@@ -1,0 +1,12 @@
+Banana-OS includes GNU GRUB as a bootloader.
+
+GNU GRUB
+Copyright (C) Free Software Foundation, Inc.
+License: GNU General Public License version 3 or later (GPL-3.0-or-later)
+
+https://www.gnu.org/software/grub/
+
+A copy of the GNU GPL v3 license is provided in the LICENSES/GPL-3.0.txt file.
+
+The Banana-OS kernel and all original Banana-OS source code remain
+licensed under the BSD 2-Clause License.
