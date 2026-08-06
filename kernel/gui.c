@@ -7,7 +7,7 @@
 #include "fb.h"
 #include "rtc.h"
 #include "usb.h"
-#include "process.h"
+#include "task.h"
 
 #define VGA_WIDTH  80
 #define VGA_HEIGHT 25
@@ -422,7 +422,7 @@ void gui_init(void) {
 
 void gui_poll(void) {
     timer_poll();
-    process_poll();
+    task_yield();
     if (gfx_available()) {
         if (!g_gui_enabled) return;
         /* framebuffer desktop loop (throttled + backbuffer to avoid flicker) */

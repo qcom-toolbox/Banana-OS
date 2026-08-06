@@ -1,7 +1,7 @@
 #include "terminal.h"
 #include "keyboard.h"
 #include "sysinfo.h"
-#include "process.h"
+#include "task.h"
 #include "timer.h"
 #include "rtc.h"
 #include "usb.h"
@@ -25,7 +25,8 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     terminal_init();
     timer_init();
     rtc_init();
-    process_init();
+    task_init("banana-sh");   /* boot stack becomes the shell's real thread */
+    task_start_sysmon();      /* real background stats-sampling thread */
     usb_init();       /* xHCI legacy handoff → USB keyboards work via PS/2 */
     mouse_init();     /* enable PS/2 AUX port for USB/PS2 mice */
     keyboard_init();  /* drain buffer after USB init */

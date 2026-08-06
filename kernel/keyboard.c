@@ -2,6 +2,7 @@
 #include "terminal.h"
 #include "types.h"
 #include "usb.h"
+#include "task.h"
 
 #define KB_DATA_PORT    0x60
 #define KB_STATUS_PORT  0x64
@@ -373,7 +374,10 @@ int keyboard_set_layout(const char* name) {
 /* ── raw scancode reader ─────────────────────────────────────────── */
 static uint8_t read_sc(void) {
     while (1) {
-        while (!(inb(KB_STATUS_PORT) & 0x01));
+        /* Real blocking wait: let other cooperative tasks (e.g. sysmon)
+         * run while no scancode is available yet, instead of a pure
+         * host-CPU-hogging spin. */
+        while (!(inb(KB_STATUS_PORT) & 0x01)) task_yield();
         uint8_t st = inb(KB_STATUS_PORT);  /* re-read after data ready */
         if (st & 0x20) {
             /* AUX byte: route to mouse assembler so we don't break PS/2 mouse */

@@ -23,7 +23,8 @@ bananOS/
 │   ├── fb.c/h          # Multiboot2 framebuffer driver
 │   ├── gfx.c/h         # 2D drawing primitives + bitmap font rendering
 │   ├── gui.c/h         # Basic desktop GUI (taskbar/start menu/windows)
-│   ├── process.c/h     # Process table simulation for top
+│   ├── task.c/h        # Real cooperative kernel threads (own stack + switch) + `top`'s process list
+│   ├── task_switch.asm # Context switch (save/restore callee-saved regs, swap esp)
 │   ├── daemon.c/h      # Background daemon loop
 │   └── keyboard.c/h    # PS/2 keyboard driver
 ├── shell/

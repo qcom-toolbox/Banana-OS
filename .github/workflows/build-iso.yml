@@ -1,0 +1,39 @@
+name: Build ISO
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm gcc-multilib grub-pc-bin grub-common xorriso
+
+      - name: Build bananOS.iso
+        run: |
+          make clean
+          make
+
+      - name: Set release tag
+        id: tag
+        run: echo "tag=build-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Banana OS build ${{ github.run_number }}
+          prerelease: true
+          target_commitish: ${{ github.sha }}
+          files: bananOS.iso

@@ -7,7 +7,7 @@
 #include "../kernel/timer.h"
 #include "../kernel/daemon.h"
 #include "../kernel/usb.h"
-#include "../kernel/process.h"
+#include "../kernel/task.h"
 #include "../kernel/gui.h"
 #include "../kernel/fb.h"
 #include "../kernel/rtc.h"
@@ -389,11 +389,11 @@ static void draw_bar(uint32_t val, uint32_t max) {
 }
 
 static void cmd_top(void) {
-    static uint32_t last_cpu[PROC_MAX] = {0};
+    static uint32_t last_cpu[TASK_MAX] = {0};
 
     while (1) {
         const sysinfo_t* si = sysinfo_get();
-        process_info_t procs[PROC_MAX];
+        task_info_t procs[TASK_MAX];
         int pcount;
 
         terminal_clear();
@@ -439,17 +439,16 @@ static void cmd_top(void) {
         /* ── PROCESS LIST ─────────────────────── */
 
         daemon_poll(0);
-        process_poll();
-        pcount = process_count();
-        if (pcount > PROC_MAX) pcount = PROC_MAX;
+        pcount = task_count();
+        if (pcount > TASK_MAX) pcount = TASK_MAX;
 
-        process_snapshot(procs, pcount);
+        task_snapshot(procs, pcount);
 
         /* sort by CPU */
         for (int i = 0; i < pcount - 1; i++) {
             for (int j = i + 1; j < pcount; j++) {
                 if (procs[j].cpu_pct > procs[i].cpu_pct) {
-                    process_info_t tmp = procs[i];
+                    task_info_t tmp = procs[i];
                     procs[i] = procs[j];
                     procs[j] = tmp;
                 }
@@ -480,7 +479,7 @@ static void cmd_top(void) {
             draw_bar(cpu, 100);
 
             terminal_write("   ");
-            const char* state = process_state_str(procs[i].state);
+            const char* state = task_state_str(procs[i].state);
             terminal_write(state);
 
             int sl = k_strlen(state);
@@ -493,7 +492,7 @@ static void cmd_top(void) {
         /* ── INPUT ───────────────────────────── */
 
         for (int i = 0; i < 20; i++) {
-            gui_poll();
+            gui_poll();       /* also yields once, giving sysmon a slice */
             char c = keyboard_try_getchar();
 
             if (c == 'q' || c == 'Q' || c == 3) {
