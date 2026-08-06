@@ -20,7 +20,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y nasm gcc-multilib grub-pc-bin grub-common xorriso
 
-      - name: Build bananOS.iso
+      - name: Build Banana_OS.iso
         run: |
           make clean
           make
@@ -36,4 +36,4 @@ jobs:
           name: Banana OS build ${{ github.run_number }}
           prerelease: true
           target_commitish: ${{ github.sha }}
-          files: bananOS.iso
+          files: Banana_OS.iso

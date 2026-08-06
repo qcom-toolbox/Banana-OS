@@ -31,7 +31,7 @@ OBJS = boot/boot.o \
 
 .PHONY: all clean run
 
-all: bananOS.iso
+all: Banana_OS.iso
 
 boot/boot.o:       boot/boot.asm;              $(AS) $(ASFLAGS) $< -o $@
 kernel/terminal.o: kernel/terminal.c;          $(CC) $(CFLAGS) -c $< -o $@
@@ -55,12 +55,12 @@ shell/shell.o:     shell/shell.c;              $(CC) $(CFLAGS) -c $< -o $@
 kernel.bin: $(OBJS)
 	ld $(LDFLAGS) -o $@ $^
 
-bananOS.iso: kernel.bin
+Banana_OS.iso: kernel.bin
 	cp kernel.bin iso/boot/kernel.bin
-	grub-mkrescue -o bananOS.iso iso
+	grub-mkrescue -o Banana_OS.iso iso
 
-run: bananOS.iso
-	qemu-system-i386 -cdrom bananOS.iso
+run: Banana_OS.iso
+	qemu-system-i386 -cdrom Banana_OS.iso
 
 clean:
-	rm -f $(OBJS) kernel.bin iso/boot/kernel.bin bananOS.iso
+	rm -f $(OBJS) kernel.bin iso/boot/kernel.bin Banana_OS.iso
