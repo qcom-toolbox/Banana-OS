@@ -66,7 +66,11 @@ int fb_init_multiboot2(uint32_t mb2_info_addr) {
             }
         }
 
-        off += align_up(tag->size, 8);
+        /* Every valid tag is at least 8 bytes (its own type+size header).
+         * Guard against a malformed/zero-size tag stalling the scan forever. */
+        uint32_t adv = align_up(tag->size, 8);
+        if (adv < 8) adv = 8;
+        off += adv;
     }
 
     return 0;

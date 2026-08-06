@@ -214,7 +214,11 @@ void sysinfo_init_mb2(uint32_t mb2_info_addr) {
             return;
         }
 
-        off += align_up8(tag->size);
+        /* Every valid tag is at least 8 bytes (its own type+size header).
+         * Guard against a malformed/zero-size tag stalling the scan forever. */
+        uint32_t adv = align_up8(tag->size);
+        if (adv < 8) adv = 8;
+        off += adv;
     }
 }
 
