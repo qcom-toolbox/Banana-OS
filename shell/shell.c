@@ -383,8 +383,7 @@ static void draw_bar(uint32_t val, uint32_t max) {
     if (bars > 10) bars = 10;
 
     for (int i = 0; i < 10; i++) {
-        if (i < bars) terminal_write("█");
-        else terminal_write(" ");
+        terminal_putchar((i < bars) ? '#' : ' ');
     }
 }
 

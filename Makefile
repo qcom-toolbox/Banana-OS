@@ -24,6 +24,8 @@ OBJS = boot/boot.o \
        kernel/sysinfo.o \
        kernel/task.o \
        kernel/task_switch.o \
+       kernel/idt.o \
+       kernel/isr.o \
        kernel/fs.o \
        kernel/usb.o \
        kernel/kernel.o \
@@ -47,6 +49,8 @@ kernel/daemon.o:   kernel/daemon.c;            $(CC) $(CFLAGS) -c $< -o $@
 kernel/sysinfo.o:  kernel/sysinfo.c;           $(CC) $(CFLAGS) -c $< -o $@
 kernel/task.o:     kernel/task.c;              $(CC) $(CFLAGS) -c $< -o $@
 kernel/task_switch.o: kernel/task_switch.asm;  $(AS) $(ASFLAGS) $< -o $@
+kernel/idt.o:      kernel/idt.c;                $(CC) $(CFLAGS) -c $< -o $@
+kernel/isr.o:      kernel/isr.asm;              $(AS) $(ASFLAGS) $< -o $@
 kernel/fs.o:       kernel/fs.c;                $(CC) $(CFLAGS) -c $< -o $@
 kernel/usb.o:      kernel/usb.c;               $(CC) $(CFLAGS) -c $< -o $@
 kernel/kernel.o:   kernel/kernel.c;            $(CC) $(CFLAGS) -c $< -o $@
