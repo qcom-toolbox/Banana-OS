@@ -125,7 +125,7 @@ chmod +x build.sh
 ```bash
 sudo apt-get install nasm gcc-multilib grub-pc-bin grub-common xorriso
 make
-# Output: bananOS.iso
+# Output: Banana_OS.iso
 ```
 
 ## Run in VirtualBox
@@ -136,13 +136,13 @@ make
    - Version: `Other/Unknown (32-bit)`
 2. Assign at least **8 MB RAM** (more recommended for GUI/testing)
 3. No virtual disk required
-4. Attach `bananOS.iso` as optical media
+4. Attach `Banana_OS.iso` as optical media
 5. Boot
 
 ## Run in QEMU
 
 ```bash
-qemu-system-i386 -cdrom bananOS.iso
+qemu-system-i386 -cdrom Banana_OS.iso
 ```
 
 ## Technical Notes
