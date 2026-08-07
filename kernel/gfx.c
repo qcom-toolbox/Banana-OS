@@ -26,6 +26,7 @@ void gfx_fill_rect(int x, int y, int w, int h, uint32_t rgb) {
 void gfx_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg) {
     if (!g_ok) return;
     uint8_t uc = (uint8_t)c;
+    if (uc >= 128) uc = '?'; /* font8x8_basic only covers 0-127 */
     const uint8_t* glyph = font8x8_basic[uc];
 
     for (int gy = 0; gy < 8; gy++) {
@@ -42,6 +43,7 @@ void gfx_draw_char_scaled(int x, int y, int scale, char c, uint32_t fg, uint32_t
     if (scale <= 1) { gfx_draw_char(x, y, c, fg, bg); return; }
 
     uint8_t uc = (uint8_t)c;
+    if (uc >= 128) uc = '?'; /* font8x8_basic only covers 0-127 */
     const uint8_t* glyph = font8x8_basic[uc];
 
     for (int gy = 0; gy < 8; gy++) {

@@ -10,11 +10,18 @@
 #include "gui.h"
 #include "fb.h"
 #include "gfx.h"
+#include "idt.h"
 #include "../shell/shell.h"
 
 #define MULTIBOOT2_MAGIC 0x36D76289
 
 void kernel_main(uint32_t magic, uint32_t mb_info) {
+    /* Install exception handlers before anything else: a fault before
+     * this point is unrecoverable anyway, but once the IDT is live, any
+     * CPU exception paints a readable panic screen instead of silently
+     * triple-faulting into a VM reset. */
+    idt_init();
+
     /* Parse Multiboot2 info first so the console can choose framebuffer mode. */
     if (magic == MULTIBOOT2_MAGIC) {
         fb_init_multiboot2(mb_info);
