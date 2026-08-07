@@ -41,9 +41,16 @@ extern kernel_main
 
 _start:
     mov esp, stack_top      ; set up stack
+    and esp, -16            ; defensive: guarantee 16-byte alignment
+    ; The i386 SysV ABI (which GCC/Clang both assume when emitting SSE
+    ; instructions such as movaps for struct copies/vectorized loops)
+    ; requires esp % 16 == 0 immediately before every `call`. We're about
+    ; to push two 4-byte args, so pad by 8 first to land back on a
+    ; 16-byte boundary once those pushes are done.
+    sub esp, 8
     push ebx                ; multiboot info pointer (mb2)
     push eax                ; multiboot magic (mb2)
-    call kernel_main        ; jump to C kernel
+    call kernel_main        ; jump to C kernel - esp is 16-aligned here
     cli
 .hang:
     hlt

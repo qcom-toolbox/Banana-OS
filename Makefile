@@ -5,6 +5,7 @@ CC      = gcc
 CFLAGS  = -m32 -ffreestanding -fno-stack-protector -fno-pic \
           -nostdlib -nostdinc \
           -Wall -Wextra -O2 \
+          -mstackrealign \
           -I kernel -I shell
 LDFLAGS = -m elf_i386 -nostdlib -T boot/linker.ld
 AS      = nasm
