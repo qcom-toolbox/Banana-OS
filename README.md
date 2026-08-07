@@ -123,7 +123,7 @@ chmod +x build.sh
 ### Manual build
 
 ```bash
-sudo apt-get install nasm gcc-multilib grub-pc-bin grub-common xorriso
+sudo apt-get install nasm gcc-multilib grub-pc-bin grub-common xorriso mtools
 make
 # Output: Banana_OS.iso
 ```
