@@ -127,7 +127,13 @@ void task_yield(void) {
 
     int cur_idx = task_index(cur);
     int next_idx = -1;
-    for (int step = 1; step <= g_count; step++) {
+    /* step < g_count only: never wrap back around to cur_idx itself. cur
+     * was just marked READY above, so a step == g_count wrap would let a
+     * task "switch" to itself - and since nxt->sp is read (as the
+     * new_sp argument) before task_switch() has a chance to overwrite
+     * cur->sp with the current esp, that reads a stale/still-NULL sp,
+     * handing task_switch() a garbage stack pointer. */
+    for (int step = 1; step < g_count; step++) {
         int cand = (cur_idx + step) % g_count;
         if (g_tasks[cand].state == TASK_READY) { next_idx = cand; break; }
     }
