@@ -63,11 +63,11 @@ isr_common_stub:
     push fs
     push gs
 
-    mov ax, 0x10             ; kernel data segment (Multiboot2 flat GDT convention)
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
+    ; No segment reload here: this kernel never runs anything outside
+    ; ring 0, so ds/es/fs/gs are already whatever valid flat kernel data
+    ; segment the CPU was already using when the fault happened - forcing
+    ; a hardcoded selector value here would just be guessing at GRUB's
+    ; GDT layout, the same mistake idt_init() avoids for the code segment.
 
     push esp                 ; registers_t* argument
     call isr_handler

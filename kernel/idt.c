@@ -32,6 +32,17 @@ typedef struct {
 static struct idt_entry idt[256];
 static struct idt_ptr   idtp;
 
+/* The Multiboot2 spec guarantees a flat 32-bit code/data GDT is loaded,
+ * but does NOT guarantee which selector values GRUB used for it - 0x08
+ * is a common convention, not a promise. Read the CS we're actually
+ * running with instead of assuming, so a fault handler doesn't itself
+ * fault trying to load a guessed-wrong segment into a gate. */
+static uint16_t read_cs(void) {
+    uint16_t cs;
+    __asm__ volatile("mov %%cs, %0" : "=r"(cs));
+    return cs;
+}
+
 static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt[num].base_lo = (uint16_t)(base & 0xFFFF);
     idt[num].base_hi = (uint16_t)((base >> 16) & 0xFFFF);
@@ -156,9 +167,11 @@ void idt_init(void) {
     idtp.limit = (uint16_t)(sizeof(idt) - 1);
     idtp.base  = (uint32_t)&idt;
 
+    uint16_t code_sel = read_cs();
+
     for (int i = 0; i < 256; i++) idt_set_gate((uint8_t)i, 0, 0, 0);
     for (int i = 0; i < 32; i++) {
-        idt_set_gate((uint8_t)i, (uint32_t)isr_stubs[i], 0x08, 0x8E);
+        idt_set_gate((uint8_t)i, (uint32_t)isr_stubs[i], code_sel, 0x8E);
     }
 
     __asm__ volatile("lidt %0" : : "m"(idtp));
