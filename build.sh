@@ -9,7 +9,7 @@ echo "========================="
 
 # ── Check dependencies ────────────────────────────────────────────
 MISSING=()
-for tool in nasm gcc ld grub-mkrescue xorriso; do
+for tool in nasm gcc ld grub-mkrescue xorriso mformat; do
     if ! command -v "$tool" &>/dev/null; then
         MISSING+=("$tool")
     fi
@@ -18,7 +18,7 @@ done
 if [ ${#MISSING[@]} -ne 0 ]; then
     echo "Installing missing dependencies: ${MISSING[*]}"
     sudo apt-get update -qq
-    sudo apt-get install -y nasm gcc grub-pc-bin grub-common xorriso
+    sudo apt-get install -y nasm gcc grub-pc-bin grub-common xorriso mtools
 fi
 
 # ── gcc multilib check ────────────────────────────────────────────

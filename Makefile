@@ -1,5 +1,5 @@
 # Banana OS 0.3 Makefile
-# Requires: nasm, gcc-multilib, ld, grub-pc-bin, grub-common, xorriso
+# Requires: nasm, gcc-multilib, ld, grub-pc-bin, grub-common, xorriso, mtools
 
 CC      = gcc
 CFLAGS  = -m32 -ffreestanding -fno-stack-protector -fno-pic \
