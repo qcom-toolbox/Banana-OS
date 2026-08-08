@@ -51,7 +51,8 @@ bananOS/
 - Fluxbox-inspired dark desktop theme
 - Wallpaper app with PNG-backed graphical presets from `assets/wallpapers/`
 - Desktop and menu icons for built-in apps
-- In-memory filesystem + shell utilities
+- In-memory Unix-style filesystem (`/bin`, `/etc`, `/home/banana`, `/usr`, `/var`, `/tmp`, `/dev`, `/root`) with absolute/relative path resolution, `.`/`..`/`~`
+- POSIX-flavored shell utilities (`ls -l`, `mkdir -p`, `rm -r`, `cp`, `mv`, `touch`, `whoami`, `hostname`, `date`, ...)
 - Built-in editor and live system monitor
 
 # Minimum Requirements
@@ -81,6 +82,25 @@ bananOS/
   - Quit GUI
 - Up to 4 terminal windows (draggable, closable, focusable)
 
+## Filesystem Layout
+
+Banana OS seeds a small Unix-style root hierarchy at boot (in-memory, reset on reboot):
+
+```
+/
+├── bin/
+├── etc/            (motd, hostname, passwd)
+├── home/
+│   └── banana/     ($HOME - shell starts here, readme.txt)
+├── root/
+├── usr/
+├── var/
+├── tmp/
+└── dev/
+```
+
+Every path-taking command accepts absolute (`/etc/motd`), relative (`../etc`), `.`/`..`, and `~` (home) paths, just like a real Unix shell.
+
 ## Available Commands
 
 | Command | Description |
@@ -90,13 +110,26 @@ bananOS/
 | `echo <text>` | Print text |
 | `clear` | Clear screen |
 | `uname` | Show OS/kernel string |
-| `ls` | List current directory |
-| `pwd` | Print current directory |
-| `cd <dir>` | Change directory (`cd ..` to go up) |
-| `mkdir <dir>` | Create directory |
-| `rm <name>` | Remove file or directory |
+| `whoami` | Print current user |
+| `hostname` | Print system hostname |
+| `date` | Print current date/time (from RTC) |
+| `ls [-l] [path]` | List a directory (long format with `-l`) |
+| `pwd` | Print current directory (full absolute path) |
+| `cd [path]` | Change directory (no arg or `~` goes home, `..` up) |
+| `mkdir [-p] <dir>` | Create directory (`-p` creates parents too) |
+| `rm [-r] <name>` | Remove a file, or a directory with `-r` |
+| `touch <file>` | Create an empty file (or no-op if it exists) |
+| `cp <src> <dst>` | Copy a file |
+| `mv <src> <dst>` | Move/rename a file or directory |
 | `edit <file>` | Open built-in nano-like editor |
 | `cat <file>` | Print file contents |
+| `grep [-n] <pattern> <file>` | Print lines matching a substring (`-n` numbers them) |
+| `wc <file>` | Count lines/words/bytes in a file |
+| `head [-n N] <file>` | Print first N lines (default 10) |
+| `tail [-n N] <file>` | Print last N lines (default 10) |
+| `find [path] [-name <sub>]` | Recursively list files/dirs under path |
+| `history` | Show command history |
+| `which <cmd>` | Show whether a command is a shell builtin |
 | `run <file.sh>` | Execute script line by line |
 | `uptime` | Show uptime |
 | `top` | Live CPU/RAM/process monitor (`q` to quit) |
