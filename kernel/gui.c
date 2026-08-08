@@ -41,6 +41,7 @@ static const wallpaper_t g_wallpapers[] = {
     {"Ocean Wave",    "assets/wallpapers/ocean-wave.png",    0x00131F2Du, 0x001B3A58u, 1, wallpaper_ocean_wave},
     {"Cyber Mint",    "assets/wallpapers/cyber-mint.png",    0x00152A2Au, 0x001E4A4Au, 0, wallpaper_cyber_mint},
     {"Amber Mesh",    "assets/wallpapers/amber-mesh.png",    0x0033261Bu, 0x00513C22u, 2, wallpaper_amber_mesh},
+    {"Azure Flow",    "assets/wallpapers/azure-flow.jpg",    0x00142E5Cu, 0x002E5CA0u, 1, wallpaper_azure_flow},
 };
 
 #define WALLPAPER_COUNT ((int)(sizeof(g_wallpapers) / sizeof(g_wallpapers[0])))
@@ -96,20 +97,46 @@ static void draw_flux_toolbar_button(int x, int y, int w, int h, const char* lab
     gfx_draw_text(x + 8, y + 8, label, 0x00E6EDF5u, base);
 }
 
-/* Nearest-neighbor upscale of a WALLPAPER_IMG_W x WALLPAPER_IMG_H RGB888
- * image to fill the framebuffer (800x600 -> 8x8 blocks, no fractional
- * scaling since 100*8=800 and 75*8=600 exactly). */
+/* Bilinear upscale of a WALLPAPER_IMG_W x WALLPAPER_IMG_H RGB888 image to
+ * fill the framebuffer. Integer-only fixed-point (16.16) math throughout -
+ * deliberately no float/double, matching -mno-sse/-mno-mmx in the Makefile:
+ * this kernel doesn't assume the target CPU has any FPU/SIMD support
+ * beyond plain integer instructions, so this doesn't either. Smooth
+ * enough for real photos (thin lines, gradients) instead of the blocky
+ * look plain nearest-neighbor gave the fine detail in e.g. azure-flow. */
 static void draw_wallpaper_bitmap(const fb_info_t* fi, const uint8_t* pixels) {
-    int scale_x = (int)fi->width / WALLPAPER_IMG_W;
-    int scale_y = (int)fi->height / WALLPAPER_IMG_H;
-    if (scale_x < 1) scale_x = 1;
-    if (scale_y < 1) scale_y = 1;
+    int fb_w = (int)fi->width;
+    int fb_h = (int)fi->height;
+    if (fb_w <= 1 || fb_h <= 1) return;
 
-    for (int y = 0; y < WALLPAPER_IMG_H; y++) {
-        for (int x = 0; x < WALLPAPER_IMG_W; x++) {
-            const uint8_t* p = &pixels[(y * WALLPAPER_IMG_W + x) * 3];
-            uint32_t rgb = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[2];
-            gfx_fill_rect(x * scale_x, y * scale_y, scale_x, scale_y, rgb);
+    int32_t step_x = (int32_t)(((WALLPAPER_IMG_W - 1) << 16) / (fb_w - 1));
+    int32_t step_y = (int32_t)(((WALLPAPER_IMG_H - 1) << 16) / (fb_h - 1));
+
+    for (int y = 0; y < fb_h; y++) {
+        int32_t sy_fixed = (int32_t)y * step_y;
+        int sy0 = (int)(sy_fixed >> 16);
+        int fy = (int)(sy_fixed & 0xFFFF);
+        int sy1 = (sy0 + 1 < WALLPAPER_IMG_H) ? sy0 + 1 : sy0;
+
+        for (int x = 0; x < fb_w; x++) {
+            int32_t sx_fixed = (int32_t)x * step_x;
+            int sx0 = (int)(sx_fixed >> 16);
+            int fx = (int)(sx_fixed & 0xFFFF);
+            int sx1 = (sx0 + 1 < WALLPAPER_IMG_W) ? sx0 + 1 : sx0;
+
+            const uint8_t* p00 = &pixels[(sy0 * WALLPAPER_IMG_W + sx0) * 3];
+            const uint8_t* p10 = &pixels[(sy0 * WALLPAPER_IMG_W + sx1) * 3];
+            const uint8_t* p01 = &pixels[(sy1 * WALLPAPER_IMG_W + sx0) * 3];
+            const uint8_t* p11 = &pixels[(sy1 * WALLPAPER_IMG_W + sx1) * 3];
+
+            uint32_t rgb = 0;
+            for (int c = 0; c < 3; c++) {
+                int top    = p00[c] + (((p10[c] - p00[c]) * fx) >> 16);
+                int bottom = p01[c] + (((p11[c] - p01[c]) * fx) >> 16);
+                int val    = top + (((bottom - top) * fy) >> 16);
+                rgb = (rgb << 8) | (uint32_t)(val & 0xFF);
+            }
+            fb_putpixel(x, y, rgb);
         }
     }
 }
