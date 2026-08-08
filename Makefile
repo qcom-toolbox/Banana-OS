@@ -17,6 +17,7 @@ OBJS = boot/boot.o \
        kernel/timer.o \
        kernel/rtc.o \
        kernel/gui.o \
+       kernel/wallpaper_data.o \
        kernel/fb.o \
        kernel/font8x8.o \
        kernel/gfx.o \
@@ -42,6 +43,7 @@ kernel/keyboard.o: kernel/keyboard.c;          $(CC) $(CFLAGS) -c $< -o $@
 kernel/timer.o:    kernel/timer.c;             $(CC) $(CFLAGS) -c $< -o $@
 kernel/rtc.o:      kernel/rtc.c;               $(CC) $(CFLAGS) -c $< -o $@
 kernel/gui.o:      kernel/gui.c;               $(CC) $(CFLAGS) -c $< -o $@
+kernel/wallpaper_data.o: kernel/wallpaper_data.c; $(CC) $(CFLAGS) -c $< -o $@
 kernel/fb.o:       kernel/fb.c;                $(CC) $(CFLAGS) -c $< -o $@
 kernel/font8x8.o:  kernel/font8x8.c;           $(CC) $(CFLAGS) -c $< -o $@
 kernel/gfx.o:      kernel/gfx.c;               $(CC) $(CFLAGS) -c $< -o $@
