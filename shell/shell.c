@@ -520,12 +520,26 @@ static void cmd_help(void) {
         "  echo <text>        print text",
         "  clear              clear screen",
         "  uname              print system name",
-        "  ls                 list directory",
-        "  cd <dir>           change directory (cd .. to go up)",
-        "  mkdir <dir>        create directory",
-        "  rm <name>          remove file or directory",
+        "  whoami             print current user",
+        "  hostname           print system hostname",
+        "  date               print current date/time",
+        "  ls [-l] [path]     list directory (absolute or relative path)",
+        "  cd [path]          change directory (no arg / ~ -> home, .. up)",
+        "  pwd                print working directory (full path)",
+        "  mkdir [-p] <dir>   create directory (-p makes parents too)",
+        "  rm [-r] <name>     remove file, or directory with -r",
+        "  touch <file>       create an empty file (or update if it exists)",
+        "  cp <src> <dst>     copy a file",
+        "  mv <src> <dst>     move/rename a file or directory",
         "  edit <file>        open nano-style text editor",
         "  cat <file>         print file contents",
+        "  grep [-n] <p> <f>  print lines in a file matching a substring",
+        "  wc <file>          count lines/words/bytes in a file",
+        "  head [-n N] <file> print first N lines (default 10)",
+        "  tail [-n N] <file> print last N lines (default 10)",
+        "  find [path]        recursively list files/dirs under path",
+        "  history            show command history",
+        "  which <cmd>        show whether a command is a shell builtin",
         "  run <file.sh>      run script file line by line",
         "  uptime             print current uptime",
         "  top                live system monitor (press q to quit)",
@@ -541,7 +555,6 @@ static void cmd_help(void) {
         "  ram_info [flags]   ram info (-t -u -f -p -m)",
         "  gpu_info [flags]   gpu/fb info (-n -r -b -p -m)",
         "  hw_info [flags]    hardware summary (-c -m -g -u -k -r)",
-        "  pwd                print working directory",
         "  shutdown [now|-c]  schedule shutdown (60s), now, or cancel",
         "  reboot             immediate reboot",
         "  halt               hard halt (no ACPI)",
@@ -566,10 +579,10 @@ static void cmd_help(void) {
             if (idx == 0) {
                 terminal_write_color(lines[idx], VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
-            } else if (idx >= 2 && idx <= 27) {
+            } else if (idx >= 2 && idx <= 44) {
                 terminal_write_color(lines[idx], VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
-            } else if (idx == 29) {
+            } else if (idx == 46) {
                 terminal_write_color(lines[idx], VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
             } else {
@@ -688,8 +701,365 @@ static void cmd_run(const char* name) {
     run_script_text(f->content);
 }
 
+/* ── text-processing / discovery utilities ─────────────────────── */
+static int k_atoi(const char* s) {
+    int neg = 0, v = 0;
+    if (*s == '-') { neg = 1; s++; }
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    return neg ? -v : v;
+}
+
+static int k_strstr(const char* hay, const char* needle) {
+    if (!*needle) return 1;
+    for (int i = 0; hay[i]; i++) {
+        int j = 0;
+        while (needle[j] && hay[i + j] == needle[j]) j++;
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+
+/* counts lines in fs_file content, treating a trailing unterminated
+ * line the same way `cat`/the editor already do: as one more line */
+static uint32_t count_lines(const char* c) {
+    if (!c[0]) return 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; c[i]; i++) if (c[i] == '\n') n++;
+    if (c[k_strlen(c) - 1] != '\n') n++;
+    return n;
+}
+
+/* prints lines [from, to) (0-indexed, half-open) of content */
+static void print_line_range(const char* c, uint32_t from, uint32_t to) {
+    uint32_t line = 0;
+    uint32_t i = 0;
+    int printed_open_line = 0;
+    while (c[i] && line < to) {
+        if (line >= from) {
+            terminal_putchar(c[i]);
+            printed_open_line = (c[i] != '\n');
+        }
+        if (c[i] == '\n') { line++; printed_open_line = 0; }
+        i++;
+    }
+    if (printed_open_line) terminal_putchar('\n');
+}
+
+static void cmd_wc(const char* args) {
+    char fname[FS_PATH_LEN];
+    const char* p = args ? args : "";
+    if (!next_token(&p, fname, sizeof(fname))) {
+        terminal_write_color("Usage: wc <file>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    int idx = fs_find_file(fname);
+    if (idx < 0) {
+        terminal_write_color("wc: no such file: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln(fname);
+        return;
+    }
+    fs_file_t* f = fs_get_file(idx);
+    const char* c = f->content;
+    uint32_t bytes = 0, words = 0, lines = 0;
+    int in_word = 0;
+    for (; c[bytes]; bytes++) {
+        char ch = c[bytes];
+        if (ch == '\n') lines++;
+        if (ch == ' ' || ch == '\n' || ch == '\t') {
+            in_word = 0;
+        } else if (!in_word) {
+            in_word = 1;
+            words++;
+        }
+    }
+    char b[16];
+    terminal_write("  "); terminal_write(u32_to_str(lines, b, sizeof(b)));
+    terminal_write("  "); terminal_write(u32_to_str(words, b, sizeof(b)));
+    terminal_write("  "); terminal_write(u32_to_str(bytes, b, sizeof(b)));
+    terminal_write("  "); terminal_writeln(fname);
+}
+
+static void cmd_head(const char* args) {
+    const char* p = args ? args : "";
+    char tok[FS_PATH_LEN];
+    uint32_t n = 10;
+    char fname[FS_PATH_LEN]; fname[0] = '\0';
+    while (next_token(&p, tok, sizeof(tok))) {
+        if (k_strcmp(tok, "-n") == 0) {
+            char numtok[16];
+            if (next_token(&p, numtok, sizeof(numtok))) n = (uint32_t)k_atoi(numtok);
+        } else if (tok[0] == '-' && tok[1] >= '0' && tok[1] <= '9') {
+            n = (uint32_t)k_atoi(tok + 1);
+        } else {
+            k_strcpy_n(fname, tok, sizeof(fname));
+        }
+    }
+    if (!fname[0]) {
+        terminal_write_color("Usage: head [-n N] <file>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    int idx = fs_find_file(fname);
+    if (idx < 0) {
+        terminal_write_color("head: no such file: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln(fname);
+        return;
+    }
+    fs_file_t* f = fs_get_file(idx);
+    uint32_t total = count_lines(f->content);
+    print_line_range(f->content, 0, (n < total) ? n : total);
+}
+
+static void cmd_tail(const char* args) {
+    const char* p = args ? args : "";
+    char tok[FS_PATH_LEN];
+    uint32_t n = 10;
+    char fname[FS_PATH_LEN]; fname[0] = '\0';
+    while (next_token(&p, tok, sizeof(tok))) {
+        if (k_strcmp(tok, "-n") == 0) {
+            char numtok[16];
+            if (next_token(&p, numtok, sizeof(numtok))) n = (uint32_t)k_atoi(numtok);
+        } else if (tok[0] == '-' && tok[1] >= '0' && tok[1] <= '9') {
+            n = (uint32_t)k_atoi(tok + 1);
+        } else {
+            k_strcpy_n(fname, tok, sizeof(fname));
+        }
+    }
+    if (!fname[0]) {
+        terminal_write_color("Usage: tail [-n N] <file>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    int idx = fs_find_file(fname);
+    if (idx < 0) {
+        terminal_write_color("tail: no such file: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln(fname);
+        return;
+    }
+    fs_file_t* f = fs_get_file(idx);
+    uint32_t total = count_lines(f->content);
+    uint32_t from = (total > n) ? total - n : 0;
+    print_line_range(f->content, from, total);
+}
+
+static void cmd_grep(const char* args) {
+    const char* p = args ? args : "";
+    char tok[FS_PATH_LEN];
+    int show_num = 0;
+    char pattern[FS_PATH_LEN]; pattern[0] = '\0';
+    char fname[FS_PATH_LEN];   fname[0]   = '\0';
+    while (next_token(&p, tok, sizeof(tok))) {
+        if (k_strcmp(tok, "-n") == 0) { show_num = 1; continue; }
+        if (!pattern[0])      k_strcpy_n(pattern, tok, sizeof(pattern));
+        else if (!fname[0])   k_strcpy_n(fname, tok, sizeof(fname));
+    }
+    if (!pattern[0] || !fname[0]) {
+        terminal_write_color("Usage: grep [-n] <pattern> <file>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    int idx = fs_find_file(fname);
+    if (idx < 0) {
+        terminal_write_color("grep: no such file: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln(fname);
+        return;
+    }
+    fs_file_t* f = fs_get_file(idx);
+
+    char line[256];
+    int lp = 0;
+    uint32_t lineno = 1;
+    for (int i = 0; ; i++) {
+        char ch = f->content[i];
+        if (ch == '\n' || ch == '\0') {
+            line[lp] = '\0';
+            if (k_strstr(line, pattern)) {
+                if (show_num) {
+                    char b[16];
+                    terminal_write(u32_to_str(lineno, b, sizeof(b)));
+                    terminal_write(": ");
+                }
+                terminal_writeln(line);
+            }
+            lp = 0;
+            lineno++;
+            if (ch == '\0') break;
+            continue;
+        }
+        if (lp < (int)sizeof(line) - 1) line[lp++] = ch;
+    }
+}
+
+static void cmd_find(const char* args) {
+    const char* p = args ? args : "";
+    char tok[FS_PATH_LEN];
+    char path[FS_PATH_LEN];        path[0] = '\0';
+    char name_filter[FS_NAME_LEN]; name_filter[0] = '\0';
+    while (next_token(&p, tok, sizeof(tok))) {
+        if (k_strcmp(tok, "-name") == 0) {
+            char ftok[FS_NAME_LEN];
+            if (next_token(&p, ftok, sizeof(ftok))) k_strcpy_n(name_filter, ftok, sizeof(name_filter));
+        } else if (!path[0]) {
+            k_strcpy_n(path, tok, sizeof(path));
+        }
+    }
+    fs_find(path, name_filter);
+}
+
+static void cmd_history(void) {
+    for (int i = 0; i < sh_hist_count; i++) {
+        char b[8];
+        terminal_write("  ");
+        terminal_write(u32_to_str((uint32_t)(i + 1), b, sizeof(b)));
+        terminal_write("  ");
+        terminal_writeln(sh_history[i]);
+    }
+}
+
+static const char* const known_cmds[] = {
+    "help", "neofetch", "echo", "clear", "uname", "whoami", "hostname", "date",
+    "ls", "cd", "pwd", "mkdir", "rm", "touch", "cp", "mv", "edit", "cat", "run",
+    "uptime", "top", "exit", "start", "stop", "startx", "stopx",
+    "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
+    "hw_info", "shutdown", "reboot", "halt", "history", "which",
+    "grep", "wc", "head", "tail", "find", (void*)0
+};
+
+static void cmd_which(const char* args) {
+    const char* p = args ? args : "";
+    char tok[64];
+    if (!next_token(&p, tok, sizeof(tok))) {
+        terminal_write_color("Usage: which <command>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    for (int i = 0; known_cmds[i]; i++) {
+        if (k_strcmp(tok, known_cmds[i]) == 0) {
+            terminal_write(tok);
+            terminal_writeln(": shell builtin");
+            return;
+        }
+    }
+    terminal_write(tok);
+    terminal_writeln(": not found");
+}
+
 static void cmd_uname(void) {
     terminal_writeln("Banana OS 0.3 x86 Banana Kernel 0.3 sh");
+}
+
+static void cmd_whoami(void) { terminal_writeln("banana"); }
+static void cmd_hostname(void) { terminal_writeln("banana-os-0.3"); }
+
+static void cmd_date(void) {
+    rtc_datetime_t dt;
+    if (rtc_read_datetime(&dt) != 0) {
+        terminal_writeln("date: RTC unavailable");
+        return;
+    }
+    char b[16];
+    terminal_write(u32_to_str(dt.year, b, sizeof(b)));
+    terminal_putchar('-');
+    if (dt.month < 10) terminal_putchar('0');
+    terminal_write(u32_to_str(dt.month, b, sizeof(b)));
+    terminal_putchar('-');
+    if (dt.day < 10) terminal_putchar('0');
+    terminal_write(u32_to_str(dt.day, b, sizeof(b)));
+    terminal_putchar(' ');
+    if (dt.hour < 10) terminal_putchar('0');
+    terminal_write(u32_to_str(dt.hour, b, sizeof(b)));
+    terminal_putchar(':');
+    if (dt.minute < 10) terminal_putchar('0');
+    terminal_write(u32_to_str(dt.minute, b, sizeof(b)));
+    terminal_putchar(':');
+    if (dt.second < 10) terminal_putchar('0');
+    terminal_writeln(u32_to_str(dt.second, b, sizeof(b)));
+}
+
+/* ── path-taking commands (parse an optional flag + a path token) ──── */
+static void cmd_ls(const char* args) {
+    const char* p = args ? args : "";
+    int longfmt = has_flag(p, "-l");
+    char tok[FS_PATH_LEN];
+    char path[FS_PATH_LEN];
+    path[0] = '\0';
+    while (next_token(&p, tok, sizeof(tok))) {
+        if (tok[0] != '-') { k_strcpy_n(path, tok, sizeof(path)); break; }
+    }
+    if (longfmt) fs_ls_long(path);
+    else         fs_ls(path);
+}
+
+static void cmd_mkdir(const char* args) {
+    int recursive = has_flag(args, "-p");
+    const char* p = args ? args : "";
+    char tok[FS_PATH_LEN];
+    char path[FS_PATH_LEN];
+    path[0] = '\0';
+    while (next_token(&p, tok, sizeof(tok))) {
+        if (tok[0] != '-') { k_strcpy_n(path, tok, sizeof(path)); break; }
+    }
+    if (!path[0]) {
+        terminal_write_color("Usage: mkdir [-p] <dir>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    int r = recursive ? fs_mkdir_p(path) : fs_mkdir(path);
+    if (r < 0) {
+        terminal_write_color("mkdir: cannot create directory: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln(path);
+    }
+}
+
+static void cmd_rm(const char* args) {
+    int recursive = has_flag(args, "-r") || has_flag(args, "-rf") || has_flag(args, "-fr");
+    const char* p = args ? args : "";
+    char tok[FS_PATH_LEN];
+    char path[FS_PATH_LEN];
+    path[0] = '\0';
+    while (next_token(&p, tok, sizeof(tok))) {
+        if (tok[0] != '-') { k_strcpy_n(path, tok, sizeof(path)); break; }
+    }
+    if (!path[0]) {
+        terminal_write_color("Usage: rm [-r] <name>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    fs_delete(path, recursive);
+}
+
+static void cmd_touch(const char* args) {
+    const char* p = args ? args : "";
+    char tok[FS_PATH_LEN];
+    int any = 0;
+    while (next_token(&p, tok, sizeof(tok))) {
+        any = 1;
+        if (fs_create(tok) < 0) {
+            terminal_write_color("touch: cannot create: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            terminal_writeln(tok);
+        }
+    }
+    if (!any) terminal_write_color("Usage: touch <file> [file...]\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+}
+
+static void cmd_cp(const char* args) {
+    const char* p = args ? args : "";
+    char src[FS_PATH_LEN], dst[FS_PATH_LEN];
+    if (!next_token(&p, src, sizeof(src)) || !next_token(&p, dst, sizeof(dst))) {
+        terminal_write_color("Usage: cp <src> <dst>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (fs_copy(src, dst) < 0) {
+        terminal_write_color("cp: cannot copy: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln(src);
+    }
+}
+
+static void cmd_mv(const char* args) {
+    const char* p = args ? args : "";
+    char src[FS_PATH_LEN], dst[FS_PATH_LEN];
+    if (!next_token(&p, src, sizeof(src)) || !next_token(&p, dst, sizeof(dst))) {
+        terminal_write_color("Usage: mv <src> <dst>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (fs_move(src, dst) < 0) {
+        terminal_write_color("mv: cannot move: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln(src);
+    }
 }
 
 static void cmd_exit(void) {
@@ -707,10 +1077,12 @@ static void cmd_halt(void) {
 
 /* ── prompt ─────────────────────────────────────────────────────── */
 static void print_prompt(void) {
+    char cwd_buf[FS_PATH_LEN];
+    fs_cwd_path(cwd_buf, sizeof(cwd_buf));
     terminal_write_color("banana",      VGA_COLOR_YELLOW,      VGA_COLOR_BLACK);
     terminal_write_color("@banana-os-0.3",  VGA_COLOR_LIGHT_GREEN,  VGA_COLOR_BLACK);
     terminal_write_color(":",           VGA_COLOR_WHITE,        VGA_COLOR_BLACK);
-    terminal_write_color(fs_cwd_name(), VGA_COLOR_LIGHT_BLUE,   VGA_COLOR_BLACK);
+    terminal_write_color(cwd_buf,       VGA_COLOR_LIGHT_BLUE,   VGA_COLOR_BLACK);
     terminal_write_color("$ ",          VGA_COLOR_WHITE,        VGA_COLOR_BLACK);
 }
 
@@ -873,8 +1245,13 @@ static void dispatch(const char* line) {
     if (k_strcmp(line, "neofetch") == 0) { cmd_neofetch();   return; }
     if (k_strcmp(line, "uname")    == 0) { cmd_uname();      return; }
     if (k_strcmp(line, "halt")     == 0) { cmd_halt();       return; }
-    if (k_strcmp(line, "ls")       == 0) { fs_ls();          return; }
+    if (k_strcmp(line, "ls")       == 0) { cmd_ls("");       return; }
     if (k_strcmp(line, "pwd")      == 0) { fs_pwd();         return; }
+    if (k_strcmp(line, "whoami")   == 0) { cmd_whoami();     return; }
+    if (k_strcmp(line, "hostname") == 0) { cmd_hostname();   return; }
+    if (k_strcmp(line, "date")     == 0) { cmd_date();       return; }
+    if (k_strcmp(line, "history")  == 0) { cmd_history();    return; }
+    if (k_strcmp(line, "find")     == 0) { cmd_find("");     return; }
     if (k_strcmp(line, "uptime")   == 0) { cmd_uptime();     return; }
     if (k_strcmp(line, "top")      == 0) { cmd_top();        return; }
     if (k_strcmp(line, "exit")     == 0) { cmd_exit();       return; }
@@ -889,7 +1266,7 @@ static void dispatch(const char* line) {
     if (k_strcmp(line, "ram_info")  == 0) { cmd_ram_info(""); return; }
     if (k_strcmp(line, "gpu_info")  == 0) { cmd_gpu_info(""); return; }
     if (k_strcmp(line, "hw_info")   == 0) { cmd_hw_info(""); return; }
-    if (k_strcmp(line, "cd")       == 0) { fs_cd("/");       return; }
+    if (k_strcmp(line, "cd")       == 0) { fs_cd("");        return; }
     if (k_strcmp(line, "echo")     == 0) { terminal_putchar('\n'); return; }
     if (k_strcmp(line, "run")      == 0) {
         terminal_write_color("Usage: run <file.sh>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
@@ -897,6 +1274,46 @@ static void dispatch(const char* line) {
     }
     if (k_strcmp(line, "edit")     == 0) {
         terminal_write_color("Usage: edit <filename>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (k_strcmp(line, "mkdir")    == 0) {
+        terminal_write_color("Usage: mkdir [-p] <dir>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (k_strcmp(line, "rm")       == 0) {
+        terminal_write_color("Usage: rm [-r] <name>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (k_strcmp(line, "touch")    == 0) {
+        terminal_write_color("Usage: touch <file> [file...]\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (k_strcmp(line, "cp")       == 0) {
+        terminal_write_color("Usage: cp <src> <dst>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (k_strcmp(line, "mv")       == 0) {
+        terminal_write_color("Usage: mv <src> <dst>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (k_strcmp(line, "grep")     == 0) {
+        terminal_write_color("Usage: grep [-n] <pattern> <file>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (k_strcmp(line, "wc")       == 0) {
+        terminal_write_color("Usage: wc <file>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (k_strcmp(line, "head")     == 0) {
+        terminal_write_color("Usage: head [-n N] <file>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (k_strcmp(line, "tail")     == 0) {
+        terminal_write_color("Usage: tail [-n N] <file>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (k_strcmp(line, "which")    == 0) {
+        terminal_write_color("Usage: which <command>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
         return;
     }
 
@@ -909,15 +1326,21 @@ static void dispatch(const char* line) {
     /* commands with arguments */
     if (k_strncmp(line, "echo ",  5) == 0) { terminal_writeln(k_skip_spaces(line+5)); return; }
     if (k_strncmp(line, "cd ",    3) == 0) { fs_cd(k_skip_spaces(line+3));            return; }
-    if (k_strncmp(line, "mkdir ", 6) == 0) {
-        if (fs_mkdir(k_skip_spaces(line+6)) < 0)
-            terminal_write_color("mkdir: cannot create\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        return;
-    }
-    if (k_strncmp(line, "rm ",   3) == 0) { fs_delete(k_skip_spaces(line+3)); return; }
+    if (k_strncmp(line, "ls ",    3) == 0) { cmd_ls(k_skip_spaces(line+3)); return; }
+    if (k_strncmp(line, "mkdir ", 6) == 0) { cmd_mkdir(k_skip_spaces(line+6)); return; }
+    if (k_strncmp(line, "rm ",   3) == 0) { cmd_rm(k_skip_spaces(line+3)); return; }
+    if (k_strncmp(line, "touch ", 6) == 0) { cmd_touch(k_skip_spaces(line+6)); return; }
+    if (k_strncmp(line, "cp ",   3) == 0) { cmd_cp(k_skip_spaces(line+3)); return; }
+    if (k_strncmp(line, "mv ",   3) == 0) { cmd_mv(k_skip_spaces(line+3)); return; }
     if (k_strncmp(line, "edit ", 5) == 0) { editor_open(k_skip_spaces(line+5)); return; }
     if (k_strncmp(line, "cat ",  4) == 0) { cmd_cat(k_skip_spaces(line+4)); return; }
     if (k_strncmp(line, "run ",  4) == 0) { cmd_run(k_skip_spaces(line+4)); return; }
+    if (k_strncmp(line, "grep ", 5) == 0) { cmd_grep(k_skip_spaces(line+5)); return; }
+    if (k_strncmp(line, "wc ",   3) == 0) { cmd_wc(k_skip_spaces(line+3)); return; }
+    if (k_strncmp(line, "head ", 5) == 0) { cmd_head(k_skip_spaces(line+5)); return; }
+    if (k_strncmp(line, "tail ", 5) == 0) { cmd_tail(k_skip_spaces(line+5)); return; }
+    if (k_strncmp(line, "find ", 5) == 0) { cmd_find(k_skip_spaces(line+5)); return; }
+    if (k_strncmp(line, "which ", 6) == 0) { cmd_which(k_skip_spaces(line+6)); return; }
     if (k_strncmp(line, "keyboardctl ", 12) == 0) { cmd_keyboardctl(k_skip_spaces(line+12)); return; }
     if (k_strncmp(line, "loadctl ", 8) == 0) { cmd_keyboardctl(k_skip_spaces(line+8)); return; }
     if (k_strncmp(line, "proc_info ", 10) == 0) { cmd_proc_info(k_skip_spaces(line+10)); return; }
