@@ -309,9 +309,26 @@ static void draw_terminal_window(const fb_info_t* fi, const term_win_t* win) {
     if (max_cols > tw) max_cols = tw;
     if (max_rows > th) max_rows = th;
 
+    /* Every vt is sized to the full screen's text grid (kernel/terminal.c),
+     * which is normally much taller than a terminal window's own client
+     * area - a window this size only ever showed rows 0..max_rows of that
+     * much bigger buffer, so once the cursor scrolled past the bottom of
+     * the window it just kept going in buffer rows nobody drew, and
+     * everything after looked "cut off" with no way to scroll to it.
+     * Follow the cursor instead: keep it pinned to the window's last
+     * visible row once the content grows past what the window can show,
+     * the same way a real terminal emulator's viewport tracks output. */
+    size_t cr = 0, cc = 0;
+    terminal_vt_get_cursor(win->vt, &cr, &cc);
+
+    int row_off = (int)cr - max_rows + 1;
+    if (row_off < 0) row_off = 0;
+    if (row_off + max_rows > th) row_off = th - max_rows;
+    if (row_off < 0) row_off = 0;
+
     for (int y = 0; y < max_rows; y++) {
         for (int x = 0; x < max_cols; x++) {
-            int idx = y * stride + x;
+            int idx = (y + row_off) * stride + x;
             uint8_t color = cols[idx];
             uint8_t fg = color & 0x0F;
             uint8_t bg = (color >> 4) & 0x0F;
@@ -321,13 +338,12 @@ static void draw_terminal_window(const fb_info_t* fi, const term_win_t* win) {
     }
 
     {
-        size_t cr = 0, cc = 0;
-        terminal_vt_get_cursor(win->vt, &cr, &cc);
-        if ((int)cr < max_rows && (int)cc < max_cols) {
+        int scr_row = (int)cr - row_off;
+        if (scr_row >= 0 && scr_row < max_rows && (int)cc < max_cols) {
             int idx = (int)cr * stride + (int)cc;
             uint8_t color = cols[idx];
             uint8_t fg = color & 0x0F;
-            gfx_fill_rect(cx + (int)cc * 8, cy + (int)cr * 8 + 7, 8, 1, vga_color_rgb(fg));
+            gfx_fill_rect(cx + (int)cc * 8, cy + scr_row * 8 + 7, 8, 1, vga_color_rgb(fg));
         }
     }
 }
