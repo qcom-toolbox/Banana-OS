@@ -388,7 +388,12 @@ static void draw_bar(uint32_t val, uint32_t max) {
 }
 
 static void cmd_top(void) {
-    static uint32_t last_cpu[TASK_MAX] = {0};
+    /* Not `static`: each GUI terminal window running "top" is a separate
+     * cooperative task with its own call stack, so this needs to be its
+     * own per-invocation smoothing buffer rather than shared state that
+     * different windows' refreshes would stomp on. */
+    uint32_t last_cpu[TASK_MAX] = {0};
+    int my_vt = terminal_vt_get_active();
 
     while (1) {
         const sysinfo_t* si = sysinfo_get();
@@ -492,7 +497,9 @@ static void cmd_top(void) {
 
         for (int i = 0; i < 20; i++) {
             gui_poll();       /* also yields once, giving sysmon a slice */
-            char c = keyboard_try_getchar();
+            terminal_vt_set_active(my_vt);
+
+            char c = (gui_focused_vt() == my_vt) ? keyboard_try_getchar() : 0;
 
             if (c == 'q' || c == 'Q' || c == 3) {
                 terminal_clear();
@@ -522,6 +529,7 @@ static void cmd_help(void) {
         "  run <file.sh>      run script file line by line",
         "  uptime             print current uptime",
         "  top                live system monitor (press q to quit)",
+        "  exit               close this GUI terminal window",
         "  start              alias of startx",
         "  stop               alias of stopx",
         "  startx             start GUI desktop",
@@ -545,6 +553,7 @@ static void cmd_help(void) {
     const int view_rows = 21; /* keep last rows for status/help */
     int top = 0;
     int max_top = (line_count > view_rows) ? (line_count - view_rows) : 0;
+    int my_vt = terminal_vt_get_active();
 
     while (1) {
         terminal_clear();
@@ -557,10 +566,10 @@ static void cmd_help(void) {
             if (idx == 0) {
                 terminal_write_color(lines[idx], VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
-            } else if (idx >= 2 && idx <= 26) {
+            } else if (idx >= 2 && idx <= 27) {
                 terminal_write_color(lines[idx], VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
-            } else if (idx == 28) {
+            } else if (idx == 29) {
                 terminal_write_color(lines[idx], VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
             } else {
@@ -589,7 +598,14 @@ static void cmd_help(void) {
         for (int i = 0; i < 62; i++) terminal_putchar(' ');
         terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 
-        char c = keyboard_getchar();
+        char c = 0;
+        while (!c) {
+            gui_poll();
+            terminal_vt_set_active(my_vt);
+            if (gui_focused_vt() != my_vt) { timer_sleep_ms(10); continue; }
+            c = keyboard_try_getchar();
+            if (!c) timer_sleep_ms(10);
+        }
         if (c == 'q' || c == 'Q' || c == 3) {
             terminal_putchar('\n'); /* keep visible help text on screen */
             return;
@@ -676,6 +692,14 @@ static void cmd_uname(void) {
     terminal_writeln("Banana OS 0.3 x86 Banana Kernel 0.3 sh");
 }
 
+static void cmd_exit(void) {
+    int my_vt = terminal_vt_get_active();
+    if (my_vt != 0 && gui_close_terminal_by_vt(my_vt)) return;
+    terminal_write_color(
+        "exit: nothing to close here (this isn't a GUI terminal window)\n",
+        VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+}
+
 static void cmd_halt(void) {
     terminal_write_color("\nSystem halted.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     __asm__ volatile("cli; hlt");
@@ -694,6 +718,13 @@ static void shell_readline(char* buf, int maxlen) {
     if (maxlen <= 0) return;
     buf[0] = '\0'; /* always start from clean command buffer */
 
+    /* Captured once, before this task can yield: identifies which vt (and
+     * so which GUI terminal window, if any) this shell instance owns.
+     * Re-asserted after every yield below, since another cooperative task
+     * may have run in between and pointed the "active vt" write target at
+     * its own window - see shell_tick(). */
+    int my_vt = terminal_vt_get_active();
+
     int len = 0;
     int cur = 0;
     int prev_len = 0;
@@ -705,41 +736,36 @@ static void shell_readline(char* buf, int maxlen) {
         poll_deferred_actions();
         daemon_poll(len == 0);
         gui_poll();
+        terminal_vt_set_active(my_vt);
+
+        if (gui_focused_vt() != my_vt) {
+            /* Another window (or none) has keyboard focus: keep this
+             * shell's own command running/idling but don't steal input
+             * meant for whoever the user is actually looking at. */
+            timer_sleep_ms(10);
+            continue;
+        }
 
         char c = keyboard_try_getchar();
         if (!c) { timer_sleep_ms(10); continue; }
 
-        if (gui_handle_key(c)) {
-            /* GUI consumed this key (e.g. Ctrl+T Start menu) */
-            continue;
-        }
-
-        if (c == 3) { /* Ctrl+C: cancel line, do not execute history entry */
-            buf[0] = '\0';
-            terminal_write("^C\n");
-            return;
-        }
-
-        if (c == '\n') {
-            buf[len] = '\0'; /* ensure empty Enter stays empty */
-            terminal_putchar('\n');
-            break;
-        }
-
-        if (c == '\b') {
-            if (cur > 0) {
-                for (int i = cur - 1; i < len; i++) buf[i] = buf[i + 1];
-                cur--;
-                len--;
-            }
-        } else if (c == 27) {
+        if (c == 27) {
+            /* Escape, or the lead byte of an arrow-key sequence
+             * (ESC [ A/B/C/D). This has to be resolved before
+             * gui_handle_key() below: it treats every bare ESC as
+             * "close the open Start menu", which would otherwise
+             * swallow the lead byte of every arrow press before the
+             * arrow itself ever reaches gui_handle_arrow() - making
+             * arrow-key menu navigation unreachable whenever the menu
+             * is open. */
             char c2 = keyboard_getchar(); /* '[' */
-            char c3 = keyboard_getchar(); /* A/B/C/D */
-            if (c2 != '[') continue;
-
-            if (gui_handle_arrow(c3)) {
+            if (c2 != '[') {
+                gui_handle_key(c);
                 continue;
             }
+            char c3 = keyboard_getchar(); /* A/B/C/D */
+
+            if (gui_handle_arrow(c3)) continue;
 
             if (c3 == 'D') {
                 if (cur > 0) { cur--; terminal_cursor_left(); }
@@ -771,6 +797,24 @@ static void shell_readline(char* buf, int maxlen) {
                 cur = len;
             } else {
                 continue;
+            }
+            /* fall through: A/B updated buf, redraw the line below */
+        } else if (gui_handle_key(c)) {
+            /* GUI consumed this key (e.g. Ctrl+T Start menu) */
+            continue;
+        } else if (c == 3) { /* Ctrl+C: cancel line, do not execute history entry */
+            buf[0] = '\0';
+            terminal_write("^C\n");
+            return;
+        } else if (c == '\n') {
+            buf[len] = '\0'; /* ensure empty Enter stays empty */
+            terminal_putchar('\n');
+            break;
+        } else if (c == '\b') {
+            if (cur > 0) {
+                for (int i = cur - 1; i < len; i++) buf[i] = buf[i + 1];
+                cur--;
+                len--;
             }
         } else if ((unsigned char)c >= 32 && len < maxlen - 1) {
             for (int i = len; i > cur; i--) buf[i] = buf[i - 1];
@@ -833,6 +877,7 @@ static void dispatch(const char* line) {
     if (k_strcmp(line, "pwd")      == 0) { fs_pwd();         return; }
     if (k_strcmp(line, "uptime")   == 0) { cmd_uptime();     return; }
     if (k_strcmp(line, "top")      == 0) { cmd_top();        return; }
+    if (k_strcmp(line, "exit")     == 0) { cmd_exit();       return; }
     if (k_strcmp(line, "start")    == 0) { cmd_startx();     return; }
     if (k_strcmp(line, "stop")     == 0) { cmd_stopx();      return; }
     if (k_strcmp(line, "startx")   == 0) { cmd_startx();     return; }
@@ -923,6 +968,27 @@ void shell_run(void) {
 
     fs_init();
 
+    while (1) {
+        buf[0] = '\0';
+        print_prompt();
+        shell_readline(buf, sizeof(buf));
+        dispatch(buf);
+    }
+}
+
+void shell_run_window(int vt) {
+    char buf[256];
+    terminal_vt_set_active(vt);
+    terminal_clear();
+    terminal_write_color("  Welcome to Banana OS 0.3  --  ",
+                         VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    terminal_writeln("type 'help' to get started.");
+    terminal_writeln("");
+
+    /* Note: fs_init() is intentionally not called here - the filesystem
+     * is a single OS-wide resource shell_run() already set up once; every
+     * window shares it (and its current directory), same as every other
+     * process on a real OS sharing one mounted filesystem. */
     while (1) {
         buf[0] = '\0';
         print_prompt();

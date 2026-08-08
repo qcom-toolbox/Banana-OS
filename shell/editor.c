@@ -10,12 +10,21 @@
 #define ED_LINE_LEN   79
 #define ED_ROWS       21
 
-static char  lines[ED_MAX_LINES][ED_LINE_LEN];
-static int   nlines;
-static int   cx, cy;
-static int   scroll;
-static int   dirty;
-static char  filename[FS_NAME_LEN];
+/* One buffer per vt (kernel/terminal.h), not a single shared instance:
+ * each GUI terminal window can have its own "edit" session open at the
+ * same time, and they must not stomp on each other's text. Indexed by
+ * terminal_vt_get_active() at editor_open() time. */
+typedef struct {
+    char lines[ED_MAX_LINES][ED_LINE_LEN];
+    int  nlines;
+    int  cx, cy;
+    int  scroll;
+    int  dirty;
+    char filename[FS_NAME_LEN];
+    char cut_buf[ED_LINE_LEN];
+} editor_buf_t;
+
+static editor_buf_t g_ed[TERMINAL_VT_MAX];
 
 /* helpers */
 static int k_strlen(const char* s) { int n=0; while(s[n]) n++; return n; }
@@ -28,46 +37,46 @@ static void k_memmove(char* d, const char* s, int n) {
 }
 
 /* buffer → file */
-static void buf_to_file(fs_file_t* f) {
+static void buf_to_file(editor_buf_t* e, fs_file_t* f) {
     int pos = 0;
-    for (int i = 0; i < nlines && pos < FS_CONTENT_LEN - 2; i++) {
-        int l = k_strlen(lines[i]);
+    for (int i = 0; i < e->nlines && pos < FS_CONTENT_LEN - 2; i++) {
+        int l = k_strlen(e->lines[i]);
         for (int j = 0; j < l && pos < FS_CONTENT_LEN - 2; j++)
-            f->content[pos++] = lines[i][j];
-        if (i < nlines - 1) f->content[pos++] = '\n';
+            f->content[pos++] = e->lines[i][j];
+        if (i < e->nlines - 1) f->content[pos++] = '\n';
     }
     f->content[pos] = '\0';
 }
 
 /* file → buffer */
-static void file_to_buf(const char* src) {
-    nlines = 0;
+static void file_to_buf(editor_buf_t* e, const char* src) {
+    e->nlines = 0;
     int col = 0;
-    for (int i = 0; src[i] && nlines < ED_MAX_LINES; i++) {
+    for (int i = 0; src[i] && e->nlines < ED_MAX_LINES; i++) {
         if (src[i] == '\n') {
-            lines[nlines][col] = '\0';
-            nlines++;
+            e->lines[e->nlines][col] = '\0';
+            e->nlines++;
             col = 0;
         } else if (col < ED_LINE_LEN - 1) {
-            lines[nlines][col++] = src[i];
+            e->lines[e->nlines][col++] = src[i];
         }
     }
-    lines[nlines][col] = '\0';
-    nlines++;
-    if (nlines == 0) { lines[0][0] = '\0'; nlines = 1; }
+    e->lines[e->nlines][col] = '\0';
+    e->nlines++;
+    if (e->nlines == 0) { e->lines[0][0] = '\0'; e->nlines = 1; }
 }
 
 /* draw */
-static void draw(void) {
+static void draw(editor_buf_t* e) {
     terminal_clear();
 
     /* title bar */
     terminal_setcolor(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREY);
     terminal_write("  GNU nano 0.1  (Banana Edition)    File: ");
-    terminal_write(filename);
-    if (dirty) terminal_write(" [Modified]");
+    terminal_write(e->filename);
+    if (e->dirty) terminal_write(" [Modified]");
 
-    int used = 42 + k_strlen(filename) + (dirty ? 11 : 0);
+    int used = 42 + k_strlen(e->filename) + (e->dirty ? 11 : 0);
     for (int i = used; i < 80; i++) terminal_putchar(' ');
 
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
@@ -75,8 +84,8 @@ static void draw(void) {
 
     /* text */
     for (int row = 0; row < ED_ROWS; row++) {
-        int li = scroll + row;
-        if (li < nlines) terminal_write(lines[li]);
+        int li = e->scroll + row;
+        if (li < e->nlines) terminal_write(e->lines[li]);
         terminal_putchar('\n');
     }
 
@@ -84,8 +93,8 @@ static void draw(void) {
     terminal_setcolor(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREY);
 
     char lbuf[8]; char cbuf[8];
-    char* ls = u32_to_str((uint32_t)(cy+1), lbuf, sizeof(lbuf));
-    char* cs = u32_to_str((uint32_t)(cx+1), cbuf, sizeof(cbuf));
+    char* ls = u32_to_str((uint32_t)(e->cy+1), lbuf, sizeof(lbuf));
+    char* cs = u32_to_str((uint32_t)(e->cx+1), cbuf, sizeof(cbuf));
 
     terminal_write("  Line ");
     terminal_write(ls);
@@ -105,12 +114,12 @@ static void draw(void) {
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 
     /* ✅ FIXED CURSOR POSITION */
-    int screen_row = 2 + (cy - scroll);
+    int screen_row = 2 + (e->cy - e->scroll);
 
     if (screen_row < 1) screen_row = 1;
     if (screen_row > ED_ROWS) screen_row = ED_ROWS;
 
-    int screen_col = cx;
+    int screen_col = e->cx;
     if (screen_col < 0) screen_col = 0;
     if (screen_col > 79) screen_col = 79;
 
@@ -118,34 +127,50 @@ static void draw(void) {
 }
 
 /* clamp */
-static void clamp(void) {
-    if (cy < 0) cy = 0;
-    if (cy >= nlines) cy = nlines - 1;
+static void clamp(editor_buf_t* e) {
+    if (e->cy < 0) e->cy = 0;
+    if (e->cy >= e->nlines) e->cy = e->nlines - 1;
 
-    int ll = k_strlen(lines[cy]);
-    if (cx < 0) cx = 0;
-    if (cx > ll) cx = ll;
+    int ll = k_strlen(e->lines[e->cy]);
+    if (e->cx < 0) e->cx = 0;
+    if (e->cx > ll) e->cx = ll;
 
-    if (cy < scroll) scroll = cy;
-    if (cy >= scroll + ED_ROWS) scroll = cy - ED_ROWS + 1;
+    if (e->cy < e->scroll) e->scroll = e->cy;
+    if (e->cy >= e->scroll + ED_ROWS) e->scroll = e->cy - ED_ROWS + 1;
 }
 
-/* cut buffer */
-static char cut_buf[ED_LINE_LEN];
+/* Cooperative wait for the next keystroke aimed at this window: keeps the
+ * GUI compositor running and this editor's vt bound as the write target,
+ * but only consumes a key once this vt actually has keyboard focus - the
+ * same rule shell_readline() follows, so an "edit" running unfocused in
+ * the background can't steal keys meant for whatever window is focused. */
+static char editor_wait_key(int my_vt) {
+    while (1) {
+        gui_poll();
+        terminal_vt_set_active(my_vt);
+        if (gui_focused_vt() != my_vt) { timer_sleep_ms(10); continue; }
+        char c = keyboard_try_getchar();
+        if (c) return c;
+        timer_sleep_ms(10);
+    }
+}
 
-static void save_file(fs_file_t* f) {
-    buf_to_file(f);
-    dirty = 0;
-    draw();
+static void save_file(editor_buf_t* e, fs_file_t* f, int my_vt) {
+    buf_to_file(e, f);
+    e->dirty = 0;
+    draw(e);
     terminal_setcolor(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREY);
     terminal_write("  Saved. Press any key...");
     terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    while (!keyboard_try_getchar()) { gui_poll(); timer_sleep_ms(10); }
-    draw();
+    editor_wait_key(my_vt);
+    draw(e);
 }
 
 void editor_open(const char* fname) {
-    k_strcpy(filename, fname, FS_NAME_LEN);
+    int my_vt = terminal_vt_get_active();
+    editor_buf_t* e = &g_ed[my_vt];
+
+    k_strcpy(e->filename, fname, FS_NAME_LEN);
 
     int idx = fs_find_file(fname);
     if (idx < 0) idx = fs_create(fname);
@@ -156,60 +181,57 @@ void editor_open(const char* fname) {
     }
 
     fs_file_t* f = fs_get_file(idx);
-    file_to_buf(f->content);
+    file_to_buf(e, f->content);
 
-    cx = 0; cy = 0; scroll = 0; dirty = 0;
-    cut_buf[0] = '\0';
+    e->cx = 0; e->cy = 0; e->scroll = 0; e->dirty = 0;
+    e->cut_buf[0] = '\0';
 
-    draw();
+    draw(e);
 
     while (1) {
-        gui_poll();
-        char c = keyboard_try_getchar();
-        if (!c) { timer_sleep_ms(10); continue; }
+        char c = editor_wait_key(my_vt);
 
         if (c == 24) { /* Ctrl+X */
-            if (dirty) {
+            if (e->dirty) {
                 terminal_setcolor(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREY);
                 terminal_write("\n  Save modified buffer? (Y/N): ");
                 terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-                char ans = 0;
-                while (!ans) { gui_poll(); ans = keyboard_try_getchar(); if (!ans) timer_sleep_ms(10); }
-                if (ans == 'y' || ans == 'Y') buf_to_file(f);
+                char ans = editor_wait_key(my_vt);
+                if (ans == 'y' || ans == 'Y') buf_to_file(e, f);
             }
             terminal_clear();
             return;
         }
 
         if (c == 15 || c == 19) { /* Ctrl+O or Ctrl+S */
-            save_file(f);
+            save_file(e, f, my_vt);
             continue;
         }
 
         if (c == 11) { /* Ctrl+K */
-            k_strcpy(cut_buf, lines[cy], ED_LINE_LEN);
-            if (nlines > 1) {
-                for (int i = cy; i < nlines - 1; i++)
-                    k_strcpy(lines[i], lines[i+1], ED_LINE_LEN);
-                nlines--;
-            } else lines[0][0] = '\0';
+            k_strcpy(e->cut_buf, e->lines[e->cy], ED_LINE_LEN);
+            if (e->nlines > 1) {
+                for (int i = e->cy; i < e->nlines - 1; i++)
+                    k_strcpy(e->lines[i], e->lines[i+1], ED_LINE_LEN);
+                e->nlines--;
+            } else e->lines[0][0] = '\0';
 
-            clamp();
-            dirty = 1;
-            draw();
+            clamp(e);
+            e->dirty = 1;
+            draw(e);
             continue;
         }
 
         if (c == 21) { /* Ctrl+U */
-            if (cut_buf[0] && nlines < ED_MAX_LINES) {
-                for (int i = nlines; i > cy; i--)
-                    k_strcpy(lines[i], lines[i-1], ED_LINE_LEN);
-                k_strcpy(lines[cy], cut_buf, ED_LINE_LEN);
-                nlines++;
-                cy++;
-                clamp();
-                dirty = 1;
-                draw();
+            if (e->cut_buf[0] && e->nlines < ED_MAX_LINES) {
+                for (int i = e->nlines; i > e->cy; i--)
+                    k_strcpy(e->lines[i], e->lines[i-1], ED_LINE_LEN);
+                k_strcpy(e->lines[e->cy], e->cut_buf, ED_LINE_LEN);
+                e->nlines++;
+                e->cy++;
+                clamp(e);
+                e->dirty = 1;
+                draw(e);
             }
             continue;
         }
@@ -218,75 +240,75 @@ void editor_open(const char* fname) {
             char c2 = keyboard_getchar();
             if (c2 == '[') {
                 char c3 = keyboard_getchar();
-                if (c3 == 'A') cy--;
-                if (c3 == 'B') cy++;
-                if (c3 == 'C') cx++;
-                if (c3 == 'D') cx--;
-                clamp();
-                draw();
+                if (c3 == 'A') e->cy--;
+                if (c3 == 'B') e->cy++;
+                if (c3 == 'C') e->cx++;
+                if (c3 == 'D') e->cx--;
+                clamp(e);
+                draw(e);
             }
             continue;
         }
 
         if (c == '\n') {
-            if (nlines >= ED_MAX_LINES) continue;
+            if (e->nlines >= ED_MAX_LINES) continue;
 
             char rest[ED_LINE_LEN];
-            k_strcpy(rest, lines[cy] + cx, ED_LINE_LEN);
-            lines[cy][cx] = '\0';
+            k_strcpy(rest, e->lines[e->cy] + e->cx, ED_LINE_LEN);
+            e->lines[e->cy][e->cx] = '\0';
 
-            for (int i = nlines; i > cy + 1; i--)
-                k_strcpy(lines[i], lines[i-1], ED_LINE_LEN);
+            for (int i = e->nlines; i > e->cy + 1; i--)
+                k_strcpy(e->lines[i], e->lines[i-1], ED_LINE_LEN);
 
-            nlines++;
-            cy++;
-            k_strcpy(lines[cy], rest, ED_LINE_LEN);
-            cx = 0;
+            e->nlines++;
+            e->cy++;
+            k_strcpy(e->lines[e->cy], rest, ED_LINE_LEN);
+            e->cx = 0;
 
-            clamp();
-            dirty = 1;
-            draw();
+            clamp(e);
+            e->dirty = 1;
+            draw(e);
             continue;
         }
 
         if (c == '\b') {
-            if (cx > 0) {
-                char* ln = lines[cy];
+            if (e->cx > 0) {
+                char* ln = e->lines[e->cy];
                 int ll = k_strlen(ln);
-                k_memmove(ln + cx - 1, ln + cx, ll - cx + 1);
-                cx--;
-            } else if (cy > 0) {
-                int prev_len = k_strlen(lines[cy-1]);
-                int cur_len  = k_strlen(lines[cy]);
+                k_memmove(ln + e->cx - 1, ln + e->cx, ll - e->cx + 1);
+                e->cx--;
+            } else if (e->cy > 0) {
+                int prev_len = k_strlen(e->lines[e->cy-1]);
+                int cur_len  = k_strlen(e->lines[e->cy]);
 
                 if (prev_len + cur_len < ED_LINE_LEN - 1) {
-                    k_strcpy(lines[cy-1] + prev_len, lines[cy], ED_LINE_LEN - prev_len);
-                    for (int i = cy; i < nlines - 1; i++)
-                        k_strcpy(lines[i], lines[i+1], ED_LINE_LEN);
-                    nlines--;
-                    cy--;
-                    cx = prev_len;
+                    k_strcpy(e->lines[e->cy-1] + prev_len, e->lines[e->cy], ED_LINE_LEN - prev_len);
+                    for (int i = e->cy; i < e->nlines - 1; i++)
+                        k_strcpy(e->lines[i], e->lines[i+1], ED_LINE_LEN);
+                    e->nlines--;
+                    e->cy--;
+                    e->cx = prev_len;
                 }
             }
-            clamp();
-            dirty = 1;
-            draw();
+            clamp(e);
+            e->dirty = 1;
+            draw(e);
             continue;
         }
 
         if (c >= 32 && c < 127) {
-            char* ln = lines[cy];
+            char* ln = e->lines[e->cy];
             int ll = k_strlen(ln);
 
             if (ll < ED_LINE_LEN - 1) {
-                k_memmove(ln + cx + 1, ln + cx, ll - cx + 1);
-                ln[cx] = c;
-                cx++;
+                k_memmove(ln + e->cx + 1, ln + e->cx, ll - e->cx + 1);
+                ln[e->cx] = c;
+                e->cx++;
             }
 
-            clamp();
-            dirty = 1;
-            draw();
+            clamp(e);
+            e->dirty = 1;
+            draw(e);
         }
     }
 }

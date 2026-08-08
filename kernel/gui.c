@@ -9,6 +9,7 @@
 #include "usb.h"
 #include "task.h"
 #include "wallpaper_data.h"
+#include "../shell/shell.h"
 
 #define VGA_WIDTH  80
 #define VGA_HEIGHT 25
@@ -52,7 +53,12 @@ static int g_wallpaper_pattern = 1;
 static const uint8_t* g_wallpaper_pixels = wallpaper_azure_flow;
 typedef struct {
     int open;
-    int vt;
+    int vt;   /* 0 until this slot's window has been opened for the first
+               * time; once allocated it (and its shell task below) is
+               * kept for the OS's lifetime, so "exit"/closing a window
+               * just hides it rather than tearing anything down - the
+               * next open reuses the same vt and picks its shell back up
+               * wherever it left off, like a detached tmux pane. */
     int x, y, w, h;
     int dragging;
     int drag_dx, drag_dy;
@@ -64,6 +70,22 @@ static term_win_t g_terms[TERM_WIN_MAX] = {
     {0, 0, 180, 120, 520, 340, 0, 0, 0},
     {0, 0, 220, 150, 520, 340, 0, 0, 0},
     {0, 0, 260, 180, 520, 340, 0, 0, 0},
+};
+
+/* Each open terminal window is driven by its own cooperative shell task
+ * (kernel/task.h) bound permanently to its vt, so windows make progress
+ * independently instead of all sharing whichever single shell last had
+ * focus (the original bug: running "top"/"edit"/"help" in one window and
+ * then clicking another showed the same running command, because there
+ * used to be only one shell instance and focus just retargeted its
+ * output). task_create() takes a plain 0-argument entry point, so these
+ * four trampolines exist one-per-slot to close over each slot's index. */
+static void term_task_entry_0(void) { shell_run_window(g_terms[0].vt); }
+static void term_task_entry_1(void) { shell_run_window(g_terms[1].vt); }
+static void term_task_entry_2(void) { shell_run_window(g_terms[2].vt); }
+static void term_task_entry_3(void) { shell_run_window(g_terms[3].vt); }
+static void (*const g_term_task_entry[TERM_WIN_MAX])(void) = {
+    term_task_entry_0, term_task_entry_1, term_task_entry_2, term_task_entry_3
 };
 
 /* z-order: back -> front */
@@ -219,16 +241,23 @@ static void bring_term_front(int idx) {
 
 static int open_new_terminal(void) {
     for (int i = 0; i < TERM_WIN_MAX; i++) {
-        if (!g_terms[i].open) {
+        if (g_terms[i].open) continue;
+
+        if (g_terms[i].vt == 0) {
+            /* First time this slot has ever been opened: allocate its vt
+             * and start its shell task. Both are kept forever after this
+             * (see the term_win_t.vt comment) - closing the window later
+             * just hides it, it does not free the vt or stop the task. */
             int vt = terminal_vt_alloc();
-            if (vt < 0) return -1;
-            g_terms[i].open = 1;
+            if (vt < 0) continue; /* out of vts; maybe another slot is reusable */
             g_terms[i].vt = vt;
-            g_terms[i].dragging = 0;
-            bring_term_front(i);
-            terminal_vt_set_active(vt);
-            return i;
+            task_create("term-sh", g_term_task_entry[i]);
         }
+
+        g_terms[i].open = 1;
+        g_terms[i].dragging = 0;
+        bring_term_front(i);
+        return i;
     }
     /* none free: focus the frontmost */
     bring_term_front(g_term_order[TERM_WIN_MAX - 1]);
@@ -636,14 +665,21 @@ void gui_poll(void) {
 
                 int title_h = 20;
                 if (mx >= w->x && mx < w->x + w->w && my >= w->y && my < w->y + w->h) {
+                    /* Bringing a window to front changes keyboard focus
+                     * (gui_focused_vt() below), but must NOT retarget
+                     * where terminal output is written - that's owned by
+                     * this window's own shell task now, not by whichever
+                     * window was last clicked. (That retargeting used to
+                     * be exactly this line, and was the root cause of
+                     * every window showing the same running command.) */
                     bring_term_front(wi);
-                    terminal_vt_set_active(w->vt);
 
                     int close_x = w->x + w->w - 28;
                     if (mx >= close_x && mx < close_x + 24 && my >= w->y + 2 && my < w->y + 18) {
+                        /* Hide only - the vt and its shell task are kept
+                         * running so a later reopen picks up right where
+                         * this session left off. */
                         w->open = 0;
-                        terminal_vt_free(w->vt);
-                        w->vt = 0;
                     } else if (my < w->y + title_h) {
                         w->dragging = 1;
                         w->drag_dx = mx - w->x;
@@ -868,11 +904,11 @@ void gui_set_enabled(int enabled) {
     g_menu_open = 0;
     g_about_open = 0;
     g_wallpaper_open = 0;
-    for (int i = 0; i < TERM_WIN_MAX; i++) {
-        if (g_terms[i].open) terminal_vt_free(g_terms[i].vt);
-        g_terms[i].open = 0;
-        g_terms[i].vt = 0;
-    }
+    /* Hide (don't tear down) any open windows: their vts and shell tasks
+     * are permanent for the OS's lifetime (see term_win_t.vt), so a later
+     * startx can bring them straight back instead of every window losing
+     * its running state on every stopx. */
+    for (int i = 0; i < TERM_WIN_MAX; i++) g_terms[i].open = 0;
 
     if (gfx_available()) {
         if (g_gui_enabled) terminal_set_mode(TERMINAL_MODE_SUSPENDED);
@@ -895,6 +931,33 @@ void gui_set_enabled(int enabled) {
 
 int gui_is_enabled(void) {
     return g_gui_enabled;
+}
+
+int gui_focused_vt(void) {
+    if (!gfx_available() || !g_gui_enabled) return 0; /* plain console owns input */
+
+    /* Frontmost OPEN window, if any - g_term_order always lists every
+     * slot, closed or not, so this has to skip closed ones explicitly. */
+    for (int oi = TERM_WIN_MAX - 1; oi >= 0; oi--) {
+        int wi = g_term_order[oi];
+        if (g_terms[wi].open) return g_terms[wi].vt;
+    }
+
+    /* No window open yet: fall back to the (hidden) console's vt0 rather
+     * than nobody, so its shell task keeps reading keys and Ctrl+T / the
+     * Start menu's arrow-key navigation still work with the mouse alone
+     * unavailable, exactly like before any window existed. */
+    return 0;
+}
+
+int gui_close_terminal_by_vt(int vt) {
+    for (int i = 0; i < TERM_WIN_MAX; i++) {
+        if (g_terms[i].open && g_terms[i].vt == vt) {
+            g_terms[i].open = 0;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static void menu_activate(void) {
