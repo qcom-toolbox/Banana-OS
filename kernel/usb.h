@@ -34,6 +34,7 @@ typedef struct {
 
 void         mouse_init(void);
 mouse_state_t mouse_read(void);   /* non-blocking, returns last known state */
+int          mouse_is_touchpad(void); /* 1 if a Synaptics PS/2 touchpad was detected */
 
 /* For other drivers that consume AUX bytes (e.g. keyboard polling) */
 void mouse_on_aux_byte(uint8_t b);
