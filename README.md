@@ -53,6 +53,7 @@ bananOS/
 - Desktop and menu icons for built-in apps
 - In-memory Unix-style filesystem (`/bin`, `/etc`, `/home/banana`, `/usr`, `/var`, `/tmp`, `/dev`, `/root`) with absolute/relative path resolution, `.`/`..`/`~`
 - POSIX-flavored shell utilities (`ls -l`, `mkdir -p`, `rm -r`, `cp`, `mv`, `touch`, `whoami`, `hostname`, `date`, ...)
+- Two shell personas sharing one command engine - stock `sh` (default) and a bash-compatible `bash` (aliases, `export`/`$VAR`, `!!`) - selectable per-session with `chsh`
 - Built-in editor and live system monitor
 
 # Minimum Requirements
@@ -101,6 +102,31 @@ Banana OS seeds a small Unix-style root hierarchy at boot (in-memory, reset on r
 
 Every path-taking command accepts absolute (`/etc/motd`), relative (`../etc`), `.`/`..`, and `~` (home) paths, just like a real Unix shell.
 
+## Shells
+
+Banana OS ships two shell **personas** built on one shared command engine (same builtins, same filesystem, same history) - only the prompt, banner, and a handful of bash-only builtins differ:
+
+| | `sh` (stock, default) | `bash` (opt-in) |
+|---|---|---|
+| Prompt | `banana` (yellow) `@banana-os-0.3` (green) `:path$ ` | `banana@banana-os-0.3` (all green) `:path$ ` |
+| `uname` / `neofetch` | reports `sh` | reports `bash` |
+| Aliases, `export`/`$VAR`, `!!` | available (shared engine) | available |
+
+Switch which persona **new** shells boot into with `chsh` - like real Unix `chsh(1)`, it only affects future sessions (new terminal windows, or the next reboot), never the one you ran it from:
+
+```
+chsh          # show the current default and this session's persona
+chsh bash     # make new shells start as the bash persona
+chsh sh       # switch back to the stock shell
+```
+
+Bash-flavored extras (available in both personas, since they share one engine):
+
+- `alias [name[=value]]`, `unalias <name>` - e.g. `alias ll='ls -l'`
+- `export [NAME=value]`, `unset <name>`, `env` - environment variables; `$NAME` expands inline (`echo $HOME`, `echo $SHELL`)
+- `!!` - re-runs (and re-records) the previous command
+- `type <cmd>` - like `which`, but alias-aware
+
 ## Available Commands
 
 | Command | Description |
@@ -130,6 +156,13 @@ Every path-taking command accepts absolute (`/etc/motd`), relative (`../etc`), `
 | `find [path] [-name <sub>]` | Recursively list files/dirs under path |
 | `history` | Show command history |
 | `which <cmd>` | Show whether a command is a shell builtin |
+| `type <cmd>` | Like `which`, but alias-aware (bash-flavored) |
+| `alias [name[=value]]` | List/define a command alias (bash-flavored) |
+| `unalias <name>` | Remove an alias |
+| `export [NAME=value]` | List/set an environment variable |
+| `unset <name>` | Remove an environment variable |
+| `env` | List environment variables |
+| `chsh [sh\|bash]` | Show/set the default shell persona for new sessions |
 | `run <file.sh>` | Execute script line by line |
 | `uptime` | Show uptime |
 | `top` | Live CPU/RAM/process monitor (`q` to quit) |
