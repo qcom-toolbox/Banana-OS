@@ -3,9 +3,17 @@
 
 #include "types.h"
 
-#define TASK_MAX         4
+/* main shell + sysmon + up to TERM_WIN_MAX (kernel/gui.c) independent
+ * per-window terminal shell tasks, plus a little headroom. */
+#define TASK_MAX         8
 #define TASK_NAME_MAX    24
-#define TASK_STACK_WORDS 1024   /* 4 KiB stack per created task */
+/* 16 KiB stack per created task, matching the boot stack (boot/boot.asm)
+ * that task 0 already runs on: created tasks can now run a full shell
+ * instance (kernel/gui.c spawns one per GUI terminal window), which nests
+ * shell_readline()/dispatch()/command call frames just as deep as the
+ * main console shell does. The old 4 KiB was fine only while the sole
+ * created task was sysmon's tiny sampling loop. */
+#define TASK_STACK_WORDS 4096
 
 typedef enum {
     TASK_UNUSED = 0,

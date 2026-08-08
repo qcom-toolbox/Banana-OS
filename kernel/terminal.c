@@ -21,8 +21,9 @@ static int term_fb_scale = 1; /* smaller font by default */
 static size_t term_fb_cols = VGA_WIDTH;
 static size_t term_fb_rows = VGA_HEIGHT;
 
-/* framebuffer virtual terminals */
-#define VT_MAX 4
+/* framebuffer virtual terminals (count shared via terminal.h so other
+ * modules can size their own per-window state to match) */
+#define VT_MAX TERMINAL_VT_MAX
 static char    vt_chars[VT_MAX][FB_MAX_ROWS][FB_MAX_COLS];
 static uint8_t vt_colors[VT_MAX][FB_MAX_ROWS][FB_MAX_COLS];
 static size_t  vt_row[VT_MAX];

@@ -3,6 +3,12 @@
 
 #include "types.h"
 
+/* Virtual terminal count: vt0 is the boot/console shell, plus one per GUI
+ * terminal window (TERM_WIN_MAX in kernel/gui.c). Shared with modules
+ * (e.g. shell/editor.c) that need one instance of some per-window state
+ * per vt, so every window can run independently. */
+#define TERMINAL_VT_MAX 5
+
 /* VGA colors */
 enum vga_color {
     VGA_COLOR_BLACK         = 0,
