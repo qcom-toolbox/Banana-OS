@@ -21,7 +21,7 @@ static uint32_t g_last_clock_sec = (uint32_t)-1;
 static int g_gui_enabled = 0; /* like startx: default off */
 static int g_about_open = 0;
 static int g_wallpaper_open = 0;
-static int g_wallpaper_sel = 0;
+static int g_wallpaper_sel = 8; /* Azure Flow */
 
 typedef struct {
     const char* name;
@@ -46,10 +46,10 @@ static const wallpaper_t g_wallpapers[] = {
 };
 
 #define WALLPAPER_COUNT ((int)(sizeof(g_wallpapers) / sizeof(g_wallpapers[0])))
-static uint32_t g_wallpaper_color = 0x00151F30u;
-static uint32_t g_wallpaper_accent = 0x001B2A40u;
-static int g_wallpaper_pattern = 0;
-static const uint8_t* g_wallpaper_pixels = wallpaper_midnight_blue;
+static uint32_t g_wallpaper_color = 0x00142E5Cu;
+static uint32_t g_wallpaper_accent = 0x002E5CA0u;
+static int g_wallpaper_pattern = 1;
+static const uint8_t* g_wallpaper_pixels = wallpaper_azure_flow;
 typedef struct {
     int open;
     int vt;
@@ -481,6 +481,45 @@ void gui_init(void) {
 static uint32_t g_desktop_backbuf[800u * 600u];
 static int      g_backbuf_active = 0;
 
+/* Cache of the rendered wallpaper (the per-pixel bilinear upscale in
+ * draw_wallpaper_bitmap() is by far the most expensive thing gui_poll()
+ * does - ~480,000 pixels of fixed-point interpolation). It used to be
+ * recomputed from scratch every single frame the mouse moved, which is
+ * effectively every frame during normal use and was the main source of
+ * GUI lag. Now it's only re-rendered when the selected wallpaper actually
+ * changes; every other frame just copies the cached result in. */
+static uint32_t g_wallpaper_cache[800u * 600u];
+static int      g_wallpaper_cache_valid = 0;
+static const uint8_t* g_wallpaper_cache_pixels = NULL;
+static int      g_wallpaper_cache_pattern = -1;
+static uint32_t g_wallpaper_cache_c0 = 0, g_wallpaper_cache_c1 = 0;
+
+static void refresh_wallpaper_cache(const fb_info_t* fi) {
+    if (g_wallpaper_cache_valid &&
+        g_wallpaper_cache_pixels == g_wallpaper_pixels &&
+        g_wallpaper_cache_pattern == g_wallpaper_pattern &&
+        g_wallpaper_cache_c0 == g_wallpaper_color &&
+        g_wallpaper_cache_c1 == g_wallpaper_accent) {
+        return;
+    }
+
+    fb_set_backbuffer(g_wallpaper_cache, 800u, 600u);
+    draw_desktop_texture(fi, g_wallpaper_color, g_wallpaper_accent, g_wallpaper_pixels);
+    fb_set_backbuffer(g_desktop_backbuf, 800u, 600u);
+
+    g_wallpaper_cache_valid = 1;
+    g_wallpaper_cache_pixels = g_wallpaper_pixels;
+    g_wallpaper_cache_pattern = g_wallpaper_pattern;
+    g_wallpaper_cache_c0 = g_wallpaper_color;
+    g_wallpaper_cache_c1 = g_wallpaper_accent;
+}
+
+static void blit_wallpaper_cache(void) {
+    for (uint32_t i = 0; i < 800u * 600u; i++) {
+        g_desktop_backbuf[i] = g_wallpaper_cache[i];
+    }
+}
+
 void gui_poll(void) {
     timer_poll();
     task_yield();
@@ -662,7 +701,8 @@ void gui_poll(void) {
         last_frame_tick = now_tick;
 
         /* redraw desktop (without cursor) into backbuffer */
-        draw_desktop_texture(fi, g_wallpaper_color, g_wallpaper_accent, g_wallpaper_pixels);
+        refresh_wallpaper_cache(fi);
+        blit_wallpaper_cache();
 
         /* desktop shortcuts */
         {
