@@ -472,6 +472,14 @@ void gui_init(void) {
     draw_taskbar();
 }
 
+/* File-scope (not gui_poll()-local) so gui_set_enabled() can tear the
+ * backbuffer down on exit: without this, fb_present() keeps copying the
+ * full 800x600 backbuffer to the real framebuffer on every single
+ * terminal_putchar() - including plain shell typing - forever after the
+ * first startx, since nothing ever called fb_clear_backbuffer(). */
+static uint32_t g_desktop_backbuf[800u * 600u];
+static int      g_backbuf_active = 0;
+
 void gui_poll(void) {
     timer_poll();
     task_yield();
@@ -490,8 +498,6 @@ void gui_poll(void) {
         if (!fi || fi->width == 0 || fi->height == 0) return;
 
         /* backbuffer sized for requested mode (800x600) */
-        static uint32_t backbuf[800u * 600u];
-        static int bb_inited = 0;
         static int mx = 100, my = 100;
         static int last_mx = -1, last_my = -1;
         static uint32_t last_sec = (uint32_t)-1;
@@ -499,9 +505,9 @@ void gui_poll(void) {
         static uint32_t last_frame_tick = 0;
         static int prev_left = 0;
 
-        if (!bb_inited) {
-            fb_set_backbuffer(backbuf, 800u, 600u);
-            bb_inited = 1;
+        if (!g_backbuf_active) {
+            fb_set_backbuffer(g_desktop_backbuf, 800u, 600u);
+            g_backbuf_active = 1;
             last_mx = -1; last_my = -1;
             last_sec = (uint32_t)-1;
             last_open = -1; last_sel = -1;
@@ -834,6 +840,14 @@ void gui_set_enabled(int enabled) {
             terminal_set_mode(TERMINAL_MODE_FRAMEBUFFER);
             terminal_fb_set_scale(1); /* console stays small */
             terminal_clear();
+
+            /* Tear the desktop backbuffer down: leaving it active makes
+             * every future terminal_putchar() (plain shell typing
+             * included) pay for a full 800x600 fb_present() copy, forever.
+             * g_backbuf_active=0 also makes the next startx correctly
+             * re-run gui_poll()'s one-time backbuffer setup. */
+            fb_clear_backbuffer();
+            g_backbuf_active = 0;
         }
     }
 }
