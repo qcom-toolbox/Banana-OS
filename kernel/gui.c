@@ -8,6 +8,7 @@
 #include "rtc.h"
 #include "usb.h"
 #include "task.h"
+#include "wallpaper_data.h"
 
 #define VGA_WIDTH  80
 #define VGA_HEIGHT 25
@@ -28,23 +29,25 @@ typedef struct {
     uint32_t base;
     uint32_t accent;
     int pattern;
+    const uint8_t* pixels; /* real RGB888 image data, see wallpaper_data.h */
 } wallpaper_t;
 
 static const wallpaper_t g_wallpapers[] = {
-    {"Midnight Blue", "assets/wallpapers/midnight-blue.png", 0x00151F30u, 0x001B2A40u, 0},
-    {"Forest Night",  "assets/wallpapers/forest-night.png",  0x00162A1Eu, 0x001D3A29u, 1},
-    {"Graphite",      "assets/wallpapers/graphite.png",      0x00252528u, 0x00323236u, 2},
-    {"Royal Purple",  "assets/wallpapers/royal-purple.png",  0x00261D3Au, 0x00362A52u, 0},
-    {"Sunset Grid",   "assets/wallpapers/sunset-grid.png",   0x0030292Au, 0x004F3A34u, 2},
-    {"Ocean Wave",    "assets/wallpapers/ocean-wave.png",    0x00131F2Du, 0x001B3A58u, 1},
-    {"Cyber Mint",    "assets/wallpapers/cyber-mint.png",    0x00152A2Au, 0x001E4A4Au, 0},
-    {"Amber Mesh",    "assets/wallpapers/amber-mesh.png",    0x0033261Bu, 0x00513C22u, 2},
+    {"Midnight Blue", "assets/wallpapers/midnight-blue.png", 0x00151F30u, 0x001B2A40u, 0, wallpaper_midnight_blue},
+    {"Forest Night",  "assets/wallpapers/forest-night.png",  0x00162A1Eu, 0x001D3A29u, 1, wallpaper_forest_night},
+    {"Graphite",      "assets/wallpapers/graphite.png",      0x00252528u, 0x00323236u, 2, wallpaper_graphite},
+    {"Royal Purple",  "assets/wallpapers/royal-purple.png",  0x00261D3Au, 0x00362A52u, 0, wallpaper_royal_purple},
+    {"Sunset Grid",   "assets/wallpapers/sunset-grid.png",   0x0030292Au, 0x004F3A34u, 2, wallpaper_sunset_grid},
+    {"Ocean Wave",    "assets/wallpapers/ocean-wave.png",    0x00131F2Du, 0x001B3A58u, 1, wallpaper_ocean_wave},
+    {"Cyber Mint",    "assets/wallpapers/cyber-mint.png",    0x00152A2Au, 0x001E4A4Au, 0, wallpaper_cyber_mint},
+    {"Amber Mesh",    "assets/wallpapers/amber-mesh.png",    0x0033261Bu, 0x00513C22u, 2, wallpaper_amber_mesh},
 };
 
 #define WALLPAPER_COUNT ((int)(sizeof(g_wallpapers) / sizeof(g_wallpapers[0])))
 static uint32_t g_wallpaper_color = 0x00151F30u;
 static uint32_t g_wallpaper_accent = 0x001B2A40u;
 static int g_wallpaper_pattern = 0;
+static const uint8_t* g_wallpaper_pixels = wallpaper_midnight_blue;
 typedef struct {
     int open;
     int vt;
@@ -93,8 +96,30 @@ static void draw_flux_toolbar_button(int x, int y, int w, int h, const char* lab
     gfx_draw_text(x + 8, y + 8, label, 0x00E6EDF5u, base);
 }
 
-static void draw_desktop_texture(const fb_info_t* fi, uint32_t c0, uint32_t c1) {
+/* Nearest-neighbor upscale of a WALLPAPER_IMG_W x WALLPAPER_IMG_H RGB888
+ * image to fill the framebuffer (800x600 -> 8x8 blocks, no fractional
+ * scaling since 100*8=800 and 75*8=600 exactly). */
+static void draw_wallpaper_bitmap(const fb_info_t* fi, const uint8_t* pixels) {
+    int scale_x = (int)fi->width / WALLPAPER_IMG_W;
+    int scale_y = (int)fi->height / WALLPAPER_IMG_H;
+    if (scale_x < 1) scale_x = 1;
+    if (scale_y < 1) scale_y = 1;
+
+    for (int y = 0; y < WALLPAPER_IMG_H; y++) {
+        for (int x = 0; x < WALLPAPER_IMG_W; x++) {
+            const uint8_t* p = &pixels[(y * WALLPAPER_IMG_W + x) * 3];
+            uint32_t rgb = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[2];
+            gfx_fill_rect(x * scale_x, y * scale_y, scale_x, scale_y, rgb);
+        }
+    }
+}
+
+static void draw_desktop_texture(const fb_info_t* fi, uint32_t c0, uint32_t c1, const uint8_t* pixels) {
     if (!fi) return;
+    if (pixels) {
+        draw_wallpaper_bitmap(fi, pixels);
+        return;
+    }
     gfx_clear(c0);
     if (g_wallpaper_pattern == 1) {
         for (int y = 0; y < (int)fi->height; y += 4) {
@@ -499,6 +524,7 @@ void gui_poll(void) {
                             g_wallpaper_color = g_wallpapers[i].base;
                             g_wallpaper_accent = g_wallpapers[i].accent;
                             g_wallpaper_pattern = g_wallpapers[i].pattern;
+                            g_wallpaper_pixels = g_wallpapers[i].pixels;
                             consumed = 1;
                             break;
                         }
@@ -594,7 +620,7 @@ void gui_poll(void) {
         last_frame_tick = now_tick;
 
         /* redraw desktop (without cursor) into backbuffer */
-        draw_desktop_texture(fi, g_wallpaper_color, g_wallpaper_accent);
+        draw_desktop_texture(fi, g_wallpaper_color, g_wallpaper_accent, g_wallpaper_pixels);
 
         /* desktop shortcuts */
         {
