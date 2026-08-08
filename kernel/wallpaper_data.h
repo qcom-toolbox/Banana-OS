@@ -25,5 +25,6 @@ extern const uint8_t wallpaper_ocean_wave[WALLPAPER_IMG_W * WALLPAPER_IMG_H * 3]
 extern const uint8_t wallpaper_cyber_mint[WALLPAPER_IMG_W * WALLPAPER_IMG_H * 3];
 extern const uint8_t wallpaper_amber_mesh[WALLPAPER_IMG_W * WALLPAPER_IMG_H * 3];
 extern const uint8_t wallpaper_azure_flow[WALLPAPER_IMG_W * WALLPAPER_IMG_H * 3];
+extern const uint8_t wallpaper_plain_black[WALLPAPER_IMG_W * WALLPAPER_IMG_H * 3];
 
 #endif

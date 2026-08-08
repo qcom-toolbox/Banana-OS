@@ -42,6 +42,7 @@ static const wallpaper_t g_wallpapers[] = {
     {"Cyber Mint",    "assets/wallpapers/cyber-mint.png",    0x00152A2Au, 0x001E4A4Au, 0, wallpaper_cyber_mint},
     {"Amber Mesh",    "assets/wallpapers/amber-mesh.png",    0x0033261Bu, 0x00513C22u, 2, wallpaper_amber_mesh},
     {"Azure Flow",    "assets/wallpapers/azure-flow.jpg",    0x00142E5Cu, 0x002E5CA0u, 1, wallpaper_azure_flow},
+    {"Plain Black",   "assets/wallpapers/plain-black.png",   0x00121214u, 0x00121214u, 0, wallpaper_plain_black},
 };
 
 #define WALLPAPER_COUNT ((int)(sizeof(g_wallpapers) / sizeof(g_wallpapers[0])))
