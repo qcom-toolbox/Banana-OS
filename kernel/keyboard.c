@@ -166,10 +166,18 @@ static void kb_wait_read(void) {
 /* ── modifier state ─────────────────────────────────────────────── */
 static int shift_held = 0;
 static int ctrl_held  = 0;
+static int alt_held   = 0;
 static int use_set2 = 0;
 static int set2_break = 0;
 static int set2_e0 = 0;
 static int set1_e0 = 0;
+
+/* One-shot Ctrl+Alt+Delete flag: set when the dedicated Delete key is
+ * pressed while both Ctrl and Alt are held, cleared by whoever consumes
+ * it via keyboard_ctrl_alt_del_pending(). Kept separate from the normal
+ * character stream since Delete isn't a letter (nothing for the
+ * existing Ctrl+letter -> control-code mapping to produce). */
+static int ctrl_alt_del_pending = 0;
 
 /* ── tiny char queue (fixes static-inside-loop bug) ─────────────── */
 #define QUEUE_SIZE 8
@@ -254,6 +262,7 @@ static int translate_scancode_set2(uint8_t sc, char* out) {
     if (set2_break) {
         if (sc == 0x12 || sc == 0x59) shift_held = 0;
         if (sc == 0x14) ctrl_held = 0;
+        if (sc == 0x11) alt_held = 0;
         set2_break = 0;
         set2_e0 = 0;
         return 0;
@@ -265,12 +274,19 @@ static int translate_scancode_set2(uint8_t sc, char* out) {
         if (sc == 0x74) { push_arrow('C'); *out = q_pop(); set2_e0 = 0; return 1; }
         if (sc == 0x6B) { push_arrow('D'); *out = q_pop(); set2_e0 = 0; return 1; }
         if (sc == 0x14) { ctrl_held = 1; set2_e0 = 0; return 0; }
+        if (sc == 0x11) { alt_held = 1; set2_e0 = 0; return 0; }  /* right alt */
+        if (sc == 0x71) {                                          /* Delete key */
+            if (ctrl_held && alt_held) ctrl_alt_del_pending = 1;
+            set2_e0 = 0;
+            return 0;
+        }
         set2_e0 = 0;
         return 0;
     }
 
     if (sc == 0x12 || sc == 0x59) { shift_held = 1; return 0; }
     if (sc == 0x14) { ctrl_held = 1; return 0; }
+    if (sc == 0x11) { alt_held = 1; return 0; }  /* left alt */
 
     char c = set2_map_char(sc, shift_held);
     if (!c) return 0;
@@ -334,6 +350,13 @@ static int process_scancode_byte(uint8_t sc, char* out) {
         if (sc == 0x4B) { push_arrow('D'); *out = q_pop(); set1_e0 = 0; return 1; }
         if (sc == 0x1D) { ctrl_held = 1; set1_e0 = 0; return 0; }  /* right ctrl down */
         if (sc == 0x9D) { ctrl_held = 0; set1_e0 = 0; return 0; }  /* right ctrl up */
+        if (sc == 0x38) { alt_held = 1; set1_e0 = 0; return 0; }   /* right alt down */
+        if (sc == 0xB8) { alt_held = 0; set1_e0 = 0; return 0; }   /* right alt up */
+        if (sc == 0x53) {                                          /* Delete key down */
+            if (ctrl_held && alt_held) ctrl_alt_del_pending = 1;
+            set1_e0 = 0;
+            return 0;
+        }
         set1_e0 = 0;
         return 0;
     }
@@ -342,6 +365,8 @@ static int process_scancode_byte(uint8_t sc, char* out) {
     if (sc == 0xAA || sc == 0xB6) { shift_held = 0; return 0; }
     if (sc == 0x1D)               { ctrl_held  = 1; return 0; }
     if (sc == 0x9D)               { ctrl_held  = 0; return 0; }
+    if (sc == 0x38)               { alt_held   = 1; return 0; }  /* left alt down */
+    if (sc == 0xB8)               { alt_held   = 0; return 0; }  /* left alt up */
     if (sc & 0x80)                return 0; /* key-up */
 
     return translate_scancode(sc, out);
@@ -438,9 +463,19 @@ void keyboard_init(void) {
     kb_wait_write();
     outb(KB_CMD_PORT, 0xAE); /* enable first port */
 
-    shift_held = 0; ctrl_held = 0;
+    shift_held = 0; ctrl_held = 0; alt_held = 0;
     use_set2 = 0; set2_break = 0; set2_e0 = 0; set1_e0 = 0;
+    ctrl_alt_del_pending = 0;
     q_head = 0; q_tail = 0;
+}
+
+/* One-shot: returns 1 exactly once per Ctrl+Alt+Delete press, then
+ * clears itself. Callers should poll this regularly (e.g. once per
+ * frame) rather than only when otherwise idle. */
+int keyboard_ctrl_alt_del_pending(void) {
+    int p = ctrl_alt_del_pending;
+    ctrl_alt_del_pending = 0;
+    return p;
 }
 
 char keyboard_getchar(void) {

@@ -448,6 +448,14 @@ void gui_init(void) {
 void gui_poll(void) {
     timer_poll();
     task_yield();
+
+    /* Consume the Ctrl+Alt+Delete flag every cycle regardless of GUI
+     * state, so a press while the GUI is off can't linger and fire the
+     * next time it's started - only actually close it when running. */
+    if (keyboard_ctrl_alt_del_pending() && g_gui_enabled) {
+        gui_set_enabled(0);
+    }
+
     if (gfx_available()) {
         if (!g_gui_enabled) return;
         /* framebuffer desktop loop (throttled + backbuffer to avoid flicker) */

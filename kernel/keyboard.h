@@ -11,4 +11,7 @@ const char* keyboard_layout_name(void);
 const char* keyboard_layouts_help(void);
 int keyboard_set_layout(const char* name);
 
+/* One-shot: 1 exactly once per Ctrl+Alt+Delete press, then clears. */
+int keyboard_ctrl_alt_del_pending(void);
+
 #endif
