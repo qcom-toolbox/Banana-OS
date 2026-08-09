@@ -10,6 +10,8 @@ Banana OS 0.3 is a minimal x86 operating system written from scratch (no Linux k
  |____/ \__,_|_| |_|\__,_|_| |_|\__,_|___/____/
 ```
 
+![Banana OS desktop](assets/screenshots/gui-desktop.png)
+
 ## Project Layout
 
 ```
@@ -42,19 +44,22 @@ bananOS/
 
 - Bare-metal x86 kernel (freestanding C + NASM)
 - Multiboot2 boot flow with framebuffer mode
+- IDT-based exception handling with a panic screen instead of silent triple-faults
 - Dual terminal backend:
   - VGA text mode
   - Framebuffer-rendered console
 - GUI desktop (started on demand with `startx`)
-- PS/2 keyboard + PS/2 mouse support
-- Multiple draggable terminal windows in GUI mode
+- PS/2 keyboard + PS/2 mouse support, plus real Synaptics PS/2 touchpad support (absolute mode + tap-to-click)
+- Ctrl+Alt+Delete closes the GUI, from anywhere
+- Up to 4 draggable, closable, focusable terminal windows in GUI mode, each with its own independent shell task and scrollback
 - Fluxbox-inspired dark desktop theme
-- Wallpaper app with PNG-backed graphical presets from `assets/wallpapers/`
+- Wallpaper app with 10 PNG/JPG-backed graphical presets from `assets/wallpapers/` (bilinear-upscaled), Azure Flow as the default
 - Desktop and menu icons for built-in apps
 - In-memory Unix-style filesystem (`/bin`, `/etc`, `/home/banana`, `/usr`, `/var`, `/tmp`, `/dev`, `/root`) with absolute/relative path resolution, `.`/`..`/`~`
 - POSIX-flavored shell utilities (`ls -l`, `mkdir -p`, `rm -r`, `cp`, `mv`, `touch`, `whoami`, `hostname`, `date`, ...)
 - Two shell personas sharing one command engine - stock `sh` (default) and a bash-compatible `bash` (aliases, `export`/`$VAR`, `!!`) - selectable per-session with `chsh`
 - Built-in editor and live system monitor
+- Real bootable disk install (`install`/`sync`) - installs onto a dedicated ATA hard disk so Banana OS boots on its own, with a persistent filesystem, no CD required
 
 # Minimum Requirements
 
@@ -66,22 +71,20 @@ bananOS/
 
 ## GUI Overview (`startx`)
 
-- 800x600 framebuffer desktop
+- 800x600 framebuffer desktop, Azure Flow wallpaper by default
 - Taskbar with:
   - `Start` button
   - `Quit` button
   - live clock
-- Start menu entries:
+- Start menu and desktop shortcuts, both with the same entries:
   - About app
   - Terminal
   - Wallpaper
   - Quit GUI
-- Desktop shortcuts:
-  - About
-  - Terminal
-  - Wallpaper
-  - Quit GUI
-- Up to 4 terminal windows (draggable, closable, focusable)
+- Wallpaper app - pick from 10 built-in presets (bilinear-upscaled to the framebuffer)
+- Up to 4 terminal windows (draggable, closable, focusable, scrollable), each running its own independent shell task
+- PS/2 mouse and Synaptics touchpad (absolute mode + tap-to-click) both work for pointing
+- Ctrl+Alt+Delete quits the GUI immediately, from anywhere
 
 ## Filesystem Layout
 
