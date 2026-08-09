@@ -12,6 +12,8 @@
 #include "../kernel/fb.h"
 #include "../kernel/rtc.h"
 #include "../kernel/types.h"
+#include "../kernel/ata.h"
+#include "../kernel/fsdisk.h"
 
 /* ── string helpers ─────────────────────────────────────────────── */
 static int k_strlen(const char* s) { int n=0; while(s[n]) n++; return n; }
@@ -263,12 +265,23 @@ static void do_reboot(void) {
 static int      shutdown_pending = 0;
 static uint32_t shutdown_deadline_tick = 0;
 
+/* If this session installed to (or booted from) a persistent disk,
+ * flush the current filesystem state to it before any power action -
+ * same spirit as real Unix syncing before shutdown/reboot, just done
+ * for us automatically instead of relying on the user to run `sync`. */
+static void sync_if_installed(void) {
+    if (!fsdisk_is_installed()) return;
+    terminal_write_color("Syncing filesystem to disk...\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    fsdisk_sync();
+}
+
 static void poll_deferred_actions(void) {
     if (!shutdown_pending) return;
     if ((int32_t)(timer_ticks() - shutdown_deadline_tick) < 0) return;
 
     shutdown_pending = 0;
     terminal_write_color("\nShutting down now...\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    sync_if_installed();
     timer_sleep_ms(150);
     acpi_poweroff();
 }
@@ -278,6 +291,7 @@ static void poll_deferred_actions(void) {
 static void cmd_reboot(const char* args) {
     (void)args;
     terminal_write_color("\nRebooting now...\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    sync_if_installed();
     timer_sleep_ms(150);
     do_reboot();
 }
@@ -286,6 +300,7 @@ static void cmd_shutdown(const char* args) {
     if (k_strcmp(args, "now") == 0) {
         shutdown_pending = 0;
         terminal_write_color("\nShutting down now...\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        sync_if_installed();
         timer_sleep_ms(150);
         acpi_poweroff();
         return;
@@ -723,6 +738,8 @@ static void cmd_help(void) {
         "  shutdown [now|-c]  schedule shutdown (60s), now, or cancel",
         "  reboot             immediate reboot",
         "  halt               hard halt (no ACPI)",
+        "  install            write filesystem to a dedicated ATA disk (persistent)",
+        "  sync               re-write filesystem to the installed disk now",
         "",
         "  Editor: arrows move, ^O/^S save, ^X exit, ^K cut line, ^U paste",
         "",
@@ -744,10 +761,10 @@ static void cmd_help(void) {
             if (idx == 0) {
                 terminal_write_color(lines[idx], VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
-            } else if (idx >= 2 && idx <= 52) {
+            } else if (idx >= 2 && idx <= 54) {
                 terminal_write_color(lines[idx], VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
-            } else if (idx == 54) {
+            } else if (idx == 56) {
                 terminal_write_color(lines[idx], VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
             } else {
@@ -1083,7 +1100,7 @@ static const char* const known_cmds[] = {
     "ls", "cd", "pwd", "mkdir", "rm", "touch", "cp", "mv", "edit", "cat", "run",
     "uptime", "top", "exit", "start", "stop", "startx", "stopx",
     "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
-    "hw_info", "shutdown", "reboot", "halt", "history", "which", "type",
+    "hw_info", "shutdown", "reboot", "halt", "install", "sync", "history", "which", "type",
     "alias", "unalias", "export", "unset", "env", "chsh",
     "grep", "wc", "head", "tail", "find", (void*)0
 };
@@ -1405,8 +1422,103 @@ static void cmd_exit(void) {
 }
 
 static void cmd_halt(void) {
+    sync_if_installed();
     terminal_write_color("\nSystem halted.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     __asm__ volatile("cli; hlt");
+}
+
+/* ── install / sync (persistent disk) ──────────────────────────────
+ * `install` formats a dedicated ATA hard disk (not the GRUB boot CD -
+ * ata_probe_disks() skips ATAPI drives) and writes the current in-memory
+ * filesystem to it. Once installed, filesystem changes persist across
+ * reboots: `sync` writes back on demand, and shutdown/reboot/halt do it
+ * automatically (see sync_if_installed() above). Booting itself is
+ * unaffected - this makes the filesystem *contents* persistent, it does
+ * not make the disk bootable on its own. */
+static int prompt_yes_no(void) {
+    int my_vt = terminal_vt_get_active();
+    while (1) {
+        gui_poll();
+        terminal_vt_set_active(my_vt);
+        if (gui_focused_vt() != my_vt) { timer_sleep_ms(10); continue; }
+        char c = keyboard_try_getchar();
+        if (!c) { timer_sleep_ms(10); continue; }
+        if (c == 'y' || c == 'Y') { terminal_writeln("y"); return 1; }
+        if (c == 'n' || c == 'N' || c == '\n' || c == 3) { terminal_writeln("n"); return 0; }
+    }
+}
+
+static void print_disk_line(const ata_disk_t* d) {
+    char b[16];
+    terminal_write("  ");
+    terminal_write(d->bus == ATA_BUS_PRIMARY ? "primary " : "secondary ");
+    terminal_write(d->is_slave ? "slave" : "master");
+    terminal_write("  ");
+    terminal_write(d->is_atapi ? "(ATAPI/CD - skipped)" : d->model[0] ? d->model : "(unknown model)");
+    if (!d->is_atapi && d->sectors) {
+        terminal_write("  ~");
+        terminal_write(u32_to_str(d->sectors / 2048u, b, sizeof(b))); /* 512B sectors -> MB */
+        terminal_write(" MB");
+    }
+    terminal_putchar('\n');
+}
+
+static void cmd_install(void) {
+    ata_disk_t all[4];
+    ata_probe_disks(all);
+
+    int found = 0;
+    ata_disk_t target;
+    for (int i = 0; i < 4; i++) {
+        if (all[i].present) print_disk_line(&all[i]);
+        if (all[i].present && !all[i].is_atapi) { found++; target = all[i]; }
+    }
+
+    if (found == 0) {
+        terminal_write_color(
+            "install: no ATA hard disk found. Attach a second (blank) IDE/ATA disk\n"
+            "to the VM - besides the GRUB boot CD - then try again.\n",
+            VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+    if (found > 1) {
+        terminal_write_color(
+            "install: multiple ATA hard disks found - detach extras so exactly one\n"
+            "is attached, then try again.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+
+    terminal_write_color("This will ERASE ", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    terminal_write(target.model[0] ? target.model : "the disk above");
+    terminal_write_color(" and write the current filesystem to it. Continue? [y/N] ",
+                         VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    if (!prompt_yes_no()) {
+        terminal_writeln("install: cancelled.");
+        return;
+    }
+
+    if (fsdisk_install() != 0) {
+        terminal_write_color("install: failed (disk I/O error).\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+    terminal_write_color(
+        "install: done. Filesystem changes now persist across reboot/shutdown/halt\n"
+        "(auto-synced, or run 'sync' manually). You still boot from the GRUB CD/ISO\n"
+        "each time - this disk holds your files, not the bootable OS itself.\n",
+        VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+}
+
+static void cmd_sync(void) {
+    if (!fsdisk_is_installed()) {
+        terminal_write_color("sync: not installed - run 'install' first.\n",
+                             VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (fsdisk_sync() != 0) {
+        terminal_write_color("sync: failed (disk I/O error).\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+    terminal_writeln("sync: filesystem written to disk.");
 }
 
 /* ── prompt ─────────────────────────────────────────────────────── */
@@ -1720,6 +1832,9 @@ static void dispatch(const char* raw_line, int persona) {
     }
     if (k_strcmp(line, "chsh")     == 0) { cmd_chsh("", persona); return; }
 
+    if (k_strcmp(line, "install")  == 0) { cmd_install();     return; }
+    if (k_strcmp(line, "sync")     == 0) { cmd_sync();        return; }
+
     /* shutdown / reboot with optional arg */
     if (k_strcmp(line, "shutdown")       == 0) { cmd_shutdown("");    return; }
     if (k_strncmp(line, "shutdown ", 9)  == 0) { cmd_shutdown(k_skip_spaces(line+9)); return; }
@@ -1821,7 +1936,10 @@ void shell_run(void) {
     terminal_clear();
     print_banner(persona);
 
-    fs_init();
+    /* If a dedicated ATA disk was previously `install`ed, load its saved
+     * filesystem instead of reseeding the defaults - this is what makes
+     * files persist across reboots. See kernel/fsdisk.c. */
+    if (!fsdisk_try_load()) fs_init();
 
     while (1) {
         buf[0] = '\0';

@@ -599,3 +599,33 @@ uint32_t fs_ram_used_bytes(void) {
     }
     return used;
 }
+
+/* ── on-disk persistence ────────────────────────────────────────── */
+uint32_t fs_snapshot_size(void) {
+    return (uint32_t)sizeof(dirs) + (uint32_t)sizeof(files) + (uint32_t)sizeof(int32_t);
+}
+
+void fs_snapshot_save(uint8_t* buf) {
+    uint32_t off = 0;
+    const uint8_t* d = (const uint8_t*)dirs;
+    for (uint32_t i = 0; i < sizeof(dirs); i++) buf[off++] = d[i];
+    const uint8_t* f = (const uint8_t*)files;
+    for (uint32_t i = 0; i < sizeof(files); i++) buf[off++] = f[i];
+    int32_t hd = (int32_t)home_dir;
+    const uint8_t* h = (const uint8_t*)&hd;
+    for (uint32_t i = 0; i < sizeof(hd); i++) buf[off++] = h[i];
+}
+
+int fs_snapshot_load(const uint8_t* buf) {
+    uint32_t off = 0;
+    uint8_t* d = (uint8_t*)dirs;
+    for (uint32_t i = 0; i < sizeof(dirs); i++) d[i] = buf[off++];
+    uint8_t* f = (uint8_t*)files;
+    for (uint32_t i = 0; i < sizeof(files); i++) f[i] = buf[off++];
+    int32_t hd = 0;
+    uint8_t* h = (uint8_t*)&hd;
+    for (uint32_t i = 0; i < sizeof(hd); i++) h[i] = buf[off++];
+    home_dir = (int)hd;
+    cwd = home_dir; /* real shells start in $HOME, same as fs_init() */
+    return 0;
+}

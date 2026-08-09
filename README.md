@@ -176,6 +176,29 @@ Bash-flavored extras (available in both personas, since they share one engine):
 | `shutdown [now|-c]` | Schedule shutdown (60s), immediate shutdown, or cancel |
 | `reboot` | Immediate reboot |
 | `halt` | Hard CPU halt |
+| `install` | Write the current filesystem to a dedicated ATA hard disk (persistent storage) |
+| `sync` | Re-write the filesystem to the installed disk on demand |
+
+## Persistent Storage (`install` / `sync`)
+
+By default the filesystem is in-memory and resets on every reboot. `install` gives it a permanent home on a **second, dedicated IDE/ATA hard disk** attached to the VM (never the GRUB boot CD - the driver detects and skips ATAPI/optical drives):
+
+```bash
+# QEMU: create a blank disk image, then attach it alongside the ISO
+qemu-img create -f raw disk.img 8M
+qemu-system-i386 -cdrom Banana_OS.iso -drive file=disk.img,format=raw,if=ide
+```
+
+In VirtualBox, attach a second blank virtual hard disk (IDE) to the same VM that boots `Banana_OS.iso`.
+
+Then, inside Banana OS:
+
+```
+install     # formats the attached disk and writes the current filesystem to it
+sync        # re-writes it on demand (also happens automatically on shutdown/reboot/halt)
+```
+
+Once installed, every reboot loads the filesystem back from disk instead of reseeding the defaults - your files persist. Note this only makes the filesystem *contents* persistent: you still boot Banana OS from the GRUB CD/ISO every time, the same as before `install`.
 
 ## Build (Ubuntu/Debian)
 
