@@ -738,7 +738,7 @@ static void cmd_help(void) {
         "  shutdown [now|-c]  schedule shutdown (60s), now, or cancel",
         "  reboot             immediate reboot",
         "  halt               hard halt (no ACPI)",
-        "  install            write filesystem to a dedicated ATA disk (persistent)",
+        "  install            install to a dedicated ATA disk (bootable, persistent)",
         "  sync               re-write filesystem to the installed disk now",
         "",
         "  Editor: arrows move, ^O/^S save, ^X exit, ^K cut line, ^U paste",
@@ -1490,22 +1490,48 @@ static void cmd_install(void) {
 
     terminal_write_color("This will ERASE ", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     terminal_write(target.model[0] ? target.model : "the disk above");
-    terminal_write_color(" and write the current filesystem to it. Continue? [y/N] ",
-                         VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    terminal_write_color(
+        " and make it directly bootable (copying the boot CD onto it, then\n"
+        "writing the current filesystem). This can take a little while. Continue? [y/N] ",
+        VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     if (!prompt_yes_no()) {
         terminal_writeln("install: cancelled.");
         return;
     }
 
-    if (fsdisk_install() != 0) {
-        terminal_write_color("install: failed (disk I/O error).\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        return;
+    terminal_writeln("install: copying boot image and filesystem, please wait...");
+    int rc = fsdisk_install();
+    switch (rc) {
+        case FSDISK_OK:
+            terminal_write_color(
+                "install: done. This disk now boots Banana OS on its own - no CD needed\n"
+                "(e.g. `qemu-system-i386 -drive file=disk.img,format=raw,if=ide`).\n"
+                "Filesystem changes persist across reboot/shutdown/halt (auto-synced,\n"
+                "or run 'sync' manually).\n",
+                VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            break;
+        case FSDISK_ERR_NO_SOURCE:
+            terminal_write_color(
+                "install: could not read the boot CD. Make sure Banana OS was booted\n"
+                "from the ISO (not already from a previously installed disk).\n",
+                VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            break;
+        case FSDISK_ERR_TOO_SMALL:
+            terminal_write_color(
+                "install: target disk is too small (need room for a ~32 MB boot image\n"
+                "reservation plus the filesystem). Recreate it bigger (64 MB+) and retry.\n",
+                VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            break;
+        case FSDISK_ERR_ISO_TOO_BIG:
+            terminal_write_color(
+                "install: the boot image no longer fits the reserved space - this is a\n"
+                "Banana OS build issue, not something fixable from here.\n",
+                VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            break;
+        default:
+            terminal_write_color("install: failed (disk I/O error).\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            break;
     }
-    terminal_write_color(
-        "install: done. Filesystem changes now persist across reboot/shutdown/halt\n"
-        "(auto-synced, or run 'sync' manually). You still boot from the GRUB CD/ISO\n"
-        "each time - this disk holds your files, not the bootable OS itself.\n",
-        VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
 }
 
 static void cmd_sync(void) {
