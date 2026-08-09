@@ -193,11 +193,11 @@ void fs_init(void) {
     int f;
     f = create_file_in(etc, "motd");
     if (f >= 0) k_strcpy(files[f].content,
-        "Welcome to Banana OS 0.3 - a from-scratch, Unix-like x86 OS.\n",
+        "Welcome to Banana OS 0.4 - a from-scratch, Unix-like x86 OS.\n",
         FS_CONTENT_LEN);
 
     f = create_file_in(etc, "hostname");
-    if (f >= 0) k_strcpy(files[f].content, "banana-os-0.3\n", FS_CONTENT_LEN);
+    if (f >= 0) k_strcpy(files[f].content, "banana-os-0.4\n", FS_CONTENT_LEN);
 
     f = create_file_in(etc, "passwd");
     if (f >= 0) k_strcpy(files[f].content,

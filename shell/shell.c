@@ -338,13 +338,13 @@ static void cmd_neofetch(int persona) {
         VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
 
     terminal_write_color("  Banana OS", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    terminal_writeln(" 0.3");
+    terminal_writeln(" 0.4");
     terminal_writeln("  --------------------");
 
     terminal_write_color("  OS:       ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln("Banana OS 0.3");
+    terminal_writeln("Banana OS 0.4");
     terminal_write_color("  KERNEL:   ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln("Banana Kernel 0.3");
+    terminal_writeln("Banana Kernel 0.4");
     terminal_write_color("  ARCH:     ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     terminal_writeln("x86 (i686)");
     terminal_write_color("  SHELL:    ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
@@ -363,8 +363,6 @@ static void cmd_neofetch(int persona) {
     }
     terminal_write_color("  DISPLAY:  ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     terminal_writeln("VGA text 80x25");
-    terminal_write_color("  LICENSE:  ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln("Banana Public License v1");
     terminal_write_color("\n  ** Powered by pure potassium **\n",
                          VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
 }
@@ -575,7 +573,7 @@ static void cmd_top(void) {
         terminal_clear();
 
         /* ── HEADER ───────────────────────────── */
-        terminal_write_color("Banana OS 0.3 htop - press q to quit\n",
+        terminal_write_color("Banana OS 0.4 htop - press q to quit\n",
                              VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
         terminal_writeln("--------------------------------------------");
 
@@ -587,7 +585,7 @@ static void cmd_top(void) {
 
         /* OS VERSION */
         terminal_write_color("OS:  ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-        terminal_writeln("Banana OS 0.3 (Banana Kernel 0.3)");
+        terminal_writeln("Banana OS 0.4 (Banana Kernel 0.4)");
 
         /* RAM USAGE */
         uint32_t total_mb = (si->mem_kb / 1024u) + 1u;
@@ -685,7 +683,7 @@ static void cmd_top(void) {
 
 static void cmd_help(void) {
     static const char* lines[] = {
-        "Banana OS 0.3 - available commands:",
+        "Banana OS 0.4 - available commands:",
         "",
         "  help               show this message",
         "  neofetch           system information",
@@ -1291,12 +1289,12 @@ static void cmd_chsh(const char* args, int persona) {
 }
 
 static void cmd_uname(int persona) {
-    if (persona == SHELL_KIND_BASH) terminal_writeln("Banana OS 0.3 x86 Banana Kernel 0.3 bash");
-    else                             terminal_writeln("Banana OS 0.3 x86 Banana Kernel 0.3 sh");
+    if (persona == SHELL_KIND_BASH) terminal_writeln("Banana OS 0.4 x86 Banana Kernel 0.4 bash");
+    else                             terminal_writeln("Banana OS 0.4 x86 Banana Kernel 0.4 sh");
 }
 
 static void cmd_whoami(void) { terminal_writeln("banana"); }
-static void cmd_hostname(void) { terminal_writeln("banana-os-0.3"); }
+static void cmd_hostname(void) { terminal_writeln("banana-os-0.4"); }
 
 static void cmd_date(void) {
     rtc_datetime_t dt;
@@ -1555,10 +1553,10 @@ static void print_prompt(int persona) {
     if (persona == SHELL_KIND_BASH) {
         /* real bash's default PS1: whole user@host in one bright-green
          * block, rather than sh's two-tone yellow/green split below. */
-        terminal_write_color("banana@banana-os-0.3", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        terminal_write_color("banana@banana-os-0.4", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     } else {
         terminal_write_color("banana",         VGA_COLOR_YELLOW,      VGA_COLOR_BLACK);
-        terminal_write_color("@banana-os-0.3", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        terminal_write_color("@banana-os-0.4", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     }
     terminal_write_color(":",     VGA_COLOR_WHITE,      VGA_COLOR_BLACK);
     terminal_write_color(cwd_buf, VGA_COLOR_LIGHT_BLUE,  VGA_COLOR_BLACK);
@@ -1932,7 +1930,7 @@ static void print_banner(int persona) {
         VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
 
     terminal_writeln("");
-    terminal_write_color("  Welcome to Banana OS 0.3  --  ",
+    terminal_write_color("  Welcome to Banana OS 0.4  --  ",
                          VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     if (persona == SHELL_KIND_BASH)
         terminal_writeln("bash-compatible shell. Type 'help' to get started.");
@@ -1942,7 +1940,7 @@ static void print_banner(int persona) {
 }
 
 static void print_banner_window(int persona) {
-    terminal_write_color("  Welcome to Banana OS 0.3  --  ",
+    terminal_write_color("  Welcome to Banana OS 0.4  --  ",
                          VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     if (persona == SHELL_KIND_BASH)
         terminal_writeln("bash-compatible shell. Type 'help' to get started.");
