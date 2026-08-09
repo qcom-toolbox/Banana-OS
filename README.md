@@ -1,6 +1,6 @@
-# 🍌 Banana OS 0.3
+# 🍌 Banana OS 0.4
 
-Banana OS 0.3 is a minimal x86 operating system written from scratch (no Linux kernel, no external OS kernel), bootable in VirtualBox/QEMU via GRUB + Multiboot2.
+Banana OS 0.4 is a minimal x86 operating system written from scratch (no Linux kernel, no external OS kernel), bootable in VirtualBox/QEMU via GRUB + Multiboot2.
 
 ```
   ____                               ____  ____
@@ -111,7 +111,7 @@ Banana OS ships two shell **personas** built on one shared command engine (same 
 
 | | `sh` (stock, default) | `bash` (opt-in) |
 |---|---|---|
-| Prompt | `banana` (yellow) `@banana-os-0.3` (green) `:path$ ` | `banana@banana-os-0.3` (all green) `:path$ ` |
+| Prompt | `banana` (yellow) `@banana-os-0.4` (green) `:path$ ` | `banana@banana-os-0.4` (all green) `:path$ ` |
 | `uname` / `neofetch` | reports `sh` | reports `bash` |
 | Aliases, `export`/`$VAR`, `!!` | available (shared engine) | available |
 
@@ -233,7 +233,7 @@ make
 ## Run in VirtualBox
 
 1. Create a new VM:
-   - Name: `Banana OS 0.3`
+   - Name: `Banana OS 0.4`
    - Type: `Other`
    - Version: `Other/Unknown (32-bit)`
 2. Assign at least **8 MB RAM** (more recommended for GUI/testing)

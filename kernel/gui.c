@@ -459,10 +459,10 @@ static void show_about(void) {
     terminal_clear();
 
     const sysinfo_t* si = sysinfo_get();
-    terminal_write_color("Banana OS 0.3 - About app\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    terminal_write_color("Banana OS 0.4 - About app\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     terminal_writeln("----------------------------------------");
     terminal_write_color("Version: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln("0.3");
+    terminal_writeln("0.4");
     terminal_write_color("Display: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     terminal_writeln("VGA text 80x25 + basic GUI taskbar");
     terminal_write_color("CPU: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
@@ -835,8 +835,8 @@ void gui_poll(void) {
             int my0 = ((int)fi->height - mh) / 2;
             draw_bevel_box(mx0, my0, mw, mh, 0x001D232Cu, 0x00505D72u, 0x0010141Cu);
             draw_bevel_box(mx0 + 3, my0 + 3, mw - 6, 19, 0x00384562u, 0x00647692u, 0x00111923u);
-            gfx_draw_text(mx0 + 10, my0 + 7, "About Banana OS 0.3", 0x00FFFFFFu, 0x00384562u);
-            gfx_draw_text(mx0 + 16, my0 + 40, "Banana OS 0.3", 0x00FFFFFFu, 0x001D232Cu);
+            gfx_draw_text(mx0 + 10, my0 + 7, "About Banana OS 0.4", 0x00FFFFFFu, 0x00384562u);
+            gfx_draw_text(mx0 + 16, my0 + 40, "Banana OS 0.4", 0x00FFFFFFu, 0x001D232Cu);
             gfx_draw_text(mx0 + 16, my0 + 56, "Theme: Fluxbox-inspired toolbar/menu", 0x00FFFFFFu, 0x001D232Cu);
             gfx_draw_text(mx0 + 16, my0 + 80, "Click anywhere to close", 0x00AAAAAAu, 0x001D232Cu);
         }

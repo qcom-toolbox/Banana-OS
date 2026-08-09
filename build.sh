@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Banana OS 0.3 build script
+# Banana OS 0.4 build script
 # Run this on Ubuntu/Debian to build the bootable ISO
 
 set -e
 
-echo "🍌  Banana OS 0.3 build script"
+echo "🍌  Banana OS 0.4 build script"
 echo "========================="
 
 # ── Check dependencies ────────────────────────────────────────────
