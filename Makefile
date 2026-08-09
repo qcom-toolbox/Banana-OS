@@ -29,6 +29,8 @@ OBJS = boot/boot.o \
        kernel/isr.o \
        kernel/fs.o \
        kernel/usb.o \
+       kernel/ata.o \
+       kernel/fsdisk.o \
        kernel/kernel.o \
        shell/editor.o \
        shell/shell.o
@@ -55,6 +57,8 @@ kernel/idt.o:      kernel/idt.c;                $(CC) $(CFLAGS) -c $< -o $@
 kernel/isr.o:      kernel/isr.asm;              $(AS) $(ASFLAGS) $< -o $@
 kernel/fs.o:       kernel/fs.c;                $(CC) $(CFLAGS) -c $< -o $@
 kernel/usb.o:      kernel/usb.c;               $(CC) $(CFLAGS) -c $< -o $@
+kernel/ata.o:      kernel/ata.c;               $(CC) $(CFLAGS) -c $< -o $@
+kernel/fsdisk.o:   kernel/fsdisk.c;            $(CC) $(CFLAGS) -c $< -o $@
 kernel/kernel.o:   kernel/kernel.c;            $(CC) $(CFLAGS) -c $< -o $@
 shell/editor.o:    shell/editor.c;             $(CC) $(CFLAGS) -c $< -o $@
 shell/shell.o:     shell/shell.c;              $(CC) $(CFLAGS) -c $< -o $@

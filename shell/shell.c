@@ -12,6 +12,8 @@
 #include "../kernel/fb.h"
 #include "../kernel/rtc.h"
 #include "../kernel/types.h"
+#include "../kernel/ata.h"
+#include "../kernel/fsdisk.h"
 
 /* ── string helpers ─────────────────────────────────────────────── */
 static int k_strlen(const char* s) { int n=0; while(s[n]) n++; return n; }
@@ -36,11 +38,53 @@ static const char* k_skip_spaces(const char* s) {
 }
 
 static void print_uptime(void);
-static void dispatch(const char* line);
-static void run_script_text(const char* content);
+static void dispatch(const char* line, int persona);
+static void run_script_text(const char* content, int persona);
 
 #define SH_LINE_MAX     256
 #define SH_HISTORY_MAX  16
+
+/* ── shell personas ─────────────────────────────────────────────── *
+ * Two shell "flavors" share one command engine (same builtins, same
+ * filesystem, same history): the stock Banana sh (unchanged look and
+ * feel) and a bash-compatible persona with a bash-style prompt/banner
+ * plus bash staples (aliases, $VAR/export, `!!`). Which one a *new*
+ * shell instance boots into is decided once, at shell_run()/
+ * shell_run_window() startup, by reading g_default_shell_kind - exactly
+ * like real Unix chsh(1), which only takes effect on your next login
+ * and never touches the session you ran it from. */
+#define SHELL_KIND_SH   0
+#define SHELL_KIND_BASH 1
+
+static int g_default_shell_kind = SHELL_KIND_SH;
+
+static const char* shell_kind_name(int kind) {
+    return (kind == SHELL_KIND_BASH) ? "bash" : "sh";
+}
+
+/* ── aliases (bash-flavored builtin) ───────────────────────────── */
+#define ALIAS_MAX      16
+#define ALIAS_NAME_LEN 32
+#define ALIAS_VAL_LEN  128
+
+static char alias_name[ALIAS_MAX][ALIAS_NAME_LEN];
+static char alias_val[ALIAS_MAX][ALIAS_VAL_LEN];
+static int  alias_count = 0;
+
+static const char* alias_lookup(const char* name) {
+    for (int i = 0; i < alias_count; i++)
+        if (k_strcmp(alias_name[i], name) == 0) return alias_val[i];
+    return (void*)0;
+}
+
+/* ── environment variables ($VAR / export, bash-flavored builtin) ─ */
+#define ENV_MAX      16
+#define ENV_NAME_LEN 32
+#define ENV_VAL_LEN  128
+
+static char env_name[ENV_MAX][ENV_NAME_LEN];
+static char env_val[ENV_MAX][ENV_VAL_LEN];
+static int  env_count = 0;
 
 static char sh_history[SH_HISTORY_MAX][SH_LINE_MAX];
 static int  sh_hist_count = 0;
@@ -71,6 +115,121 @@ static int has_flag(const char* args, const char* flag) {
         if (k_strcmp(tok, flag) == 0) return 1;
     }
     return 0;
+}
+
+/* ── alias / env storage ────────────────────────────────────────── */
+static void alias_set(const char* name, const char* value) {
+    for (int i = 0; i < alias_count; i++) {
+        if (k_strcmp(alias_name[i], name) == 0) {
+            k_strcpy_n(alias_val[i], value, ALIAS_VAL_LEN);
+            return;
+        }
+    }
+    if (alias_count < ALIAS_MAX) {
+        k_strcpy_n(alias_name[alias_count], name, ALIAS_NAME_LEN);
+        k_strcpy_n(alias_val[alias_count], value, ALIAS_VAL_LEN);
+        alias_count++;
+    } else {
+        terminal_write_color("alias: table full\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    }
+}
+
+static int alias_unset(const char* name) {
+    for (int i = 0; i < alias_count; i++) {
+        if (k_strcmp(alias_name[i], name) == 0) {
+            for (int j = i; j < alias_count - 1; j++) {
+                k_strcpy_n(alias_name[j], alias_name[j + 1], ALIAS_NAME_LEN);
+                k_strcpy_n(alias_val[j],  alias_val[j + 1],  ALIAS_VAL_LEN);
+            }
+            alias_count--;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static const char* env_lookup(const char* name) {
+    for (int i = 0; i < env_count; i++)
+        if (k_strcmp(env_name[i], name) == 0) return env_val[i];
+    return (void*)0;
+}
+
+static void env_set(const char* name, const char* value) {
+    for (int i = 0; i < env_count; i++) {
+        if (k_strcmp(env_name[i], name) == 0) {
+            k_strcpy_n(env_val[i], value, ENV_VAL_LEN);
+            return;
+        }
+    }
+    if (env_count < ENV_MAX) {
+        k_strcpy_n(env_name[env_count], name, ENV_NAME_LEN);
+        k_strcpy_n(env_val[env_count], value, ENV_VAL_LEN);
+        env_count++;
+    } else {
+        terminal_write_color("export: table full\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    }
+}
+
+static int env_unset(const char* name) {
+    for (int i = 0; i < env_count; i++) {
+        if (k_strcmp(env_name[i], name) == 0) {
+            for (int j = i; j < env_count - 1; j++) {
+                k_strcpy_n(env_name[j], env_name[j + 1], ENV_NAME_LEN);
+                k_strcpy_n(env_val[j],  env_val[j + 1],  ENV_VAL_LEN);
+            }
+            env_count--;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* $HOME/$USER/$SHELL/$PWD/$PATH are resolved live (not stored) so they
+ * always track the current directory and the running instance's own
+ * persona, rather than going stale like a snapshot taken at export time
+ * would; anything else falls back to the user-defined table above. */
+static void resolve_var(const char* name, int persona, char* out, int outlen) {
+    if (k_strcmp(name, "HOME") == 0)  { k_strcpy_n(out, "/home/banana", outlen); return; }
+    if (k_strcmp(name, "USER") == 0)  { k_strcpy_n(out, "banana", outlen); return; }
+    if (k_strcmp(name, "SHELL") == 0) {
+        k_strcpy_n(out, (persona == SHELL_KIND_BASH) ? "/bin/bash" : "/bin/sh", outlen);
+        return;
+    }
+    if (k_strcmp(name, "PWD") == 0)  { fs_cwd_path(out, outlen); return; }
+    if (k_strcmp(name, "PATH") == 0) { k_strcpy_n(out, "/bin", outlen); return; }
+    const char* v = env_lookup(name);
+    k_strcpy_n(out, v ? v : "", outlen);
+}
+
+static int is_ident_start(char c) {
+    return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+static int is_ident_char(char c) {
+    return is_ident_start(c) || (c >= '0' && c <= '9');
+}
+
+/* Expands any "$NAME" variable references in a raw command line before
+ * it's tokenized and dispatched - applied uniformly for both personas and
+ * for script lines run via `run`, same as a real shell's variable
+ * expansion. ("!!" history-bang is handled separately, in
+ * shell_readline() - see the comment there for why.) */
+static void expand_line(const char* in, char* out, int outlen, int persona) {
+    int oi = 0;
+    for (int i = 0; in[i] && oi < outlen - 1;) {
+        if (in[i] == '$' && is_ident_start(in[i + 1])) {
+            char name[ENV_NAME_LEN];
+            int j = 0;
+            i++;
+            while (is_ident_char(in[i]) && j < ENV_NAME_LEN - 1) name[j++] = in[i++];
+            name[j] = '\0';
+            char val[ENV_VAL_LEN];
+            resolve_var(name, persona, val, sizeof(val));
+            for (int k = 0; val[k] && oi < outlen - 1; k++) out[oi++] = val[k];
+        } else {
+            out[oi++] = in[i++];
+        }
+    }
+    out[oi] = '\0';
 }
 
 /* ── ACPI power off ──────────────────────────────────────────────── */
@@ -106,12 +265,23 @@ static void do_reboot(void) {
 static int      shutdown_pending = 0;
 static uint32_t shutdown_deadline_tick = 0;
 
+/* If this session installed to (or booted from) a persistent disk,
+ * flush the current filesystem state to it before any power action -
+ * same spirit as real Unix syncing before shutdown/reboot, just done
+ * for us automatically instead of relying on the user to run `sync`. */
+static void sync_if_installed(void) {
+    if (!fsdisk_is_installed()) return;
+    terminal_write_color("Syncing filesystem to disk...\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    fsdisk_sync();
+}
+
 static void poll_deferred_actions(void) {
     if (!shutdown_pending) return;
     if ((int32_t)(timer_ticks() - shutdown_deadline_tick) < 0) return;
 
     shutdown_pending = 0;
     terminal_write_color("\nShutting down now...\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    sync_if_installed();
     timer_sleep_ms(150);
     acpi_poweroff();
 }
@@ -121,6 +291,7 @@ static void poll_deferred_actions(void) {
 static void cmd_reboot(const char* args) {
     (void)args;
     terminal_write_color("\nRebooting now...\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    sync_if_installed();
     timer_sleep_ms(150);
     do_reboot();
 }
@@ -129,6 +300,7 @@ static void cmd_shutdown(const char* args) {
     if (k_strcmp(args, "now") == 0) {
         shutdown_pending = 0;
         terminal_write_color("\nShutting down now...\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        sync_if_installed();
         timer_sleep_ms(150);
         acpi_poweroff();
         return;
@@ -152,7 +324,7 @@ static void cmd_shutdown(const char* args) {
                          VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
 }
 
-static void cmd_neofetch(void) {
+static void cmd_neofetch(int persona) {
     const sysinfo_t* si = sysinfo_get();
     char mbuf[16];
 
@@ -176,7 +348,7 @@ static void cmd_neofetch(void) {
     terminal_write_color("  ARCH:     ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     terminal_writeln("x86 (i686)");
     terminal_write_color("  SHELL:    ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln("sh (Banana sh)");
+    terminal_writeln((persona == SHELL_KIND_BASH) ? "bash (Banana bash)" : "sh (Banana sh)");
     terminal_write_color("  CPU:      ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     terminal_writeln(si->cpu_brand[0] ? si->cpu_brand : "Whatever your hypervisor gives you");
     terminal_write_color("  VENDOR:   ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
@@ -540,6 +712,14 @@ static void cmd_help(void) {
         "  find [path]        recursively list files/dirs under path",
         "  history            show command history",
         "  which <cmd>        show whether a command is a shell builtin",
+        "  type <cmd>         like which, but alias-aware (bash-flavored)",
+        "  alias [n[=v]]      list/define a command alias (bash-flavored)",
+        "  unalias <name>     remove an alias",
+        "  export [N=V]       list/set an environment variable",
+        "  unset <name>       remove an environment variable",
+        "  env                list environment variables",
+        "  chsh [sh|bash]     show/set the DEFAULT shell for new sessions",
+        "  ($VAR expands to env vars; \"!!\" repeats the last command)",
         "  run <file.sh>      run script file line by line",
         "  uptime             print current uptime",
         "  top                live system monitor (press q to quit)",
@@ -558,6 +738,8 @@ static void cmd_help(void) {
         "  shutdown [now|-c]  schedule shutdown (60s), now, or cancel",
         "  reboot             immediate reboot",
         "  halt               hard halt (no ACPI)",
+        "  install            write filesystem to a dedicated ATA disk (persistent)",
+        "  sync               re-write filesystem to the installed disk now",
         "",
         "  Editor: arrows move, ^O/^S save, ^X exit, ^K cut line, ^U paste",
         "",
@@ -579,10 +761,10 @@ static void cmd_help(void) {
             if (idx == 0) {
                 terminal_write_color(lines[idx], VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
-            } else if (idx >= 2 && idx <= 44) {
+            } else if (idx >= 2 && idx <= 54) {
                 terminal_write_color(lines[idx], VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
-            } else if (idx == 46) {
+            } else if (idx == 56) {
                 terminal_write_color(lines[idx], VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
             } else {
@@ -681,7 +863,7 @@ static void cmd_cat(const char* name) {
     else                 terminal_writeln(f->content);
 }
 
-static void cmd_run(const char* name) {
+static void cmd_run(const char* name, int persona) {
     if (!name || !name[0]) {
         terminal_write_color("run: missing filename\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
         return;
@@ -698,7 +880,7 @@ static void cmd_run(const char* name) {
         return;
     }
     fs_file_t* f = fs_get_file(idx);
-    run_script_text(f->content);
+    run_script_text(f->content, persona);
 }
 
 /* ── text-processing / discovery utilities ─────────────────────── */
@@ -918,7 +1100,8 @@ static const char* const known_cmds[] = {
     "ls", "cd", "pwd", "mkdir", "rm", "touch", "cp", "mv", "edit", "cat", "run",
     "uptime", "top", "exit", "start", "stop", "startx", "stopx",
     "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
-    "hw_info", "shutdown", "reboot", "halt", "history", "which",
+    "hw_info", "shutdown", "reboot", "halt", "install", "sync", "history", "which", "type",
+    "alias", "unalias", "export", "unset", "env", "chsh",
     "grep", "wc", "head", "tail", "find", (void*)0
 };
 
@@ -940,8 +1123,176 @@ static void cmd_which(const char* args) {
     terminal_writeln(": not found");
 }
 
-static void cmd_uname(void) {
-    terminal_writeln("Banana OS 0.3 x86 Banana Kernel 0.3 sh");
+/* bash's `type`: unlike `which` above, this one also knows about aliases -
+ * a deliberate, authentic difference between the two commands. */
+static void cmd_type(const char* args) {
+    const char* p = args ? args : "";
+    char tok[64];
+    if (!next_token(&p, tok, sizeof(tok))) {
+        terminal_write_color("Usage: type <name>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    const char* av = alias_lookup(tok);
+    if (av) {
+        terminal_write(tok);
+        terminal_write(" is aliased to `");
+        terminal_write(av);
+        terminal_writeln("'");
+        return;
+    }
+    for (int i = 0; known_cmds[i]; i++) {
+        if (k_strcmp(tok, known_cmds[i]) == 0) {
+            terminal_write(tok);
+            terminal_writeln(" is a shell builtin");
+            return;
+        }
+    }
+    terminal_write(tok);
+    terminal_writeln(": not found");
+}
+
+/* "name=value" (optionally quoted value) shared by alias/export - unlike
+ * next_token(), this does NOT split on spaces, so `alias ll='ls -l'`
+ * keeps its value intact instead of getting cut at the first space. */
+static void parse_assignment(const char* a, char* name, int name_len, char* value, int value_len) {
+    int eq = -1;
+    for (int i = 0; a[i]; i++) { if (a[i] == '=') { eq = i; break; } }
+    if (eq < 0) { name[0] = '\0'; value[0] = '\0'; return; }
+
+    int nl = (eq < name_len - 1) ? eq : name_len - 1;
+    for (int i = 0; i < nl; i++) name[i] = a[i];
+    name[nl] = '\0';
+
+    const char* val = a + eq + 1;
+    int vl = k_strlen(val);
+    if (vl >= 2 && (val[0] == '\'' || val[0] == '"') && val[vl - 1] == val[0]) {
+        int inner = vl - 2;
+        if (inner >= value_len) inner = value_len - 1;
+        for (int i = 0; i < inner; i++) value[i] = val[1 + i];
+        value[inner] = '\0';
+    } else {
+        k_strcpy_n(value, val, value_len);
+    }
+}
+
+static void cmd_alias(const char* args) {
+    const char* a = args ? k_skip_spaces(args) : "";
+    if (!*a) {
+        for (int i = 0; i < alias_count; i++) {
+            terminal_write("alias ");
+            terminal_write(alias_name[i]);
+            terminal_write("='");
+            terminal_write(alias_val[i]);
+            terminal_writeln("'");
+        }
+        return;
+    }
+
+    char name[ALIAS_NAME_LEN], value[ALIAS_VAL_LEN];
+    parse_assignment(a, name, sizeof(name), value, sizeof(value));
+    if (!name[0]) {
+        /* "alias foo" with no '=' - show that one definition */
+        char tok[ALIAS_NAME_LEN];
+        const char* pp = a;
+        next_token(&pp, tok, sizeof(tok));
+        const char* v = alias_lookup(tok);
+        if (v) {
+            terminal_write("alias "); terminal_write(tok);
+            terminal_write("='"); terminal_write(v); terminal_writeln("'");
+        } else {
+            terminal_write_color("alias: not found: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            terminal_writeln(tok);
+        }
+        return;
+    }
+    alias_set(name, value);
+}
+
+static void cmd_unalias(const char* args) {
+    char name[ALIAS_NAME_LEN];
+    const char* p = args ? args : "";
+    if (!next_token(&p, name, sizeof(name))) {
+        terminal_write_color("Usage: unalias <name>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (!alias_unset(name)) {
+        terminal_write_color("unalias: not found: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln(name);
+    }
+}
+
+static void print_env(int persona) {
+    static const char* const dyn_names[] = { "HOME", "USER", "SHELL", "PWD", "PATH" };
+    for (int i = 0; i < 5; i++) {
+        char val[FS_PATH_LEN];
+        resolve_var(dyn_names[i], persona, val, sizeof(val));
+        terminal_write(dyn_names[i]);
+        terminal_write("=");
+        terminal_writeln(val);
+    }
+    for (int i = 0; i < env_count; i++) {
+        terminal_write(env_name[i]);
+        terminal_write("=");
+        terminal_writeln(env_val[i]);
+    }
+}
+
+static void cmd_export(const char* args, int persona) {
+    const char* a = args ? k_skip_spaces(args) : "";
+    if (!*a) { print_env(persona); return; }
+
+    char name[ENV_NAME_LEN], value[ENV_VAL_LEN];
+    parse_assignment(a, name, sizeof(name), value, sizeof(value));
+    if (!name[0]) return; /* "export NAME" with no value: no-op, nothing to scope here */
+    env_set(name, value);
+}
+
+static void cmd_unset(const char* args) {
+    char name[ENV_NAME_LEN];
+    const char* p = args ? args : "";
+    if (!next_token(&p, name, sizeof(name))) {
+        terminal_write_color("Usage: unset <name>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (!env_unset(name)) {
+        terminal_write_color("unset: not found: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln(name);
+    }
+}
+
+static void cmd_chsh(const char* args, int persona) {
+    const char* a = args ? k_skip_spaces(args) : "";
+    if (!*a) {
+        terminal_write_color("Default shell (for new sessions): ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+        terminal_writeln(shell_kind_name(g_default_shell_kind));
+        terminal_write_color("This session's shell:              ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+        terminal_writeln(shell_kind_name(persona));
+        terminal_writeln("Usage: chsh <sh|bash>");
+        return;
+    }
+    char tok[16];
+    const char* pp = a;
+    next_token(&pp, tok, sizeof(tok));
+
+    int kind;
+    if (k_strcmp(tok, "sh") == 0 || k_strcmp(tok, "/bin/sh") == 0) kind = SHELL_KIND_SH;
+    else if (k_strcmp(tok, "bash") == 0 || k_strcmp(tok, "/bin/bash") == 0) kind = SHELL_KIND_BASH;
+    else {
+        terminal_write_color("chsh: unknown shell: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln(tok);
+        terminal_writeln("Available: sh, bash");
+        return;
+    }
+
+    g_default_shell_kind = kind;
+    terminal_write_color("Default shell set to: ", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    terminal_writeln(shell_kind_name(kind));
+    terminal_writeln("(takes effect for new terminal windows / the next boot - this session is unaffected)");
+}
+
+static void cmd_uname(int persona) {
+    if (persona == SHELL_KIND_BASH) terminal_writeln("Banana OS 0.3 x86 Banana Kernel 0.3 bash");
+    else                             terminal_writeln("Banana OS 0.3 x86 Banana Kernel 0.3 sh");
 }
 
 static void cmd_whoami(void) { terminal_writeln("banana"); }
@@ -1071,22 +1422,124 @@ static void cmd_exit(void) {
 }
 
 static void cmd_halt(void) {
+    sync_if_installed();
     terminal_write_color("\nSystem halted.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     __asm__ volatile("cli; hlt");
 }
 
-/* ── prompt ─────────────────────────────────────────────────────── */
-static void print_prompt(void) {
-    char cwd_buf[FS_PATH_LEN];
-    fs_cwd_path(cwd_buf, sizeof(cwd_buf));
-    terminal_write_color("banana",      VGA_COLOR_YELLOW,      VGA_COLOR_BLACK);
-    terminal_write_color("@banana-os-0.3",  VGA_COLOR_LIGHT_GREEN,  VGA_COLOR_BLACK);
-    terminal_write_color(":",           VGA_COLOR_WHITE,        VGA_COLOR_BLACK);
-    terminal_write_color(cwd_buf,       VGA_COLOR_LIGHT_BLUE,   VGA_COLOR_BLACK);
-    terminal_write_color("$ ",          VGA_COLOR_WHITE,        VGA_COLOR_BLACK);
+/* ── install / sync (persistent disk) ──────────────────────────────
+ * `install` formats a dedicated ATA hard disk (not the GRUB boot CD -
+ * ata_probe_disks() skips ATAPI drives) and writes the current in-memory
+ * filesystem to it. Once installed, filesystem changes persist across
+ * reboots: `sync` writes back on demand, and shutdown/reboot/halt do it
+ * automatically (see sync_if_installed() above). Booting itself is
+ * unaffected - this makes the filesystem *contents* persistent, it does
+ * not make the disk bootable on its own. */
+static int prompt_yes_no(void) {
+    int my_vt = terminal_vt_get_active();
+    while (1) {
+        gui_poll();
+        terminal_vt_set_active(my_vt);
+        if (gui_focused_vt() != my_vt) { timer_sleep_ms(10); continue; }
+        char c = keyboard_try_getchar();
+        if (!c) { timer_sleep_ms(10); continue; }
+        if (c == 'y' || c == 'Y') { terminal_writeln("y"); return 1; }
+        if (c == 'n' || c == 'N' || c == '\n' || c == 3) { terminal_writeln("n"); return 0; }
+    }
 }
 
-static void shell_readline(char* buf, int maxlen) {
+static void print_disk_line(const ata_disk_t* d) {
+    char b[16];
+    terminal_write("  ");
+    terminal_write(d->bus == ATA_BUS_PRIMARY ? "primary " : "secondary ");
+    terminal_write(d->is_slave ? "slave" : "master");
+    terminal_write("  ");
+    terminal_write(d->is_atapi ? "(ATAPI/CD - skipped)" : d->model[0] ? d->model : "(unknown model)");
+    if (!d->is_atapi && d->sectors) {
+        terminal_write("  ~");
+        terminal_write(u32_to_str(d->sectors / 2048u, b, sizeof(b))); /* 512B sectors -> MB */
+        terminal_write(" MB");
+    }
+    terminal_putchar('\n');
+}
+
+static void cmd_install(void) {
+    ata_disk_t all[4];
+    ata_probe_disks(all);
+
+    int found = 0;
+    ata_disk_t target;
+    for (int i = 0; i < 4; i++) {
+        if (all[i].present) print_disk_line(&all[i]);
+        if (all[i].present && !all[i].is_atapi) { found++; target = all[i]; }
+    }
+
+    if (found == 0) {
+        terminal_write_color(
+            "install: no ATA hard disk found. Attach a second (blank) IDE/ATA disk\n"
+            "to the VM - besides the GRUB boot CD - then try again.\n",
+            VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+    if (found > 1) {
+        terminal_write_color(
+            "install: multiple ATA hard disks found - detach extras so exactly one\n"
+            "is attached, then try again.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+
+    terminal_write_color("This will ERASE ", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    terminal_write(target.model[0] ? target.model : "the disk above");
+    terminal_write_color(" and write the current filesystem to it. Continue? [y/N] ",
+                         VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    if (!prompt_yes_no()) {
+        terminal_writeln("install: cancelled.");
+        return;
+    }
+
+    if (fsdisk_install() != 0) {
+        terminal_write_color("install: failed (disk I/O error).\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+    terminal_write_color(
+        "install: done. Filesystem changes now persist across reboot/shutdown/halt\n"
+        "(auto-synced, or run 'sync' manually). You still boot from the GRUB CD/ISO\n"
+        "each time - this disk holds your files, not the bootable OS itself.\n",
+        VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+}
+
+static void cmd_sync(void) {
+    if (!fsdisk_is_installed()) {
+        terminal_write_color("sync: not installed - run 'install' first.\n",
+                             VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (fsdisk_sync() != 0) {
+        terminal_write_color("sync: failed (disk I/O error).\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+    terminal_writeln("sync: filesystem written to disk.");
+}
+
+/* ── prompt ─────────────────────────────────────────────────────── */
+static void print_prompt(int persona) {
+    char cwd_buf[FS_PATH_LEN];
+    fs_cwd_path(cwd_buf, sizeof(cwd_buf));
+
+    if (persona == SHELL_KIND_BASH) {
+        /* real bash's default PS1: whole user@host in one bright-green
+         * block, rather than sh's two-tone yellow/green split below. */
+        terminal_write_color("banana@banana-os-0.3", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    } else {
+        terminal_write_color("banana",         VGA_COLOR_YELLOW,      VGA_COLOR_BLACK);
+        terminal_write_color("@banana-os-0.3", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    }
+    terminal_write_color(":",     VGA_COLOR_WHITE,      VGA_COLOR_BLACK);
+    terminal_write_color(cwd_buf, VGA_COLOR_LIGHT_BLUE,  VGA_COLOR_BLACK);
+    terminal_write_color("$ ",    VGA_COLOR_WHITE,       VGA_COLOR_BLACK);
+}
+
+static void shell_readline(char* buf, int maxlen, int persona) {
     if (maxlen <= 0) return;
     buf[0] = '\0'; /* always start from clean command buffer */
 
@@ -1201,7 +1654,7 @@ static void shell_readline(char* buf, int maxlen) {
 
         /* Redraw editable command line after prompt */
         terminal_putchar('\r');
-        print_prompt();
+        print_prompt(persona);
         terminal_write(buf);
 
         if (prev_len > len) {
@@ -1211,6 +1664,24 @@ static void shell_readline(char* buf, int maxlen) {
         int draw_len = (prev_len > len) ? prev_len : len;
         for (int i = 0; i < draw_len - cur; i++) terminal_cursor_left();
         prev_len = len;
+    }
+
+    /* "!!" (bash/csh-style history-bang) has to resolve here, against
+     * whatever is still the *previous* history entry, and before the
+     * append below - otherwise it would see itself ("!!") as "the last
+     * command" instead of the command it's supposed to repeat. Real bash
+     * likewise records the expanded command in history, not the literal
+     * "!!", so typing it twice in a row repeats the original both times
+     * rather than degenerating after the first expansion. */
+    if (k_strcmp(buf, "!!") == 0) {
+        if (sh_hist_count > 0) {
+            k_strcpy_n(buf, sh_history[sh_hist_count - 1], maxlen);
+            len = k_strlen(buf);
+            terminal_writeln(buf);
+        } else {
+            buf[0] = '\0';
+            len = 0;
+        }
     }
 
     if (len > 0) {
@@ -1235,15 +1706,43 @@ static void cmd_stopx(void) {
 }
 
 /* ── dispatch ───────────────────────────────────────────────────── */
-static void dispatch(const char* line) {
-    line = k_skip_spaces(line);
+static void dispatch(const char* raw_line, int persona) {
+    /* "!!" / "$VAR" expansion, then a single non-recursive alias
+     * substitution of the leading word - same order a real shell applies
+     * these in, and shared by both personas (and by `run`'s scripts). */
+    char expanded[SH_LINE_MAX];
+    expand_line(raw_line, expanded, sizeof(expanded), persona);
+
+    char final_buf[SH_LINE_MAX];
+    {
+        const char* s = k_skip_spaces(expanded);
+        char first[ALIAS_NAME_LEN];
+        const char* rest_p = s;
+        if (next_token(&rest_p, first, sizeof(first))) {
+            const char* av = alias_lookup(first);
+            if (av) {
+                int n = 0;
+                for (int i = 0; av[i] && n < (int)sizeof(final_buf) - 1; i++) final_buf[n++] = av[i];
+                const char* rest = k_skip_spaces(rest_p);
+                if (*rest && n < (int)sizeof(final_buf) - 1) final_buf[n++] = ' ';
+                for (int i = 0; rest[i] && n < (int)sizeof(final_buf) - 1; i++) final_buf[n++] = rest[i];
+                final_buf[n] = '\0';
+            } else {
+                k_strcpy_n(final_buf, s, sizeof(final_buf));
+            }
+        } else {
+            final_buf[0] = '\0';
+        }
+    }
+
+    const char* line = k_skip_spaces(final_buf);
     if (!*line) return;
 
     /* exact matches */
     if (k_strcmp(line, "help")     == 0) { cmd_help();       return; }
     if (k_strcmp(line, "clear")    == 0) { terminal_clear(); return; }
-    if (k_strcmp(line, "neofetch") == 0) { cmd_neofetch();   return; }
-    if (k_strcmp(line, "uname")    == 0) { cmd_uname();      return; }
+    if (k_strcmp(line, "neofetch") == 0) { cmd_neofetch(persona); return; }
+    if (k_strcmp(line, "uname")    == 0) { cmd_uname(persona);    return; }
     if (k_strcmp(line, "halt")     == 0) { cmd_halt();       return; }
     if (k_strcmp(line, "ls")       == 0) { cmd_ls("");       return; }
     if (k_strcmp(line, "pwd")      == 0) { fs_pwd();         return; }
@@ -1316,6 +1815,25 @@ static void dispatch(const char* line) {
         terminal_write_color("Usage: which <command>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
         return;
     }
+    if (k_strcmp(line, "alias")    == 0) { cmd_alias("");         return; }
+    if (k_strcmp(line, "unalias")  == 0) {
+        terminal_write_color("Usage: unalias <name>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (k_strcmp(line, "export")   == 0) { cmd_export("", persona); return; }
+    if (k_strcmp(line, "unset")    == 0) {
+        terminal_write_color("Usage: unset <name>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (k_strcmp(line, "env")      == 0) { print_env(persona);    return; }
+    if (k_strcmp(line, "type")     == 0) {
+        terminal_write_color("Usage: type <name>\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        return;
+    }
+    if (k_strcmp(line, "chsh")     == 0) { cmd_chsh("", persona); return; }
+
+    if (k_strcmp(line, "install")  == 0) { cmd_install();     return; }
+    if (k_strcmp(line, "sync")     == 0) { cmd_sync();        return; }
 
     /* shutdown / reboot with optional arg */
     if (k_strcmp(line, "shutdown")       == 0) { cmd_shutdown("");    return; }
@@ -1334,13 +1852,19 @@ static void dispatch(const char* line) {
     if (k_strncmp(line, "mv ",   3) == 0) { cmd_mv(k_skip_spaces(line+3)); return; }
     if (k_strncmp(line, "edit ", 5) == 0) { editor_open(k_skip_spaces(line+5)); return; }
     if (k_strncmp(line, "cat ",  4) == 0) { cmd_cat(k_skip_spaces(line+4)); return; }
-    if (k_strncmp(line, "run ",  4) == 0) { cmd_run(k_skip_spaces(line+4)); return; }
+    if (k_strncmp(line, "run ",  4) == 0) { cmd_run(k_skip_spaces(line+4), persona); return; }
     if (k_strncmp(line, "grep ", 5) == 0) { cmd_grep(k_skip_spaces(line+5)); return; }
     if (k_strncmp(line, "wc ",   3) == 0) { cmd_wc(k_skip_spaces(line+3)); return; }
     if (k_strncmp(line, "head ", 5) == 0) { cmd_head(k_skip_spaces(line+5)); return; }
     if (k_strncmp(line, "tail ", 5) == 0) { cmd_tail(k_skip_spaces(line+5)); return; }
     if (k_strncmp(line, "find ", 5) == 0) { cmd_find(k_skip_spaces(line+5)); return; }
     if (k_strncmp(line, "which ", 6) == 0) { cmd_which(k_skip_spaces(line+6)); return; }
+    if (k_strncmp(line, "alias ",   7) == 0) { cmd_alias(k_skip_spaces(line+7)); return; }
+    if (k_strncmp(line, "unalias ", 8) == 0) { cmd_unalias(k_skip_spaces(line+8)); return; }
+    if (k_strncmp(line, "export ",  7) == 0) { cmd_export(k_skip_spaces(line+7), persona); return; }
+    if (k_strncmp(line, "unset ",   6) == 0) { cmd_unset(k_skip_spaces(line+6)); return; }
+    if (k_strncmp(line, "type ",    5) == 0) { cmd_type(k_skip_spaces(line+5)); return; }
+    if (k_strncmp(line, "chsh ",    5) == 0) { cmd_chsh(k_skip_spaces(line+5), persona); return; }
     if (k_strncmp(line, "keyboardctl ", 12) == 0) { cmd_keyboardctl(k_skip_spaces(line+12)); return; }
     if (k_strncmp(line, "loadctl ", 8) == 0) { cmd_keyboardctl(k_skip_spaces(line+8)); return; }
     if (k_strncmp(line, "proc_info ", 10) == 0) { cmd_proc_info(k_skip_spaces(line+10)); return; }
@@ -1349,11 +1873,12 @@ static void dispatch(const char* line) {
     if (k_strncmp(line, "hw_info ", 8) == 0) { cmd_hw_info(k_skip_spaces(line+8)); return; }
 
     /* unknown */
-    terminal_write_color("sh: command not found: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+    terminal_write_color(shell_kind_name(persona), VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+    terminal_write_color(": command not found: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     terminal_writeln(line);
 }
 
-static void run_script_text(const char* content) {
+static void run_script_text(const char* content, int persona) {
     char linebuf[256];
     int pos = 0;
     for (int i = 0;; i++) {
@@ -1362,7 +1887,7 @@ static void run_script_text(const char* content) {
         if (ch == '\n' || ch == '\0') {
             linebuf[pos] = '\0';
             const char* cmd = k_skip_spaces(linebuf);
-            if (*cmd && *cmd != '#') dispatch(cmd);
+            if (*cmd && *cmd != '#') dispatch(cmd, persona);
             pos = 0;
             if (ch == '\0') break;
             continue;
@@ -1371,10 +1896,7 @@ static void run_script_text(const char* content) {
     }
 }
 
-/* ── entry ──────────────────────────────────────────────────────── */
-void shell_run(void) {
-    char buf[256];
-    terminal_clear();
+static void print_banner(int persona) {
     terminal_write_color(
         "  ____                                   _     ___  ____  \n"
         " | __ )  __ _ _ __   __ _ _ __   __ _  / \\   / _ \\/ ___| \n"
@@ -1382,31 +1904,58 @@ void shell_run(void) {
         " | |_) | (_| | | | | (_| | | | | (_| / ___ \\| |_| |___) | \n"
         " |____/ \\__,_|_| |_|\\__,_|_| |_|\\__,_/_/   \\_\\\\___/|____/  \n",
         VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    
+
     terminal_writeln("");
     terminal_write_color("  Welcome to Banana OS 0.3  --  ",
                          VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    terminal_writeln("type 'help' to get started.");
+    if (persona == SHELL_KIND_BASH)
+        terminal_writeln("bash-compatible shell. Type 'help' to get started.");
+    else
+        terminal_writeln("type 'help' to get started.");
     terminal_writeln("");
+}
 
-    fs_init();
+static void print_banner_window(int persona) {
+    terminal_write_color("  Welcome to Banana OS 0.3  --  ",
+                         VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    if (persona == SHELL_KIND_BASH)
+        terminal_writeln("bash-compatible shell. Type 'help' to get started.");
+    else
+        terminal_writeln("type 'help' to get started.");
+    terminal_writeln("");
+}
+
+/* ── entry ──────────────────────────────────────────────────────── */
+void shell_run(void) {
+    char buf[256];
+    /* Which persona a *new* shell instance boots into is decided once,
+     * here, from g_default_shell_kind (as set by `chsh`) - see the
+     * "shell personas" comment near the top of this file. */
+    int persona = g_default_shell_kind;
+
+    terminal_clear();
+    print_banner(persona);
+
+    /* If a dedicated ATA disk was previously `install`ed, load its saved
+     * filesystem instead of reseeding the defaults - this is what makes
+     * files persist across reboots. See kernel/fsdisk.c. */
+    if (!fsdisk_try_load()) fs_init();
 
     while (1) {
         buf[0] = '\0';
-        print_prompt();
-        shell_readline(buf, sizeof(buf));
-        dispatch(buf);
+        print_prompt(persona);
+        shell_readline(buf, sizeof(buf), persona);
+        dispatch(buf, persona);
     }
 }
 
 void shell_run_window(int vt) {
     char buf[256];
+    int persona = g_default_shell_kind;
+
     terminal_vt_set_active(vt);
     terminal_clear();
-    terminal_write_color("  Welcome to Banana OS 0.3  --  ",
-                         VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    terminal_writeln("type 'help' to get started.");
-    terminal_writeln("");
+    print_banner_window(persona);
 
     /* Note: fs_init() is intentionally not called here - the filesystem
      * is a single OS-wide resource shell_run() already set up once; every
@@ -1414,8 +1963,8 @@ void shell_run_window(int vt) {
      * process on a real OS sharing one mounted filesystem. */
     while (1) {
         buf[0] = '\0';
-        print_prompt();
-        shell_readline(buf, sizeof(buf));
-        dispatch(buf);
+        print_prompt(persona);
+        shell_readline(buf, sizeof(buf), persona);
+        dispatch(buf, persona);
     }
 }

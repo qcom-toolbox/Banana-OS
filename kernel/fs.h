@@ -57,4 +57,12 @@ uint32_t fs_max_files(void);
 uint32_t fs_max_dirs(void);
 uint32_t fs_ram_used_bytes(void);
 
+/* ── on-disk persistence (see kernel/fsdisk.c) ──────────────────────
+ * Dump/restore the raw dirs[]/files[] tables plus home_dir as an opaque
+ * blob - fsdisk.c writes/reads that blob to/from disk with no knowledge
+ * of fs.c's internal layout. */
+uint32_t fs_snapshot_size(void);
+void     fs_snapshot_save(uint8_t* buf);       /* buf must be >= fs_snapshot_size() bytes */
+int      fs_snapshot_load(const uint8_t* buf); /* returns 0 on success */
+
 #endif

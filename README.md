@@ -53,6 +53,7 @@ bananOS/
 - Desktop and menu icons for built-in apps
 - In-memory Unix-style filesystem (`/bin`, `/etc`, `/home/banana`, `/usr`, `/var`, `/tmp`, `/dev`, `/root`) with absolute/relative path resolution, `.`/`..`/`~`
 - POSIX-flavored shell utilities (`ls -l`, `mkdir -p`, `rm -r`, `cp`, `mv`, `touch`, `whoami`, `hostname`, `date`, ...)
+- Two shell personas sharing one command engine - stock `sh` (default) and a bash-compatible `bash` (aliases, `export`/`$VAR`, `!!`) - selectable per-session with `chsh`
 - Built-in editor and live system monitor
 
 # Minimum Requirements
@@ -101,6 +102,31 @@ Banana OS seeds a small Unix-style root hierarchy at boot (in-memory, reset on r
 
 Every path-taking command accepts absolute (`/etc/motd`), relative (`../etc`), `.`/`..`, and `~` (home) paths, just like a real Unix shell.
 
+## Shells
+
+Banana OS ships two shell **personas** built on one shared command engine (same builtins, same filesystem, same history) - only the prompt, banner, and a handful of bash-only builtins differ:
+
+| | `sh` (stock, default) | `bash` (opt-in) |
+|---|---|---|
+| Prompt | `banana` (yellow) `@banana-os-0.3` (green) `:path$ ` | `banana@banana-os-0.3` (all green) `:path$ ` |
+| `uname` / `neofetch` | reports `sh` | reports `bash` |
+| Aliases, `export`/`$VAR`, `!!` | available (shared engine) | available |
+
+Switch which persona **new** shells boot into with `chsh` - like real Unix `chsh(1)`, it only affects future sessions (new terminal windows, or the next reboot), never the one you ran it from:
+
+```
+chsh          # show the current default and this session's persona
+chsh bash     # make new shells start as the bash persona
+chsh sh       # switch back to the stock shell
+```
+
+Bash-flavored extras (available in both personas, since they share one engine):
+
+- `alias [name[=value]]`, `unalias <name>` - e.g. `alias ll='ls -l'`
+- `export [NAME=value]`, `unset <name>`, `env` - environment variables; `$NAME` expands inline (`echo $HOME`, `echo $SHELL`)
+- `!!` - re-runs (and re-records) the previous command
+- `type <cmd>` - like `which`, but alias-aware
+
 ## Available Commands
 
 | Command | Description |
@@ -130,6 +156,13 @@ Every path-taking command accepts absolute (`/etc/motd`), relative (`../etc`), `
 | `find [path] [-name <sub>]` | Recursively list files/dirs under path |
 | `history` | Show command history |
 | `which <cmd>` | Show whether a command is a shell builtin |
+| `type <cmd>` | Like `which`, but alias-aware (bash-flavored) |
+| `alias [name[=value]]` | List/define a command alias (bash-flavored) |
+| `unalias <name>` | Remove an alias |
+| `export [NAME=value]` | List/set an environment variable |
+| `unset <name>` | Remove an environment variable |
+| `env` | List environment variables |
+| `chsh [sh\|bash]` | Show/set the default shell persona for new sessions |
 | `run <file.sh>` | Execute script line by line |
 | `uptime` | Show uptime |
 | `top` | Live CPU/RAM/process monitor (`q` to quit) |
@@ -143,6 +176,29 @@ Every path-taking command accepts absolute (`/etc/motd`), relative (`../etc`), `
 | `shutdown [now|-c]` | Schedule shutdown (60s), immediate shutdown, or cancel |
 | `reboot` | Immediate reboot |
 | `halt` | Hard CPU halt |
+| `install` | Write the current filesystem to a dedicated ATA hard disk (persistent storage) |
+| `sync` | Re-write the filesystem to the installed disk on demand |
+
+## Persistent Storage (`install` / `sync`)
+
+By default the filesystem is in-memory and resets on every reboot. `install` gives it a permanent home on a **second, dedicated IDE/ATA hard disk** attached to the VM (never the GRUB boot CD - the driver detects and skips ATAPI/optical drives):
+
+```bash
+# QEMU: create a blank disk image, then attach it alongside the ISO
+qemu-img create -f raw disk.img 8M
+qemu-system-i386 -cdrom Banana_OS.iso -drive file=disk.img,format=raw,if=ide
+```
+
+In VirtualBox, attach a second blank virtual hard disk (IDE) to the same VM that boots `Banana_OS.iso`.
+
+Then, inside Banana OS:
+
+```
+install     # formats the attached disk and writes the current filesystem to it
+sync        # re-writes it on demand (also happens automatically on shutdown/reboot/halt)
+```
+
+Once installed, every reboot loads the filesystem back from disk instead of reseeding the defaults - your files persist. Note this only makes the filesystem *contents* persistent: you still boot Banana OS from the GRUB CD/ISO every time, the same as before `install`.
 
 ## Build (Ubuntu/Debian)
 
