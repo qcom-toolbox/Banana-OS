@@ -4,25 +4,39 @@
 #include "types.h"
 #include "ata.h"
 
-/* Persists the in-memory filesystem (kernel/fs.c) to a dedicated ATA hard
- * disk, so its contents survive a reboot. This only makes the filesystem
- * *contents* persistent across boots of the same GRUB-loaded kernel - it
- * does not make the disk itself bootable (Banana OS still boots from the
- * GRUB CD/ISO every time). */
+/* Installs Banana OS onto a dedicated ATA hard disk: raw-copies the
+ * already directly-BIOS-bootable boot image (the same GRUB "hybrid" MBR
+ * that lets Banana_OS.iso be dd'd straight to a USB stick or disk) from
+ * the ATAPI CD Banana OS itself booted from, then writes the current
+ * in-memory filesystem into a reserved region right after it. The result
+ * is a disk that boots Banana OS on its own, no CD required, with your
+ * files persisted. */
+
+/* fsdisk_install() failure reasons. */
+#define FSDISK_OK              0
+#define FSDISK_ERR_NO_TARGET   -1 /* no ATA hard disk found */
+#define FSDISK_ERR_AMBIGUOUS   -2 /* more than one ATA hard disk found */
+#define FSDISK_ERR_NO_SOURCE   -3 /* no ATAPI boot CD found to copy from */
+#define FSDISK_ERR_TOO_SMALL   -4 /* target disk too small for the boot region + filesystem */
+#define FSDISK_ERR_ISO_TOO_BIG -5 /* boot image bigger than the reserved region (build issue) */
+#define FSDISK_ERR_IO          -6 /* a read or write failed */
 
 /* Looks for exactly one non-ATAPI ATA disk attached (any bus/position).
  * Returns 1 and fills *out if exactly one was found, 0 if none, -1 if
  * more than one (ambiguous - caller should ask the user to detach extras). */
 int fsdisk_find_target(ata_disk_t* out);
 
-/* Formats the target disk found by fsdisk_find_target() and writes the
- * current in-memory filesystem to it. Destroys any prior disk contents.
- * Returns 0 on success, -1 on failure (no/ambiguous target, or I/O error). */
+/* Copies the boot image from the ATAPI CD Banana OS booted from onto the
+ * target ATA disk (found via fsdisk_find_target()), then writes the
+ * current in-memory filesystem into the reserved region after it.
+ * Destroys any prior disk contents. Returns FSDISK_OK on success, or one
+ * of the FSDISK_ERR_* codes above on failure. */
 int fsdisk_install(void);
 
 /* Re-writes the current in-memory filesystem to the disk this session
- * installed to or booted from. Returns -1 if this session isn't
- * associated with an installed disk yet (call fsdisk_install() first). */
+ * installed to or booted from (leaves the boot image alone). Returns
+ * FSDISK_ERR_NO_TARGET if this session isn't associated with an
+ * installed disk yet (call fsdisk_install() first). */
 int fsdisk_sync(void);
 
 /* Called once at boot, before fs_init() would otherwise seed the default
