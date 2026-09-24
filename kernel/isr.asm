@@ -53,7 +53,34 @@ ISR_NOERR 29
 ISR_ERR   30
 ISR_NOERR 31
 
+; Hardware IRQs 0-15, remapped by idt.c's PIC setup to vectors 32-47.
+%macro IRQ 1
+global irq%1
+irq%1:
+    push dword 0
+    push dword (32 + %1)
+    jmp irq_common_stub
+%endmacro
+
+IRQ 0
+IRQ 1
+IRQ 2
+IRQ 3
+IRQ 4
+IRQ 5
+IRQ 6
+IRQ 7
+IRQ 8
+IRQ 9
+IRQ 10
+IRQ 11
+IRQ 12
+IRQ 13
+IRQ 14
+IRQ 15
+
 extern isr_handler
+extern irq_handler
 
 section .text
 isr_common_stub:
@@ -79,4 +106,27 @@ isr_common_stub:
     pop ds
     popad
     add esp, 8                ; drop error_code + int_no
+    iret
+
+; Same frame layout as isr_common_stub, so irq_handler() gets a
+; registers_t* too. The direction flag is cleared for the C code (the
+; interrupted code may have been in the middle of a backwards memmove).
+irq_common_stub:
+    pushad
+    push ds
+    push es
+    push fs
+    push gs
+    cld
+
+    push esp
+    call irq_handler
+    add esp, 4
+
+    pop gs
+    pop fs
+    pop es
+    pop ds
+    popad
+    add esp, 8
     iret

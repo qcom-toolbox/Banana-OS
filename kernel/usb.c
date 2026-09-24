@@ -490,7 +490,33 @@ static void mouse_consume_ready(void) {
  * Synaptics absolute) is available in the 8042 output buffer (bit 5 of
  * status = AUX data), consume it.
  */
+/* USB mice (usb/usbhid.c) add their motion here; it's merged into the
+ * next mouse_read(). dy follows the PS/2 convention (positive = up). */
+static int g_usb_dx, g_usb_dy, g_usb_buttons = -1;
+
+void mouse_inject(int dx, int dy, int buttons) {
+    g_usb_dx += dx;
+    g_usb_dy += dy;
+    g_usb_buttons = buttons;
+}
+
 mouse_state_t mouse_read(void) {
+    if (g_usb_dx || g_usb_dy || g_usb_buttons >= 0) {
+        mouse_state_t m = last_mouse;
+        m.dx = g_usb_dx;
+        m.dy = g_usb_dy;
+        if (g_usb_buttons >= 0) {
+            m.btn_left = g_usb_buttons & 1;
+            m.btn_right = (g_usb_buttons >> 1) & 1;
+            m.btn_middle = (g_usb_buttons >> 2) & 1;
+            last_mouse.btn_left = m.btn_left;
+            last_mouse.btn_right = m.btn_right;
+            last_mouse.btn_middle = m.btn_middle;
+        }
+        g_usb_dx = g_usb_dy = 0;
+        g_usb_buttons = -1;
+        return m;
+    }
     if (!mouse_enabled) return last_mouse;
 
     /* If no new packet arrives, deltas must be 0 (avoid cursor drift). */

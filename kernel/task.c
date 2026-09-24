@@ -7,11 +7,13 @@
  * Each task owns its own stack. task_switch() (kernel/task_switch.asm) saves
  * the outgoing task's callee-saved registers on its own stack, records the
  * resulting esp, then loads esp for the incoming task and restores its
- * registers with a plain `ret`. There is no timer IRQ in this kernel (the
- * PIT is polled, see timer.c), so switches only happen where a task calls
- * task_yield()/task_sleep_ms() itself - this is cooperative, not preemptive,
- * multitasking. CPU% and per-task tick counts are real: they are measured
- * from timer_ticks() across each task's actual run span, not invented.
+ * registers with a plain `ret`. The timer IRQ only counts time - it never
+ * switches tasks - so switches only happen where a task calls
+ * task_yield()/task_sleep_ms() itself: cooperative, not preemptive,
+ * multitasking. When every task is asleep the scheduler halts the CPU
+ * until the next interrupt. CPU% and per-task run times are real: they
+ * are measured with timer_ms() across each task's actual run span, and
+ * halted (idle) time is charged to no task.
  */
 
 typedef struct {
@@ -21,10 +23,11 @@ typedef struct {
     char         name[TASK_NAME_MAX];
     task_state_t state;
     void         (*entry)(void);
+    /* all times below are in milliseconds (timer_ms()) */
     uint32_t     sleep_until_tick;
     uint32_t     run_start_tick;
-    uint32_t     window_ticks;   /* real ticks since last cpu_pct sample */
-    uint32_t     life_ticks;     /* real ticks accumulated for the task's life */
+    uint32_t     window_ticks;   /* real ms run since last cpu_pct sample */
+    uint32_t     life_ticks;     /* real ms accumulated for the task's life */
     uint32_t     cpu_pct;
 } task_t;
 
@@ -71,14 +74,14 @@ void task_init(const char* main_task_name) {
     t->window_ticks = 0;
     t->life_ticks = 0;
     t->cpu_pct = 0;
-    t->run_start_tick = timer_ticks();
+    t->run_start_tick = timer_ms();
 
     g_count = 1;
     g_current = t;
 }
 
-void task_create(const char* name, void (*entry)(void)) {
-    if (g_count >= TASK_MAX) return;
+int task_create(const char* name, void (*entry)(void)) {
+    if (g_count >= TASK_MAX) return -1;
 
     task_t* t = &g_tasks[g_count];
     t->pid = (uint32_t)g_count;
@@ -89,7 +92,7 @@ void task_create(const char* name, void (*entry)(void)) {
     t->window_ticks = 0;
     t->life_ticks = 0;
     t->cpu_pct = 0;
-    t->run_start_tick = timer_ticks();
+    t->run_start_tick = timer_ms();
 
     /* Build a fake call frame so task_switch()'s epilogue (pop edi/esi/ebx/
      * ebp; ret) lands straight in task_trampoline() as if it had just been
@@ -105,11 +108,20 @@ void task_create(const char* name, void (*entry)(void)) {
     t->sp = sp;
 
     g_count++;
+    return (int)t->pid;
+}
+
+static void wake_expired(uint32_t now_ms) {
+    for (int i = 0; i < g_count; i++) {
+        if (g_tasks[i].state == TASK_SLEEPING &&
+            (int32_t)(now_ms - g_tasks[i].sleep_until_tick) >= 0) {
+            g_tasks[i].state = TASK_READY;
+        }
+    }
 }
 
 void task_yield(void) {
-    timer_poll();
-    uint32_t now = timer_ticks();
+    uint32_t now = timer_ms();
     task_t* cur = g_current;
 
     uint32_t elapsed = now - cur->run_start_tick;
@@ -118,66 +130,56 @@ void task_yield(void) {
 
     if (cur->state == TASK_RUNNING) cur->state = TASK_READY;
 
-    for (int i = 0; i < g_count; i++) {
-        if (g_tasks[i].state == TASK_SLEEPING &&
-            (int32_t)(now - g_tasks[i].sleep_until_tick) >= 0) {
-            g_tasks[i].state = TASK_READY;
-        }
-    }
-
     int cur_idx = task_index(cur);
     int next_idx = -1;
-    /* step < g_count only: never wrap back around to cur_idx itself. cur
-     * was just marked READY above, so a step == g_count wrap would let a
-     * task "switch" to itself - and since nxt->sp is read (as the
-     * new_sp argument) before task_switch() has a chance to overwrite
-     * cur->sp with the current esp, that reads a stale/still-NULL sp,
-     * handing task_switch() a garbage stack pointer. */
-    for (int step = 1; step < g_count; step++) {
-        int cand = (cur_idx + step) % g_count;
-        if (g_tasks[cand].state == TASK_READY) { next_idx = cand; break; }
-    }
-
-    if (next_idx < 0) {
-        /* Nothing else is READY. If we were the one asking to sleep, there
-         * is genuinely nothing else to run, so wait for real time to pass
-         * instead of returning early. */
-        while (cur->state == TASK_SLEEPING &&
-               (int32_t)(timer_ticks() - cur->sleep_until_tick) < 0) {
-            timer_poll();
+    for (;;) {
+        wake_expired(timer_ms());
+        /* Round robin starting after cur; cur itself is the last choice
+         * (step == g_count), so a lone READY task keeps running. */
+        for (int step = 1; step <= g_count; step++) {
+            int cand = (cur_idx + step) % g_count;
+            if (g_tasks[cand].state == TASK_READY) { next_idx = cand; break; }
         }
-        cur->state = TASK_RUNNING;
-        cur->run_start_tick = timer_ticks();
-        return;
+        if (next_idx >= 0) break;
+        /* Every task is asleep: halt until the next interrupt (timer, or
+         * a device that task_wake()s a sleeper) instead of spinning. The
+         * halted time is idle time, charged to no task. */
+        timer_idle();
     }
 
     task_t* nxt = &g_tasks[next_idx];
     nxt->state = TASK_RUNNING;
-    nxt->run_start_tick = now;
-    g_current = nxt;
+    nxt->run_start_tick = timer_ms();
+    if (nxt == cur) return;
 
+    g_current = nxt;
     task_switch(&cur->sp, nxt->sp);
 
     /* We only get here once some other task switches back into `cur`.
      * g_current was set to `cur` by whoever scheduled us back in. */
-    g_current->run_start_tick = timer_ticks();
+    g_current->run_start_tick = timer_ms();
 }
 
 void task_sleep_ms(uint32_t ms) {
-    timer_poll();
-    uint32_t now = timer_ticks();
-    uint32_t wraps = (ms * 100u + 999u) / 1000u; /* PIT runs at 100 Hz */
-    if (wraps == 0) wraps = 1;
-    uint32_t target = now + wraps;
-
-    g_current->sleep_until_tick = target;
+    if (ms == 0) ms = 1;
+    g_current->sleep_until_tick = timer_ms() + ms;
     g_current->state = TASK_SLEEPING;
+    /* task_yield() only picks READY tasks, and a sleeper only becomes
+     * READY once its deadline passes (or task_wake()), so one call is
+     * enough - no early-wakeup guard loop needed. */
     task_yield();
+}
 
-    /* Guard against being woken slightly early by scheduling latency. */
-    while ((int32_t)(timer_ticks() - target) < 0) {
-        task_yield();
-    }
+int task_current_pid(void) {
+    return g_current ? (int)g_current->pid : 0;
+}
+
+void task_wake(int pid) {
+    /* Safe from IRQ context: only moves the deadline, and the scheduler
+     * re-checks deadlines after every hlt. */
+    if (pid < 0 || pid >= g_count) return;
+    if (g_tasks[pid].state == TASK_SLEEPING)
+        g_tasks[pid].sleep_until_tick = timer_ms();
 }
 
 int task_count(void) {
@@ -191,7 +193,7 @@ void task_snapshot(task_info_t* out, int max_count) {
         set_name(out[i].name, g_tasks[i].name, TASK_NAME_MAX);
         out[i].state = g_tasks[i].state;
         out[i].cpu_pct = g_tasks[i].cpu_pct;
-        out[i].ticks_total = g_tasks[i].life_ticks;
+        out[i].ticks_total = g_tasks[i].life_ticks / 10u; /* 100 Hz ticks */
     }
 }
 
@@ -208,8 +210,13 @@ const char* task_state_str(task_state_t s) {
  * work a userspace `top`-feeding daemon does on a real OS: periodic
  * sampling, decoupled from whether anyone is currently looking at it. */
 static void recompute_cpu_window(void) {
-    uint32_t total = 0;
-    for (int i = 0; i < g_count; i++) total += g_tasks[i].window_ticks;
+    /* Percent of wall-clock time since the last sample, so an idle
+     * system shows mostly-0% tasks instead of shares that always sum
+     * to 100%. */
+    static uint32_t last_sample_ms = 0;
+    uint32_t now = timer_ms();
+    uint32_t total = now - last_sample_ms;
+    last_sample_ms = now;
     if (total == 0) total = 1;
     for (int i = 0; i < g_count; i++) {
         g_tasks[i].cpu_pct = (g_tasks[i].window_ticks * 100u) / total;

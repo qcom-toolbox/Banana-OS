@@ -1,0 +1,5 @@
+# make dependency files (gcc -MMD)
+*.d
+
+# build outputs of the new directories (existing tracked .o files stay tracked)
+*.o

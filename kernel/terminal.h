@@ -64,6 +64,22 @@ int  terminal_vt_get_active(void);
 void terminal_vt_get_buffer(int vt, const char** chars, const uint8_t** colors, int* width, int* height, int* stride);
 void terminal_vt_get_cursor(int vt, size_t* row, size_t* col);
 
+/* Text grid of the active terminal (columns / usable rows). */
+size_t terminal_get_width(void);
+size_t terminal_get_height(void);
+
+/* vt0 output is mirrored to the serial console; the shell's line editor
+ * turns that off while it repaints and sends its own ANSI redraw. */
+void terminal_serial_mirror(int on);
+
+/* changes whenever any terminal content or cursor changes */
+uint32_t terminal_generation(void);
+
+/* The framebuffer console paints lazily (see terminal.c): this brings
+ * the screen up to date now. Cheap when nothing changed; called from
+ * idle/wait loops so output never lingers unpainted. */
+void terminal_flush(void);
+
 /* GUI helpers */
 void terminal_get_cursor(size_t* row, size_t* col);
 void terminal_set_reserved_bottom(size_t rows);

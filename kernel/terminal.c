@@ -2,6 +2,9 @@
 #include "types.h"
 #include "fb.h"
 #include "gfx.h"
+#include "serial.h"
+#include "kstring.h"
+#include "timer.h"
 
 #define VGA_WIDTH  80
 #define VGA_HEIGHT 25
@@ -31,6 +34,12 @@ static size_t  vt_col[VT_MAX];
 static uint8_t vt_color[VT_MAX];
 static uint8_t vt_used[VT_MAX] = {1, 0, 0, 0}; /* vt0 reserved */
 static int     vt_active = 0;
+
+/* bumped on every change to any vt (text, colours, cursor): the GUI
+ * compares it to decide whether terminal windows need repainting */
+static volatile uint32_t g_term_gen = 1;
+
+uint32_t terminal_generation(void) { return g_term_gen; }
 
 static uint32_t vga_color_rgb(uint8_t c) {
     /* simple VGA palette */
@@ -92,57 +101,128 @@ static void fb_recompute_grid(void) {
     if (term_row >= term_fb_rows) term_row = term_fb_rows - 1;
 }
 
+/* ── framebuffer console: deferred rendering ─────────────────────────
+ * The framebuffer console (the shell before `startx`) always shows vt0.
+ * Output only updates the text grid and marks rows dirty; the pixels are
+ * brought up to date by terminal_flush(), which runs at most every ~25 ms
+ * while output streams, whenever the system goes idle (gui_poll() and
+ * the blocking waits call it), and immediately for interactive cursor
+ * moves. Consecutive scrolls are coalesced into one block move of the
+ * pixels. Painting every character (and moving the whole screen for
+ * every line) as it was printed made long output crawl - `cat` of an
+ * 8000-line file took ~28 s. */
+
+#define CONSOLE_VT 0
+#define FLUSH_INTERVAL_MS 25
+
+static uint8_t  g_dirty[FB_MAX_ROWS];
+static int      g_any_dirty = 1;
+static uint32_t g_pending_scroll = 0;
+static uint32_t g_last_flush_ms = 0;
+
+/* where the underline cursor is currently painted */
+static int    g_ov_valid = 0;
+static size_t g_ov_row, g_ov_col;
+
+static int fb_console_on(void) {
+    return term_mode == TERMINAL_MODE_FRAMEBUFFER && gfx_available();
+}
+
+/* is the text being written right now what the console shows? */
+static int fb_console_target(void) {
+    return fb_console_on() && vt_active == CONSOLE_VT;
+}
+
+static void mark_dirty(size_t row) {
+    if (row < FB_MAX_ROWS) {
+        g_dirty[row] = 1;
+        g_any_dirty = 1;
+    }
+}
+
+static void mark_all_dirty(void) {
+    for (size_t r = 0; r < FB_MAX_ROWS; r++) g_dirty[r] = 1;
+    g_any_dirty = 1;
+}
+
 static void fb_draw_cell(size_t row, size_t col) {
-    if (!gfx_available()) return;
     if (row >= terminal_fb_rows() || col >= terminal_fb_cols()) return;
-    uint8_t color = vt_colors[vt_active][row][col];
-    uint8_t fg = color & 0x0F;
-    uint8_t bg = (color >> 4) & 0x0F;
-    int scale = term_fb_scale;
-    if (scale < 1) scale = 1;
-    int x = (int)col * 8 * scale;
-    int y = (int)row * 8 * scale;
-    gfx_draw_char_scaled(x, y, scale, vt_chars[vt_active][row][col], vga_color_rgb(fg), vga_color_rgb(bg));
+    uint8_t color = vt_colors[CONSOLE_VT][row][col];
+    int scale = term_fb_scale < 1 ? 1 : term_fb_scale;
+    gfx_draw_char_scaled((int)col * 8 * scale, (int)row * 8 * scale, scale, vt_chars[CONSOLE_VT][row][col],
+                         vga_color_rgb(color & 0x0F), vga_color_rgb((color >> 4) & 0x0F));
 }
 
 static void fb_draw_cursor_overlay(size_t row, size_t col) {
-    if (!gfx_available()) return;
-    if (term_mode != TERMINAL_MODE_FRAMEBUFFER) return;
     if (row >= terminal_fb_rows() || col >= terminal_fb_cols()) return;
+    g_ov_valid = 1;
+    g_ov_row = row;
+    g_ov_col = col;
 
-    uint8_t color = vt_colors[vt_active][row][col];
-    uint8_t fg = color & 0x0F;
-    int scale = term_fb_scale;
-    if (scale < 1) scale = 1;
-    int x = (int)col * 8 * scale;
-    int y = (int)row * 8 * scale;
+    uint8_t fg = vt_colors[CONSOLE_VT][row][col] & 0x0F;
+    int scale = term_fb_scale < 1 ? 1 : term_fb_scale;
     int h = (scale > 1) ? 2 : 1;
-    gfx_fill_rect(x, y + (8 * scale - h), 8 * scale, h, vga_color_rgb(fg));
+    gfx_fill_rect((int)col * 8 * scale, (int)row * 8 * scale + (8 * scale - h), 8 * scale, h, vga_color_rgb(fg));
+}
+
+static void console_cursor(size_t* row, size_t* col) {
+    /* the live copy is term_row/col while vt0 is the active vt */
+    *row = (vt_active == CONSOLE_VT) ? term_row : vt_row[CONSOLE_VT];
+    *col = (vt_active == CONSOLE_VT) ? term_col : vt_col[CONSOLE_VT];
+}
+
+void terminal_flush(void) {
+    if (!fb_console_on()) return;
+    size_t cr, cc;
+    console_cursor(&cr, &cc);
+    int cursor_moved = !g_ov_valid || g_ov_row != cr || g_ov_col != cc;
+    if (!g_any_dirty && !g_pending_scroll && !cursor_moved) return;
+
+    size_t rows = terminal_fb_rows();
+    int cell = 8 * (term_fb_scale < 1 ? 1 : term_fb_scale);
+
+    if (g_pending_scroll) {
+        if (g_pending_scroll >= rows) {
+            mark_all_dirty();
+        } else {
+            /* all the scrolls since the last flush as one block move; the
+             * underline moved up with the pixels, so repaint where it went */
+            fb_scroll_up(0, (int)rows * cell, (int)g_pending_scroll * cell, 0);
+            if (g_ov_valid && g_ov_row >= g_pending_scroll) mark_dirty(g_ov_row - g_pending_scroll);
+        }
+        g_pending_scroll = 0;
+        g_ov_valid = 0;
+    }
+    if (g_ov_valid && (g_ov_row != cr || g_ov_col != cc)) mark_dirty(g_ov_row);   /* erase old underline */
+
+    size_t cols = terminal_fb_cols();
+    for (size_t r = 0; r < rows; r++) {
+        if (!g_dirty[r]) continue;
+        g_dirty[r] = 0;
+        for (size_t c = 0; c < cols; c++) fb_draw_cell(r, c);
+    }
+    g_any_dirty = 0;
+    fb_draw_cursor_overlay(cr, cc);
+    fb_present();
+    g_last_flush_ms = timer_ms();
+}
+
+static void maybe_flush(void) {
+    if ((uint32_t)(timer_ms() - g_last_flush_ms) >= FLUSH_INTERVAL_MS) terminal_flush();
 }
 
 static void fb_refresh_cursor(size_t old_row, size_t old_col) {
-    if (!gfx_available()) return;
-    if (term_mode != TERMINAL_MODE_FRAMEBUFFER) return;
-
-    if (old_row < terminal_fb_rows() && old_col < terminal_fb_cols()) {
-        fb_draw_cell(old_row, old_col);
-    }
-    if (term_row < terminal_fb_rows() && term_col < terminal_fb_cols()) {
-        fb_draw_cell(term_row, term_col);
-        fb_draw_cursor_overlay(term_row, term_col);
-    }
-    fb_present();
+    /* interactive cursor movement: paint right away */
+    (void)old_row; (void)old_col;
+    if (fb_console_target()) terminal_flush();
 }
 
 static void fb_redraw_all(void) {
-    if (!gfx_available()) return;
-    for (size_t y = 0; y < terminal_fb_rows(); y++) {
-        for (size_t x = 0; x < terminal_fb_cols(); x++) {
-            fb_draw_cell(y, x);
-        }
-    }
-    fb_draw_cursor_overlay(term_row, term_col);
-    fb_present();
+    if (!fb_console_on()) return;
+    g_ov_valid = 0;
+    g_pending_scroll = 0;
+    mark_all_dirty();
+    terminal_flush();
 }
 
 static inline void outb(uint16_t port, uint8_t val) {
@@ -200,6 +280,7 @@ void terminal_init(void) {
 }
 
 void terminal_clear(void) {
+    g_term_gen++;
     size_t h = terminal_usable_height();
     size_t w = terminal_width();
 
@@ -253,12 +334,8 @@ static void terminal_scroll(void) {
     size_t w = terminal_width();
 
     if ((term_mode == TERMINAL_MODE_FRAMEBUFFER && gfx_available()) || term_mode == TERMINAL_MODE_SUSPENDED) {
-        for (size_t y = 1; y < h; y++) {
-            for (size_t x = 0; x < w; x++) {
-                vt_chars[vt_active][y - 1][x] = vt_chars[vt_active][y][x];
-                vt_colors[vt_active][y - 1][x] = vt_colors[vt_active][y][x];
-            }
-        }
+        memmove(&vt_chars[vt_active][0][0], &vt_chars[vt_active][1][0], (h - 1) * FB_MAX_COLS);
+        memmove(&vt_colors[vt_active][0][0], &vt_colors[vt_active][1][0], (h - 1) * FB_MAX_COLS);
         for (size_t x = 0; x < w; x++) {
             vt_chars[vt_active][h - 1][x] = ' ';
             vt_colors[vt_active][h - 1][x] = vt_color[vt_active];
@@ -267,7 +344,14 @@ static void terminal_scroll(void) {
         term_col = 0;
         vt_row[vt_active] = term_row;
         vt_col[vt_active] = term_col;
-        if (term_mode == TERMINAL_MODE_FRAMEBUFFER && gfx_available()) fb_redraw_all();
+        if (fb_console_target()) {
+            /* dirty flags follow their text up; the pixels move at the
+             * next flush, together with any further scrolls */
+            memmove(g_dirty, g_dirty + 1, h - 1);
+            g_dirty[h - 1] = 1;
+            g_any_dirty = 1;
+            g_pending_scroll++;
+        }
         return;
     }
 
@@ -280,15 +364,61 @@ static void terminal_scroll(void) {
     term_col = 0;
 }
 
+static int g_serial_mirror = 1;
+
+void terminal_serial_mirror(int on) {
+    g_serial_mirror = on;
+}
+
+size_t terminal_get_width(void) {
+    return terminal_width();
+}
+
+size_t terminal_get_height(void) {
+    return terminal_usable_height();
+}
+
 void terminal_putchar(char c) {
+    g_term_gen++;
+    /* the console shell (vt0) is mirrored to the serial port */
+    if (vt_active == 0 && g_serial_mirror) serial_putc(c);
+
     size_t h = terminal_usable_height();
     if (h == 0) return;
     size_t w = terminal_width();
-    size_t old_row = term_row;
-    size_t old_col = term_col;
 
-    if (term_mode == TERMINAL_MODE_SUSPENDED) {
-        /* Keep backing store up to date so GUI can render terminal window */
+    if (term_mode == TERMINAL_MODE_FRAMEBUFFER && gfx_available() && vt_active == CONSOLE_VT) {
+        /* text grid only; the pixels follow in terminal_flush() */
+        if (c == '\n') {
+            term_col = 0;
+            if (++term_row == h) terminal_scroll();
+        } else if (c == '\r') {
+            term_col = 0;
+        } else if (c == '\b') {
+            if (term_col > 0) {
+                term_col--;
+                vt_chars[CONSOLE_VT][term_row][term_col] = ' ';
+                vt_colors[CONSOLE_VT][term_row][term_col] = vt_color[CONSOLE_VT];
+                mark_dirty(term_row);
+            }
+        } else {
+            vt_chars[CONSOLE_VT][term_row][term_col] = c;
+            vt_colors[CONSOLE_VT][term_row][term_col] = vt_color[CONSOLE_VT];
+            mark_dirty(term_row);
+            if (++term_col == w) {
+                term_col = 0;
+                if (++term_row == h) terminal_scroll();
+            }
+        }
+        vt_row[CONSOLE_VT] = term_row;
+        vt_col[CONSOLE_VT] = term_col;
+        maybe_flush();
+        return;
+    }
+
+    if (term_mode == TERMINAL_MODE_SUSPENDED || (term_mode == TERMINAL_MODE_FRAMEBUFFER && gfx_available())) {
+        /* Keep backing store up to date so GUI can render terminal window
+         * (also: a hidden window's shell writing while the console is up) */
         if (c == '\n') {
             term_col = 0;
             if (++term_row == h) terminal_scroll();
@@ -318,45 +448,29 @@ void terminal_putchar(char c) {
         return;
     }
 
+    /* VGA text mode (no framebuffer) */
     if (c == '\n') {
         term_col = 0;
         if (++term_row == h)
             terminal_scroll();
-        if (term_mode != TERMINAL_MODE_FRAMEBUFFER) terminal_update_cursor();
-        else fb_refresh_cursor(old_row, old_col);
+        terminal_update_cursor();
         return;
     }
     if (c == '\r') {
         term_col = 0;
-        if (term_mode != TERMINAL_MODE_FRAMEBUFFER) terminal_update_cursor();
-        else fb_refresh_cursor(old_row, old_col);
+        terminal_update_cursor();
         return;
     }
     if (c == '\b') {
         if (term_col > 0) {
             term_col--;
-            if (term_mode == TERMINAL_MODE_FRAMEBUFFER && gfx_available()) {
-                vt_chars[vt_active][term_row][term_col] = ' ';
-                vt_colors[vt_active][term_row][term_col] = vt_color[vt_active];
-                fb_draw_cell(term_row, term_col);
-                fb_present();
-            } else {
-                term_buf[term_row * VGA_WIDTH + term_col] = vga_entry(' ', term_color);
-            }
+            term_buf[term_row * VGA_WIDTH + term_col] = vga_entry(' ', term_color);
         }
-        if (term_mode != TERMINAL_MODE_FRAMEBUFFER) terminal_update_cursor();
-        else fb_refresh_cursor(old_row, old_col);
+        terminal_update_cursor();
         return;
     }
 
-    if (term_mode == TERMINAL_MODE_FRAMEBUFFER && gfx_available()) {
-        vt_chars[vt_active][term_row][term_col] = c;
-        vt_colors[vt_active][term_row][term_col] = vt_color[vt_active];
-        fb_draw_cell(term_row, term_col);
-        fb_present();
-    } else {
-        term_buf[term_row * VGA_WIDTH + term_col] = vga_entry(c, term_color);
-    }
+    term_buf[term_row * VGA_WIDTH + term_col] = vga_entry(c, term_color);
 
     if (++term_col == w) {
         term_col = 0;
@@ -365,8 +479,7 @@ void terminal_putchar(char c) {
     }
     vt_row[vt_active] = term_row;
     vt_col[vt_active] = term_col;
-    if (term_mode != TERMINAL_MODE_FRAMEBUFFER) terminal_update_cursor();
-    else fb_refresh_cursor(old_row, old_col);
+    terminal_update_cursor();
 }
 
 void terminal_write(const char* str) {
@@ -387,6 +500,7 @@ void terminal_write_color(const char* str, uint8_t fg, uint8_t bg) {
 }
 
 void terminal_cursor_left(void) {
+    g_term_gen++;
     if (term_col > 0) {
         size_t old_row = term_row, old_col = term_col;
         term_col--;
@@ -396,6 +510,7 @@ void terminal_cursor_left(void) {
 }
 
 void terminal_cursor_right(void) {
+    g_term_gen++;
     size_t w = terminal_width();
     if (term_col + 1 < w) {
         size_t old_row = term_row, old_col = term_col;
@@ -406,6 +521,7 @@ void terminal_cursor_right(void) {
 }
 
 void terminal_set_cursor(size_t row, size_t col) {
+    g_term_gen++;
     size_t h = terminal_usable_height();
     size_t w = terminal_width();
     size_t old_row = term_row, old_col = term_col;
@@ -438,13 +554,13 @@ void terminal_set_reserved_bottom(size_t rows) {
 }
 
 void terminal_putentryat(char c, uint8_t fg, uint8_t bg, size_t row, size_t col) {
+    g_term_gen++;
     if (row >= VGA_HEIGHT || col >= VGA_WIDTH) return;
     if (term_mode == TERMINAL_MODE_FRAMEBUFFER && gfx_available()) {
         uint8_t color = vga_entry_color(fg, bg);
         vt_chars[vt_active][row][col] = c;
         vt_colors[vt_active][row][col] = color;
-        fb_draw_cell(row, col);
-        fb_present();
+        if (vt_active == CONSOLE_VT) { mark_dirty(row); terminal_flush(); }
         return;
     }
 
@@ -461,10 +577,9 @@ void terminal_write_at(const char* str, uint8_t fg, uint8_t bg, size_t row, size
 }
 
 void terminal_set_mode(terminal_mode_t mode) {
-    size_t old_row = term_row, old_col = term_col;
     term_mode = mode;
     if (term_mode == TERMINAL_MODE_FRAMEBUFFER && gfx_available()) {
-        fb_refresh_cursor(old_row, old_col);
+        fb_redraw_all();   /* back from the desktop: repaint everything */
     }
 }
 
@@ -495,6 +610,7 @@ void terminal_fb_get_buffer(const char** chars, const uint8_t** colors, int* wid
 }
 
 int terminal_vt_alloc(void) {
+    g_term_gen++;
     for (int i = 1; i < VT_MAX; i++) {
         if (!vt_used[i]) {
             vt_used[i] = 1;

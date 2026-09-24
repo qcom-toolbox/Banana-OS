@@ -5,7 +5,7 @@
 
 /* main shell + sysmon + up to TERM_WIN_MAX (kernel/gui.c) independent
  * per-window terminal shell tasks, plus a little headroom. */
-#define TASK_MAX         8
+#define TASK_MAX         12
 #define TASK_NAME_MAX    24
 /* 16 KiB stack per created task, matching the boot stack (boot/boot.asm)
  * that task 0 already runs on: created tasks can now run a full shell
@@ -36,18 +36,23 @@ void task_init(const char* main_task_name);
 /* Spawns the real background stats-sampling thread ("sysmon"). */
 void task_start_sysmon(void);
 
-/* Creates a new cooperative kernel thread with its own 4 KiB stack.
+/* Creates a new cooperative kernel thread with its own 16 KiB stack.
  * `entry` takes no arguments and is expected to run forever, calling
  * task_yield()/task_sleep_ms() so other tasks get the CPU. */
-void task_create(const char* name, void (*entry)(void));
+int  task_create(const char* name, void (*entry)(void));  /* pid, or -1 if full */
 
 /* Voluntarily gives up the CPU to the next READY task (round robin).
  * If nothing else is READY, returns to the caller immediately. */
 void task_yield(void);
 
 /* Real sleep: marks the calling task SLEEPING and does not resume it
- * until at least `ms` milliseconds of real PIT-tick time have passed. */
+ * until at least `ms` milliseconds have passed (or task_wake()). */
 void task_sleep_ms(uint32_t ms);
+
+/* Ends a task's sleep early (next scheduling pass). IRQ-safe: drivers
+ * use it to wake whoever is waiting on their device. */
+void task_wake(int pid);
+int  task_current_pid(void);
 
 int  task_count(void);
 void task_snapshot(task_info_t* out, int max_count);

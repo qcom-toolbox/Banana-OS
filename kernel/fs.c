@@ -1,6 +1,8 @@
 #include "fs.h"
 #include "terminal.h"
 #include "types.h"
+#include "kheap.h"
+#include "kstring.h"
 
 #define FS_HOME_PATH "/home/banana"
 
@@ -97,18 +99,86 @@ static int mkdir_in(int parent, const char* name) {
     return -1;
 }
 
+/* ── file data (heap-backed) ────────────────────────────────────── */
+
+static void free_file(int i) {
+    kfree(files[i].content);
+    files[i].content = NULL;
+    files[i].size = files[i].cap = 0;
+    files[i].used = 0;
+}
+
+/* makes room for `size` bytes + the NUL terminator */
+static int reserve(fs_file_t* f, uint32_t size) {
+    if (size > FS_MAX_FILE_SIZE) return -1;
+    if (size + 1 <= f->cap) return 0;
+    /* grow geometrically so appends (downloads) stay linear overall */
+    uint32_t cap = f->cap ? f->cap : 16;
+    while (cap < size + 1) cap = (cap < (1u << 20)) ? cap * 2 : cap + (1u << 20);
+    char* p = (char*)krealloc(f->content, cap);
+    if (!p) return -1;
+    f->content = p;
+    f->cap = cap;
+    return 0;
+}
+
 static int create_file_in(int parent, const char* name) {
     if (find_dir_in(parent, name) >= 0) return -1; /* name clash */
     for (int i = 0; i < FS_MAX_FILES; i++) {
         if (!files[i].used) {
+            files[i].content = NULL;
+            files[i].size = files[i].cap = 0;
+            if (reserve(&files[i], 0) != 0) return -1;
+            files[i].content[0] = '\0';
             files[i].used       = 1;
             files[i].parent_dir = parent;
-            files[i].content[0] = '\0';
             k_strcpy(files[i].name, name, FS_NAME_LEN);
             return i;
         }
     }
     return -1;
+}
+
+int fs_write(int idx, const void* data, uint32_t len) {
+    fs_file_t* f = fs_get_file(idx);
+    if (!f || !f->used) return -1;
+    if (reserve(f, len) != 0) return -1;
+    if (len) memmove(f->content, data, len);
+    f->size = len;
+    f->content[len] = '\0';
+    /* give back a large buffer when the file shrank a lot */
+    if (f->cap > 4096 && f->cap > 4 * (len + 1)) {
+        char* p = (char*)kmalloc(len + 1);
+        if (p) {
+            memcpy(p, f->content, len + 1);
+            kfree(f->content);
+            f->content = p;
+            f->cap = len + 1;
+        }
+    }
+    return 0;
+}
+
+int fs_append(int idx, const void* data, uint32_t len) {
+    fs_file_t* f = fs_get_file(idx);
+    if (!f || !f->used) return -1;
+    if (reserve(f, f->size + len) != 0) return -1;
+    memcpy(f->content + f->size, data, len);
+    f->size += len;
+    f->content[f->size] = '\0';
+    return 0;
+}
+
+int fs_set_text(int idx, const char* text) {
+    return fs_write(idx, text, (uint32_t)strlen(text));
+}
+
+int fs_is_binary(int idx) {
+    fs_file_t* f = fs_get_file(idx);
+    if (!f || !f->used) return 0;
+    for (uint32_t i = 0; i < f->size; i++)
+        if (f->content[i] == '\0') return 1;
+    return 0;
 }
 
 /* consumes "." / ".." or looks up a real child dir */
@@ -160,7 +230,7 @@ static int resolve_parent_leaf(const char* path, char* leaf, int leaf_len) {
 
 static void delete_dir_recursive(int idx) {
     for (int i = 0; i < FS_MAX_FILES; i++)
-        if (files[i].used && files[i].parent_dir == idx) files[i].used = 0;
+        if (files[i].used && files[i].parent_dir == idx) free_file(i);
     for (int i = 0; i < FS_MAX_DIRS; i++)
         if (dirs[i].used && dirs[i].parent_dir == idx) delete_dir_recursive(i);
     dirs[idx].used = 0;
@@ -169,7 +239,7 @@ static void delete_dir_recursive(int idx) {
 /* ── init ────────────────────────────────────────────────────────── */
 void fs_init(void) {
     for (int i = 0; i < FS_MAX_DIRS;  i++) dirs[i].used  = 0;
-    for (int i = 0; i < FS_MAX_FILES; i++) files[i].used = 0;
+    for (int i = 0; i < FS_MAX_FILES; i++) free_file(i);
 
     /* create root dir */
     dirs[0].used       = 1;
@@ -189,27 +259,27 @@ void fs_init(void) {
     (void)bin;
 
     home_dir = mkdir_in(home, "banana");
+    mkdir_in(home_dir, "Pictures");    /* user wallpapers go here */
 
     int f;
     f = create_file_in(etc, "motd");
-    if (f >= 0) k_strcpy(files[f].content,
-        "Welcome to Banana OS 0.4 - a from-scratch, Unix-like x86 OS.\n",
-        FS_CONTENT_LEN);
+    if (f >= 0) fs_set_text(f,
+        "Welcome to Banana OS 0.5 - a from-scratch, Unix-like x86 OS.\n");
 
     f = create_file_in(etc, "hostname");
-    if (f >= 0) k_strcpy(files[f].content, "banana-os-0.4\n", FS_CONTENT_LEN);
+    if (f >= 0) fs_set_text(f, "banana-os-0.5\n");
 
     f = create_file_in(etc, "passwd");
-    if (f >= 0) k_strcpy(files[f].content,
+    if (f >= 0) fs_set_text(f,
         "root:x:0:0:root:/root:/bin/sh\n"
-        "banana:x:1000:1000:banana:/home/banana:/bin/sh\n",
-        FS_CONTENT_LEN);
+        "banana:x:1000:1000:banana:/home/banana:/bin/sh\n");
 
     f = create_file_in(home_dir, "readme.txt");
-    if (f >= 0) k_strcpy(files[f].content,
+    if (f >= 0) fs_set_text(f,
         "Home sweet /home/banana.\n"
-        "Try: ls -l, pwd, touch, cp, mv, mkdir -p a/b/c, cd ..\n",
-        FS_CONTENT_LEN);
+        "Try: ls -l, pwd, touch, cp, mv, mkdir -p a/b/c, cd ..\n"
+        "Networking: ifconfig, ping example.com, curl http://example.com\n"
+        "Wallpapers: wget -O ~/Pictures/pic.jpg <url>, then: wallpaper ~/Pictures/pic.jpg\n");
 
     /* real shells start in $HOME, not / */
     cwd = home_dir;
@@ -316,7 +386,7 @@ void fs_ls_long(const char* path) {
     }
     for (int i = 0; i < FS_MAX_FILES; i++) {
         if (files[i].used && files[i].parent_dir == target) {
-            print_perm_size(0, k_strlen(files[i].content));
+            print_perm_size(0, files[i].size);
             terminal_writeln(files[i].name);
             any = 1;
         }
@@ -362,7 +432,7 @@ void fs_delete(const char* path, int recursive) {
     }
 
     int fidx = find_file_in(parent, leaf);
-    if (fidx >= 0) { files[fidx].used = 0; return; }
+    if (fidx >= 0) { free_file(fidx); return; }
 
     int didx = find_dir_in(parent, leaf);
     if (didx >= 0) {
@@ -427,10 +497,11 @@ int fs_copy(const char* src, const char* dst) {
         return -1;
 
     int existing = find_file_in(target_dir, target_name);
+    if (existing == sidx) return sidx;   /* cp a a */
     int tidx = (existing >= 0) ? existing : create_file_in(target_dir, target_name);
     if (tidx < 0) return -1;
 
-    k_strcpy(files[tidx].content, files[sidx].content, FS_CONTENT_LEN);
+    if (fs_write(tidx, files[sidx].content, files[sidx].size) != 0) return -1;
     return tidx;
 }
 
@@ -453,7 +524,7 @@ int fs_move(const char* src, const char* dst) {
 
     if (sfile >= 0) {
         int existing = find_file_in(target_dir, target_name);
-        if (existing >= 0 && existing != sfile) files[existing].used = 0;
+        if (existing >= 0 && existing != sfile) free_file(existing);
         files[sfile].parent_dir = target_dir;
         k_strcpy(files[sfile].name, target_name, FS_NAME_LEN);
         return sfile;
@@ -590,42 +661,171 @@ uint32_t fs_used_dirs(void) {
 uint32_t fs_max_files(void) { return FS_MAX_FILES; }
 uint32_t fs_max_dirs(void)  { return FS_MAX_DIRS; }
 
+
 uint32_t fs_ram_used_bytes(void) {
-    /* The filesystem tables are static in-memory arrays in BSS. */
+    /* the dirs/files tables are static arrays; file data is on the heap */
     uint32_t used = (uint32_t)sizeof(dirs) + (uint32_t)sizeof(files);
-    /* Add currently used payload bytes for a more intuitive "used". */
     for (int i = 0; i < FS_MAX_FILES; i++) {
-        if (files[i].used) used += k_strlen(files[i].content);
+        if (files[i].used) used += files[i].size;
     }
     return used;
 }
 
+int fs_write_path(const char* path, const void* data, uint32_t len) {
+    int idx = fs_create(path);
+    if (idx < 0) return -1;
+    if (fs_write(idx, data, len) != 0) return -1;
+    return idx;
+}
+
+void fs_file_path(int idx, char* buf, int buflen) {
+    fs_file_t* f = fs_get_file(idx);
+    if (!f || !f->used) { k_strcpy(buf, "", buflen); return; }
+    char dir[FS_PATH_LEN];
+    dir_abs_path(f->parent_dir, dir, sizeof(dir));
+    join_path(dir, f->name, buf, buflen);
+}
+
 /* ── on-disk persistence ────────────────────────────────────────── */
+
+/* v2 record per used file: name[FS_NAME_LEN], int32 parent, uint32 size, data */
+#define FILE_REC_HDR (FS_NAME_LEN + 8u)
+
 uint32_t fs_snapshot_size(void) {
-    return (uint32_t)sizeof(dirs) + (uint32_t)sizeof(files) + (uint32_t)sizeof(int32_t);
+    uint32_t n = (uint32_t)sizeof(dirs) + 4u /* home_dir */ + 4u /* file count */;
+    for (int i = 0; i < FS_MAX_FILES; i++)
+        if (files[i].used) n += FILE_REC_HDR + files[i].size;
+    return n;
 }
 
 void fs_snapshot_save(uint8_t* buf) {
     uint32_t off = 0;
-    const uint8_t* d = (const uint8_t*)dirs;
-    for (uint32_t i = 0; i < sizeof(dirs); i++) buf[off++] = d[i];
-    const uint8_t* f = (const uint8_t*)files;
-    for (uint32_t i = 0; i < sizeof(files); i++) buf[off++] = f[i];
+    memcpy(buf + off, dirs, sizeof(dirs));
+    off += sizeof(dirs);
     int32_t hd = (int32_t)home_dir;
-    const uint8_t* h = (const uint8_t*)&hd;
-    for (uint32_t i = 0; i < sizeof(hd); i++) buf[off++] = h[i];
+    memcpy(buf + off, &hd, 4);
+    off += 4;
+    uint32_t count = fs_used_files();
+    memcpy(buf + off, &count, 4);
+    off += 4;
+    for (int i = 0; i < FS_MAX_FILES; i++) {
+        if (!files[i].used) continue;
+        memcpy(buf + off, files[i].name, FS_NAME_LEN);
+        int32_t parent = files[i].parent_dir;
+        memcpy(buf + off + FS_NAME_LEN, &parent, 4);
+        memcpy(buf + off + FS_NAME_LEN + 4, &files[i].size, 4);
+        off += FILE_REC_HDR;
+        memcpy(buf + off, files[i].content, files[i].size);
+        off += files[i].size;
+    }
 }
 
-int fs_snapshot_load(const uint8_t* buf) {
-    uint32_t off = 0;
-    uint8_t* d = (uint8_t*)dirs;
-    for (uint32_t i = 0; i < sizeof(dirs); i++) d[i] = buf[off++];
-    uint8_t* f = (uint8_t*)files;
-    for (uint32_t i = 0; i < sizeof(files); i++) f[i] = buf[off++];
-    int32_t hd = 0;
-    uint8_t* h = (uint8_t*)&hd;
-    for (uint32_t i = 0; i < sizeof(hd); i++) h[i] = buf[off++];
-    home_dir = (int)hd;
-    cwd = home_dir; /* real shells start in $HOME, same as fs_init() */
+/* Banana OS 0.4's fixed layout: 32 dirs, 64 files of 2 KiB text each */
+#define V1_DIRS     32
+#define V1_FILES    64
+#define V1_CONTENT  2048
+typedef struct {
+    char    name[FS_NAME_LEN];
+    char    content[V1_CONTENT];
+    int32_t used;
+    int32_t parent_dir;
+} v1_file_t;
+
+static int load_v1(const uint8_t* buf, uint32_t len) {
+    uint32_t need = V1_DIRS * (uint32_t)sizeof(fs_dir_t) + V1_FILES * (uint32_t)sizeof(v1_file_t) + 4u;
+    if (len < need) return -1;
+    for (int i = 0; i < FS_MAX_DIRS; i++) dirs[i].used = 0;
+    for (int i = 0; i < FS_MAX_FILES; i++) free_file(i);
+    memcpy(dirs, buf, V1_DIRS * sizeof(fs_dir_t));
+    const uint8_t* p = buf + V1_DIRS * sizeof(fs_dir_t);
+    for (int i = 0; i < V1_FILES; i++) {
+        v1_file_t vf;
+        memcpy(&vf, p + (uint32_t)i * sizeof(v1_file_t), sizeof(vf));
+        if (!vf.used) continue;
+        vf.name[FS_NAME_LEN - 1] = '\0';
+        vf.content[V1_CONTENT - 1] = '\0';
+        int idx = -1;
+        for (int j = 0; j < FS_MAX_FILES; j++) if (!files[j].used) { idx = j; break; }
+        if (idx < 0) break;
+        k_strcpy(files[idx].name, vf.name, FS_NAME_LEN);
+        files[idx].parent_dir = vf.parent_dir;
+        files[idx].used = 1;
+        files[idx].content = NULL;
+        files[idx].size = files[idx].cap = 0;
+        if (fs_set_text(idx, vf.content) != 0) { files[idx].used = 0; break; }
+    }
+    int32_t hd;
+    memcpy(&hd, p + V1_FILES * sizeof(v1_file_t), 4);
+    home_dir = (hd > 0 && hd < FS_MAX_DIRS) ? (int)hd : 0;
     return 0;
+}
+
+static int load_v2(const uint8_t* buf, uint32_t len) {
+    if (len < sizeof(dirs) + 8u) return -1;
+    /* validate the whole blob before touching the live tree */
+    uint32_t count;
+    memcpy(&count, buf + sizeof(dirs) + 4, 4);
+    if (count > FS_MAX_FILES) return -1;
+    uint32_t off = sizeof(dirs) + 8u;
+    for (uint32_t i = 0; i < count; i++) {
+        if (off + FILE_REC_HDR > len) return -1;
+        uint32_t size;
+        memcpy(&size, buf + off + FS_NAME_LEN + 4, 4);
+        if (size > FS_MAX_FILE_SIZE || off + FILE_REC_HDR + size > len) return -1;
+        off += FILE_REC_HDR + size;
+    }
+
+    for (int i = 0; i < FS_MAX_FILES; i++) free_file(i);
+    memcpy(dirs, buf, sizeof(dirs));
+    int32_t hd;
+    memcpy(&hd, buf + sizeof(dirs), 4);
+    home_dir = (hd > 0 && hd < FS_MAX_DIRS) ? (int)hd : 0;
+
+    off = sizeof(dirs) + 8u;
+    for (uint32_t i = 0; i < count; i++) {
+        fs_file_t* f = &files[i];
+        memcpy(f->name, buf + off, FS_NAME_LEN);
+        f->name[FS_NAME_LEN - 1] = '\0';
+        int32_t parent;
+        uint32_t size;
+        memcpy(&parent, buf + off + FS_NAME_LEN, 4);
+        memcpy(&size, buf + off + FS_NAME_LEN + 4, 4);
+        off += FILE_REC_HDR;
+        f->parent_dir = parent;
+        f->used = 1;
+        f->content = NULL;
+        f->size = f->cap = 0;
+        if (fs_write((int)i, buf + off, size) != 0) { f->used = 0; return -1; }
+        off += size;
+    }
+    return 0;
+}
+
+int fs_snapshot_load(const uint8_t* buf, uint32_t len, uint32_t version) {
+    int rc = (version == FS_SNAPSHOT_V1) ? load_v1(buf, len)
+           : (version == FS_SNAPSHOT_V2) ? load_v2(buf, len) : -1;
+    if (rc != 0) return rc;
+    /* anything not reachable from / (corrupt parent links) is dropped */
+    for (int i = 0; i < FS_MAX_FILES; i++)
+        if (files[i].used && (files[i].parent_dir < 0 || files[i].parent_dir >= FS_MAX_DIRS ||
+                              !dirs[files[i].parent_dir].used))
+            free_file(i);
+    cwd = home_dir; /* real shells start in $HOME, same as fs_init() */
+    /* disks from 0.4 predate ~/Pictures */
+    if (home_dir > 0 && find_dir_in(home_dir, "Pictures") < 0) mkdir_in(home_dir, "Pictures");
+    return 0;
+}
+
+int fs_list_files(const char* path, int* out_idx, int max) {
+    char p[FS_PATH_LEN];
+    expand_tilde(path, p, sizeof(p));
+    int dir = resolve_dir(p);
+    if (dir < 0) return -1;
+    int n = 0;
+    for (int i = 0; i < FS_MAX_FILES; i++) {
+        if (!files[i].used || files[i].parent_dir != dir) continue;
+        if (n < max) out_idx[n] = i;
+        n++;
+    }
+    return n;
 }

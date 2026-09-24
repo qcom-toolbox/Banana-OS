@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Banana OS 0.4 build script
+# Banana OS 0.5 build script
 # Run this on Ubuntu/Debian to build the bootable ISO
 
 set -e
 
-echo "🍌  Banana OS 0.4 build script"
+echo "🍌  Banana OS 0.5 build script"
 echo "========================="
 
 # ── Check dependencies ────────────────────────────────────────────
@@ -39,10 +39,10 @@ echo "🎉  Build complete!  →  Banana_OS.iso"
 echo ""
 echo "VirtualBox setup:"
 echo "  1. New VM  →  Type: Other, Version: Other/Unknown (32-bit)"
-echo "  2. RAM: 32 MB minimum"
-echo "  3. No hard disk needed"
+echo "  2. RAM: 32 MB minimum (256 MB recommended)"
+echo "  3. Network: NAT, Intel PRO/1000 MT Desktop (optional); no hard disk needed"
 echo "  4. Settings → Storage → add Banana_OS.iso as optical drive"
 echo "  5. Boot!"
 echo ""
 echo "QEMU quick test:"
-echo "  qemu-system-i386 -cdrom Banana_OS.iso"
+echo "  make run     (qemu-system-i386 -cdrom Banana_OS.iso -m 256 -nic user,model=e1000 -serial stdio)"

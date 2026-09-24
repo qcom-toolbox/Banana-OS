@@ -163,6 +163,89 @@ void isr_handler(registers_t* regs) {
     for (;;) __asm__ volatile("cli; hlt");
 }
 
+/* ── hardware IRQs (8259 PIC) ───────────────────────────────────────
+ * The PICs are remapped to vectors 32-47 (out of the CPU exception
+ * range) and every line starts masked: drivers opt in with
+ * irq_install(). Keyboard and mouse stay polled as before - only the
+ * timer (and the NIC, to wake the CPU from hlt) use interrupts. */
+
+#define PIC1_CMD  0x20
+#define PIC1_DATA 0x21
+#define PIC2_CMD  0xA0
+#define PIC2_DATA 0xA1
+
+static inline void pic_outb(uint16_t p, uint8_t v) { __asm__ volatile("outb %0,%1" :: "a"(v), "Nd"(p)); }
+static inline uint8_t pic_inb(uint16_t p) { uint8_t v; __asm__ volatile("inb %1,%0" : "=a"(v) : "Nd"(p)); return v; }
+static inline void pic_wait(void) { pic_outb(0x80, 0); }
+
+extern void irq0(void);  extern void irq1(void);  extern void irq2(void);  extern void irq3(void);
+extern void irq4(void);  extern void irq5(void);  extern void irq6(void);  extern void irq7(void);
+extern void irq8(void);  extern void irq9(void);  extern void irq10(void); extern void irq11(void);
+extern void irq12(void); extern void irq13(void); extern void irq14(void); extern void irq15(void);
+
+static void (*const irq_stubs[16])(void) = {
+    irq0, irq1, irq2,  irq3,  irq4,  irq5,  irq6,  irq7,
+    irq8, irq9, irq10, irq11, irq12, irq13, irq14, irq15,
+};
+
+/* PCI interrupt lines are shared (e.g. the NIC and a USB controller on
+ * IRQ 11), so each line keeps a short chain; every handler checks its own
+ * device and returns quietly when it was not the source. */
+#define IRQ_CHAIN 4
+static void (*irq_handlers[16][IRQ_CHAIN])(void);
+static uint16_t irq_mask = 0xFFFF;
+
+static void pic_apply_mask(void) {
+    uint16_t m = irq_mask;
+    /* the cascade line (IRQ2) must be open for anything on the slave */
+    if ((m & 0xFF00) != 0xFF00) m &= (uint16_t)~(1u << 2);
+    pic_outb(PIC1_DATA, (uint8_t)(m & 0xFF));
+    pic_outb(PIC2_DATA, (uint8_t)(m >> 8));
+}
+
+static void pic_remap(void) {
+    pic_outb(PIC1_CMD, 0x11); pic_wait();   /* ICW1: init + ICW4 */
+    pic_outb(PIC2_CMD, 0x11); pic_wait();
+    pic_outb(PIC1_DATA, 32);  pic_wait();   /* ICW2: vector offsets */
+    pic_outb(PIC2_DATA, 40);  pic_wait();
+    pic_outb(PIC1_DATA, 4);   pic_wait();   /* ICW3: slave on IRQ2 */
+    pic_outb(PIC2_DATA, 2);   pic_wait();
+    pic_outb(PIC1_DATA, 0x01); pic_wait();  /* ICW4: 8086 mode */
+    pic_outb(PIC2_DATA, 0x01); pic_wait();
+    pic_apply_mask();
+}
+
+void irq_install(int irq, void (*handler)(void)) {
+    if (irq < 0 || irq > 15) return;
+    for (int i = 0; i < IRQ_CHAIN; i++) {
+        if (irq_handlers[irq][i] == handler) break;
+        if (!irq_handlers[irq][i]) { irq_handlers[irq][i] = handler; break; }
+    }
+    irq_mask &= (uint16_t)~(1u << irq);
+    pic_apply_mask();
+}
+
+void irq_handler(registers_t* regs) {
+    int irq = (int)regs->int_no - 32;
+    if (irq < 0 || irq > 15) return;
+
+    /* Spurious IRQ7/15: the PIC's in-service bit isn't set, so it must
+     * not be acknowledged (IRQ15 still needs the master's EOI). */
+    if (irq == 7 || irq == 15) {
+        uint16_t cmd = (irq == 7) ? PIC1_CMD : PIC2_CMD;
+        pic_outb(cmd, 0x0B);  /* read ISR */
+        if (!(pic_inb(cmd) & 0x80)) {
+            if (irq == 15) pic_outb(PIC1_CMD, 0x20);
+            return;
+        }
+    }
+
+    for (int i = 0; i < IRQ_CHAIN && irq_handlers[irq][i]; i++) irq_handlers[irq][i]();
+
+    if (irq >= 8) pic_outb(PIC2_CMD, 0x20);
+    pic_outb(PIC1_CMD, 0x20);
+}
+
 void idt_init(void) {
     idtp.limit = (uint16_t)(sizeof(idt) - 1);
     idtp.base  = (uint32_t)&idt;
@@ -173,6 +256,10 @@ void idt_init(void) {
     for (int i = 0; i < 32; i++) {
         idt_set_gate((uint8_t)i, (uint32_t)isr_stubs[i], code_sel, 0x8E);
     }
+    for (int i = 0; i < 16; i++) {
+        idt_set_gate((uint8_t)(32 + i), (uint32_t)irq_stubs[i], code_sel, 0x8E);
+    }
 
     __asm__ volatile("lidt %0" : : "m"(idtp));
+    pic_remap();
 }

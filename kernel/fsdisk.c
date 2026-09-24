@@ -3,9 +3,11 @@
 #include "ata.h"
 #include "atapi.h"
 #include "types.h"
+#include "kheap.h"
+#include "kstring.h"
 
 #define FSDISK_MAGIC   0x414E4142u /* "BANA" */
-#define FSDISK_VERSION 1u
+#define FSDISK_VERSION 2u   /* = FS_SNAPSHOT_V2; version 1 disks (Banana OS 0.4) still load */
 #define FSDISK_SECTOR  512u
 
 /* Reserved space at the start of the target disk for the raw-copied boot
@@ -25,19 +27,14 @@ typedef struct __attribute__((packed)) {
     uint32_t checksum;
 } fsdisk_super_t;
 
-/* Scratch buffer, sized to the larger of (a) fs.c's full snapshot
- * (superblock + dirs[]/files[], ~132KB) and (b) one boot-image copy
- * chunk (64KB) - reused sequentially for both, never concurrently. This
- * kernel has no heap allocator, so a static buffer it is. */
-#define FSDISK_PAYLOAD_MAX \
-    (FS_MAX_DIRS * sizeof(fs_dir_t) + FS_MAX_FILES * sizeof(fs_file_t) + sizeof(int32_t))
-#define FSDISK_SNAPSHOT_BUF_BYTES \
-    ((((uint32_t)sizeof(fsdisk_super_t) + FSDISK_PAYLOAD_MAX + FSDISK_SECTOR - 1u) / FSDISK_SECTOR) * FSDISK_SECTOR)
+/* Boot-image copy chunk buffer. The filesystem snapshot itself is now
+ * variable-sized (file data lives on the heap), so it gets a heap buffer
+ * of exactly the right size per sync instead of a worst-case static one. */
 #define FSDISK_COPY_BUF_BYTES (FSDISK_COPY_CHUNK_BLOCKS * 2048u)
-#define FSDISK_BUF_BYTES \
-    ((FSDISK_SNAPSHOT_BUF_BYTES > FSDISK_COPY_BUF_BYTES) ? FSDISK_SNAPSHOT_BUF_BYTES : FSDISK_COPY_BUF_BYTES)
+static uint8_t g_buf[FSDISK_COPY_BUF_BYTES];
 
-static uint8_t g_buf[FSDISK_BUF_BYTES];
+/* largest snapshot we'll ever try to read back (sanity bound) */
+#define FSDISK_MAX_PAYLOAD (256u * 1024u * 1024u)
 
 static int        g_have_target = 0;
 static ata_disk_t g_target;
@@ -109,35 +106,41 @@ static int copy_boot_image(const ata_disk_t* src, const ata_disk_t* dst, uint32_
     return 0;
 }
 
-static int write_snapshot_to(const ata_disk_t* disk) {
-    uint32_t payload = fs_snapshot_size();
-    if ((uint32_t)sizeof(fsdisk_super_t) + payload > FSDISK_BUF_BYTES) return -1;
-
-    fs_snapshot_save(g_buf + sizeof(fsdisk_super_t));
-
-    fsdisk_super_t sb;
-    sb.magic         = FSDISK_MAGIC;
-    sb.version       = FSDISK_VERSION;
-    sb.payload_bytes = payload;
-    sb.checksum      = checksum_of(g_buf + sizeof(fsdisk_super_t), payload);
-
-    uint8_t* p = (uint8_t*)&sb;
-    for (uint32_t i = 0; i < sizeof(sb); i++) g_buf[i] = p[i];
-
-    uint32_t total   = (uint32_t)sizeof(fsdisk_super_t) + payload;
-    uint32_t sectors = bytes_to_sectors(total);
-    for (uint32_t i = total; i < sectors * FSDISK_SECTOR; i++) g_buf[i] = 0;
-
+/* Writes superblock + payload from `buf` (header space included at the
+ * front) starting at FSDISK_BASE_LBA. */
+static int write_sectors(const ata_disk_t* disk, const uint8_t* buf, uint32_t sectors) {
     uint32_t lba = FSDISK_BASE_LBA, done = 0;
     while (done < sectors) {
         uint8_t chunk = (uint8_t)((sectors - done > 255u) ? 255u : (sectors - done));
         if (ata_write_sectors(disk->bus, disk->is_slave, lba, chunk,
-                               g_buf + (uint32_t)done * FSDISK_SECTOR) != 0)
+                               buf + done * FSDISK_SECTOR) != 0)
             return -1;
         lba  += chunk;
         done += chunk;
     }
     return 0;
+}
+
+static int write_snapshot_to(const ata_disk_t* disk) {
+    uint32_t payload = fs_snapshot_size();
+    uint32_t total   = (uint32_t)sizeof(fsdisk_super_t) + payload;
+    uint32_t sectors = bytes_to_sectors(total);
+    if (disk->sectors < FSDISK_BASE_LBA + sectors) return FSDISK_ERR_TOO_SMALL;
+
+    uint8_t* buf = (uint8_t*)kzalloc(sectors * FSDISK_SECTOR);
+    if (!buf) return FSDISK_ERR_IO;
+    fs_snapshot_save(buf + sizeof(fsdisk_super_t));
+
+    fsdisk_super_t sb;
+    sb.magic         = FSDISK_MAGIC;
+    sb.version       = FSDISK_VERSION;
+    sb.payload_bytes = payload;
+    sb.checksum      = checksum_of(buf + sizeof(fsdisk_super_t), payload);
+    memcpy(buf, &sb, sizeof(sb));
+
+    int rc = write_sectors(disk, buf, sectors) == 0 ? FSDISK_OK : FSDISK_ERR_IO;
+    kfree(buf);
+    return rc;
 }
 
 int fsdisk_install(void) {
@@ -158,7 +161,8 @@ int fsdisk_install(void) {
     if (target.sectors < need_sectors) return FSDISK_ERR_TOO_SMALL;
 
     if (copy_boot_image(&source, &target, iso_bytes) != 0) return FSDISK_ERR_IO;
-    if (write_snapshot_to(&target) != 0) return FSDISK_ERR_IO;
+    int rc = write_snapshot_to(&target);
+    if (rc != FSDISK_OK) return rc;
 
     g_target = target;
     g_have_target = 1;
@@ -167,7 +171,7 @@ int fsdisk_install(void) {
 
 int fsdisk_sync(void) {
     if (!g_have_target) return FSDISK_ERR_NO_TARGET;
-    return (write_snapshot_to(&g_target) == 0) ? FSDISK_OK : FSDISK_ERR_IO;
+    return write_snapshot_to(&g_target);
 }
 
 int fsdisk_try_load(void) {
@@ -178,32 +182,35 @@ int fsdisk_try_load(void) {
     if (ata_read_sectors(target.bus, target.is_slave, FSDISK_BASE_LBA, 1, g_buf) != 0) return 0;
 
     fsdisk_super_t sb;
-    uint8_t* p = (uint8_t*)&sb;
-    for (uint32_t i = 0; i < sizeof(sb); i++) p[i] = g_buf[i];
-
-    if (sb.magic != FSDISK_MAGIC || sb.version != FSDISK_VERSION) return 0;
-    if (sb.payload_bytes == 0 || sb.payload_bytes != fs_snapshot_size()) return 0;
-    if ((uint32_t)sizeof(fsdisk_super_t) + sb.payload_bytes > FSDISK_BUF_BYTES) return 0;
+    memcpy(&sb, g_buf, sizeof(sb));
+    if (sb.magic != FSDISK_MAGIC) return 0;
+    if (sb.version != FS_SNAPSHOT_V1 && sb.version != FS_SNAPSHOT_V2) return 0;
+    if (sb.payload_bytes == 0 || sb.payload_bytes > FSDISK_MAX_PAYLOAD) return 0;
 
     uint32_t total   = (uint32_t)sizeof(fsdisk_super_t) + sb.payload_bytes;
     uint32_t sectors = bytes_to_sectors(total);
+    if (FSDISK_BASE_LBA + sectors > target.sectors) return 0;
 
+    uint8_t* buf = (uint8_t*)kmalloc(sectors * FSDISK_SECTOR);
+    if (!buf) return 0;
     uint32_t lba = FSDISK_BASE_LBA, done = 0;
+    int ok = 1;
     while (done < sectors) {
         uint8_t chunk = (uint8_t)((sectors - done > 255u) ? 255u : (sectors - done));
         if (ata_read_sectors(target.bus, target.is_slave, lba, chunk,
-                              g_buf + (uint32_t)done * FSDISK_SECTOR) != 0)
-            return 0;
+                              buf + done * FSDISK_SECTOR) != 0) { ok = 0; break; }
         lba  += chunk;
         done += chunk;
     }
-
-    if (checksum_of(g_buf + sizeof(fsdisk_super_t), sb.payload_bytes) != sb.checksum) return 0;
-
-    fs_snapshot_load(g_buf + sizeof(fsdisk_super_t));
+    if (ok && checksum_of(buf + sizeof(fsdisk_super_t), sb.payload_bytes) != sb.checksum) ok = 0;
+    if (ok && fs_snapshot_load(buf + sizeof(fsdisk_super_t), sb.payload_bytes, sb.version) != 0) ok = 0;
+    kfree(buf);
+    if (!ok) return 0;
 
     g_target = target;
     g_have_target = 1;
+    /* upgrade a 0.4 (v1) disk to the current format right away */
+    if (sb.version != FSDISK_VERSION) write_snapshot_to(&target);
     return 1;
 }
 

@@ -14,4 +14,7 @@ int keyboard_set_layout(const char* name);
 /* One-shot: 1 exactly once per Ctrl+Alt+Delete press, then clears. */
 int keyboard_ctrl_alt_del_pending(void);
 
+/* USB HID keyboards feed set-1 scancodes through the PS/2 decoder */
+void keyboard_feed_scancode(uint8_t sc);
+
 #endif

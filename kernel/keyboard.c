@@ -3,6 +3,8 @@
 #include "types.h"
 #include "usb.h"
 #include "task.h"
+#include "serial.h"
+#include "../usb/usbcore.h"
 
 #define KB_DATA_PORT    0x60
 #define KB_STATUS_PORT  0x64
@@ -396,29 +398,42 @@ int keyboard_set_layout(const char* name) {
     return -1;
 }
 
-/* ── raw scancode reader ─────────────────────────────────────────── */
-static uint8_t read_sc(void) {
-    while (1) {
-        /* Real blocking wait: let other cooperative tasks (e.g. sysmon)
-         * run while no scancode is available yet, instead of a pure
-         * host-CPU-hogging spin. */
-        while (!(inb(KB_STATUS_PORT) & 0x01)) task_yield();
-        uint8_t st = inb(KB_STATUS_PORT);  /* re-read after data ready */
-        if (st & 0x20) {
-            /* AUX byte: route to mouse assembler so we don't break PS/2 mouse */
-            uint8_t b = inb(KB_DATA_PORT);
-            mouse_on_aux_byte(b);
-            continue;
-        }
-
-        uint8_t sc = inb(KB_DATA_PORT);
-
-        return sc;
+/* USB keyboards (usb/usbhid.c) translate their key events into set-1
+ * scancodes and feed them through the same decoder as PS/2, so layouts,
+ * modifiers, arrows and Ctrl+Alt+Del behave identically. */
+void keyboard_feed_scancode(uint8_t sc) {
+    char out = 0;
+    if (!process_scancode_byte(sc, &out)) return;
+    if (out == 27) {
+        /* an arrow: the decoder queued "[X" and handed back the ESC that
+         * must come first */
+        q_head = (q_head + QUEUE_SIZE - 1) % QUEUE_SIZE;
+        q_buf[q_head] = out;
+    } else {
+        q_push(out);
     }
 }
 
+/* Serial console input (see serial.h): terminals send CR for Enter and
+ * DEL for Backspace; map them to what the shell expects. Arrow keys
+ * already arrive as the same ESC [ A-D sequences the PS/2 path queues. */
+static char serial_key(void) {
+    static int last_cr = 0;
+    int b = serial_try_getc();
+    if (b < 0) return 0;
+    if (b == '\n' && last_cr) { last_cr = 0; return 0; }
+    last_cr = (b == '\r');
+    if (b == '\r' || b == '\n') return '\n';
+    if (b == 0x7F) return '\b';
+    return (char)b;
+}
+
 char keyboard_try_getchar(void) {
+    usb_poll();           /* USB keyboards report through here */
     if (!q_empty()) return q_pop();
+
+    char sk = serial_key();
+    if (sk) return sk;
 
     if (!(inb(KB_STATUS_PORT) & 0x01)) return 0; /* no data */
     uint8_t st = inb(KB_STATUS_PORT);
@@ -480,12 +495,12 @@ int keyboard_ctrl_alt_del_pending(void) {
 
 char keyboard_getchar(void) {
     while (1) {
-        /* drain queue first */
-        if (!q_empty()) return q_pop();
-
-        uint8_t sc = read_sc();
-        char out = 0;
-        if (process_scancode_byte(sc, &out)) return out;
+        /* PS/2 and serial both feed keyboard_try_getchar(); while neither
+         * has anything, let other tasks run (and the CPU idle). */
+        char c = keyboard_try_getchar();
+        if (c) return c;
+        terminal_flush();
+        task_sleep_ms(2);
     }
 }
 
