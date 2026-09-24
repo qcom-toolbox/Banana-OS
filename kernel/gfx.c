@@ -25,16 +25,25 @@ void gfx_fill_rect(int x, int y, int w, int h, uint32_t rgb) {
 
 void gfx_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg) {
     if (!g_ok) return;
+    int stride, tw, th;
+    uint32_t* t = fb_target(&stride, &tw, &th);
+    if (!t) return;
     uint8_t uc = (uint8_t)c;
     if (uc >= 128) uc = '?'; /* font8x8_basic only covers 0-127 */
+
+    /* Blank cells (most of any terminal) are a plain fill. */
+    if (uc == ' ' || uc == 0) { fb_fill_rect(x, y, 8, 8, bg); return; }
     const uint8_t* glyph = font8x8_basic[uc];
 
-    for (int gy = 0; gy < 8; gy++) {
+    /* Clip once per glyph, then write rows straight into the target
+     * instead of 64 bounds-checked fb_putpixel() calls. */
+    int gx0 = x < 0 ? -x : 0, gx1 = (x + 8 > tw) ? tw - x : 8;
+    int gy0 = y < 0 ? -y : 0, gy1 = (y + 8 > th) ? th - y : 8;
+    if (gx0 >= gx1 || gy0 >= gy1) return;
+    for (int gy = gy0; gy < gy1; gy++) {
         uint8_t row = glyph[gy];
-        for (int gx = 0; gx < 8; gx++) {
-            uint32_t col = (row & (1u << gx)) ? fg : bg;
-            fb_putpixel(x + gx, y + gy, col);
-        }
+        uint32_t* p = t + (uint32_t)(y + gy) * (uint32_t)stride + (uint32_t)x;
+        for (int gx = gx0; gx < gx1; gx++) p[gx] = (row & (1u << gx)) ? fg : bg;
     }
 }
 

@@ -14,6 +14,15 @@
 #include "../kernel/types.h"
 #include "../kernel/ata.h"
 #include "../kernel/fsdisk.h"
+#include "netcmds.h"
+#include "../kernel/serial.h"
+#include "../kernel/kstring.h"
+#include "../kernel/kheap.h"
+
+extern char _kernel_end[];   /* boot/linker.ld */
+
+#define SHELL_USER "banana"
+#define SHELL_HOST "banana-os-0.5"
 
 /* ── string helpers ─────────────────────────────────────────────── */
 static int k_strlen(const char* s) { int n=0; while(s[n]) n++; return n; }
@@ -41,7 +50,7 @@ static void print_uptime(void);
 static void dispatch(const char* line, int persona);
 static void run_script_text(const char* content, int persona);
 
-#define SH_LINE_MAX     256
+#define SH_LINE_MAX     1024   /* long enough for real-world download URLs */
 #define SH_HISTORY_MAX  16
 
 /* ── shell personas ─────────────────────────────────────────────── *
@@ -338,13 +347,13 @@ static void cmd_neofetch(int persona) {
         VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
 
     terminal_write_color("  Banana OS", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    terminal_writeln(" 0.4");
+    terminal_writeln(" 0.5");
     terminal_writeln("  --------------------");
 
     terminal_write_color("  OS:       ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln("Banana OS 0.4");
+    terminal_writeln("Banana OS 0.5");
     terminal_write_color("  KERNEL:   ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln("Banana Kernel 0.4");
+    terminal_writeln("Banana Kernel 0.5");
     terminal_write_color("  ARCH:     ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     terminal_writeln("x86 (i686)");
     terminal_write_color("  SHELL:    ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
@@ -419,7 +428,10 @@ static void cmd_proc_info(const char* args) {
 static void cmd_ram_info(const char* args) {
     const sysinfo_t* si = sysinfo_get();
     uint32_t total_kb = si->mem_kb;
-    uint32_t used_bytes = fs_ram_used_bytes();
+    /* everything below the end of the kernel image (low memory + the
+     * image with its static buffers) plus what the heap has handed out
+     * (file contents, network buffers, decoded images...) */
+    uint32_t used_bytes = (uint32_t)(uintptr_t)_kernel_end + kheap_used_bytes();
     uint32_t used_kb = (used_bytes + 1023u) / 1024u;
     uint32_t free_kb = (total_kb > used_kb) ? (total_kb - used_kb) : 0;
     uint32_t pct = (total_kb > 0) ? ((used_kb * 100u) / total_kb) : 0;
@@ -432,9 +444,17 @@ static void cmd_ram_info(const char* args) {
         terminal_writeln(" MB");
     }
     if (show_all || has_flag(args, "-u")) {
-        terminal_write_color("Used (RAM FS): ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+        terminal_write_color("Used (kernel + heap): ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
         terminal_write(u32_to_str((used_kb / 1024u) + 1u, b, sizeof(b)));
         terminal_writeln(" MB");
+    }
+    if (show_all || has_flag(args, "-h")) {
+        char line[96];
+        ksnprintf(line, sizeof(line), "%u KiB used of %u KiB (files: %u KiB, largest free block %u KiB)",
+                  kheap_used_bytes() / 1024u, kheap_total_bytes() / 1024u,
+                  fs_ram_used_bytes() / 1024u, kheap_largest_free() / 1024u);
+        terminal_write_color("Kernel heap: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+        terminal_writeln(line);
     }
     if (show_all || has_flag(args, "-f")) {
         terminal_write_color("Estimated free: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
@@ -573,7 +593,7 @@ static void cmd_top(void) {
         terminal_clear();
 
         /* ── HEADER ───────────────────────────── */
-        terminal_write_color("Banana OS 0.4 htop - press q to quit\n",
+        terminal_write_color("Banana OS 0.5 htop - press q to quit\n",
                              VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
         terminal_writeln("--------------------------------------------");
 
@@ -585,7 +605,7 @@ static void cmd_top(void) {
 
         /* OS VERSION */
         terminal_write_color("OS:  ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-        terminal_writeln("Banana OS 0.4 (Banana Kernel 0.4)");
+        terminal_writeln("Banana OS 0.5 (Banana Kernel 0.5)");
 
         /* RAM USAGE */
         uint32_t total_mb = (si->mem_kb / 1024u) + 1u;
@@ -676,14 +696,14 @@ static void cmd_top(void) {
                 return;
             }
 
-            timer_sleep_ms(50);
+            task_sleep_ms(50);
         }
     }
 }
 
 static void cmd_help(void) {
     static const char* lines[] = {
-        "Banana OS 0.4 - available commands:",
+        "Banana OS 0.5 - available commands:",
         "",
         "  help               show this message",
         "  neofetch           system information",
@@ -730,7 +750,7 @@ static void cmd_help(void) {
         "  loadctl [lay]      alias of keyboardctl",
         "  usbctl             show USB legacy handoff status",
         "  proc_info [flags]  cpu info (-c -t -n -v -f -m -s -ht)",
-        "  ram_info [flags]   ram info (-t -u -f -p -m)",
+        "  ram_info [flags]   ram info (-t -u -h -f -p -m)",
         "  gpu_info [flags]   gpu/fb info (-n -r -b -p -m)",
         "  hw_info [flags]    hardware summary (-c -m -g -u -k -r)",
         "  shutdown [now|-c]  schedule shutdown (60s), now, or cancel",
@@ -738,6 +758,25 @@ static void cmd_help(void) {
         "  halt               hard halt (no ACPI)",
         "  install            install to a dedicated ATA disk (bootable, persistent)",
         "  sync               re-write filesystem to the installed disk now",
+        "  time <command>     run a command and print how long it took",
+        "",
+        "Networking:",
+        "  ifconfig [if ..]   show / set the network config (DHCP by default)",
+        "  ifconfig <if> up   make eth0 / usb0 the active interface",
+        "  lsusb              list USB controllers and devices",
+        "  usb rescan         look for newly plugged / unplugged USB devices",
+        "  dhcp               request a new DHCP lease",
+        "  ping [-c N] <host> send ICMP echo requests (Ctrl+C stops)",
+        "  nslookup <host>    resolve a hostname with DNS (alias: host)",
+        "  curl [opt] <url>   HTTP/HTTPS client: -o f -O -L -I -i -v -s",
+        "  wget [-O f] <url>  download a file (follows redirects)",
+        "  netstat            list TCP connections",
+        "  arp                show the ARP cache",
+        "  cryptotest         run the TLS crypto self-tests",
+        "",
+        "Wallpaper:",
+        "  wallpaper          show/set the wallpaper (see: wallpaper help)",
+        "  wallpaper url <u>  download a picture to ~/Pictures and use it",
         "",
         "  Editor: arrows move, ^O/^S save, ^X exit, ^K cut line, ^U paste",
         "",
@@ -756,17 +795,20 @@ static void cmd_help(void) {
                 terminal_putchar('\n');
                 continue;
             }
-            if (idx == 0) {
-                terminal_write_color(lines[idx], VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+            /* headings are unindented, the editor note is grey, and
+             * every indented line is a command */
+            const char* l = lines[idx];
+            if (l[0] && l[0] != ' ') {
+                terminal_write_color(l, VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
-            } else if (idx >= 2 && idx <= 54) {
-                terminal_write_color(lines[idx], VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            } else if (k_strncmp(l, "  Editor:", 9) == 0) {
+                terminal_write_color(l, VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
-            } else if (idx == 56) {
-                terminal_write_color(lines[idx], VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK);
+            } else if (l[0]) {
+                terminal_write_color(l, VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
                 terminal_putchar('\n');
             } else {
-                terminal_writeln(lines[idx]);
+                terminal_writeln(l);
             }
         }
 
@@ -795,9 +837,9 @@ static void cmd_help(void) {
         while (!c) {
             gui_poll();
             terminal_vt_set_active(my_vt);
-            if (gui_focused_vt() != my_vt) { timer_sleep_ms(10); continue; }
+            if (gui_focused_vt() != my_vt) { task_sleep_ms(10); continue; }
             c = keyboard_try_getchar();
-            if (!c) timer_sleep_ms(10);
+            if (!c) task_sleep_ms(10);
         }
         if (c == 'q' || c == 'Q' || c == 3) {
             terminal_putchar('\n'); /* keep visible help text on screen */
@@ -857,8 +899,18 @@ static void cmd_cat(const char* name) {
         return;
     }
     fs_file_t* f = fs_get_file(idx);
-    if (!f->content[0]) terminal_writeln("(empty file)");
-    else                 terminal_writeln(f->content);
+    if (f->size == 0) { terminal_writeln("(empty file)"); return; }
+    if (fs_is_binary(idx)) {
+        char b[16];
+        terminal_write("cat: ");
+        terminal_write(name);
+        terminal_write(": binary file (");
+        terminal_write(u32_to_str(f->size, b, sizeof(b)));
+        terminal_writeln(" bytes) - not printed");
+        return;
+    }
+    terminal_write(f->content);
+    if (f->content[f->size - 1] != '\n') terminal_putchar('\n');
 }
 
 static void cmd_run(const char* name, int persona) {
@@ -1100,7 +1152,10 @@ static const char* const known_cmds[] = {
     "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
     "hw_info", "shutdown", "reboot", "halt", "install", "sync", "history", "which", "type",
     "alias", "unalias", "export", "unset", "env", "chsh",
-    "grep", "wc", "head", "tail", "find", (void*)0
+    "grep", "wc", "head", "tail", "find", "time",
+    /* shell/netcmds.c + shell/wpcmd.c */
+    "ifconfig", "dhcp", "ping", "nslookup", "host", "netstat", "arp", "curl", "wget",
+    "cryptotest", "wallpaper", "lsusb", "usb", (void*)0
 };
 
 static void cmd_which(const char* args) {
@@ -1289,12 +1344,12 @@ static void cmd_chsh(const char* args, int persona) {
 }
 
 static void cmd_uname(int persona) {
-    if (persona == SHELL_KIND_BASH) terminal_writeln("Banana OS 0.4 x86 Banana Kernel 0.4 bash");
-    else                             terminal_writeln("Banana OS 0.4 x86 Banana Kernel 0.4 sh");
+    if (persona == SHELL_KIND_BASH) terminal_writeln("Banana OS 0.5 x86 Banana Kernel 0.5 bash");
+    else                             terminal_writeln("Banana OS 0.5 x86 Banana Kernel 0.5 sh");
 }
 
 static void cmd_whoami(void) { terminal_writeln("banana"); }
-static void cmd_hostname(void) { terminal_writeln("banana-os-0.4"); }
+static void cmd_hostname(void) { terminal_writeln("banana-os-0.5"); }
 
 static void cmd_date(void) {
     rtc_datetime_t dt;
@@ -1438,9 +1493,9 @@ static int prompt_yes_no(void) {
     while (1) {
         gui_poll();
         terminal_vt_set_active(my_vt);
-        if (gui_focused_vt() != my_vt) { timer_sleep_ms(10); continue; }
+        if (gui_focused_vt() != my_vt) { task_sleep_ms(10); continue; }
         char c = keyboard_try_getchar();
-        if (!c) { timer_sleep_ms(10); continue; }
+        if (!c) { task_sleep_ms(10); continue; }
         if (c == 'y' || c == 'Y') { terminal_writeln("y"); return 1; }
         if (c == 'n' || c == 'N' || c == '\n' || c == 3) { terminal_writeln("n"); return 0; }
     }
@@ -1538,7 +1593,13 @@ static void cmd_sync(void) {
                              VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
         return;
     }
-    if (fsdisk_sync() != 0) {
+    int rc = fsdisk_sync();
+    if (rc == FSDISK_ERR_TOO_SMALL) {
+        terminal_write_color("sync: failed - the files no longer fit on the disk (delete some, or use a bigger disk).\n",
+                             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+    if (rc != 0) {
         terminal_write_color("sync: failed (disk I/O error).\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }
@@ -1553,14 +1614,60 @@ static void print_prompt(int persona) {
     if (persona == SHELL_KIND_BASH) {
         /* real bash's default PS1: whole user@host in one bright-green
          * block, rather than sh's two-tone yellow/green split below. */
-        terminal_write_color("banana@banana-os-0.4", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        terminal_write_color("banana@banana-os-0.5", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     } else {
         terminal_write_color("banana",         VGA_COLOR_YELLOW,      VGA_COLOR_BLACK);
-        terminal_write_color("@banana-os-0.4", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        terminal_write_color("@banana-os-0.5", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     }
     terminal_write_color(":",     VGA_COLOR_WHITE,      VGA_COLOR_BLACK);
     terminal_write_color(cwd_buf, VGA_COLOR_LIGHT_BLUE,  VGA_COLOR_BLACK);
     terminal_write_color("$ ",    VGA_COLOR_WHITE,       VGA_COLOR_BLACK);
+}
+
+/* ── line editor painting ───────────────────────────────────────── */
+
+static void line_place_cursor(int start, int cur) {
+    int w = (int)terminal_get_width();
+    int pos = start + cur;
+    terminal_serial_mirror(0);
+    terminal_set_cursor((size_t)(pos / w), (size_t)(pos % w));
+    terminal_serial_mirror(1);
+}
+
+/* Rewrites the input text from `*start`, blanking what a shorter line
+ * left behind. Writing past the last row scrolls the screen, so the
+ * start offset is recomputed from where the cursor actually ended up. */
+static void line_repaint(int* start, const char* buf, int len, int prev_len, int cur) {
+    int w = (int)terminal_get_width();
+    int total = (prev_len > len) ? prev_len : len;
+    terminal_serial_mirror(0);
+    terminal_set_cursor((size_t)(*start / w), (size_t)(*start % w));
+    for (int i = 0; i < len; i++) terminal_putchar(buf[i]);
+    for (int i = len; i < total; i++) terminal_putchar(' ');
+    size_t r, c;
+    terminal_get_cursor(&r, &c);
+    *start = (int)(r * (size_t)w + c) - total;
+    if (*start < 0) *start = 0;
+    terminal_serial_mirror(1);
+    line_place_cursor(*start, cur);
+}
+
+/* The serial console gets a plain ANSI repaint of the line instead. */
+static void line_serial_echo(const char* buf, int len, int cur, int persona) {
+    if (terminal_vt_get_active() != 0) return;
+    char cwd_buf[FS_PATH_LEN];
+    fs_cwd_path(cwd_buf, sizeof(cwd_buf));
+    (void)persona;
+    serial_write("\r" SHELL_USER "@" SHELL_HOST ":");
+    serial_write(cwd_buf);
+    serial_write("$ ");
+    for (int i = 0; i < len; i++) serial_putc(buf[i]);
+    serial_write("\x1b[K");
+    if (len > cur) {
+        char seq[16];
+        ksnprintf(seq, sizeof(seq), "\x1b[%dD", len - cur);
+        serial_write(seq);
+    }
 }
 
 static void shell_readline(char* buf, int maxlen, int persona) {
@@ -1581,6 +1688,15 @@ static void shell_readline(char* buf, int maxlen, int persona) {
     char live_line[SH_LINE_MAX];
     live_line[0] = '\0';
 
+    /* where the editable text begins (just after the prompt), as a
+     * linear cell offset - lines longer than the screen wrap */
+    int start;
+    {
+        size_t r, cc;
+        terminal_get_cursor(&r, &cc);
+        start = (int)(r * terminal_get_width() + cc);
+    }
+
     while (1) {
         poll_deferred_actions();
         daemon_poll(len == 0);
@@ -1591,12 +1707,12 @@ static void shell_readline(char* buf, int maxlen, int persona) {
             /* Another window (or none) has keyboard focus: keep this
              * shell's own command running/idling but don't steal input
              * meant for whoever the user is actually looking at. */
-            timer_sleep_ms(10);
+            task_sleep_ms(10);
             continue;
         }
 
         char c = keyboard_try_getchar();
-        if (!c) { timer_sleep_ms(10); continue; }
+        if (!c) { task_sleep_ms(10); continue; }
 
         if (c == 27) {
             /* Escape, or the lead byte of an arrow-key sequence
@@ -1613,15 +1729,16 @@ static void shell_readline(char* buf, int maxlen, int persona) {
                 continue;
             }
             char c3 = keyboard_getchar(); /* A/B/C/D */
+            terminal_vt_set_active(my_vt);   /* keyboard_getchar() may yield */
 
             if (gui_handle_arrow(c3)) continue;
 
-            if (c3 == 'D') {
-                if (cur > 0) { cur--; terminal_cursor_left(); }
-                continue;
-            }
-            if (c3 == 'C') {
-                if (cur < len) { cur++; terminal_cursor_right(); }
+            if (c3 == 'D' || c3 == 'C') {
+                if (c3 == 'D' && cur > 0) cur--;
+                else if (c3 == 'C' && cur < len) cur++;
+                else continue;
+                line_place_cursor(start, cur);
+                line_serial_echo(buf, len, cur, persona);
                 continue;
             }
             if (c3 == 'A') { /* history up */
@@ -1653,10 +1770,12 @@ static void shell_readline(char* buf, int maxlen, int persona) {
             continue;
         } else if (c == 3) { /* Ctrl+C: cancel line, do not execute history entry */
             buf[0] = '\0';
+            line_place_cursor(start, len);
             terminal_write("^C\n");
             return;
         } else if (c == '\n') {
             buf[len] = '\0'; /* ensure empty Enter stays empty */
+            line_place_cursor(start, len);   /* newline after the whole (wrapped) line */
             terminal_putchar('\n');
             break;
         } else if (c == '\b') {
@@ -1676,17 +1795,9 @@ static void shell_readline(char* buf, int maxlen, int persona) {
 
         buf[len] = '\0';
 
-        /* Redraw editable command line after prompt */
-        terminal_putchar('\r');
-        print_prompt(persona);
-        terminal_write(buf);
-
-        if (prev_len > len) {
-            for (int i = 0; i < prev_len - len; i++) terminal_putchar(' ');
-        }
-
-        int draw_len = (prev_len > len) ? prev_len : len;
-        for (int i = 0; i < draw_len - cur; i++) terminal_cursor_left();
+        /* Repaint the editable text in place (it may span several rows) */
+        line_repaint(&start, buf, len, prev_len, cur);
+        line_serial_echo(buf, len, cur, persona);
         prev_len = len;
     }
 
@@ -1858,6 +1969,16 @@ static void dispatch(const char* raw_line, int persona) {
 
     if (k_strcmp(line, "install")  == 0) { cmd_install();     return; }
     if (k_strcmp(line, "sync")     == 0) { cmd_sync();        return; }
+    if (k_strncmp(line, "time ", 5) == 0) {
+        /* bash-style `time`: wall-clock duration of one command */
+        uint32_t t0 = timer_ms();
+        dispatch(k_skip_spaces(line + 5), persona);
+        uint32_t ms = timer_ms() - t0;
+        char tb[48];
+        ksnprintf(tb, sizeof(tb), "\nreal    %um%u.%03us\n", ms / 60000u, (ms / 1000u) % 60u, ms % 1000u);
+        terminal_write(tb);
+        return;
+    }
 
     /* shutdown / reboot with optional arg */
     if (k_strcmp(line, "shutdown")       == 0) { cmd_shutdown("");    return; }
@@ -1883,7 +2004,7 @@ static void dispatch(const char* raw_line, int persona) {
     if (k_strncmp(line, "tail ", 5) == 0) { cmd_tail(k_skip_spaces(line+5)); return; }
     if (k_strncmp(line, "find ", 5) == 0) { cmd_find(k_skip_spaces(line+5)); return; }
     if (k_strncmp(line, "which ", 6) == 0) { cmd_which(k_skip_spaces(line+6)); return; }
-    if (k_strncmp(line, "alias ",   7) == 0) { cmd_alias(k_skip_spaces(line+7)); return; }
+    if (k_strncmp(line, "alias ",   6) == 0) { cmd_alias(k_skip_spaces(line+6)); return; }
     if (k_strncmp(line, "unalias ", 8) == 0) { cmd_unalias(k_skip_spaces(line+8)); return; }
     if (k_strncmp(line, "export ",  7) == 0) { cmd_export(k_skip_spaces(line+7), persona); return; }
     if (k_strncmp(line, "unset ",   6) == 0) { cmd_unset(k_skip_spaces(line+6)); return; }
@@ -1896,6 +2017,9 @@ static void dispatch(const char* raw_line, int persona) {
     if (k_strncmp(line, "gpu_info ", 9) == 0) { cmd_gpu_info(k_skip_spaces(line+9)); return; }
     if (k_strncmp(line, "hw_info ", 8) == 0) { cmd_hw_info(k_skip_spaces(line+8)); return; }
 
+    /* network commands (shell/netcmds.c) */
+    if (netcmd_dispatch(line)) return;
+
     /* unknown */
     terminal_write_color(shell_kind_name(persona), VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     terminal_write_color(": command not found: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
@@ -1903,7 +2027,7 @@ static void dispatch(const char* raw_line, int persona) {
 }
 
 static void run_script_text(const char* content, int persona) {
-    char linebuf[256];
+    char linebuf[SH_LINE_MAX];
     int pos = 0;
     for (int i = 0;; i++) {
         char ch = content[i];
@@ -1930,7 +2054,7 @@ static void print_banner(int persona) {
         VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
 
     terminal_writeln("");
-    terminal_write_color("  Welcome to Banana OS 0.4  --  ",
+    terminal_write_color("  Welcome to Banana OS 0.5  --  ",
                          VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     if (persona == SHELL_KIND_BASH)
         terminal_writeln("bash-compatible shell. Type 'help' to get started.");
@@ -1940,7 +2064,7 @@ static void print_banner(int persona) {
 }
 
 static void print_banner_window(int persona) {
-    terminal_write_color("  Welcome to Banana OS 0.4  --  ",
+    terminal_write_color("  Welcome to Banana OS 0.5  --  ",
                          VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     if (persona == SHELL_KIND_BASH)
         terminal_writeln("bash-compatible shell. Type 'help' to get started.");
@@ -1951,7 +2075,7 @@ static void print_banner_window(int persona) {
 
 /* ── entry ──────────────────────────────────────────────────────── */
 void shell_run(void) {
-    char buf[256];
+    char buf[SH_LINE_MAX];
     /* Which persona a *new* shell instance boots into is decided once,
      * here, from g_default_shell_kind (as set by `chsh`) - see the
      * "shell personas" comment near the top of this file. */
@@ -1974,7 +2098,7 @@ void shell_run(void) {
 }
 
 void shell_run_window(int vt) {
-    char buf[256];
+    char buf[SH_LINE_MAX];
     int persona = g_default_shell_kind;
 
     terminal_vt_set_active(vt);

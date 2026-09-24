@@ -1,4 +1,5 @@
 #include "fb.h"
+#include "kstring.h"
 
 /* Multiboot2 info parsing (only what we need) */
 typedef struct {
@@ -107,36 +108,48 @@ void fb_putpixel(int x, int y, uint32_t rgb) {
     fb_putpixel_direct(x, y, rgb);
 }
 
+uint32_t* fb_target(int* stride_px, int* w, int* h) {
+    if (!g_fb_ok) return NULL;
+    if (g_bb) {
+        *stride_px = (int)g_bb_w;
+        *w = (int)(g_bb_w < g_fb.width ? g_bb_w : g_fb.width);
+        *h = (int)(g_bb_h < g_fb.height ? g_bb_h : g_fb.height);
+        return g_bb;
+    }
+    *stride_px = (int)(g_fb.pitch / 4u);
+    *w = (int)g_fb.width;
+    *h = (int)g_fb.height;
+    return (uint32_t*)g_fb.addr;
+}
+
 void fb_fill_rect(int x, int y, int w, int h, uint32_t rgb) {
-    if (!g_fb_ok) return;
-    if (w <= 0 || h <= 0) return;
+    int stride, tw, th;
+    uint32_t* t = fb_target(&stride, &tw, &th);
+    if (!t || w <= 0 || h <= 0) return;
 
     int x0 = x < 0 ? 0 : x;
     int y0 = y < 0 ? 0 : y;
     int x1 = x + w;
     int y1 = y + h;
-    if (x1 > (int)g_fb.width) x1 = (int)g_fb.width;
-    if (y1 > (int)g_fb.height) y1 = (int)g_fb.height;
+    if (x1 > tw) x1 = tw;
+    if (y1 > th) y1 = th;
+    if (x0 >= x1 || y0 >= y1) return;
 
-    if (g_bb) {
-        for (int yy = y0; yy < y1; yy++) {
-            if ((uint32_t)yy >= g_bb_h) break;
-            uint32_t* p = &g_bb[(uint32_t)yy * g_bb_w];
-            for (int xx = x0; xx < x1; xx++) {
-                if ((uint32_t)xx >= g_bb_w) break;
-                p[xx] = rgb;
-            }
-        }
-        return;
-    }
+    for (int yy = y0; yy < y1; yy++)
+        memset32(t + (uint32_t)yy * (uint32_t)stride + (uint32_t)x0, rgb, (uint32_t)(x1 - x0));
+}
 
-    for (int yy = y0; yy < y1; yy++) {
-        uintptr_t row = g_fb.addr + (uintptr_t)((uint32_t)yy * g_fb.pitch);
-        uint32_t* p = (uint32_t*)row;
-        for (int xx = x0; xx < x1; xx++) {
-            p[xx] = rgb;
-        }
-    }
+void fb_scroll_up(int top, int height, int dy, uint32_t fill) {
+    int stride, tw, th;
+    uint32_t* t = fb_target(&stride, &tw, &th);
+    if (!t || dy <= 0 || height <= 0) return;
+    if (top + height > th) height = th - top;
+    if (dy >= height) { fb_fill_rect(0, top, tw, height, fill); return; }
+    /* one block move of every row but the first dy, then clear the gap */
+    memmove(t + (uint32_t)top * (uint32_t)stride,
+            t + (uint32_t)(top + dy) * (uint32_t)stride,
+            (uint32_t)(height - dy) * (uint32_t)stride * 4u);
+    fb_fill_rect(0, top + height - dy, tw, dy, fill);
 }
 
 void fb_set_backbuffer(uint32_t* buf, uint32_t buf_width, uint32_t buf_height) {
@@ -159,12 +172,24 @@ void fb_present(void) {
     if (h > g_fb.height) h = g_fb.height;
 
     for (uint32_t y = 0; y < h; y++) {
-        uintptr_t row = g_fb.addr + (uintptr_t)(y * g_fb.pitch);
-        uint32_t* dst = (uint32_t*)row;
-        uint32_t* src = &g_bb[y * g_bb_w];
-        for (uint32_t x = 0; x < w; x++) {
-            dst[x] = src[x];
-        }
+        uint32_t* dst = (uint32_t*)(g_fb.addr + (uintptr_t)(y * g_fb.pitch));
+        memcpy(dst, &g_bb[y * g_bb_w], w * 4u);
+    }
+}
+
+void fb_present_rect(int x, int y, int w, int h) {
+    if (!g_fb_ok || !g_bb) return;
+    int x1 = x + w, y1 = y + h;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x1 > (int)g_fb.width)  x1 = (int)g_fb.width;
+    if (y1 > (int)g_fb.height) y1 = (int)g_fb.height;
+    if (x1 > (int)g_bb_w) x1 = (int)g_bb_w;
+    if (y1 > (int)g_bb_h) y1 = (int)g_bb_h;
+    if (x >= x1 || y >= y1) return;
+    for (int yy = y; yy < y1; yy++) {
+        uint32_t* dst = (uint32_t*)(g_fb.addr + (uintptr_t)((uint32_t)yy * g_fb.pitch));
+        memcpy(dst + x, &g_bb[(uint32_t)yy * g_bb_w + (uint32_t)x], (uint32_t)(x1 - x) * 4u);
     }
 }
 

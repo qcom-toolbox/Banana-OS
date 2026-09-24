@@ -1,4 +1,4 @@
-/* Banana OS 0.3 linker script */
+/* Banana OS 0.5 linker script */
 ENTRY(_start)
 
 SECTIONS {
@@ -7,19 +7,29 @@ SECTIONS {
     .text BLOCK(4K) : ALIGN(4K) {
         *(.multiboot)
         *(.multiboot2)
-        *(.text)
+        *(.text .text.*)
     }
 
     .rodata BLOCK(4K) : ALIGN(4K) {
-        *(.rodata)
+        *(.rodata .rodata.*)
+        *(.eh_frame*)
     }
 
     .data BLOCK(4K) : ALIGN(4K) {
-        *(.data)
+        *(.data .data.*)
     }
 
     .bss BLOCK(4K) : ALIGN(4K) {
         *(COMMON)
-        *(.bss)
+        *(.bss .bss.*)
+    }
+
+    /* First free byte after the image: the kernel heap starts here
+     * (kernel/kheap.c). */
+    _kernel_end = .;
+
+    /DISCARD/ : {
+        *(.note*)
+        *(.comment)
     }
 }

@@ -4,6 +4,7 @@
 #include "../kernel/fs.h"
 #include "../kernel/gui.h"
 #include "../kernel/timer.h"
+#include "../kernel/task.h"
 #include "../kernel/types.h"
 
 #define ED_MAX_LINES  64
@@ -37,22 +38,23 @@ static void k_memmove(char* d, const char* s, int n) {
 }
 
 /* buffer → file */
-static void buf_to_file(editor_buf_t* e, fs_file_t* f) {
+static void buf_to_file(editor_buf_t* e, int file_idx) {
+    static char text[ED_MAX_LINES * ED_LINE_LEN];   /* lines + newlines always fit */
     int pos = 0;
-    for (int i = 0; i < e->nlines && pos < FS_CONTENT_LEN - 2; i++) {
+    for (int i = 0; i < e->nlines; i++) {
         int l = k_strlen(e->lines[i]);
-        for (int j = 0; j < l && pos < FS_CONTENT_LEN - 2; j++)
-            f->content[pos++] = e->lines[i][j];
-        if (i < e->nlines - 1) f->content[pos++] = '\n';
+        for (int j = 0; j < l; j++) text[pos++] = e->lines[i][j];
+        if (i < e->nlines - 1) text[pos++] = '\n';
     }
-    f->content[pos] = '\0';
+    fs_write(file_idx, text, (uint32_t)pos);
 }
 
 /* file → buffer */
 static void file_to_buf(editor_buf_t* e, const char* src) {
     e->nlines = 0;
     int col = 0;
-    for (int i = 0; src[i] && e->nlines < ED_MAX_LINES; i++) {
+    /* stop one line early: the final (unterminated) line below needs a slot */
+    for (int i = 0; src[i] && e->nlines < ED_MAX_LINES - 1; i++) {
         if (src[i] == '\n') {
             e->lines[e->nlines][col] = '\0';
             e->nlines++;
@@ -148,15 +150,15 @@ static char editor_wait_key(int my_vt) {
     while (1) {
         gui_poll();
         terminal_vt_set_active(my_vt);
-        if (gui_focused_vt() != my_vt) { timer_sleep_ms(10); continue; }
+        if (gui_focused_vt() != my_vt) { task_sleep_ms(10); continue; }
         char c = keyboard_try_getchar();
         if (c) return c;
-        timer_sleep_ms(10);
+        task_sleep_ms(10);
     }
 }
 
-static void save_file(editor_buf_t* e, fs_file_t* f, int my_vt) {
-    buf_to_file(e, f);
+static void save_file(editor_buf_t* e, int file_idx, int my_vt) {
+    buf_to_file(e, file_idx);
     e->dirty = 0;
     draw(e);
     terminal_setcolor(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREY);
@@ -180,6 +182,13 @@ void editor_open(const char* fname) {
         return;
     }
 
+    if (fs_is_binary(idx)) {
+        /* saving would truncate it at the first NUL byte */
+        terminal_write_color("editor: refusing to open a binary file (image/download?)\n",
+                             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+
     fs_file_t* f = fs_get_file(idx);
     file_to_buf(e, f->content);
 
@@ -197,14 +206,14 @@ void editor_open(const char* fname) {
                 terminal_write("\n  Save modified buffer? (Y/N): ");
                 terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
                 char ans = editor_wait_key(my_vt);
-                if (ans == 'y' || ans == 'Y') buf_to_file(e, f);
+                if (ans == 'y' || ans == 'Y') buf_to_file(e, idx);
             }
             terminal_clear();
             return;
         }
 
         if (c == 15 || c == 19) { /* Ctrl+O or Ctrl+S */
-            save_file(e, f, my_vt);
+            save_file(e, idx, my_vt);
             continue;
         }
 

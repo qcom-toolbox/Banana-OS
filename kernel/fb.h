@@ -24,6 +24,16 @@ void fb_set_backbuffer(uint32_t* buf, uint32_t buf_width, uint32_t buf_height);
 void fb_clear_backbuffer(void);
 void fb_present(void);              /* copy backbuffer -> framebuffer */
 void fb_putpixel_direct(int x, int y, uint32_t rgb); /* always to framebuffer */
+/* copies one rectangle of the backbuffer to the screen */
+void fb_present_rect(int x, int y, int w, int h);
+
+/* The buffer drawing currently goes to: the backbuffer when one is set,
+ * else the framebuffer itself. Returns NULL without a framebuffer. */
+uint32_t* fb_target(int* stride_px, int* w, int* h);
+
+/* Moves rows [top+dy, top+height) up by dy pixels and fills the freed
+ * strip at the bottom (fast console scrolling). */
+void fb_scroll_up(int top, int height, int dy, uint32_t fill);
 
 #endif
 
