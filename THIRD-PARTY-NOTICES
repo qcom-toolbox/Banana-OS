@@ -48,6 +48,12 @@ License: BSD 2-Clause
   OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
   SUCH DAMAGE.
 
+TweetNaCl (crypto/ed25519.c: the Ed25519 field and group arithmetic
+follows TweetNaCl's crypto_sign)
+Daniel J. Bernstein, Wesley Janssen, Tanja Lange, Peter Schwabe,
+Matthew Dempsky, Sjaak Smetsers
+License: public domain - https://tweetnacl.cr.yp.to/
+
 The Banana-OS kernel and all original Banana-OS source code (including
 the network stack, TLS and crypto code) remain licensed under the BSD
 2-Clause License.

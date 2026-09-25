@@ -164,3 +164,25 @@ void hkdf_expand(const uint8_t prk[SHA256_LEN], const uint8_t* info, uint32_t in
         counter++;
     }
 }
+
+/* PBKDF2-HMAC-SHA256 (RFC 8018), first 32-byte block only - enough for
+ * storing password hashes. The keyed HMAC state is computed once and
+ * copied for every iteration, so each costs two SHA-256 blocks. */
+void pbkdf2_sha256(const uint8_t* pw, uint32_t pw_len, const uint8_t* salt, uint32_t salt_len,
+                   uint32_t iterations, uint8_t out[SHA256_LEN]) {
+    hmac_sha256_ctx_t base, c;
+    uint8_t u[SHA256_LEN];
+    static const uint8_t one[4] = { 0, 0, 0, 1 };
+    hmac_sha256_init(&base, pw, pw_len);
+    c = base;
+    hmac_sha256_update(&c, salt, salt_len);
+    hmac_sha256_update(&c, one, 4);
+    hmac_sha256_final(&c, u);
+    memcpy(out, u, SHA256_LEN);
+    for (uint32_t i = 1; i < iterations; i++) {
+        c = base;
+        hmac_sha256_update(&c, u, SHA256_LEN);
+        hmac_sha256_final(&c, u);
+        for (int k = 0; k < SHA256_LEN; k++) out[k] ^= u[k];
+    }
+}

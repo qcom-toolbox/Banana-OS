@@ -35,4 +35,8 @@ void hkdf_extract(const uint8_t* salt, uint32_t salt_len, const uint8_t* ikm, ui
 void hkdf_expand(const uint8_t prk[SHA256_LEN], const uint8_t* info, uint32_t info_len,
                  uint8_t* out, uint32_t out_len);
 
+/* PBKDF2-HMAC-SHA256 (RFC 8018), 32 bytes of output */
+void pbkdf2_sha256(const uint8_t* pw, uint32_t pw_len, const uint8_t* salt, uint32_t salt_len,
+                   uint32_t iterations, uint8_t out[SHA256_LEN]);
+
 #endif

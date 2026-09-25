@@ -1,4 +1,5 @@
 #include "net.h"
+#include "netconf.h"
 #include "tcp.h"
 #include "kstring.h"
 #include "serial.h"
@@ -214,8 +215,11 @@ void net_register_device(netdev_t* nd) {
     random_add_entropy(nd->mac, 6);
     klog("net: %s: %s, mac %02x:%02x:%02x:%02x:%02x:%02x\n", nd->ifname, nd->model,
          nd->mac[0], nd->mac[1], nd->mac[2], nd->mac[3], nd->mac[4], nd->mac[5]);
-    /* a USB adapter was plugged in on purpose: use it */
-    if (!g_if.dev || nd->is_usb) net_select_device(nd);
+    /* the saved configuration (/etc/network.conf) names this card: use it
+     * with its saved addresses. Otherwise a USB adapter plugged in on
+     * purpose is used - unless the configuration pins another card. */
+    if (netconf_claims(nd)) { netconf_apply_to(nd); return; }
+    if (!g_if.dev || (nd->is_usb && !netconf_pins_iface())) net_select_device(nd);
 }
 
 void net_unregister_device(netdev_t* nd) {

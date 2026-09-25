@@ -15,9 +15,11 @@
 #include "../kernel/ata.h"
 #include "../kernel/fsdisk.h"
 #include "netcmds.h"
+#include "srvcmds.h"
 #include "../kernel/serial.h"
 #include "../kernel/kstring.h"
 #include "../kernel/kheap.h"
+#include "../kernel/tty.h"
 
 extern char _kernel_end[];   /* boot/linker.ld */
 
@@ -761,7 +763,8 @@ static void cmd_help(void) {
         "  time <command>     run a command and print how long it took",
         "",
         "Networking:",
-        "  ifconfig [if ..]   show / set the network config (DHCP by default)",
+        "  ifconfig [if ..]   show / set the network config (saved in /etc/network.conf)",
+        "  ifconfig reset     forget the saved network config (back to DHCP)",
         "  ifconfig <if> up   make eth0 / usb0 the active interface",
         "  lsusb              list USB controllers and devices",
         "  usb rescan         look for newly plugged / unplugged USB devices",
@@ -777,11 +780,23 @@ static void cmd_help(void) {
         "Wallpaper:",
         "  wallpaper          show/set the wallpaper (see: wallpaper help)",
         "  wallpaper url <u>  download a picture to ~/Pictures and use it",
+        "  files [folder]     open the desktop's file explorer (also: Files icon)",
         "",
+        "Servers:",
+        "  passwd             set the password of banana (the SSH login)",
+        "  sshd start|stop    SSH server (port 22): ssh banana@<this machine>",
+        "  httpd start|stop   web server (port 80) for the files in /var/www",
+        "  sshd/httpd enable  also start it at every boot (disable: undo)",
+        "",
+        "Shell: cmd > file, cmd >> file, cmd1; cmd2, cmd1 && cmd2",
         "  Editor: arrows move, ^O/^S save, ^X exit, ^K cut line, ^U paste",
         "",
     };
     const int line_count = (int)(sizeof(lines) / sizeof(lines[0]));
+    if (terminal_is_capturing()) {           /* help > file: no pager */
+        for (int i = 0; i < line_count; i++) terminal_writeln(lines[i]);
+        return;
+    }
     const int view_rows = 21; /* keep last rows for status/help */
     int top = 0;
     int max_top = (line_count > view_rows) ? (line_count - view_rows) : 0;
@@ -1155,7 +1170,7 @@ static const char* const known_cmds[] = {
     "grep", "wc", "head", "tail", "find", "time",
     /* shell/netcmds.c + shell/wpcmd.c */
     "ifconfig", "dhcp", "ping", "nslookup", "host", "netstat", "arp", "curl", "wget",
-    "cryptotest", "wallpaper", "lsusb", "usb", (void*)0
+    "cryptotest", "wallpaper", "lsusb", "usb", "httpd", "sshd", "passwd", "files", (void*)0
 };
 
 static void cmd_which(const char* args) {
@@ -1467,6 +1482,8 @@ static void cmd_mv(const char* args) {
 }
 
 static void cmd_exit(void) {
+    int tt = tty_current();
+    if (tt >= 0) { tty_finish(tt); return; }      /* log out of SSH */
     int my_vt = terminal_vt_get_active();
     if (my_vt != 0 && gui_close_terminal_by_vt(my_vt)) return;
     terminal_write_color(
@@ -1653,20 +1670,33 @@ static void line_repaint(int* start, const char* buf, int len, int prev_len, int
 }
 
 /* The serial console gets a plain ANSI repaint of the line instead. */
+/* An SSH session gets the same repaint through its own stream. */
+static void echo_out(int tt, const char* s) {
+    if (tt >= 0) tty_write(tt, s);
+    else serial_write(s);
+}
+
 static void line_serial_echo(const char* buf, int len, int cur, int persona) {
-    if (terminal_vt_get_active() != 0) return;
+    int tt = tty_current();
+    if (tt < 0 && terminal_vt_get_active() != 0) return;
     char cwd_buf[FS_PATH_LEN];
     fs_cwd_path(cwd_buf, sizeof(cwd_buf));
     (void)persona;
-    serial_write("\r" SHELL_USER "@" SHELL_HOST ":");
-    serial_write(cwd_buf);
-    serial_write("$ ");
-    for (int i = 0; i < len; i++) serial_putc(buf[i]);
-    serial_write("\x1b[K");
+    echo_out(tt, "\r" SHELL_USER "@" SHELL_HOST ":");
+    echo_out(tt, cwd_buf);
+    echo_out(tt, "$ ");
+    {
+        char line[SH_LINE_MAX];
+        int n = len < SH_LINE_MAX - 1 ? len : SH_LINE_MAX - 1;
+        memcpy(line, buf, (uint32_t)n);
+        line[n] = 0;
+        echo_out(tt, line);
+    }
+    echo_out(tt, "\x1b[K");
     if (len > cur) {
         char seq[16];
         ksnprintf(seq, sizeof(seq), "\x1b[%dD", len - cur);
-        serial_write(seq);
+        echo_out(tt, seq);
     }
 }
 
@@ -1841,7 +1871,99 @@ static void cmd_stopx(void) {
 }
 
 /* ── dispatch ───────────────────────────────────────────────────── */
+static void dispatch_cmd(const char* raw_line, int persona);
+
+/* `cmd > file` / `cmd >> file`: runs cmd with its output captured
+ * (kernel/terminal.c) and writes that to the file instead of the screen. */
 static void dispatch(const char* raw_line, int persona) {
+    /* `a; b` and `a && b` run one after the other */
+    {
+        char q = 0;
+        for (int i = 0; raw_line[i]; i++) {
+            char c = raw_line[i];
+            if (q) { if (c == q) q = 0; continue; }
+            if (c == 0x22 || c == 0x27) { q = c; continue; }
+            int amp = (c == '&' && raw_line[i + 1] == '&');
+            if (c != ';' && !amp) continue;
+            char first[SH_LINE_MAX];
+            int n = i < SH_LINE_MAX - 1 ? i : SH_LINE_MAX - 1;
+            memcpy(first, raw_line, (uint32_t)n);
+            while (n > 0 && (first[n - 1] == ' ' || first[n - 1] == '\t')) n--;
+            first[n] = 0;
+            if (*k_skip_spaces(first)) dispatch(first, persona);
+            const char* rest = k_skip_spaces(raw_line + i + (amp ? 2 : 1));
+            if (*rest) dispatch(rest, persona);
+            return;
+        }
+    }
+
+    int pos = -1;
+    char q = 0;
+    for (int i = 0; raw_line[i]; i++) {
+        char c = raw_line[i];
+        if (q) { if (c == q) q = 0; }
+        else if (c == 0x22 || c == 0x27) q = c;
+        else if (c == 0x3E) { pos = i; break; }
+    }
+    if (pos < 0) { dispatch_cmd(raw_line, persona); return; }
+
+    int append = raw_line[pos + 1] == 0x3E;
+    char cmd[SH_LINE_MAX], path[FS_PATH_LEN];
+    int n = pos < SH_LINE_MAX - 1 ? pos : SH_LINE_MAX - 1;
+    memcpy(cmd, raw_line, (uint32_t)n);
+    while (n > 0 && (cmd[n - 1] == ' ' || cmd[n - 1] == '\t')) n--;
+    cmd[n] = 0;
+    const char* t = k_skip_spaces(raw_line + pos + (append ? 2 : 1));
+    int pl = 0;
+    for (; t[pl] && t[pl] != 0x20 && pl < FS_PATH_LEN - 1; pl++) path[pl] = t[pl];
+    path[pl] = 0;
+    if (path[0] == 0x22 || path[0] == 0x27) {          /* "quoted name" */
+        int k = 0;
+        for (int i = 1; path[i] && path[i] != path[0]; i++) path[k++] = path[i];
+        path[k] = 0;
+    }
+    if (!path[0]) {
+        terminal_write_color("sh: syntax error: file name expected after >\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+    if (!terminal_capture_start()) {
+        terminal_write_color("sh: another redirection is running, try again\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+    dispatch_cmd(cmd, persona);
+    uint32_t len;
+    char* out = terminal_capture_stop(&len);
+    int idx = append ? fs_find_file(path) : -1;
+    int ok = idx >= 0 ? fs_append(idx, out, len) == 0 : fs_write_path(path, out, len) >= 0;
+    kfree(out);
+    if (!ok) {
+        terminal_write_color("sh: cannot write ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_write_color(path, VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_putchar(0x0A);
+    }
+}
+
+/* Commands that take one path as the rest of the line: `cd "My files"`
+ * works like in a real shell (the quotes only group the words). */
+static const char* unquote_path_cmd(const char* line, char* out, int cap) {
+    static const char* const cmds[] = { "cd", "edit", "cat", "run" };
+    const char* s = k_skip_spaces(line);
+    int wl = 0;
+    while (s[wl] && s[wl] != ' ') wl++;
+    int match = 0;
+    for (uint32_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
+        if ((int)strlen(cmds[i]) == wl && strncmp(s, cmds[i], (size_t)wl) == 0) match = 1;
+    if (!match || (!strchr(s, 0x22) && !strchr(s, 0x27))) return line;
+    int n = 0;
+    for (; *s && n < cap - 1; s++)
+        if (*s != 0x22 && *s != 0x27) out[n++] = *s;
+    out[n] = '\0';
+    return out;
+}
+
+static void dispatch_cmd(const char* raw_line, int persona) {
+    char unquoted[SH_LINE_MAX];
+    raw_line = unquote_path_cmd(raw_line, unquoted, sizeof(unquoted));
     /* "!!" / "$VAR" expansion, then a single non-recursive alias
      * substitution of the leading word - same order a real shell applies
      * these in, and shared by both personas (and by `run`'s scripts). */
@@ -1987,7 +2109,18 @@ static void dispatch(const char* raw_line, int persona) {
     if (k_strncmp(line, "reboot ", 7)    == 0) { cmd_reboot(k_skip_spaces(line+7));   return; }
 
     /* commands with arguments */
-    if (k_strncmp(line, "echo ",  5) == 0) { terminal_writeln(k_skip_spaces(line+5)); return; }
+    if (k_strncmp(line, "echo ",  5) == 0) {
+        /* quotes group words, like a real shell: they are not printed */
+        const char* s = k_skip_spaces(line + 5);
+        char q = 0;
+        for (; *s; s++) {
+            if (q) { if (*s == q) { q = 0; continue; } }
+            else if (*s == 0x22 || *s == 0x27) { q = *s; continue; }
+            terminal_putchar(*s);
+        }
+        terminal_putchar(0x0A);
+        return;
+    }
     if (k_strncmp(line, "cd ",    3) == 0) { fs_cd(k_skip_spaces(line+3));            return; }
     if (k_strncmp(line, "ls ",    3) == 0) { cmd_ls(k_skip_spaces(line+3)); return; }
     if (k_strncmp(line, "mkdir ", 6) == 0) { cmd_mkdir(k_skip_spaces(line+6)); return; }
@@ -1995,6 +2128,11 @@ static void dispatch(const char* raw_line, int persona) {
     if (k_strncmp(line, "touch ", 6) == 0) { cmd_touch(k_skip_spaces(line+6)); return; }
     if (k_strncmp(line, "cp ",   3) == 0) { cmd_cp(k_skip_spaces(line+3)); return; }
     if (k_strncmp(line, "mv ",   3) == 0) { cmd_mv(k_skip_spaces(line+3)); return; }
+    if (k_strncmp(line, "edit ", 5) == 0 && tty_current() >= 0) {
+        terminal_writeln("edit: the full-screen editor only runs on the local screen - over SSH use");
+        terminal_writeln("      echo \"text\" > file, cat, cp, or open the file in a GUI terminal");
+        return;
+    }
     if (k_strncmp(line, "edit ", 5) == 0) { editor_open(k_skip_spaces(line+5)); return; }
     if (k_strncmp(line, "cat ",  4) == 0) { cmd_cat(k_skip_spaces(line+4)); return; }
     if (k_strncmp(line, "run ",  4) == 0) { cmd_run(k_skip_spaces(line+4), persona); return; }
@@ -2018,6 +2156,7 @@ static void dispatch(const char* raw_line, int persona) {
     if (k_strncmp(line, "hw_info ", 8) == 0) { cmd_hw_info(k_skip_spaces(line+8)); return; }
 
     /* network commands (shell/netcmds.c) */
+    if (srvcmd_dispatch(line)) return;
     if (netcmd_dispatch(line)) return;
 
     /* unknown */
@@ -2089,6 +2228,9 @@ void shell_run(void) {
      * files persist across reboots. See kernel/fsdisk.c. */
     if (!fsdisk_try_load()) fs_init();
 
+    /* saved network settings, services enabled at boot (shell/srvcmds.c) */
+    services_boot();
+
     while (1) {
         buf[0] = '\0';
         print_prompt(persona);
@@ -2114,5 +2256,39 @@ void shell_run_window(int vt) {
         print_prompt(persona);
         shell_readline(buf, sizeof(buf), persona);
         dispatch(buf, persona);
+    }
+}
+
+/* SSH sessions (net/sshd.c): one of these runs per remote terminal, for
+ * the OS's lifetime, and serves one client after another. */
+void shell_run_remote(int tty) {
+    char buf[SH_LINE_MAX];
+    tty_bind(tty);
+    terminal_vt_set_active(tty_vt(tty));
+    for (;;) {
+        while (!tty_active(tty)) task_sleep_ms(50);
+        terminal_vt_set_active(tty_vt(tty));
+        int persona = g_default_shell_kind;
+
+        const char* cmd = tty_exec_cmd(tty);
+        if (cmd[0]) {                       /* ssh host <command> */
+            k_strcpy_n(buf, cmd, sizeof(buf));
+            dispatch(buf, persona);
+            terminal_flush();
+            tty_finish(tty);
+            continue;
+        }
+
+        terminal_write_color("Banana OS 0.5", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        terminal_writeln(" - SSH session. Type 'help' for commands, 'exit' to log out.");
+        terminal_writeln("");
+        while (tty_active(tty)) {
+            buf[0] = '\0';
+            print_prompt(persona);
+            shell_readline(buf, sizeof(buf), persona);
+            if (!tty_active(tty)) break;
+            dispatch(buf, persona);
+        }
+        tty_finish(tty);
     }
 }

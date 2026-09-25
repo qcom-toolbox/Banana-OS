@@ -1,5 +1,6 @@
 #include "task.h"
 #include "timer.h"
+#include "terminal.h"
 
 /*
  * Real cooperative kernel threads.
@@ -29,6 +30,8 @@ typedef struct {
     uint32_t     window_ticks;   /* real ms run since last cpu_pct sample */
     uint32_t     life_ticks;     /* real ms accumulated for the task's life */
     uint32_t     cpu_pct;
+    int          vt;             /* terminal output target, restored on switch-in */
+    int          background;     /* daemon: never reads the keyboard (task_set_background) */
 } task_t;
 
 static task_t  g_tasks[TASK_MAX];
@@ -56,6 +59,7 @@ static void task_exit_stub(void) {
  * reaches this via `ret`, so on entry esp already looks exactly like a
  * normal 0-argument call - no arguments need passing here. */
 static void task_trampoline(void) {
+    terminal_vt_set_active(g_current->vt);
     g_current->entry();
     g_current->state = TASK_UNUSED;
     for (;;) task_yield();
@@ -93,6 +97,8 @@ int task_create(const char* name, void (*entry)(void)) {
     t->life_ticks = 0;
     t->cpu_pct = 0;
     t->run_start_tick = timer_ms();
+    t->vt = 0;
+    t->background = 0;
 
     /* Build a fake call frame so task_switch()'s epilogue (pop edi/esi/ebx/
      * ebp; ret) lands straight in task_trampoline() as if it had just been
@@ -152,12 +158,17 @@ void task_yield(void) {
     nxt->run_start_tick = timer_ms();
     if (nxt == cur) return;
 
+    /* every task has its own idea of which terminal it writes to: a
+     * background command (or another window) running in between must
+     * not leave its terminal selected for us */
+    cur->vt = terminal_vt_get_active();
     g_current = nxt;
     task_switch(&cur->sp, nxt->sp);
 
     /* We only get here once some other task switches back into `cur`.
      * g_current was set to `cur` by whoever scheduled us back in. */
     g_current->run_start_tick = timer_ms();
+    terminal_vt_set_active(g_current->vt);
 }
 
 void task_sleep_ms(uint32_t ms) {
@@ -233,4 +244,12 @@ static void sysmon_entry(void) {
 
 void task_start_sysmon(void) {
     task_create("sysmon", sysmon_entry);
+}
+
+void task_set_background(void) {
+    g_current->background = 1;
+}
+
+int task_is_background(void) {
+    return g_current ? g_current->background : 0;
 }

@@ -55,6 +55,9 @@ int  fs_is_binary(int idx);
 /* file indexes (fs_get_file) directly inside directory `path`, up to max;
  * returns how many exist in total (may exceed max), or -1 if no such dir */
 int  fs_list_files(const char* path, int* out_idx, int max);
+/* the same for subdirectories (fs_get_dir) */
+int  fs_list_dirs(const char* path, int* out_idx, int max);
+const fs_dir_t* fs_get_dir(int idx);
 /* absolute path of a file, for display */
 void fs_file_path(int idx, char* buf, int buflen);
 
