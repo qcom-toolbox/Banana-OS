@@ -3,8 +3,11 @@
 #include "fb.h"
 #include "gfx.h"
 #include "serial.h"
+#include "tty.h"
 #include "kstring.h"
 #include "timer.h"
+#include "task.h"
+#include "kheap.h"
 
 #define VGA_WIDTH  80
 #define VGA_HEIGHT 25
@@ -279,7 +282,11 @@ void terminal_init(void) {
     terminal_clear();
 }
 
+static int capturing(void);
+
 void terminal_clear(void) {
+    if (capturing()) return;
+    tty_clear_screen((int)vt_active);
     g_term_gen++;
     size_t h = terminal_usable_height();
     size_t w = terminal_width();
@@ -378,10 +385,53 @@ size_t terminal_get_height(void) {
     return terminal_usable_height();
 }
 
+/* Output capture for shell redirection (`cmd > file`): while a task
+ * captures, what it prints goes into a buffer instead of the screen. */
+static struct { int active, pid; char* buf; uint32_t len, cap; } g_cap;
+
+int terminal_capture_start(void) {
+    if (g_cap.active) return 0;
+    g_cap.cap = 4096;
+    g_cap.buf = (char*)kmalloc(g_cap.cap);
+    if (!g_cap.buf) return 0;
+    g_cap.len = 0;
+    g_cap.pid = task_current_pid();
+    g_cap.active = 1;
+    return 1;
+}
+
+char* terminal_capture_stop(uint32_t* len) {
+    char* b = g_cap.buf;
+    *len = g_cap.len;
+    g_cap.active = 0;
+    g_cap.buf = NULL;
+    return b;
+}
+
+static int capturing(void) {
+    return g_cap.active && g_cap.pid == task_current_pid();
+}
+
+static void capture_putc(char c) {
+    if (g_cap.len + 1 >= g_cap.cap) {
+        if (g_cap.cap >= (32u << 20)) return;     /* the file size limit */
+        char* nb = (char*)kmalloc(g_cap.cap * 2);
+        if (!nb) return;
+        memcpy(nb, g_cap.buf, g_cap.len);
+        kfree(g_cap.buf);
+        g_cap.buf = nb;
+        g_cap.cap *= 2;
+    }
+    g_cap.buf[g_cap.len++] = c;
+}
+
 void terminal_putchar(char c) {
+    if (capturing()) { capture_putc(c); return; }
     g_term_gen++;
     /* the console shell (vt0) is mirrored to the serial port */
     if (vt_active == 0 && g_serial_mirror) serial_putc(c);
+    /* ...and an SSH session's vt to its client */
+    if (g_serial_mirror && vt_active != 0) tty_mirror((int)vt_active, c);
 
     size_t h = terminal_usable_height();
     if (h == 0) return;
@@ -672,4 +722,8 @@ void terminal_vt_get_cursor(int vt, size_t* row, size_t* col) {
     }
     if (row) *row = vt_row[vt];
     if (col) *col = vt_col[vt];
+}
+
+int terminal_is_capturing(void) {
+    return capturing();
 }

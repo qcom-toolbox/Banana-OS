@@ -4,8 +4,11 @@
 #include "timer.h"
 #include "random.h"
 #include "terminal.h"
+#include "serial.h"
 
-#define TCP_MAX_CONN  8
+#define TCP_MAX_CONN  16
+#define TCP_MAX_LISTEN 4
+#define TCP_BACKLOG   4                 /* handshaking + not yet accepted, per listener */
 #define TCP_MSS       1460              /* what we accept: 1500 - IP - TCP headers */
 #define RBUF_SIZE     65536u            /* receive ring (window capped at 65535) */
 #define SBUF_SIZE     32768u
@@ -74,14 +77,22 @@ struct tcp_conn {
 
     int      user_closed;
     int      err;
+
+    struct tcp_listener* listener;   /* passive open: not yet tcp_accept()ed */
+};
+
+struct tcp_listener {
+    int      used;
+    uint16_t port;
 };
 
 static tcp_conn_t g_conns[TCP_MAX_CONN];
+static tcp_listener_t g_listeners[TCP_MAX_LISTEN];
 
 const char* tcp_state_str(tcp_state_t s) {
     static const char* names[] = {
         "CLOSED", "SYN_SENT", "ESTABLISHED", "FIN_WAIT1", "FIN_WAIT2",
-        "CLOSE_WAIT", "CLOSING", "LAST_ACK", "TIME_WAIT",
+        "CLOSE_WAIT", "CLOSING", "LAST_ACK", "TIME_WAIT", "SYN_RCVD",
     };
     return ((unsigned)s < sizeof(names) / sizeof(names[0])) ? names[s] : "?";
 }
@@ -365,6 +376,66 @@ static void ack_processing(tcp_conn_t* c, uint32_t seq, uint32_t ack, uint32_t w
     }
 }
 
+static tcp_conn_t* conn_alloc(void) {
+    tcp_conn_t* c = NULL;
+    for (int i = 0; i < TCP_MAX_CONN; i++)
+        if (!g_conns[i].used) { c = &g_conns[i]; break; }
+    if (!c) return NULL;
+    memset(c, 0, sizeof(*c));
+    c->sbuf = (uint8_t*)kmalloc(SBUF_SIZE);
+    c->rbuf = (uint8_t*)kmalloc(RBUF_SIZE);
+    if (!c->sbuf || !c->rbuf) {
+        kfree(c->sbuf);
+        kfree(c->rbuf);
+        c->sbuf = c->rbuf = NULL;
+        return NULL;
+    }
+    c->used = 1;
+    c->iss = random_u32();
+    c->snd_una = c->iss;
+    c->snd_nxt = c->iss + 1;
+    c->snd_max = c->snd_nxt;
+    c->peer_mss = 536;                   /* RFC 1122 default until told */
+    c->cwnd = 4 * TCP_MSS;
+    c->ssthresh = 65535;
+    c->rto = RTO_INIT;
+    return c;
+}
+
+/* A SYN for a port somebody listens on: answer with SYN-ACK. The
+ * connection waits in SYN_RCVD for the final ACK, then in the listener's
+ * queue for tcp_accept(). Returns 0 if nobody listens on that port. */
+static int passive_open(ip4_t src, uint16_t sport, uint16_t dport, uint32_t seq, uint32_t wnd,
+                        const uint8_t* seg, uint32_t hl) {
+    tcp_listener_t* l = NULL;
+    for (int i = 0; i < TCP_MAX_LISTEN; i++)
+        if (g_listeners[i].used && g_listeners[i].port == dport) { l = &g_listeners[i]; break; }
+    if (!l) return 0;
+    int pending = 0;
+    for (int i = 0; i < TCP_MAX_CONN; i++)
+        if (g_conns[i].used && g_conns[i].listener == l && g_conns[i].state != TCP_CLOSED) pending++;
+    if (pending >= TCP_BACKLOG) return 1;       /* busy: drop, the client retries */
+
+    tcp_conn_t* c = conn_alloc();
+    if (!c) return 1;
+    c->listener = l;
+    c->rip = src;
+    c->rport = sport;
+    c->lport = dport;
+    c->irs = seq;
+    c->rcv_nxt = seq + 1;
+    c->snd_wnd = wnd;
+    c->snd_wl1 = seq;
+    parse_mss(c, seg + 20, hl - 20);
+    c->state = TCP_SYN_RCVD;
+    send_seg(c, c->iss, F_SYN | F_ACK, NULL, 0);
+    c->rtt_timing = 1;
+    c->rtt_seq = c->iss;
+    c->rtt_start = timer_ms();
+    arm_timer(c);
+    return 1;
+}
+
 void tcp_rx(ip4_t src, ip4_t dst, const uint8_t* seg, uint32_t len) {
     if (len < 20) return;
     uint8_t ph[12];
@@ -391,8 +462,36 @@ void tcp_rx(ip4_t src, ip4_t dst, const uint8_t* seg, uint32_t len) {
             k->rport == sport && k->rip == src) { c = k; break; }
     }
     if (!c) {
+        if ((flags & (F_SYN | F_ACK | F_RST)) == F_SYN && passive_open(src, sport, dport, seq, wnd, seg, hl))
+            return;
         send_reset_for(src, sport, dport, seq, ack, flags, dlen);
         return;
+    }
+
+    if (c->state == TCP_SYN_RCVD) {
+        if (flags & F_RST) { c->state = TCP_CLOSED; c->timer_on = 0; return; }
+        if (flags & F_SYN) {                     /* our SYN-ACK got lost */
+            send_seg(c, c->iss, F_SYN | F_ACK, NULL, 0);
+            return;
+        }
+        if (!(flags & F_ACK)) return;
+        if (ack != c->iss + 1) {
+            send_reset_for(src, sport, dport, seq, ack, flags, dlen);
+            return;
+        }
+        c->snd_una = ack;
+        c->snd_wnd = wnd;
+        c->snd_wl1 = seq;
+        c->snd_wl2 = ack;
+        if (c->rtt_timing) {
+            update_rtt(c, timer_ms() - c->rtt_start);
+            c->rtt_timing = 0;
+        }
+        c->retries = 0;
+        c->timer_on = 0;
+        c->cwnd = 4 * c->peer_mss;
+        c->state = TCP_ESTABLISHED;
+        /* the ACK may already carry data (or a FIN): handled below */
     }
 
     if (c->state == TCP_SYN_SENT) {
@@ -494,16 +593,18 @@ void tcp_rx(ip4_t src, ip4_t dst, const uint8_t* seg, uint32_t len) {
 void tcp_flush(void) {
     for (int i = 0; i < TCP_MAX_CONN; i++) {
         tcp_conn_t* c = &g_conns[i];
-        if (c->used && c->ack_pending && c->state != TCP_CLOSED && c->state != TCP_SYN_SENT)
+        if (c->used && c->ack_pending && c->state != TCP_CLOSED && c->state != TCP_SYN_SENT &&
+            c->state != TCP_SYN_RCVD)
             send_seg(c, c->snd_nxt, F_ACK, NULL, 0);
     }
 }
 
 static void on_timeout(tcp_conn_t* c) {
-    int limit = (c->state == TCP_SYN_SENT) ? SYN_RETRIES : MAX_RETRIES;
+    int handshake = (c->state == TCP_SYN_SENT || c->state == TCP_SYN_RCVD);
+    int limit = handshake ? SYN_RETRIES : MAX_RETRIES;
     if (++c->retries > limit) {
         c->err = NET_ERR_TIMEOUT;
-        if (c->state != TCP_SYN_SENT) send_seg(c, c->snd_nxt, F_RST | F_ACK, NULL, 0);
+        if (!handshake) send_seg(c, c->snd_nxt, F_RST | F_ACK, NULL, 0);
         c->state = TCP_CLOSED;
         c->timer_on = 0;
         return;
@@ -511,6 +612,11 @@ static void on_timeout(tcp_conn_t* c) {
     c->rtt_timing = 0;                  /* Karn: never time a retransmission */
     c->rto = min_u32(c->rto * 2, RTO_MAX);
 
+    if (c->state == TCP_SYN_RCVD) {
+        send_seg(c, c->iss, F_SYN | F_ACK, NULL, 0);
+        arm_timer(c);
+        return;
+    }
     if (c->state == TCP_SYN_SENT) {
         send_seg(c, c->iss, F_SYN, NULL, 0);
         arm_timer(c);
@@ -544,7 +650,9 @@ void tcp_timer(void) {
             c->state = TCP_CLOSED;
         if (c->timer_on && c->state != TCP_CLOSED && (int32_t)(now - c->rto_deadline) >= 0)
             on_timeout(c);
-        if (c->state == TCP_CLOSED && c->user_closed) conn_free(c);
+        /* closed and nobody will look at it again: the user closed it, or
+         * it died before tcp_accept() handed it out */
+        if (c->state == TCP_CLOSED && (c->user_closed || c->listener)) conn_free(c);
     }
 }
 
@@ -567,33 +675,11 @@ tcp_conn_t* tcp_connect(ip4_t ip, uint16_t port, uint32_t timeout_ms, int* err) 
     if (!nif->dev) { *err = NET_ERR_NODEV; return NULL; }
     if (!net_wait_configured(timeout_ms)) { *err = NET_ERR_NOTREADY; return NULL; }
 
-    tcp_conn_t* c = NULL;
-    for (int i = 0; i < TCP_MAX_CONN; i++)
-        if (!g_conns[i].used) { c = &g_conns[i]; break; }
+    tcp_conn_t* c = conn_alloc();
     if (!c) { *err = NET_ERR_NOMEM; return NULL; }
-
-    memset(c, 0, sizeof(*c));
-    c->sbuf = (uint8_t*)kmalloc(SBUF_SIZE);
-    c->rbuf = (uint8_t*)kmalloc(RBUF_SIZE);
-    if (!c->sbuf || !c->rbuf) {
-        kfree(c->sbuf);
-        kfree(c->rbuf);
-        c->sbuf = c->rbuf = NULL;
-        *err = NET_ERR_NOMEM;
-        return NULL;
-    }
-    c->used = 1;
     c->rip = ip;
     c->rport = port;
     c->lport = pick_port();
-    c->iss = random_u32();
-    c->snd_una = c->iss;
-    c->snd_nxt = c->iss + 1;
-    c->snd_max = c->snd_nxt;
-    c->peer_mss = 536;                   /* RFC 1122 default until told */
-    c->cwnd = 4 * TCP_MSS;
-    c->ssthresh = 65535;
-    c->rto = RTO_INIT;
     c->state = TCP_SYN_SENT;
 
     send_seg(c, c->iss, F_SYN, NULL, 0);
@@ -702,5 +788,77 @@ void tcp_dump(void) {
         terminal_writeln(line);
         any = 1;
     }
+    for (int i = 0; i < TCP_MAX_LISTEN; i++) {
+        if (!g_listeners[i].used) continue;
+        char l[24], line[100];
+        ksnprintf(l, sizeof(l), "0.0.0.0:%u", g_listeners[i].port);
+        ksnprintf(line, sizeof(line), "tcp   %-21s %-21s %-12s", l, "*:*", "LISTEN");
+        terminal_writeln(line);
+        any = 1;
+    }
     if (!any) terminal_writeln("(no connections)");
+}
+
+/* ── server side ────────────────────────────────────────────────── */
+
+tcp_listener_t* tcp_listen(uint16_t port, int* err) {
+    int e;
+    if (!err) err = &e;
+    for (int i = 0; i < TCP_MAX_LISTEN; i++)
+        if (g_listeners[i].used && g_listeners[i].port == port) { *err = NET_ERR_PROTO; return NULL; }
+    for (int i = 0; i < TCP_MAX_LISTEN; i++) {
+        if (g_listeners[i].used) continue;
+        g_listeners[i].used = 1;
+        g_listeners[i].port = port;
+        *err = NET_OK;
+        return &g_listeners[i];
+    }
+    *err = NET_ERR_NOMEM;
+    return NULL;
+}
+
+tcp_conn_t* tcp_accept(tcp_listener_t* l, uint32_t timeout_ms) {
+    if (!l || !l->used) return NULL;
+    uint32_t start = timer_ms();
+    for (;;) {
+        for (int i = 0; i < TCP_MAX_CONN; i++) {
+            tcp_conn_t* c = &g_conns[i];
+            if (c->used && c->listener == l &&
+                (c->state == TCP_ESTABLISHED || c->state == TCP_CLOSE_WAIT)) {
+                c->listener = NULL;             /* the caller owns it now */
+                return c;
+            }
+        }
+        if (timer_ms() - start >= timeout_ms) return NULL;
+        if (net_interrupted()) return NULL;
+        net_wait(20);
+    }
+}
+
+void tcp_unlisten(tcp_listener_t* l) {
+    if (!l || !l->used) return;
+    for (int i = 0; i < TCP_MAX_CONN; i++) {
+        tcp_conn_t* c = &g_conns[i];
+        if (c->used && c->listener == l) {
+            if (c->state != TCP_CLOSED) send_seg(c, c->snd_nxt, F_RST | F_ACK, NULL, 0);
+            conn_free(c);
+        }
+    }
+    l->used = 0;
+}
+
+void tcp_peer(const tcp_conn_t* c, ip4_t* ip, uint16_t* port) {
+    if (ip) *ip = c->rip;
+    if (port) *port = c->rport;
+}
+
+int tcp_readable(const tcp_conn_t* c) {
+    if (c->rb_len) return (int)c->rb_len;
+    if (c->fin_rcvd || c->err || c->state == TCP_CLOSED) return -1;
+    return 0;
+}
+
+uint32_t tcp_send_space(const tcp_conn_t* c) {
+    if (c->state != TCP_ESTABLISHED && c->state != TCP_CLOSE_WAIT) return 0;
+    return SBUF_SIZE - c->sb_len;
 }

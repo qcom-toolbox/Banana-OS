@@ -16,5 +16,7 @@ int keyboard_ctrl_alt_del_pending(void);
 
 /* USB HID keyboards feed set-1 scancodes through the PS/2 decoder */
 void keyboard_feed_scancode(uint8_t sc);
+/* queues text as typed input for whoever reads the keyboard next */
+void keyboard_inject(const char* s);
 
 #endif

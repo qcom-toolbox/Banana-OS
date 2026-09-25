@@ -12,4 +12,8 @@ void shell_run(void);
  * output with whichever window last had focus. */
 void shell_run_window(int vt);
 
+/* The shell of an SSH session on remote terminal `tty` (kernel/tty.h):
+ * waits for a client, serves it until it logs out, repeats. Never returns. */
+void shell_run_remote(int tty);
+
 #endif
