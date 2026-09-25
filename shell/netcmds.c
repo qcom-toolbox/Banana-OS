@@ -12,6 +12,10 @@
 #include "../crypto/selftest.h"
 #include "wpcmd.h"
 #include "../usb/usbcore.h"
+#include "../net/netconf.h"
+#include "../net/httpd.h"
+#include "../kernel/config.h"
+#include "../kernel/fsdisk.h"
 
 
 /* ── helpers ────────────────────────────────────────────────────── */
@@ -112,6 +116,18 @@ static void show_ifconfig(void) {
     terminal_writeln("lo: inet 127.0.0.1  netmask 255.0.0.0");
 }
 
+/* where a network setting was saved, and whether it will outlive a reboot */
+static void saved_note(int written_to_disk) {
+    if (written_to_disk < 0)
+        printf_line("(could not save %s)\n", CFG_NETWORK);
+    else if (written_to_disk == 1)
+        printf_line("(saved in %s and written to disk - kept after reboot)\n", CFG_NETWORK);
+    else if (fsdisk_is_installed())
+        printf_line("(saved in %s - could not write the disk now, `sync` retries)\n", CFG_NETWORK);
+    else
+        printf_line("(saved in %s - kept after reboot once Banana OS is installed: `install`)\n", CFG_NETWORK);
+}
+
 static netdev_t* find_ifname(const char* name) {
     for (int i = 0; i < net_device_count(); i++)
         if (strcmp(net_device_at(i)->ifname, name) == 0) return net_device_at(i);
@@ -125,12 +141,27 @@ static void cmd_ifconfig(int argc, char** argv) {
         else show_ifconfig();
         return;
     }
+    if (argc == 2 && strcmp(argv[1], "reset") == 0) {
+        /* forget the saved settings: DHCP on the default card again */
+        int disk = netconf_forget();
+        if (net_if()->dev) net_select_device(net_if()->dev);
+        printf_line("ifconfig: saved settings removed (%s)%s - back to DHCP\n", CFG_NETWORK,
+                    disk ? ", disk updated" : "");
+        return;
+    }
     if (named && argc == 3 && strcmp(argv[2], "up") == 0) {
-        /* make this card the active interface (DHCP starts on it) */
-        net_select_device(named);
-        printf_line("%s is now the active interface; requesting an address...\n", named->ifname);
-        if (net_wait_configured(10000)) show_device(named);
-        else err("ifconfig", "no DHCP answer yet (still trying in the background)");
+        /* make this card the active interface, with its saved static
+         * addresses if it has some, DHCP otherwise */
+        int keep_static = netconf_claims(named) && netconf_is_static();
+        if (keep_static) netconf_apply_to(named);
+        else net_select_device(named);
+        int disk = keep_static ? 0 : netconf_save_dhcp(named);
+        printf_line("%s is now the active interface%s\n", named->ifname,
+                    keep_static ? " (saved static address)" : "; requesting an address...");
+        if (!keep_static && !net_wait_configured(10000))
+            err("ifconfig", "no DHCP answer yet (still trying in the background)");
+        else show_device(named);
+        if (!keep_static) saved_note(disk);
         return;
     }
     if (!need_device("ifconfig")) return;
@@ -154,18 +185,22 @@ static void cmd_ifconfig(int argc, char** argv) {
         else { err("ifconfig", "unknown option"); return; }
     }
     net_set_static(ip, mask, gw, dns);
+    int disk = netconf_save_static(net_if()->dev, ip, mask, gw, net_if()->dns);
     show_ifconfig();
+    saved_note(disk);
 }
 
 static void cmd_dhcp(void) {
     if (!need_device("dhcp")) return;
     terminal_writeln("dhcp: requesting a lease...");
     dhcp_start();
+    int disk = netconf_save_dhcp(net_if()->dev);
     if (!net_wait_configured(15000)) {
         err("dhcp", "no answer from a DHCP server (still trying in the background)");
         return;
     }
     show_ifconfig();
+    saved_note(disk);
 }
 
 /* ── ping ───────────────────────────────────────────────────────── */

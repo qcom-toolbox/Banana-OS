@@ -4,6 +4,7 @@
 #include "usb.h"
 #include "task.h"
 #include "serial.h"
+#include "tty.h"
 #include "../usb/usbcore.h"
 
 #define KB_DATA_PORT    0x60
@@ -182,7 +183,7 @@ static int set1_e0 = 0;
 static int ctrl_alt_del_pending = 0;
 
 /* ── tiny char queue (fixes static-inside-loop bug) ─────────────── */
-#define QUEUE_SIZE 8
+#define QUEUE_SIZE 256   /* also holds text typed by keyboard_inject() */
 static char  q_buf[QUEUE_SIZE];
 static int   q_head = 0;
 static int   q_tail = 0;
@@ -429,6 +430,11 @@ static char serial_key(void) {
 }
 
 char keyboard_try_getchar(void) {
+    /* daemons have no keyboard; an SSH session's shell reads its client */
+    if (task_is_background()) return 0;
+    int tt = tty_current();
+    if (tt >= 0) return tty_getkey(tt);
+
     usb_poll();           /* USB keyboards report through here */
     if (!q_empty()) return q_pop();
 
@@ -524,4 +530,10 @@ void keyboard_readline(char* buf, int maxlen) {
         terminal_putchar(c);
     }
     buf[pos] = '\0';
+}
+
+/* Types text as if from the keyboard (the GUI uses it to start a command
+ * in a terminal window it just opened). */
+void keyboard_inject(const char* s) {
+    while (*s) q_push(*s++);
 }

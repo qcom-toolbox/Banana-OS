@@ -829,3 +829,21 @@ int fs_list_files(const char* path, int* out_idx, int max) {
     }
     return n;
 }
+
+int fs_list_dirs(const char* path, int* out_idx, int max) {
+    char p[FS_PATH_LEN];
+    expand_tilde(path, p, sizeof(p));
+    int dir = resolve_dir(p);
+    if (dir < 0) return -1;
+    int n = 0;
+    for (int i = 0; i < FS_MAX_DIRS; i++) {
+        if (!dirs[i].used || i == dir || dirs[i].parent_dir != dir) continue;
+        if (n < max) out_idx[n] = i;
+        n++;
+    }
+    return n;
+}
+
+const fs_dir_t* fs_get_dir(int idx) {
+    return (idx >= 0 && idx < FS_MAX_DIRS && dirs[idx].used) ? &dirs[idx] : NULL;
+}

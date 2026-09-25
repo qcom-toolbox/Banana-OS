@@ -7,7 +7,7 @@
  * terminal window (TERM_WIN_MAX in kernel/gui.c). Shared with modules
  * (e.g. shell/editor.c) that need one instance of some per-window state
  * per vt, so every window can run independently. */
-#define TERMINAL_VT_MAX 5
+#define TERMINAL_VT_MAX 7   /* console + 4 GUI windows + 2 SSH sessions */
 
 /* VGA colors */
 enum vga_color {
@@ -79,6 +79,13 @@ uint32_t terminal_generation(void);
  * the screen up to date now. Cheap when nothing changed; called from
  * idle/wait loops so output never lingers unpainted. */
 void terminal_flush(void);
+
+/* Redirection (`cmd > file`): the calling task's output is collected
+ * instead of shown. start: 0 if a capture is already running; stop: the
+ * heap buffer (caller kfree()s it) and its length. */
+int   terminal_capture_start(void);
+char* terminal_capture_stop(uint32_t* len);
+int   terminal_is_capturing(void);        /* the calling task's output is redirected */
 
 /* GUI helpers */
 void terminal_get_cursor(size_t* row, size_t* col);

@@ -22,6 +22,11 @@ Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux k
 - **Real files** - files are no longer capped at 2 KiB: data lives on a new kernel heap (up to 32 MiB per file), binary files are fine, and installed disks from 0.4 are upgraded automatically
 - **Faster, cooler** - timer interrupts + `hlt` instead of busy polling: an idle Banana OS went from pinning a host CPU core at **100% to ~6%**; the console prints ~100x faster (an 8000-line file: 27.8 s -> 0.27 s); the desktop only repaints what changed
 - **Serial console** - the shell also runs on COM1 (`-serial stdio`), which makes Banana OS scriptable and testable headless
+- **SSH server** - log in from any SSH client (OpenSSH, PuTTY, Windows `ssh`) with the password you set with `passwd`: curve25519 key exchange, Ed25519 host key, ChaCha20-Poly1305 / AES-128-GCM, written from the RFCs
+- **Web server** - `httpd start` serves `/var/www` (with folder listings) to any browser on the network
+- **File explorer** - a "Files" window on the desktop: browse, preview text and pictures, new folder, delete, open in the editor or a terminal, set a picture as the wallpaper
+- **Permanent settings** - the network configuration (static IP or DHCP, chosen interface) and the servers to start at boot are saved in `/etc` and applied at every boot of an installed system
+- **Shell** - output redirection (`cmd > file`, `cmd >> file`) and command lists (`a; b`, `a && b`)
 
 ## Project Layout
 
@@ -43,6 +48,10 @@ Banana-OS/
 │   ├── terminal.c/h    # Terminal (VGA + framebuffer + virtual terminals), deferred painting
 │   ├── fb.c, gfx.c     # Framebuffer + 2D drawing
 │   ├── gui.c/h         # Desktop GUI (taskbar/start menu/windows/wallpaper app)
+│   ├── explorer.c      # "Files" window (file explorer)
+│   ├── tty.c           # Remote terminals (SSH sessions)
+│   ├── config.c        # key=value settings in /etc (network, services)
+│   ├── passwd.c        # Password hashes (PBKDF2) in /etc/shadow
 │   ├── wallpaper.c     # Wallpaper presets, user images, /etc/wallpaper
 │   ├── image.c         # Image decoding (via stb_image) + resampling
 │   ├── fs.c, fsdisk.c  # In-memory Unix-like FS + on-disk persistence
@@ -55,12 +64,16 @@ Banana-OS/
 │   ├── cdc_ecm.c       # USB CDC-ECM class Ethernet (QEMU usb-net, phones, ...)
 │   ├── net.c           # Interfaces (eth0, usb0), Ethernet, netd task
 │   ├── arp.c ip.c icmp.c udp.c dhcp.c dns.c tcp.c
+│   ├── netconf.c       # Saved network configuration (/etc/network.conf)
 │   ├── tls.c           # TLS 1.3 client
-│   └── http.c          # HTTP/1.1 client (curl, wget)
-├── crypto/             # SHA-256/HMAC/HKDF, ChaCha20, Poly1305, AES-128-GCM, X25519, self-tests
+│   ├── http.c          # HTTP/1.1 client (curl, wget)
+│   ├── httpd.c         # Web server
+│   └── sshd.c          # SSH server
+├── crypto/             # SHA-256/512, HMAC/HKDF/PBKDF2, ChaCha20, Poly1305, AES-128-GCM, X25519, Ed25519, self-tests
 ├── shell/
 │   ├── shell.c/h       # Banana shell
 │   ├── netcmds.c       # ifconfig, ping, curl, wget, ...
+│   ├── srvcmds.c       # sshd, httpd, passwd, files
 │   ├── wpcmd.c         # wallpaper command
 │   └── editor.c/h      # Nano-like text editor
 ├── third_party/        # stb_image (runtime image decoding), lodepng
@@ -90,7 +103,9 @@ Banana-OS/
 - POSIX-flavored shell utilities (`ls -l`, `mkdir -p`, `rm -r`, `cp`, `mv`, `touch`, `whoami`, `hostname`, `date`, `time`, ...)
 - Two shell personas sharing one command engine - stock `sh` (default) and a bash-compatible `bash` (aliases, `export`/`$VAR`, `!!`) - selectable per-session with `chsh`
 - Built-in editor and live system monitor
-- Networking: e1000 + RTL8139 drivers, USB adapters (RTL8152/8152B, CDC-ECM), TCP/IP stack, DHCP, DNS, HTTP + HTTPS (TLS 1.3)
+- Networking: e1000 + RTL8139 drivers, USB adapters (RTL8152/8152B, CDC-ECM), TCP/IP stack, DHCP, DNS, HTTP + HTTPS (TLS 1.3), saved configuration
+- Servers: SSH (password login, 2 sessions) and a static web server, optionally started at boot
+- File explorer window with text/picture previews
 - Real bootable disk install (`install`/`sync`) - installs onto a dedicated ATA hard disk so Banana OS boots on its own, with a persistent filesystem, no CD required
 - Serial console on COM1 (output mirror + input)
 
@@ -115,8 +130,10 @@ Banana-OS/
 - Start menu and desktop shortcuts, both with the same entries:
   - About app
   - Terminal
+  - Files
   - Wallpaper
   - Quit GUI
+- Files - the file explorer (below)
 - Wallpaper app - pick one of 10 built-in presets, or one of your own pictures from `~/Pictures`
 - Up to 4 terminal windows (draggable, closable, focusable, scrollable), each running its own independent shell task
 - PS/2 mouse and Synaptics touchpad (absolute mode + tap-to-click) both work for pointing
@@ -137,9 +154,12 @@ curl -v https://example.com           # show the connection, TLS cipher, request
 wget https://raw.githubusercontent.com/nothings/stb/master/README.md   # download a file
 netstat                               # TCP connections
 arp                                   # ARP cache
-dhcp                                  # renew the DHCP lease
+dhcp                                  # back to DHCP / renew the lease
 ifconfig eth0 192.168.1.50 netmask 255.255.255.0 gw 192.168.1.1 dns 1.1.1.1   # static setup
+ifconfig reset                        # forget the saved settings
 ```
+
+**The configuration is permanent:** `ifconfig <if> <ip> ...` (static), `ifconfig <if> up` (choose the interface) and `dhcp` save it in `/etc/network.conf`, and it is applied again at every boot - also when the saved interface is a USB adapter plugged in later. On an installed system (`install`, below) the file is written to the disk immediately; on the live CD it only lasts until you power off.
 
 What's implemented, all from scratch:
 
@@ -148,10 +168,10 @@ What's implemented, all from scratch:
 | NIC drivers | Intel 8254x "e1000" (DMA descriptor rings, IRQ wakeups), Realtek RTL8139, USB: Realtek RTL8152/8152B, CDC-ECM |
 | Link | Ethernet II, ARP (cache, request queueing), loopback |
 | Network | IPv4 (routing via default gateway, DF, no fragmentation), ICMP echo request/reply |
-| Transport | UDP, TCP (3-way handshake, sliding window, RTT-estimated retransmission timeout with backoff, fast retransmit, slow start/congestion avoidance, out-of-order reassembly, delayed ACKs, zero-window probing, orderly close) |
+| Transport | UDP, TCP (client and server: 3-way handshake both ways with a listen backlog, sliding window, RTT-estimated retransmission timeout with backoff, fast retransmit, slow start/congestion avoidance, out-of-order reassembly, delayed ACKs, zero-window probing, orderly close) |
 | Services | DHCP client (with lease renewal), DNS resolver (with CNAMEs + cache) |
 | Security | TLS 1.3 client: X25519, TLS_AES_128_GCM_SHA256, TLS_CHACHA20_POLY1305_SHA256 |
-| Application | HTTP/1.1 client: Content-Length, chunked encoding, redirects |
+| Application | HTTP/1.1 client: Content-Length, chunked encoding, redirects; HTTP server; SSH-2 server (Ed25519, curve25519, ChaCha20-Poly1305, AES-128-GCM) |
 
 > ⚠️ **HTTPS note:** TLS encrypts and authenticates the whole session (the handshake transcript and Finished MACs are verified), but Banana OS ships no certificate authority store, so it does **not** verify the server's certificate - like `curl --insecure`. That protects against eavesdropping, not against an active man-in-the-middle. Don't use it for anything sensitive.
 
@@ -181,6 +201,56 @@ For the guest to sit directly on your LAN instead of behind NAT, bridge it with 
 ### VirtualBox
 
 Use the default network adapter: **Settings → Network → Adapter 1 → Attached to: NAT** (or *Bridged Adapter* to join your LAN), adapter type **Intel PRO/1000 MT Desktop (82540EM)**. The *Intel PRO/1000 T Server* and *MT Server* types work too; the PCnet and virtio adapters are not supported.
+
+## Servers: SSH and web
+
+### SSH (`sshd`)
+
+```
+passwd                 # choose the password of `banana` - it is the SSH login
+sshd start             # listen on port 22 (sshd start 2222 for another port)
+sshd enable            # ...and start it at every boot
+sshd                   # status: address to use, host key fingerprint, open sessions
+```
+
+Then, from another computer: `ssh banana@<address shown by ifconfig>`. You get a normal Banana OS shell - `ls`, `cat`, `ping`, `curl`, `wget`, `httpd`, ... and `exit` to log out. A single command works too: `ssh banana@10.0.2.15 "ls /etc; uname"`.
+
+- Protocol: SSH-2 written from the RFCs - curve25519-sha256 key exchange (with the "strict KEX" fix against the Terrapin attack), an Ed25519 host key (created on first start, kept in `/etc/ssh`), chacha20-poly1305@openssh.com or aes128-gcm@openssh.com. Works with OpenSSH, PuTTY and Windows' `ssh`.
+- The first connection shows the host key fingerprint (`SHA256:...`): compare it with what `sshd` prints on the Banana OS screen before answering "yes".
+- Password login only (no keys yet); the password is stored salted and stretched (PBKDF2-HMAC-SHA256, 10000 rounds) in `/etc/shadow`. 5 wrong passwords close the connection, each costs 1.5 s. `passwd -d` removes it (SSH logins refused).
+- Up to 2 sessions at the same time. The full-screen editor (`edit`) only runs on the local screen - over SSH write files with `echo "text" > file` / `>>`.
+- No SFTP/scp or port forwarding.
+
+### Web server (`httpd`)
+
+```
+httpd start            # port 80 (httpd start 8080 for another port)
+httpd enable           # ...and at every boot
+httpd                  # status and the last requests
+echo "<h1>Hello</h1>" > /var/www/index.html
+wget -O /var/www/photo.jpg https://...
+```
+
+Open `http://<address>/` in a browser. Files under `/var/www` are served (GET/HEAD) with their content type; a folder without `index.html` gets a file listing. A new, empty `/var/www` gets a welcome page.
+
+In **QEMU's user-mode network** (the default `make run`), the guest is behind QEMU's NAT, so forward ports to reach the servers from your computer:
+
+```bash
+qemu-system-i386 -cdrom Banana_OS.iso -m 256 -nic user,model=e1000,hostfwd=tcp::2222-:22,hostfwd=tcp::8080-:80
+ssh -p 2222 banana@localhost        # and http://localhost:8080/
+```
+
+With a bridged network (VirtualBox "Bridged Adapter", QEMU tap) the machine has its own address on your LAN - no forwarding needed.
+
+## File Explorer ("Files")
+
+Open it from the desktop (`startx`): the **Files** icon or Start menu entry, or `files [folder]` in a terminal.
+
+- Click selects, double-click opens a folder; **Up** / **Home** navigate
+- The right pane previews the selection: text files show their first lines, pictures a thumbnail, folders their size
+- **Edit** (text) opens the file in the editor in a new terminal window; **Set as wallpaper** (pictures); double-click does the same
+- **New folder**, **Delete** (click twice to confirm; folders are deleted with their contents), **Terminal** opens a terminal in the current folder, **Refresh**
+- The window can be dragged by its title bar, and stacks with the terminal windows
 
 ## USB
 
@@ -348,9 +418,18 @@ Bash-flavored extras (available in both personas, since they share one engine):
 | `wget [-q] [-O file] <url>` | Download a file (follows redirects) |
 | `netstat` | TCP connections |
 | `arp` | ARP cache |
-| `cryptotest` | Run the TLS crypto known-answer self-tests |
-| **Wallpaper** | |
+| `cryptotest` | Run the crypto known-answer self-tests |
+| `ifconfig reset` | Forget the saved network settings (back to DHCP) |
+| **Servers** | |
+| `passwd [-d]` | Set (or remove) the password of `banana`, used for SSH logins |
+| `sshd [status\|start [port]\|stop\|enable [port]\|disable]` | SSH server (port 22); `enable` also starts it at boot |
+| `httpd [status\|start [port]\|stop\|enable [port]\|disable]` | Web server for `/var/www` (port 80); `enable` also starts it at boot |
+| **Wallpaper / desktop** | |
 | `wallpaper [list\|reset\|preset <n>\|url <url>\|<file> [fill\|fit\|stretch\|center]]` | Show or change the desktop wallpaper |
+| `files [folder]` | Open the file explorer (desktop running) |
+| **Shell syntax** | |
+| `cmd > file`, `cmd >> file` | Write / append a command's output to a file |
+| `cmd1; cmd2`, `cmd1 && cmd2` | Run commands one after the other |
 
 ## Installing to a Hard Disk (`install` / `sync`)
 

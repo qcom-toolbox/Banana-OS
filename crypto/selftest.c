@@ -3,6 +3,8 @@
 #include "chacha20.h"
 #include "x25519.h"
 #include "aead.h"
+#include "sha512.h"
+#include "ed25519.h"
 #include "kstring.h"
 #include "kheap.h"
 
@@ -117,6 +119,28 @@ int crypto_selftest(void (*report)(const char* name, int ok)) {
                      memcmp(buf, pt, 114) == 0;
         report("ChaCha20-Poly1305 decrypt + verify", opened);
         all &= opened;
+    }
+
+    /* used by the SSH server */
+    sha512("abc", 3, out);
+    all &= check("SHA-512 (FIPS 180-4)", out,
+                 "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+                 "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f", report);
+
+    pbkdf2_sha256((const uint8_t*)"password", 8, (const uint8_t*)"salt", 4, 4096, out);
+    all &= check("PBKDF2-HMAC-SHA256 (4096 iterations)", out,
+                 "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a", report);
+
+    {
+        uint8_t seed[32], pk[32], sig[64];
+        unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", seed, 32);
+        ed25519_public_key(pk, seed);
+        all &= check("Ed25519 public key (RFC 8032 #1)", pk,
+                     "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", report);
+        ed25519_sign(sig, (const uint8_t*)"", 0, seed, pk);
+        all &= check("Ed25519 signature (RFC 8032 #1)", sig,
+                     "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555"
+                     "fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b", report);
     }
     return all;
 }

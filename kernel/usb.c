@@ -2,6 +2,7 @@
 #include "terminal.h"
 #include "types.h"
 #include "timer.h"
+#include "serial.h"
 
 /* ── I/O helpers ─────────────────────────────────────────────────── */
 static inline uint8_t  inb (uint16_t p){ uint8_t  v; __asm__ volatile("inb  %1,%0":"=a"(v):"Nd"(p)); return v; }
@@ -402,21 +403,45 @@ static int syn_tap_click_pulse = 0;
 
 static int abs_i(int v) { return v < 0 ? -v : v; }
 
+/* Complete packets wait in a small queue: bytes can arrive through
+ * keyboard_try_getchar() as well as mouse_read(), and a quick press +
+ * release must not be lost because the first packet was not read yet. */
+#define MPKT_RING 32
+static uint8_t mouse_asm[6];
+static int     mouse_asm_i = 0;
+static uint8_t mouse_ring[MPKT_RING][6];
+static int     mouse_ring_head = 0, mouse_ring_len = 0;
+
 void mouse_on_aux_byte(uint8_t b) {
     if (!mouse_enabled) return;
 
-    if (mouse_pkt_i == 0) {
+    if (mouse_asm_i == 0) {
         /* validate sync bit (bit 3 of the first byte is always 1,
          * in both the plain and Synaptics packet formats) */
         if (!(b & 0x08)) return;
     }
-    if (mouse_pkt_i < mouse_pkt_size) {
-        mouse_pkt[mouse_pkt_i++] = b;
+    mouse_asm[mouse_asm_i++] = b;
+    if (mouse_asm_i >= mouse_pkt_size) {
+        if (mouse_ring_len == MPKT_RING) {          /* full: drop the oldest */
+            mouse_ring_head = (mouse_ring_head + 1) % MPKT_RING;
+            mouse_ring_len--;
+        }
+        int slot = (mouse_ring_head + mouse_ring_len) % MPKT_RING;
+        for (int i = 0; i < 6; i++) mouse_ring[slot][i] = mouse_asm[i];
+        mouse_ring_len++;
+        mouse_asm_i = 0;
     }
 }
 
 static int mouse_pkt_ready(void) {
-    return mouse_pkt_i >= mouse_pkt_size;
+    return mouse_ring_len > 0;
+}
+
+/* the oldest queued packet -> mouse_pkt, for the consume functions */
+static void mouse_pop(void) {
+    for (int i = 0; i < 6; i++) mouse_pkt[i] = mouse_ring[mouse_ring_head][i];
+    mouse_ring_head = (mouse_ring_head + 1) % MPKT_RING;
+    mouse_ring_len--;
 }
 
 static void synaptics_consume_ready(void) {
@@ -523,27 +548,29 @@ mouse_state_t mouse_read(void) {
     last_mouse.dx = 0;
     last_mouse.dy = 0;
 
-    if (mouse_pkt_ready()) {
-        mouse_consume_ready();
-        return last_mouse;
-    }
-
-    /* Check if data is from AUX (bit 5 set) and available (bit 0 set) */
-    uint8_t st = inb(PS2_STATUS);
-    if (!((st & 0x01) && (st & 0x20))) return last_mouse;
-
-    /* Drain as many AUX bytes as available into the packet assembler */
-    while (1) {
-        st = inb(PS2_STATUS);
+    /* Drain the AUX bytes waiting in the controller (status: bit 0 =
+     * data available, bit 5 = from the mouse) into the packet queue */
+    for (;;) {
+        uint8_t st = inb(PS2_STATUS);
         if (!((st & 0x01) && (st & 0x20))) break;
-        uint8_t b = inb(PS2_DATA);
-        mouse_on_aux_byte(b);
-        if (mouse_pkt_ready()) break;
+        mouse_on_aux_byte(inb(PS2_DATA));
     }
 
-    if (mouse_pkt_ready()) {
+    /* Motion of all queued packets adds up; a button change ends the
+     * batch, so every press and release is seen by some mouse_read()
+     * (a double-click is two separate presses, however quick). */
+    int sdx = 0, sdy = 0;
+    while (mouse_pkt_ready()) {
+        int bl = last_mouse.btn_left, br = last_mouse.btn_right, bm = last_mouse.btn_middle;
+        mouse_pop();
+        last_mouse.dx = 0;            /* a touchpad packet may carry no motion */
+        last_mouse.dy = 0;
         mouse_consume_ready();
+        sdx += last_mouse.dx;
+        sdy += last_mouse.dy;
+        if (last_mouse.btn_left != bl || last_mouse.btn_right != br || last_mouse.btn_middle != bm) break;
     }
-
+    last_mouse.dx = sdx;
+    last_mouse.dy = sdy;
     return last_mouse;
 }

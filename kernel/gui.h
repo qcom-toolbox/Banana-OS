@@ -27,5 +27,8 @@ int gui_focused_vt(void);
  * closed. */
 int gui_close_terminal_by_vt(int vt);
 
+/* opens the Files window at `path` (NULL: home); 0 if the desktop is not running */
+int gui_open_files(const char* path);
+
 #endif
 

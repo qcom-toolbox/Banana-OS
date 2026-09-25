@@ -5,7 +5,7 @@
 
 /* main shell + sysmon + up to TERM_WIN_MAX (kernel/gui.c) independent
  * per-window terminal shell tasks, plus a little headroom. */
-#define TASK_MAX         12
+#define TASK_MAX         24
 #define TASK_NAME_MAX    24
 /* 16 KiB stack per created task, matching the boot stack (boot/boot.asm)
  * that task 0 already runs on: created tasks can now run a full shell
@@ -53,6 +53,13 @@ void task_sleep_ms(uint32_t ms);
  * use it to wake whoever is waiting on their device. */
 void task_wake(int pid);
 int  task_current_pid(void);
+
+/* Marks the calling task as a daemon (sshd, httpd, ...): it has no
+ * terminal of its own, so it never reads the keyboard and Ctrl+C never
+ * interrupts it (net_interrupted() is 0) - that input belongs to the
+ * shells. */
+void task_set_background(void);
+int  task_is_background(void);
 
 int  task_count(void);
 void task_snapshot(task_info_t* out, int max_count);
