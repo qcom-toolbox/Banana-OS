@@ -18,7 +18,13 @@ done
 if [ ${#MISSING[@]} -ne 0 ]; then
     echo "Installing missing dependencies: ${MISSING[*]}"
     sudo apt-get update -qq
-    sudo apt-get install -y nasm gcc grub-pc-bin grub-common xorriso mtools
+    sudo apt-get install -y nasm gcc grub-pc-bin grub-efi-amd64-bin grub-common xorriso mtools
+fi
+
+# ── UEFI boot support (x86_64-efi GRUB modules) ─────────────────────
+if [ ! -d /usr/lib/grub/x86_64-efi ]; then
+    echo "Installing grub-efi-amd64-bin (makes the ISO bootable on UEFI too)..."
+    sudo apt-get install -y grub-efi-amd64-bin
 fi
 
 # ── gcc multilib check ────────────────────────────────────────────
@@ -38,11 +44,14 @@ echo ""
 echo "🎉  Build complete!  →  Banana_OS.iso"
 echo ""
 echo "VirtualBox setup:"
-echo "  1. New VM  →  Type: Other, Version: Other/Unknown (32-bit)"
+echo "  1. New VM  →  Type: Other, Version: Other/Unknown (64-bit)"
 echo "  2. RAM: 32 MB minimum (256 MB recommended)"
 echo "  3. Network: NAT, Intel PRO/1000 MT Desktop (optional); no hard disk needed"
+echo "     (optional) System → Motherboard → Enable EFI to boot through UEFI"
 echo "  4. Settings → Storage → add Banana_OS.iso as optical drive"
 echo "  5. Boot!"
 echo ""
 echo "QEMU quick test:"
-echo "  make run     (qemu-system-i386 -cdrom Banana_OS.iso -m 256 -nic user,model=e1000 -serial stdio)"
+echo "  make run       (BIOS, 64-bit kernel - QEMU with e1000 networking, serial console here)"
+echo "  make run-uefi  (the same ISO on UEFI firmware; needs: apt install ovmf)"
+echo "  make run-32    (a 32-bit CPU: the boot menu picks the 32-bit kernel)"

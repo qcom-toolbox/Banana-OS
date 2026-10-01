@@ -38,7 +38,7 @@ void* usb_dma_alloc(uint32_t size) {
     while (align < size && align < 65536) align <<= 1;
     uint8_t* raw = (uint8_t*)kmalloc(size + align);
     if (!raw) return NULL;
-    uint8_t* p = (uint8_t*)(((uint32_t)(uintptr_t)raw + align - 1) & ~(align - 1));
+    uint8_t* p = (uint8_t*)(((uintptr_t)raw + align - 1) & ~(uintptr_t)(align - 1));
     memset(p, 0, size);
     return p;
 }

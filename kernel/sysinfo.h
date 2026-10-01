@@ -13,6 +13,7 @@ typedef struct {
     uint32_t cpu_stepping;
     uint32_t cpu_has_ht;        /* 1 if Hyper-Threading flag set */
     uint32_t mem_kb;            /* total memory in KiB from multiboot */
+    int      uefi;              /* booted through UEFI firmware (else BIOS) */
 } sysinfo_t;
 
 void sysinfo_init(uint32_t mb_info_addr);

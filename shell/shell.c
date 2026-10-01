@@ -357,7 +357,9 @@ static void cmd_neofetch(int persona) {
     terminal_write_color("  KERNEL:   ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     terminal_writeln("Banana Kernel 0.5");
     terminal_write_color("  ARCH:     ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln("x86 (i686)");
+    terminal_writeln(BANANA_ARCH_DESC);
+    terminal_write_color("  BOOT:     ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+    terminal_writeln(si->uefi ? "UEFI" : "BIOS");
     terminal_write_color("  SHELL:    ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     terminal_writeln((persona == SHELL_KIND_BASH) ? "bash (Banana bash)" : "sh (Banana sh)");
     terminal_write_color("  CPU:      ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
@@ -373,7 +375,13 @@ static void cmd_neofetch(int persona) {
         terminal_writeln("Unknown");
     }
     terminal_write_color("  DISPLAY:  ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln("VGA text 80x25");
+    if (fb_available()) {
+        char d[48];
+        ksnprintf(d, sizeof(d), "framebuffer %ux%u, %u bpp", fb_info()->width, fb_info()->height, (uint32_t)fb_info()->bpp);
+        terminal_writeln(d);
+    } else {
+        terminal_writeln("VGA text 80x25");
+    }
     terminal_write_color("\n  ** Powered by pure potassium **\n",
                          VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
 }
@@ -1359,8 +1367,8 @@ static void cmd_chsh(const char* args, int persona) {
 }
 
 static void cmd_uname(int persona) {
-    if (persona == SHELL_KIND_BASH) terminal_writeln("Banana OS 0.5 x86 Banana Kernel 0.5 bash");
-    else                             terminal_writeln("Banana OS 0.5 x86 Banana Kernel 0.5 sh");
+    if (persona == SHELL_KIND_BASH) terminal_writeln("Banana OS 0.5 " BANANA_ARCH " Banana Kernel 0.5 bash");
+    else                             terminal_writeln("Banana OS 0.5 " BANANA_ARCH " Banana Kernel 0.5 sh");
 }
 
 static void cmd_whoami(void) { terminal_writeln("banana"); }

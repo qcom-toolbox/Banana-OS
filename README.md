@@ -1,6 +1,6 @@
 # 🍌 Banana OS 0.5
 
-Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux kernel, no external OS kernel), bootable in VirtualBox/QEMU via GRUB + Multiboot2 - now with **real networking**: its own drivers for the Intel e1000 and Realtek RTL8139 network cards and its own TCP/IP stack, so `ping`, `curl` and `wget` talk to the actual Internet (HTTP and HTTPS).
+Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux kernel, no external OS kernel) - a **64-bit (x86_64) kernel with a 32-bit fallback**, booting on **UEFI and BIOS** machines and in VirtualBox/QEMU via GRUB + Multiboot2 - now with **real networking**: its own drivers for the Intel e1000 and Realtek RTL8139 network cards and its own TCP/IP stack, so `ping`, `curl` and `wget` talk to the actual Internet (HTTP and HTTPS).
 
 ```
   ____                               ____  ____
@@ -14,6 +14,8 @@ Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux k
 
 ## What's new in 0.5
 
+- **64-bit** - the kernel also builds for x86_64 (long mode, 4 GiB identity-mapped with 2 MiB pages); one ISO carries both kernels and its boot menu picks the 64-bit one when the CPU supports it, the 32-bit one otherwise
+- **UEFI** - the ISO (and a disk made with `install`) boots on UEFI firmware as well as on BIOS; `neofetch` shows which one started it
 - **Networking** - PCI NIC drivers (Intel e1000 / 82540EM, the default card in QEMU and VirtualBox, and Realtek RTL8139) and a from-scratch TCP/IP stack: Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS and TCP (retransmission with RTT-based timeouts, fast retransmit, congestion + flow control, out-of-order reassembly)
 - **`ping`, `curl`, `wget`, `nslookup`, `ifconfig`, `netstat`, `arp`, `dhcp`** - working against real hosts
 - **USB** - xHCI + EHCI host controllers, USB keyboards and mice, and USB network adapters: **Realtek RTL8152/8152B (Lanberg NC-0100-01)** and CDC-ECM; `lsusb`, hot-plug with `usb rescan`
@@ -33,11 +35,12 @@ Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux k
 ```
 Banana-OS/
 ├── boot/
-│   ├── boot.asm        # Multiboot2 entry point (assembly)
-│   └── linker.ld       # Linker script (exports _kernel_end for the heap)
+│   ├── boot.asm        # Multiboot2 entry point, 32-bit kernel
+│   ├── boot64.asm      # Multiboot2 entry of the 64-bit kernel: page tables, long mode
+│   └── linker.ld, linker64.ld  # Linker scripts (export _kernel_end for the heap)
 ├── kernel/
 │   ├── kernel.c        # kernel_main()
-│   ├── idt.c, isr.asm  # CPU exceptions (panic screen) + PIC / hardware IRQs
+│   ├── idt.c, isr.asm  # CPU exceptions (panic screen) + PIC / hardware IRQs (isr64.asm: 64-bit)
 │   ├── timer.c         # PIT at 1 kHz on IRQ0, hlt-based idle
 │   ├── task.c/h        # Cooperative kernel threads; the scheduler halts when all sleep
 │   ├── kheap.c         # Kernel heap (first-fit, coalescing) over the Multiboot2 memory map
@@ -111,7 +114,8 @@ Banana-OS/
 
 # Minimum Requirements
 
-- CPU : Yes (i686 or newer)
+- CPU : Yes (any x86-64 CPU runs the 64-bit kernel; an i686 runs the 32-bit one)
+- Firmware : UEFI or BIOS (legacy/CSM not required on UEFI machines; Secure Boot must be off - the ISO is not signed)
 - RAM : 32 MB (256 MB recommended - decoding a large photo for a wallpaper needs width x height x 3 bytes)
 - GPU : any sort of graphics accelerator should do it
 - Keyboard / Mouse : PS/2
@@ -475,39 +479,56 @@ chmod +x build.sh
 ### Manual build
 
 ```bash
-sudo apt-get install nasm gcc-multilib grub-pc-bin grub-common xorriso mtools
+sudo apt-get install nasm gcc-multilib grub-pc-bin grub-efi-amd64-bin grub-common xorriso mtools
 make
-# Output: Banana_OS.iso
+# Output: Banana_OS.iso (kernel.bin = 32-bit, kernel64.bin = 64-bit inside)
 ```
+
+`grub-efi-amd64-bin` is what makes the ISO UEFI-bootable: `grub-mkrescue` adds the UEFI boot image when it finds those GRUB modules (without them the build still works, BIOS-only, with a warning).
 
 ## Run in VirtualBox
 
 1. Create a new VM:
    - Name: `Banana OS 0.5`
    - Type: `Other`
-   - Version: `Other/Unknown (32-bit)`
+   - Version: `Other/Unknown (64-bit)`
 2. Assign at least **32 MB RAM** (256 MB recommended)
 3. Network: Adapter 1, **NAT**, **Intel PRO/1000 MT Desktop**
 4. No virtual disk required (add one to use `install`)
 5. Attach `Banana_OS.iso` as optical media
-6. Boot
+6. Optional: **System → Motherboard → Enable EFI** to boot it the UEFI way
+7. Boot
 
 ## Run in QEMU
 
 ```bash
-make run
-# or
-qemu-system-i386 -cdrom Banana_OS.iso -m 256 -nic user,model=e1000 -serial stdio
+make run          # BIOS, 64-bit kernel
+make run-uefi     # the same ISO on UEFI firmware (apt install ovmf)
+make run-32       # a 32-bit-only CPU: the menu falls back to the 32-bit kernel
+# or by hand
+qemu-system-x86_64 -cdrom Banana_OS.iso -m 256 -nic user,model=e1000 -serial stdio
+qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd -cdrom Banana_OS.iso -m 256 -nic user,model=e1000 -serial stdio
 ```
+
+The boot menu has both entries - **Banana OS 0.5 (64-bit)** and **(32-bit)**; the default is chosen with GRUB's `cpuid -l` (long mode available or not).
+
+## 64-bit and UEFI: how it works
+
+- **One ISO, two firmwares**: `grub-mkrescue` writes a hybrid image with a BIOS El Torito boot record and a UEFI one (`efi.img` with GRUB for x86_64-efi). Either GRUB loads the kernel with Multiboot2 and asks for an 800x600x32 framebuffer - VBE on BIOS, GOP on UEFI. Written to a disk by `install` (or with `dd` to a USB stick) it is bootable both ways too.
+- **Long mode**: GRUB starts a Multiboot2 kernel in 32-bit protected mode on both firmwares. `boot/boot64.asm` checks the CPU, builds page tables mapping the first 4 GiB 1:1 with 2 MiB pages (RAM, PCI device memory and the framebuffer all live there), enables PAE, long mode and paging, loads a 64-bit GDT and jumps to `kernel_main`.
+- **Same C code**: both kernels are built from the same sources (`*.o` for i386, `*.o64` for x86_64: `-mcmodel=small -mno-red-zone`, no SSE). Pointer-sized types come from the compiler, the interrupt stubs (`isr64.asm`), the task switch (`task_switch64.asm`), the IDT gate format and the new-task stack frame have 64-bit versions; the heap stays below 3.5 GiB, so DMA addresses still fit the 32-bit registers of the older devices.
+- **UEFI quirk**: UEFI firmware leaves the CPU's local APIC enabled with the legacy PIC input masked (a BIOS sets it to pass-through); Banana OS drives interrupts with the 8259 PIC, so it switches the local APIC off at boot - without that, no timer or device interrupt would arrive.
+- **Not (yet)**: Secure Boot (the GRUB on the ISO is unsigned), memory above 4 GiB (64-bit Banana OS uses at most 3.5 GiB of RAM), more than one CPU core.
 
 ## Technical Notes
 
-- **Bootloader**: GRUB 2 (Multiboot2)
+- **Bootloader**: GRUB 2 (Multiboot2), BIOS and UEFI
+- **Architectures**: x86_64 (long mode) and i686 (protected mode), same sources
 - **Language**: freestanding C + NASM, no floating point (integer-only graphics and crypto)
 - **Graphics**: 32-bit framebuffer + 8x8 bitmap font; the console paints lazily (dirty rows, coalesced scrolling)
 - **Interrupts**: PIC remapped to vectors 32-47; IRQ0 (1 kHz timer) and the NIC's IRQ are used, keyboard/mouse stay polled
 - **Scheduling**: cooperative kernel threads; with nothing to run the CPU halts until the next interrupt
-- **Memory**: no paging (physical = virtual), kernel heap from the Multiboot2 memory map, so heap buffers double as DMA buffers
+- **Memory**: physical = virtual (32-bit: paging off; 64-bit: the first 4 GiB identity-mapped), kernel heap from the Multiboot2 memory map, so heap buffers double as DMA buffers
 - **Input**:
   - PS/2 keyboard (`0x60` / `0x64`)
   - PS/2 mouse AUX packets

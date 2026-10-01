@@ -3,3 +3,6 @@
 
 # build outputs of the new directories (existing tracked .o files stay tracked)
 *.o
+*.o64
+*.o64.d
+kernel64.bin
