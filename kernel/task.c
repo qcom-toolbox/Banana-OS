@@ -18,8 +18,8 @@
  */
 
 typedef struct {
-    uint32_t*    sp;                      /* saved esp when not running */
-    uint32_t     stack[TASK_STACK_WORDS]; /* only used for created tasks */
+    uintptr_t*   sp;                      /* saved stack pointer when not running */
+    uintptr_t    stack[TASK_STACK_WORDS] __attribute__((aligned(16))); /* created tasks only */
     uint32_t     pid;
     char         name[TASK_NAME_MAX];
     task_state_t state;
@@ -38,7 +38,7 @@ static task_t  g_tasks[TASK_MAX];
 static int     g_count = 0;
 static task_t* g_current = NULL;
 
-extern void task_switch(uint32_t** old_sp_store, uint32_t* new_sp);
+extern void task_switch(uintptr_t** old_sp_store, uintptr_t* new_sp);
 
 static void set_name(char* dst, const char* src, int maxlen) {
     int i = 0;
@@ -100,17 +100,26 @@ int task_create(const char* name, void (*entry)(void)) {
     t->vt = 0;
     t->background = 0;
 
-    /* Build a fake call frame so task_switch()'s epilogue (pop edi/esi/ebx/
-     * ebp; ret) lands straight in task_trampoline() as if it had just been
-     * called with zero arguments. */
-    uint32_t* sp = &t->stack[TASK_STACK_WORDS];
+    /* Build a fake call frame so task_switch()'s epilogue (pop the
+     * callee-saved registers; ret) lands straight in task_trampoline()
+     * as if it had just been called with zero arguments. */
+    uintptr_t* sp = &t->stack[TASK_STACK_WORDS];
+#ifdef __x86_64__
+    /* r15 r14 r13 r12 rbx rbp, then the return addresses; the slot
+     * after the trampoline's address sits at 8 mod 16, like after a call */
+    sp -= 8;
+    for (int i = 0; i < 6; i++) sp[i] = 0;
+    sp[6] = (uintptr_t)task_trampoline;     /* task_switch's `ret` target */
+    sp[7] = (uintptr_t)task_exit_stub;      /* trampoline's own `ret` target */
+#else
     sp -= 6;
     sp[0] = 0;                              /* edi */
     sp[1] = 0;                              /* esi */
     sp[2] = 0;                              /* ebx */
     sp[3] = 0;                              /* ebp */
-    sp[4] = (uint32_t)task_trampoline;      /* task_switch's `ret` target */
-    sp[5] = (uint32_t)task_exit_stub;       /* trampoline's own `ret` target */
+    sp[4] = (uintptr_t)task_trampoline;     /* task_switch's `ret` target */
+    sp[5] = (uintptr_t)task_exit_stub;      /* trampoline's own `ret` target */
+#endif
     t->sp = sp;
 
     g_count++;

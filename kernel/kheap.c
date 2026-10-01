@@ -10,7 +10,7 @@ typedef struct block {
     uint32_t      used;   /* 0 = free, HEAP_MAGIC = allocated */
     struct block* prev;
     struct block* next;
-} block_t;
+} __attribute__((aligned(16))) block_t;   /* 16 or 32 bytes: payloads stay 16-aligned */
 
 #define HEAP_MAGIC 0xB16B00B5u
 #define HDR        ((uint32_t)sizeof(block_t))

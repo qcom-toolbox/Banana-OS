@@ -14,9 +14,9 @@ static inline uint32_t inl(uint16_t p) { uint32_t v; __asm__ volatile("inl %1,%0
 static inline void io_wait(void) { outb(0x80, 0); }
 
 static inline uint32_t irq_save(void) {
-    uint32_t f;
+    uintptr_t f;                        /* pushf pushes a full-width word */
     __asm__ volatile("pushf; pop %0; cli" : "=r"(f) :: "memory");
-    return f;
+    return (uint32_t)f;
 }
 static inline void irq_restore(uint32_t f) {
     if (f & 0x200) __asm__ volatile("sti" ::: "memory");

@@ -1,9 +1,38 @@
 #include "idt.h"
 #include "types.h"
 #include "fb.h"
+#include "serial.h"
 
 #define VGA_MEMORY ((volatile uint16_t*)0xB8000)
 
+#ifdef __x86_64__
+/* long mode: 16-byte gates with a 64-bit handler address */
+struct idt_entry {
+    uint16_t base_lo;
+    uint16_t sel;
+    uint8_t  ist;
+    uint8_t  flags;
+    uint16_t base_mid;
+    uint32_t base_hi;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct idt_ptr {
+    uint16_t limit;
+    uint64_t base;
+} __attribute__((packed));
+
+/* What kernel/isr64.asm pushes, low address -> high address: the 15
+ * general registers, int_no/err_code from the stub, then the frame the
+ * CPU pushes in long mode (always including rsp/ss). */
+typedef struct {
+    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
+    uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
+    uint64_t int_no, err_code;
+    uint64_t rip, cs, rflags, rsp, ss;
+} registers_t;
+#define REG_IP(r) ((r)->rip)
+#else
 struct idt_entry {
     uint16_t base_lo;
     uint16_t sel;
@@ -28,6 +57,8 @@ typedef struct {
     uint32_t int_no, err_code;
     uint32_t eip, cs, eflags;
 } registers_t;
+#define REG_IP(r) ((r)->eip)
+#endif
 
 static struct idt_entry idt[256];
 static struct idt_ptr   idtp;
@@ -43,12 +74,19 @@ static uint16_t read_cs(void) {
     return cs;
 }
 
-static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
+static void idt_set_gate(uint8_t num, uintptr_t base, uint16_t sel, uint8_t flags) {
     idt[num].base_lo = (uint16_t)(base & 0xFFFF);
-    idt[num].base_hi = (uint16_t)((base >> 16) & 0xFFFF);
     idt[num].sel     = sel;
-    idt[num].always0 = 0;
     idt[num].flags   = flags;
+#ifdef __x86_64__
+    idt[num].ist      = 0;
+    idt[num].base_mid = (uint16_t)((base >> 16) & 0xFFFF);
+    idt[num].base_hi  = (uint32_t)((uint64_t)base >> 32);
+    idt[num].reserved = 0;
+#else
+    idt[num].always0 = 0;
+    idt[num].base_hi = (uint16_t)((base >> 16) & 0xFFFF);
+#endif
 }
 
 extern void isr0(void);  extern void isr1(void);  extern void isr2(void);  extern void isr3(void);
@@ -150,10 +188,17 @@ void isr_handler(registers_t* regs) {
     vga_put_hex(2, 10, n, 0x4F);
     vga_puts(3, 2, "Error code:", 0x4F);
     vga_put_hex(3, 14, regs->err_code, 0x4F);
-    vga_puts(4, 2, "EIP:", 0x4F);
-    vga_put_hex(4, 7, regs->eip, 0x4F);
+    vga_puts(4, 2, "IP:", 0x4F);
+#ifdef __x86_64__
+    vga_put_hex(4, 7, (uint32_t)(REG_IP(regs) >> 32), 0x4F);
+    vga_put_hex(4, 15, (uint32_t)REG_IP(regs), 0x4F);
+#else
+    vga_put_hex(4, 7, REG_IP(regs), 0x4F);
+#endif
     vga_puts(5, 2, "CS:", 0x4F);
-    vga_put_hex(5, 6, regs->cs, 0x4F);
+    vga_put_hex(5, 6, (uint32_t)regs->cs, 0x4F);
+    klog("*** PANIC: %s (vector %u, error %x) at ip %llx\n", name, n, (uint32_t)regs->err_code,
+         (unsigned long long)REG_IP(regs));
 
     /* Solid red field + binary-encoded vector number (MSB..LSB, left to
      * right) on the real framebuffer, in case that's what's on screen. */
@@ -246,20 +291,37 @@ void irq_handler(registers_t* regs) {
     pic_outb(PIC1_CMD, 0x20);
 }
 
+/* UEFI firmware hands over with the local APIC enabled and its LINT0
+ * input (where the 8259 PIC's interrupt line arrives) masked, so no
+ * hardware interrupt would ever reach the CPU - a BIOS sets LINT0 to
+ * "ExtINT" pass-through instead. Banana OS uses the 8259, so the local
+ * APIC is switched off: the CPU then takes the PIC's INTR directly. */
+static void lapic_off(void) {
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    if (!(d & (1u << 9))) return;                       /* no APIC */
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x1Bu));
+    if (!(lo & (1u << 11))) return;                     /* already off */
+    lo &= ~((1u << 11) | (1u << 10));                   /* EN and x2APIC EXTD */
+    __asm__ volatile("wrmsr" : : "a"(lo), "d"(hi), "c"(0x1Bu));
+}
+
 void idt_init(void) {
     idtp.limit = (uint16_t)(sizeof(idt) - 1);
-    idtp.base  = (uint32_t)&idt;
+    idtp.base  = (uintptr_t)&idt;
 
     uint16_t code_sel = read_cs();
 
     for (int i = 0; i < 256; i++) idt_set_gate((uint8_t)i, 0, 0, 0);
     for (int i = 0; i < 32; i++) {
-        idt_set_gate((uint8_t)i, (uint32_t)isr_stubs[i], code_sel, 0x8E);
+        idt_set_gate((uint8_t)i, (uintptr_t)isr_stubs[i], code_sel, 0x8E);
     }
     for (int i = 0; i < 16; i++) {
-        idt_set_gate((uint8_t)(32 + i), (uint32_t)irq_stubs[i], code_sel, 0x8E);
+        idt_set_gate((uint8_t)(32 + i), (uintptr_t)irq_stubs[i], code_sel, 0x8E);
     }
 
     __asm__ volatile("lidt %0" : : "m"(idtp));
+    lapic_off();
     pic_remap();
 }

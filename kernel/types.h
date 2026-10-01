@@ -13,11 +13,20 @@ typedef signed short       int16_t;
 typedef signed int         int32_t;
 typedef signed long long   int64_t;
 
-typedef unsigned int       size_t;
-typedef signed int         ptrdiff_t;
+/* pointer-sized types: 32-bit on i386, 64-bit on x86_64 */
+typedef __SIZE_TYPE__      size_t;
+typedef __PTRDIFF_TYPE__   ptrdiff_t;
+typedef __UINTPTR_TYPE__   uintptr_t;
+typedef __INTPTR_TYPE__    intptr_t;
 
-/* ✅ ADD THIS (required for pointer casts) */
-typedef unsigned int       uintptr_t;
+/* the architecture this kernel was built for (uname, neofetch) */
+#ifdef __x86_64__
+#define BANANA_ARCH      "x86_64"
+#define BANANA_ARCH_DESC "x86_64 (64-bit long mode)"
+#else
+#define BANANA_ARCH      "i686"
+#define BANANA_ARCH_DESC "x86 (i686, 32-bit)"
+#endif
 
 #ifndef NULL
 #define NULL ((void*)0)
