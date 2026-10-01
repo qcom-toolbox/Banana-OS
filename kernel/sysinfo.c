@@ -123,7 +123,7 @@ void sysinfo_init(uint32_t mb_info_addr) {
 
     /* ── Memory from Multiboot ──────────────────────────────────── */
     if (mb_info_addr) {
-        mb_info_t* mb = (mb_info_t*)mb_info_addr;
+        mb_info_t* mb = (mb_info_t*)(uintptr_t)mb_info_addr;
         if (mb->flags & 0x1) {
             /* mem_upper is KiB above 1MB; add 1024 for the first MB */
             info.mem_kb = mb->mem_upper + 1024;
@@ -179,9 +179,18 @@ void sysinfo_init_mb2(uint32_t mb2_info_addr) {
     info.mem_kb = 0;
     if (!mb2_info_addr) return;
 
-    mb2_info_t* mb2 = (mb2_info_t*)mb2_info_addr;
+    mb2_info_t* mb2 = (mb2_info_t*)(uintptr_t)mb2_info_addr;
     uint32_t total = mb2->total_size;
     uint32_t off = 8;
+
+    /* GRUB passes the EFI system table (tag 11/12) only when it was
+     * started by UEFI firmware */
+    for (uint32_t o = 8; o + 8 <= total;) {
+        mb2_tag_t* t = (mb2_tag_t*)(uintptr_t)(mb2_info_addr + o);
+        if (t->type == 0 || t->size < 8) break;
+        if (t->type == 11 || t->type == 12) info.uefi = 1;
+        o += (t->size + 7u) & ~7u;
+    }
 
     while (off + 8 <= total) {
         mb2_tag_t* tag = (mb2_tag_t*)(uintptr_t)(mb2_info_addr + off);
