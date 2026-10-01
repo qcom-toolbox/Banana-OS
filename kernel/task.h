@@ -40,6 +40,9 @@ void task_start_sysmon(void);
  * `entry` takes no arguments and is expected to run forever, calling
  * task_yield()/task_sleep_ms() so other tasks get the CPU. */
 int  task_create(const char* name, void (*entry)(void));  /* pid, or -1 if full */
+/* Same, on a kmalloc'd stack of stack_bytes (the web browser and the PHP
+ * pages of httpd run deeply recursive interpreters). */
+int  task_create_stack(const char* name, void (*entry)(void), uint32_t stack_bytes);
 
 /* Voluntarily gives up the CPU to the next READY task (round robin).
  * If nothing else is READY, returns to the caller immediately. */

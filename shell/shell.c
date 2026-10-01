@@ -789,11 +789,12 @@ static void cmd_help(void) {
         "  wallpaper          show/set the wallpaper (see: wallpaper help)",
         "  wallpaper url <u>  download a picture to ~/Pictures and use it",
         "  files [folder]     open the desktop's file explorer (also: Files icon)",
+        "  browser [url]      open the desktop's web browser (also: Browser icon)",
         "",
         "Servers:",
         "  passwd             set the password of banana (the SSH login)",
         "  sshd start|stop    SSH server (port 22): ssh banana@<this machine>",
-        "  httpd start|stop   web server (port 80) for the files in /var/www",
+        "  httpd start|stop   web server (port 80) for /var/www, runs .php pages",
         "  sshd/httpd enable  also start it at every boot (disable: undo)",
         "",
         "Shell: cmd > file, cmd >> file, cmd1; cmd2, cmd1 && cmd2",
@@ -1178,7 +1179,7 @@ static const char* const known_cmds[] = {
     "grep", "wc", "head", "tail", "find", "time",
     /* shell/netcmds.c + shell/wpcmd.c */
     "ifconfig", "dhcp", "ping", "nslookup", "host", "netstat", "arp", "curl", "wget",
-    "cryptotest", "wallpaper", "lsusb", "usb", "httpd", "sshd", "passwd", "files", (void*)0
+    "cryptotest", "wallpaper", "lsusb", "usb", "httpd", "sshd", "passwd", "files", "browser", (void*)0
 };
 
 static void cmd_which(const char* args) {

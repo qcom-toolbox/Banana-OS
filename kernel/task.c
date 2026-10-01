@@ -1,6 +1,7 @@
 #include "task.h"
 #include "timer.h"
 #include "terminal.h"
+#include "kheap.h"
 
 /*
  * Real cooperative kernel threads.
@@ -85,6 +86,10 @@ void task_init(const char* main_task_name) {
 }
 
 int task_create(const char* name, void (*entry)(void)) {
+    return task_create_stack(name, entry, 0);
+}
+
+int task_create_stack(const char* name, void (*entry)(void), uint32_t stack_bytes) {
     if (g_count >= TASK_MAX) return -1;
 
     task_t* t = &g_tasks[g_count];
@@ -104,6 +109,11 @@ int task_create(const char* name, void (*entry)(void)) {
      * callee-saved registers; ret) lands straight in task_trampoline()
      * as if it had just been called with zero arguments. */
     uintptr_t* sp = &t->stack[TASK_STACK_WORDS];
+    if (stack_bytes > sizeof(t->stack)) {
+        uint8_t* mem = (uint8_t*)kmalloc(stack_bytes + 16);
+        if (!mem) return -1;
+        sp = (uintptr_t*)(((uintptr_t)mem + stack_bytes) & ~(uintptr_t)15);
+    }
 #ifdef __x86_64__
     /* r15 r14 r13 r12 rbx rbp, then the return addresses; the slot
      * after the trampoline's address sits at 8 mod 16, like after a call */

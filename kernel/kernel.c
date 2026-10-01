@@ -8,6 +8,7 @@
 #include "daemon.h"
 #include "types.h"
 #include "gui.h"
+#include "browser.h"
 #include "fb.h"
 #include "gfx.h"
 #include "idt.h"
@@ -20,12 +21,26 @@
 
 #define MULTIBOOT2_MAGIC 0x36D76289
 
+/* The x87 FPU: the web browser's JavaScript and httpd's PHP compute with
+ * it (the kernel is built without SSE). No emulation, no lazy switching
+ * (tasks are cooperative and the x87 stack is empty across calls), FPU
+ * errors reported natively, all exceptions masked by fninit. */
+static void fpu_init(void) {
+    uintptr_t cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~((uintptr_t)1 << 2 | (uintptr_t)1 << 3);   /* EM, TS */
+    cr0 |= (uintptr_t)1 << 1 | (uintptr_t)1 << 5;      /* MP, NE */
+    __asm__ volatile("mov %0, %%cr0" :: "r"(cr0));
+    __asm__ volatile("fninit");
+}
+
 void kernel_main(uint32_t magic, uint32_t mb_info) {
     /* Install exception handlers before anything else: a fault before
      * this point is unrecoverable anyway, but once the IDT is live, any
      * CPU exception paints a readable panic screen instead of silently
      * triple-faulting into a VM reset. */
     idt_init();
+    fpu_init();
 
     serial_init();
     klog("Banana OS 0.5 booting\n");
@@ -44,6 +59,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     timer_init();
     __asm__ volatile("sti");  /* timer IRQ from here on */
     rtc_init();
+    web_init();       /* clock for JavaScript Date / PHP date() */
     task_init("banana-sh");   /* boot stack becomes the shell's real thread */
     task_start_sysmon();      /* real background stats-sampling thread */
     usb_init();       /* xHCI legacy handoff → USB keyboards work via PS/2 */

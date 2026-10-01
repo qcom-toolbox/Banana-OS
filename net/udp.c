@@ -54,7 +54,7 @@ int udp_send(ip4_t dst, uint16_t sport, uint16_t dport, const void* data, uint32
 
     /* checksum over the pseudo header + datagram */
     uint8_t ph[12];
-    wr32(ph, nif->configured ? nif->ip : 0);
+    wr32(ph, (dst >> 24) == 127 ? dst : nif->configured ? nif->ip : 0);   /* loopback: from 127.x */
     wr32(ph + 4, dst);
     ph[8] = 0;
     ph[9] = IP_PROTO_UDP;

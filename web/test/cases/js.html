@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>JS &amp; DOM test</title>
+<style>
+  body { font-family: sans-serif; background: #fffbe6; }
+  .box { border: 2px solid #c90; padding: 6px; margin: 6px 0; }
+  .hot { background: #ffd54f; color: #b00; }
+  #list li.done { text-decoration: line-through; color: #888; }
+</style>
+</head>
+<body>
+<h1 id="title">Banana Browser JS test</h1>
+<p>Static: <script>document.write("<b>written by document.write</b> " + (6 * 7));</script></p>
+<div id="counter" class="box">Clicks: <span id="n">0</span></div>
+<button id="btn" onclick="bump()">Click me</button>
+<button id="btn2">Listener</button>
+<a id="lnk" href="other.html" onclick="return false">no-nav link</a>
+<a id="lnk2" href="sub/page.html?x=1">nav link</a>
+<p><input id="name" type="text" placeholder="Your name" oninput="greet()"> <span id="hello"></span></p>
+<p><label><input id="cb" type="checkbox" onchange="document.getElementById('cbs').textContent = this.checked ? 'on' : 'off'"> check</label> <span id="cbs">off</span></p>
+<ul id="list"></ul>
+<div id="timer" class="box">timer: <span id="t">0</span></div>
+<form id="f" action="search.php">
+  <input name="q" id="q" value="banana split">
+  <select name="kind" id="kind"><option>fruit</option><option selected>dessert</option></select>
+  <input type="submit" id="go" value="Go">
+</form>
+<script>
+  var count = 0;
+  function bump() {
+    count++;
+    document.getElementById("n").textContent = count;
+    if (count >= 2) document.getElementById("counter").className = "box hot";
+  }
+  document.getElementById("btn2").addEventListener("click", function (e) {
+    alert("listener got " + e.type + " on " + e.target.tagName);
+  });
+  function greet() {
+    var v = document.getElementById("name").value;
+    document.querySelector("#hello").innerHTML = v ? "Hello, <i>" + v + "</i>!" : "";
+  }
+  var items = ["apples", "bananas", "cherries"];
+  var ul = document.getElementById("list");
+  items.forEach(function (it, i) {
+    var li = document.createElement("li");
+    li.textContent = (i + 1) + ". " + it;
+    if (i === 1) li.classList.add("done");
+    ul.appendChild(li);
+  });
+  var ticks = 0;
+  var iv = setInterval(function () {
+    ticks++;
+    document.getElementById("t").textContent = ticks;
+    if (ticks === 3) clearInterval(iv);
+  }, 100);
+  window.onload = function () {
+    document.title = "Loaded: " + document.querySelectorAll("li").length + " items";
+    document.getElementById("title").style.color = "#2a7";
+  };
+  console.log("script done, location " + location.pathname);
+</script>
+</body>
+</html>

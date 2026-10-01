@@ -29,6 +29,8 @@ int gui_close_terminal_by_vt(int vt);
 
 /* opens the Files window at `path` (NULL: home); 0 if the desktop is not running */
 int gui_open_files(const char* path);
+/* opens the Browser window (url NULL: its current page); 0 if the desktop is not running */
+int gui_open_browser(const char* url);
 
 #endif
 

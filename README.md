@@ -27,6 +27,8 @@ Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux k
 - **SSH server** - log in from any SSH client (OpenSSH, PuTTY, Windows `ssh`) with the password you set with `passwd`: curve25519 key exchange, Ed25519 host key, ChaCha20-Poly1305 / AES-128-GCM, written from the RFCs
 - **Web server** - `httpd start` serves `/var/www` (with folder listings) to any browser on the network
 - **File explorer** - a "Files" window on the desktop: browse, preview text and pictures, new folder, delete, open in the editor or a terminal, set a picture as the wallpaper
+- **Web browser** - a "Browser" window on the desktop with its own HTML parser, CSS engine, layout and renderer, and a small JavaScript interpreter with a DOM (`getElementById`, `innerHTML`, events, `setInterval`, ...); opens `http://`, `https://`, `file://` and `about:home`
+- **PHP** - `httpd` runs `.php` pages (`$_GET`, `$_SERVER`, `header()`, ~90 functions, files) with the same interpreter; try `http://localhost/demo.php`
 - **Permanent settings** - the network configuration (static IP or DHCP, chosen interface) and the servers to start at boot are saved in `/etc` and applied at every boot of an installed system
 - **Shell** - output redirection (`cmd > file`, `cmd >> file`) and command lists (`a; b`, `a && b`)
 
@@ -52,6 +54,7 @@ Banana-OS/
 │   ├── fb.c, gfx.c     # Framebuffer + 2D drawing
 │   ├── gui.c/h         # Desktop GUI (taskbar/start menu/windows/wallpaper app)
 │   ├── explorer.c      # "Files" window (file explorer)
+│   ├── browser.c       # "Browser" window (runs web/ in its own task)
 │   ├── tty.c           # Remote terminals (SSH sessions)
 │   ├── config.c        # key=value settings in /etc (network, services)
 │   ├── passwd.c        # Password hashes (PBKDF2) in /etc/shadow
@@ -71,12 +74,15 @@ Banana-OS/
 │   ├── tls.c           # TLS 1.3 client
 │   ├── http.c          # HTTP/1.1 client (curl, wget)
 │   ├── httpd.c         # Web server
+│   ├── httpd_php.c     # .php pages for httpd
 │   └── sshd.c          # SSH server
+├── web/                # Browser engine: html.c (parser + DOM), css.c, layout.c, render.c,
+│                       #   script.c + script_lib.c (JavaScript and PHP interpreter), jsdom.c, page.c
 ├── crypto/             # SHA-256/512, HMAC/HKDF/PBKDF2, ChaCha20, Poly1305, AES-128-GCM, X25519, Ed25519, self-tests
 ├── shell/
 │   ├── shell.c/h       # Banana shell
 │   ├── netcmds.c       # ifconfig, ping, curl, wget, ...
-│   ├── srvcmds.c       # sshd, httpd, passwd, files
+│   ├── srvcmds.c       # sshd, httpd, passwd, files, browser
 │   ├── wpcmd.c         # wallpaper command
 │   └── editor.c/h      # Nano-like text editor
 ├── third_party/        # stb_image (runtime image decoding), lodepng
@@ -107,7 +113,8 @@ Banana-OS/
 - Two shell personas sharing one command engine - stock `sh` (default) and a bash-compatible `bash` (aliases, `export`/`$VAR`, `!!`) - selectable per-session with `chsh`
 - Built-in editor and live system monitor
 - Networking: e1000 + RTL8139 drivers, USB adapters (RTL8152/8152B, CDC-ECM), TCP/IP stack, DHCP, DNS, HTTP + HTTPS (TLS 1.3), saved configuration
-- Servers: SSH (password login, 2 sessions) and a static web server, optionally started at boot
+- Servers: SSH (password login, 2 sessions) and a web server with PHP pages, optionally started at boot
+- Web browser: HTML + CSS layout, images, forms, JavaScript with a DOM, history
 - File explorer window with text/picture previews
 - Real bootable disk install (`install`/`sync`) - installs onto a dedicated ATA hard disk so Banana OS boots on its own, with a persistent filesystem, no CD required
 - Serial console on COM1 (output mirror + input)
@@ -135,9 +142,11 @@ Banana-OS/
   - About app
   - Terminal
   - Files
+  - Browser
   - Wallpaper
   - Quit GUI
 - Files - the file explorer (below)
+- Browser - the web browser (below)
 - Wallpaper app - pick one of 10 built-in presets, or one of your own pictures from `~/Pictures`
 - Up to 4 terminal windows (draggable, closable, focusable, scrollable), each running its own independent shell task
 - PS/2 mouse and Synaptics touchpad (absolute mode + tap-to-click) both work for pointing
@@ -235,7 +244,16 @@ echo "<h1>Hello</h1>" > /var/www/index.html
 wget -O /var/www/photo.jpg https://...
 ```
 
-Open `http://<address>/` in a browser. Files under `/var/www` are served (GET/HEAD) with their content type; a folder without `index.html` gets a file listing. A new, empty `/var/www` gets a welcome page.
+Open `http://<address>/` in a browser. Files under `/var/www` are served (GET/HEAD) with their content type; a folder without `index.html` gets a file listing. A new, empty `/var/www` gets a welcome page and `demo.php`.
+
+**PHP**: a `.php` file is run on each request (as is `index.php` for a folder) and its output is the page. It is Banana OS's own interpreter for a basic PHP: variables, arrays (ordered maps), functions, `if/for/foreach/while/switch`, `try/catch`, `<?= ?>` and the `endif;`/`endforeach;` forms, string interpolation, and about 90 functions (strings, arrays and sorting, math, `date()`, `json_encode/decode`, `md5/sha1`, `htmlspecialchars`, `sprintf`, `print_r/var_dump`, ...). `$_GET`, `$_REQUEST` and `$_SERVER` are set from the request; `header()` sets the content type, the status or a redirect; `file_get_contents`, `file_put_contents` (with `FILE_APPEND`), `file`, `file_exists`, `unlink` and `scandir` work on the Banana OS files (relative to the script's folder). No classes, includes, sessions or POST bodies; errors are shown in the page, like `display_errors=On`.
+
+For example, `edit /var/www/hello.php`, then open `http://<address>/hello.php?name=Ann`:
+
+```php
+<h1>Hello <?= htmlspecialchars($_GET['name'] ?? 'world') ?></h1>
+<?php foreach ([1, 2, 3] as $n) echo "<p>$n squared is " . $n * $n . "</p>"; ?>
+```
 
 In **QEMU's user-mode network** (the default `make run`), the guest is behind QEMU's NAT, so forward ports to reach the servers from your computer:
 
@@ -255,6 +273,18 @@ Open it from the desktop (`startx`): the **Files** icon or Start menu entry, or 
 - **Edit** (text) opens the file in the editor in a new terminal window; **Set as wallpaper** (pictures); double-click does the same
 - **New folder**, **Delete** (click twice to confirm; folders are deleted with their contents), **Terminal** opens a terminal in the current folder, **Refresh**
 - The window can be dragged by its title bar, and stacks with the terminal windows
+
+## Web Browser ("Browser")
+
+Open it from the desktop (`startx`): the **Browser** icon or Start menu entry, or `browser [address]` in a terminal (`browser localhost/demo.php`, `browser example.com`, `browser /home/banana`).
+
+- Addresses: `http://` and `https://` (redirects followed), `file:///path` (files and folder listings), `about:home` (the start page). A bare name gets `http://`, a path gets `file://`
+- **<** / **>** history, **R** reload, **Hm** start page, the address bar (click it or Ctrl+L, Enter to go); scrollbar, arrow keys, space and PgUp/PgDn scroll; Backspace goes back; Ctrl+R reloads
+- HTML: a forgiving parser (missing end tags, entities, `<script>`/`<style>`), headings, paragraphs, lists, tables, links (`#anchors` too), `<pre>`, images (PNG/JPEG/GIF/BMP), forms (text fields, textareas, checkboxes, radio buttons, selects, buttons - submitted as GET)
+- CSS: `<style>`, `<link rel=stylesheet>` and `style=""`; tag/class/id/attribute selectors, descendant and child combinators, specificity and `!important`; colors, backgrounds, borders, margins/padding, widths, `margin: auto`, font size (scaled 8x8 font), bold/italic/underline, `text-align`, `display`, `visibility`, `white-space`
+- JavaScript: Banana OS's own interpreter for a basic JavaScript - `var/let/const`, functions, arrow functions, closures, objects, arrays, template strings, `try/catch`, and the usual String/Array/Math/JSON/Date methods. The DOM: `document.getElementById/querySelector(All)/createElement/write`, `innerHTML`, `textContent`, `value`, `style`, `classList`, `appendChild`/`remove`/..., `addEventListener` and `onclick=""`-style handlers (click, input, change, submit, keydown, load), `setTimeout/setInterval`, `alert()`, `location`, `localStorage` (for the page's lifetime)
+- Not supported: regular expressions, classes, `fetch`/XMLHttpRequest, CSS floats/flexbox/grid/positioning, fonts other than the built-in one. A script error is shown in the status bar and the rest of the page still works
+- Pages run in the browser's own task (a 2 MiB stack); a page gets at most 48 MiB, and a script stops after 5 million steps
 
 ## USB
 
@@ -427,10 +457,11 @@ Bash-flavored extras (available in both personas, since they share one engine):
 | **Servers** | |
 | `passwd [-d]` | Set (or remove) the password of `banana`, used for SSH logins |
 | `sshd [status\|start [port]\|stop\|enable [port]\|disable]` | SSH server (port 22); `enable` also starts it at boot |
-| `httpd [status\|start [port]\|stop\|enable [port]\|disable]` | Web server for `/var/www` (port 80); `enable` also starts it at boot |
+| `httpd [status\|start [port]\|stop\|enable [port]\|disable]` | Web server for `/var/www` (port 80, `.php` pages run); `enable` also starts it at boot |
 | **Wallpaper / desktop** | |
 | `wallpaper [list\|reset\|preset <n>\|url <url>\|<file> [fill\|fit\|stretch\|center]]` | Show or change the desktop wallpaper |
 | `files [folder]` | Open the file explorer (desktop running) |
+| `browser [address]` | Open the web browser, optionally at an address (desktop running) |
 | **Shell syntax** | |
 | `cmd > file`, `cmd >> file` | Write / append a command's output to a file |
 | `cmd1; cmd2`, `cmd1 && cmd2` | Run commands one after the other |

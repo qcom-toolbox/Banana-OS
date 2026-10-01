@@ -177,6 +177,12 @@ int srvcmd_dispatch(const char* line) {
     if (strcmp(argv[0], "httpd") == 0)  { cmd_httpd(argc, argv); return 1; }
     if (strcmp(argv[0], "sshd") == 0)   { cmd_sshd(argc, argv); return 1; }
     if (strcmp(argv[0], "passwd") == 0) { cmd_passwd(argc, argv); return 1; }
+    if (strcmp(argv[0], "browser") == 0) {
+        /* the desktop's web browser, optionally at an address */
+        if (!gui_open_browser(argc >= 2 ? argv[1] : NULL))
+            terminal_writeln("browser: the web browser is part of the desktop - run `startx` first");
+        return 1;
+    }
     if (strcmp(argv[0], "files") == 0) {
         /* the desktop's file explorer, opened at a folder */
         char path[FS_PATH_LEN];

@@ -7,6 +7,8 @@
 #include "timer.h"
 #include "terminal.h"
 #include "serial.h"
+#include "httpd_php.h"
+#include "httpd_demo.h"
 
 #define REQ_MAX   4096
 #define LOG_LINES 8
@@ -172,6 +174,82 @@ static void send_listing(tcp_conn_t* c, int head_only, const char* url, const ch
     kfree(b);
 }
 
+/* ── PHP pages ────────────────────────────────────────────────────── */
+
+static int is_php(const char* name) {
+    const char* dot = strrchr(name, '.');
+    return dot && strcasecmp(dot, ".php") == 0;
+}
+
+/* value of a request header ("" if absent) */
+static void req_header(const char* req, const char* name, char* out, int cap) {
+    out[0] = '\0';
+    size_t nl = strlen(name);
+    for (const char* l = strchr(req, '\n'); l && l[1]; l = strchr(l + 1, '\n')) {
+        const char* h = l + 1;
+        if (*h == '\r' || *h == '\n') break;
+        if (strncasecmp(h, name, nl) == 0 && h[nl] == ':') {
+            h += nl + 1;
+            while (*h == ' ') h++;
+            int n = 0;
+            while (h[n] && h[n] != '\r' && h[n] != '\n' && n < cap - 1) { out[n] = h[n]; n++; }
+            out[n] = '\0';
+            return;
+        }
+    }
+}
+
+static const char* status_text(int code) {
+    switch (code) {
+    case 200: return "OK";
+    case 201: return "Created";
+    case 204: return "No Content";
+    case 301: return "Moved Permanently";
+    case 302: return "Found";
+    case 303: return "See Other";
+    case 400: return "Bad Request";
+    case 403: return "Forbidden";
+    case 404: return "Not Found";
+    case 500: return "Internal Server Error";
+    default:  return code < 400 ? "OK" : "Error";
+    }
+}
+
+static int serve_php(tcp_conn_t* c, int head_only, const char* req, const char* method,
+                     const char* target, const char* path, const char* fspath, const char* ip) {
+    int fidx = fs_find_file(fspath);
+    if (fidx < 0) { send_error(c, head_only, 404, "Not Found"); return 404; }
+    fs_file_t* f = fs_get_file(fidx);
+    /* the file can change while the script runs (file_put_contents): run a copy */
+    char* code = (char*)kmalloc(f->size + 1);
+    if (!code) { send_error(c, head_only, 500, "Internal Server Error"); return 500; }
+    memcpy(code, f->content, f->size);
+    code[f->size] = '\0';
+    uint32_t code_len = f->size;
+
+    char host[128], ua[160];
+    req_header(req, "Host", host, sizeof(host));
+    req_header(req, "User-Agent", ua, sizeof(ua));
+    const char* q = strchr(target, '?');
+    char query[512];
+    kstrlcpy(query, q ? q + 1 : "", sizeof(query));
+    char* hash = strchr(query, '#');
+    if (hash) *hash = '\0';
+
+    php_request_t rq = { method, target, path, query, HTTPD_ROOT, ip, host, ua };
+    php_result_t res;
+    httpd_run_php(fspath, code, code_len, &rq, &res);
+    kfree(code);
+
+    char extra[600];
+    extra[0] = '\0';
+    if (res.location[0]) ksnprintf(extra, sizeof(extra), "Location: %s\r\n", res.location);
+    send_response(c, head_only, res.status, status_text(res.status), res.content_type,
+                  res.body ? res.body : "", res.len, extra);
+    if (res.body) kfree(res.body);
+    return res.status;
+}
+
 /* ── one request ──────────────────────────────────────────────────── */
 
 static void handle(tcp_conn_t* c) {
@@ -225,7 +303,9 @@ static void handle(tcp_conn_t* c) {
             while (fl > 1 && fspath[fl - 1] == '/') fspath[--fl] = '\0';
 
             int fidx = fs_find_file(fspath);
-            if (fidx >= 0) {
+            if (fidx >= 0 && is_php(fs_get_file(fidx)->name)) {
+                code = serve_php(c, head_only, req, method, target, path, fspath, ipstr);
+            } else if (fidx >= 0) {
                 fs_file_t* f = fs_get_file(fidx);
                 code = 200;
                 send_response(c, head_only, 200, "OK", content_type(f->name, fidx), f->content, f->size, NULL);
@@ -240,8 +320,12 @@ static void handle(tcp_conn_t* c) {
                     char index[FS_PATH_LEN];
                     ksnprintf(index, sizeof(index), "%s/index.html", fspath);
                     int iidx = fs_find_file(index);
+                    char pindex[FS_PATH_LEN];
+                    ksnprintf(pindex, sizeof(pindex), "%s/index.php", fspath);
                     code = 200;
-                    if (iidx >= 0) {
+                    if (iidx < 0 && fs_find_file(pindex) >= 0) {
+                        code = serve_php(c, head_only, req, method, target, path, pindex, ipstr);
+                    } else if (iidx >= 0) {
                         fs_file_t* f = fs_get_file(iidx);
                         send_response(c, head_only, 200, "OK", "text/html; charset=utf-8", f->content, f->size, NULL);
                     } else {
@@ -284,6 +368,16 @@ static void ensure_docroot(void) {
     /* a brand-new, empty document root gets a welcome page */
     if (fs_list_files(HTTPD_ROOT, files, 1) == 0 && fs_list_dirs(HTTPD_ROOT, dirs, 1) == 0)
         fs_write_path(index, DEFAULT_INDEX, sizeof(DEFAULT_INDEX) - 1);
+    /* next to the untouched welcome page (new, or from an older Banana OS)
+     * goes a PHP demo */
+    char demo[FS_PATH_LEN];
+    ksnprintf(demo, sizeof(demo), "%s/demo.php", HTTPD_ROOT);
+    int iidx = fs_find_file(index);
+    if (iidx >= 0 && fs_find_file(demo) < 0) {
+        fs_file_t* f = fs_get_file(iidx);
+        if (f->size == sizeof(DEFAULT_INDEX) - 1 && memcmp(f->content, DEFAULT_INDEX, f->size) == 0)
+            fs_write_path(demo, HTTPD_DEMO_PHP, HTTPD_DEMO_PHP_LEN);
+    }
 }
 
 int httpd_start(uint16_t port, char* err, int errcap) {
@@ -298,7 +392,8 @@ int httpd_start(uint16_t port, char* err, int errcap) {
         return -1;
     }
     if (!g_task_started) {
-        if (task_create("httpd", httpd_task) < 0) {
+        /* a big stack: .php pages run a recursive interpreter */
+        if (task_create_stack("httpd", httpd_task, 1u << 20) < 0) {
             tcp_unlisten(l);
             ksnprintf(err, (size_t)errcap, "no free task slot");
             return -1;

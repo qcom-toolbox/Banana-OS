@@ -34,10 +34,36 @@ typedef struct {
 
 static uint32_t align_up(uint32_t v, uint32_t a) { return (v + a - 1u) & ~(a - 1u); }
 
-/* End of the available RAM region containing `addr`, or 0 if none found. */
-static uint32_t region_end_for(uint32_t mb2, uint32_t addr) {
+#define HEAP_MIN_ADDR 0x100000ull       /* below 1 MiB: BIOS/firmware leftovers */
+#define HEAP_MAX_ADDR 0xE0000000ull     /* 3.5 GiB: stay clear of the 32-bit MMIO hole
+                                         * (and inside the 64-bit kernel's 1:1 map) */
+
+/* Largest piece of [lo, hi) that avoids [xlo, xhi): updates *best_lo/hi */
+static void consider(uint64_t lo, uint64_t hi, uint64_t* best_lo, uint64_t* best_hi,
+                     const uint64_t* xlo, const uint64_t* xhi, int nx) {
+    if (lo < HEAP_MIN_ADDR) lo = HEAP_MIN_ADDR;
+    if (hi > HEAP_MAX_ADDR) hi = HEAP_MAX_ADDR;
+    if (hi <= lo) return;
+    /* cut out the first excluded range that overlaps, recurse on both sides */
+    for (int i = 0; i < nx; i++) {
+        if (xhi[i] <= lo || xlo[i] >= hi) continue;
+        consider(lo, xlo[i], best_lo, best_hi, xlo, xhi, nx);
+        consider(xhi[i], hi, best_lo, best_hi, xlo, xhi, nx);
+        return;
+    }
+    if (hi - lo > *best_hi - *best_lo) { *best_lo = lo; *best_hi = hi; }
+}
+
+/* The largest available RAM range from the Multiboot2 memory map that
+ * does not overlap the kernel image or the Multiboot2 information.
+ * (Firmware - UEFI in particular - splits memory into many regions; the
+ * one the kernel was loaded into can be just a few MiB.) */
+static int pick_region(uint32_t mb2, uint64_t* out_lo, uint64_t* out_hi) {
     if (!mb2) return 0;
     uint32_t total = *(uint32_t*)(uintptr_t)mb2;
+    uint64_t xlo[2] = { 0x100000ull, mb2 };
+    uint64_t xhi[2] = { align_up((uint32_t)(uintptr_t)_kernel_end, 4096u), (uint64_t)mb2 + total };
+    uint64_t best_lo = 0, best_hi = 0;
     uint32_t off = 8;
     while (off + 8 <= total) {
         mb2_tag_t* tag = (mb2_tag_t*)(uintptr_t)(mb2 + off);
@@ -47,34 +73,29 @@ static uint32_t region_end_for(uint32_t mb2, uint32_t addr) {
             for (uint32_t pos = sizeof(*mm); pos + mm->entry_size <= mm->size; pos += mm->entry_size) {
                 mb2_mmap_entry_t* e = (mb2_mmap_entry_t*)((uintptr_t)mm + pos);
                 if (e->type != 1) continue;
-                uint64_t lo = e->base, hi = e->base + e->length;
-                if ((uint64_t)addr >= lo && (uint64_t)addr < hi) {
-                    /* cap at 3.5 GiB: stay clear of the 32-bit MMIO hole */
-                    if (hi > 0xE0000000ull) hi = 0xE0000000ull;
-                    return (uint32_t)hi;
-                }
+                consider(e->base, e->base + e->length, &best_lo, &best_hi, xlo, xhi, 2);
             }
         }
         uint32_t adv = align_up(tag->size, 8);
         off += adv < 8 ? 8 : adv;
     }
-    return 0;
+    if (best_hi <= best_lo) return 0;
+    *out_lo = best_lo;
+    *out_hi = best_hi;
+    return 1;
 }
 
 void kheap_init(uint32_t mb2_info_addr) {
-    uint32_t start = align_up((uint32_t)(uintptr_t)_kernel_end, 4096u);
-
-    /* The Multiboot2 info block is usually right after the kernel. Every
-     * consumer (fb.c, sysinfo.c) has already copied what it needs by now,
-     * but skip past it anyway so nothing reads freshly-clobbered tags. */
-    if (mb2_info_addr >= start && mb2_info_addr < start + (1u << 20)) {
-        uint32_t mb_end = mb2_info_addr + *(uint32_t*)(uintptr_t)mb2_info_addr;
-        start = align_up(mb_end, 4096u);
-    }
-
-    uint32_t end = region_end_for(mb2_info_addr, start);
-    if (end == 0 || end <= start + (1u << 20)) {
-        /* No usable map: assume a conservative 16 MiB machine. */
+    /* Every Multiboot2 consumer (fb.c, sysinfo.c) has copied what it needs
+     * by now, but the info block is kept out of the heap anyway. */
+    uint64_t lo, hi;
+    uint32_t start, end;
+    if (pick_region(mb2_info_addr, &lo, &hi) && hi - lo >= (1u << 20)) {
+        start = align_up((uint32_t)lo, 4096u);
+        end = (uint32_t)hi;
+    } else {
+        /* No usable map: right after the kernel, on a conservative 16 MiB machine. */
+        start = align_up((uint32_t)(uintptr_t)_kernel_end, 4096u);
         end = 16u << 20;
     }
     end &= ~(ALIGN - 1u);

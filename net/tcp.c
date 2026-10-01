@@ -139,7 +139,9 @@ static void send_raw(ip4_t dst, uint16_t sport, uint16_t dport, uint32_t seq, ui
     if (len) memcpy(seg + hl, data, len);
 
     uint8_t ph[12];
-    wr32(ph, nif->ip);
+    /* the source ip_send() will put in the header: loopback packets to
+     * 127.x come "from" 127.x (the receiver checks against that) */
+    wr32(ph, (dst >> 24) == 127 ? dst : nif->ip);
     wr32(ph + 4, dst);
     ph[8] = 0;
     ph[9] = IP_PROTO_TCP;

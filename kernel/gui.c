@@ -13,6 +13,7 @@
 #include "wallpaper.h"
 #include "tty.h"
 #include "explorer.h"
+#include "browser.h"
 #include "../net/net.h"
 #include "../shell/shell.h"
 
@@ -22,9 +23,10 @@
 #define TASKBAR_ROW (VGA_HEIGHT - 1)
 
 static int g_menu_open = 0;
-static int g_menu_sel = 0; /* 0=About, 1=Terminal, 2=Files, 3=Wallpaper, 4=Quit GUI */
-#define MENU_ITEMS 5
+static int g_menu_sel = 0; /* 0=About, 1=Terminal, 2=Files, 3=Browser, 4=Wallpaper, 5=Quit GUI */
+#define MENU_ITEMS 6
 static int g_files_front = 0; /* the Files window is above the terminal windows */
+static int g_browser_front = 0; /* the Browser window is above the terminal windows */
 static uint32_t g_last_clock_sec = (uint32_t)-1;
 static int g_gui_enabled = 0; /* like startx: default off */
 static int g_about_open = 0;
@@ -132,6 +134,18 @@ static void draw_icon_files(int x, int y, uint32_t bg) {
     gfx_fill_rect(x, y + 1, 6, 2, 0x00F4D35Eu);
     gfx_fill_rect(x, y + 3, 14, 9, 0x00F4D35Eu);
     gfx_fill_rect(x + 1, y + 4, 12, 1, 0x00FFF1A8u);
+}
+
+/* a little globe */
+static void draw_icon_browser(int x, int y, uint32_t bg) {
+    (void)bg;
+    gfx_fill_rect(x + 4, y, 6, 12, 0x003A7BD5u);
+    gfx_fill_rect(x + 1, y + 2, 12, 8, 0x003A7BD5u);
+    gfx_fill_rect(x + 2, y + 1, 10, 10, 0x003A7BD5u);
+    gfx_fill_rect(x + 3, y + 3, 4, 3, 0x0057B65Au);
+    gfx_fill_rect(x + 8, y + 6, 3, 3, 0x0057B65Au);
+    gfx_fill_rect(x + 1, y + 6, 12, 1, 0x00A9CCF5u);
+    gfx_fill_rect(x + 6, y, 1, 12, 0x00A9CCF5u);
 }
 
 static void draw_icon_power(int x, int y, uint32_t bg) {
@@ -364,7 +378,7 @@ static void draw_menu(void) {
         uint8_t bg = VGA_COLOR_DARK_GREY;
         if (g_menu_sel == i) { fg = VGA_COLOR_WHITE; bg = VGA_COLOR_BLUE; }
 
-        static const char* const items[MENU_ITEMS] = { " About app", " Terminal", " Files", " Wallpaper", " Quit GUI" };
+        static const char* const items[MENU_ITEMS] = { " About app", " Terminal", " Files", " Browser", " Wallpaper", " Quit GUI" };
         const char* item = items[i];
         /* fill the rest of the row in highlight color for clean look */
         for (size_t x = 0; x < menu_w - 2; x++) {
@@ -647,8 +661,8 @@ static void draw_cursor(int mx, int my) {
 typedef struct {
     int menu_open, menu_sel, about_open, wallpaper_open;
     int term_open[TERM_WIN_MAX], term_x[TERM_WIN_MAX], term_y[TERM_WIN_MAX], term_order[TERM_WIN_MAX];
-    int pic_count, pending, files_front;
-    uint32_t sec, term_gen, wp_gen, net_state, files_sig;
+    int pic_count, pending, files_front, browser_front;
+    uint32_t sec, term_gen, wp_gen, net_state, files_sig, browser_sig;
     char status[96];
 } gui_view_t;
 
@@ -671,6 +685,8 @@ static void capture_view(gui_view_t* v, uint32_t sec) {
     v->wp_gen = wallpaper_generation();
     v->net_state = net_if()->configured ? net_if()->ip : 1;
     v->files_front = g_files_front;
+    v->browser_front = g_browser_front;
+    v->browser_sig = browser_signature();
     v->files_sig = explorer_signature();
     kstrlcpy(v->status, g_wp_status, sizeof(v->status));
 }
@@ -695,22 +711,16 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
         int icon_w = 132, icon_h = 38;
         int sx = 18, sy = 22;
 
-        draw_bevel_box(sx, sy, icon_w, icon_h, 0x0029313Du, 0x00586678u, 0x0010151Eu);
-        draw_icon_info(sx + 8, sy + 12, 0x0029313Du);
-        gfx_draw_text(sx + 30, sy + 13, "About", 0x00F0F6FFu, 0x0029313Du);
-
-        draw_bevel_box(sx, sy + icon_h + 10, icon_w, icon_h, 0x0029313Du, 0x00586678u, 0x0010151Eu);
-        draw_icon_terminal(sx + 8, sy + icon_h + 22, 0x0029313Du);
-        gfx_draw_text(sx + 30, sy + icon_h + 10 + 13, "Terminal", 0x00F0F6FFu, 0x0029313Du);
-        draw_bevel_box(sx, sy + (icon_h + 10) * 2, icon_w, icon_h, 0x0029313Du, 0x00586678u, 0x0010151Eu);
-        draw_icon_files(sx + 8, sy + (icon_h + 10) * 2 + 12, 0x0029313Du);
-        gfx_draw_text(sx + 30, sy + (icon_h + 10) * 2 + 13, "Files", 0x00F0F6FFu, 0x0029313Du);
-        draw_bevel_box(sx, sy + (icon_h + 10) * 3, icon_w, icon_h, 0x0029313Du, 0x00586678u, 0x0010151Eu);
-        draw_icon_wallpaper(sx + 8, sy + (icon_h + 10) * 3 + 12, 0x0029313Du);
-        gfx_draw_text(sx + 30, sy + (icon_h + 10) * 3 + 13, "Wallpaper", 0x00F0F6FFu, 0x0029313Du);
-        draw_bevel_box(sx, sy + (icon_h + 10) * 4, icon_w, icon_h, 0x0029313Du, 0x00586678u, 0x0010151Eu);
-        draw_icon_power(sx + 8, sy + (icon_h + 10) * 4 + 12, 0x0029313Du);
-        gfx_draw_text(sx + 30, sy + (icon_h + 10) * 4 + 13, "Quit GUI", 0x00F0F6FFu, 0x0029313Du);
+        static void (*const icons[MENU_ITEMS])(int, int, uint32_t) = {
+            draw_icon_info, draw_icon_terminal, draw_icon_files, draw_icon_browser, draw_icon_wallpaper, draw_icon_power,
+        };
+        static const char* const labels[MENU_ITEMS] = { "About", "Terminal", "Files", "Browser", "Wallpaper", "Quit GUI" };
+        for (int i = 0; i < MENU_ITEMS; i++) {
+            int iy = sy + (icon_h + 10) * i;
+            draw_bevel_box(sx, iy, icon_w, icon_h, 0x0029313Du, 0x00586678u, 0x0010151Eu);
+            icons[i](sx + 8, iy + 12, 0x0029313Du);
+            gfx_draw_text(sx + 30, iy + 13, labels[i], 0x00F0F6FFu, 0x0029313Du);
+        }
     }
 
     char clk[9];
@@ -732,7 +742,7 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
     /* root menu */
     if (g_menu_open) {
         int menu_w = 236;
-        int menu_h = 168;
+        int menu_h = 196;
         int menu_x = 8;
         int menu_y = (int)fi->height - bar_h - menu_h - 8;
         draw_bevel_box(menu_x, menu_y, menu_w, menu_h, 0x001D232Cu, 0x00505E74u, 0x0010151Du);
@@ -740,9 +750,9 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
         gfx_draw_text(menu_x + 5, menu_y + 8, "B", 0x00F4F8FFu, 0x00354463u);
 
         static void (*const icons[MENU_ITEMS])(int, int, uint32_t) = {
-            draw_icon_info, draw_icon_terminal, draw_icon_files, draw_icon_wallpaper, draw_icon_power,
+            draw_icon_info, draw_icon_terminal, draw_icon_files, draw_icon_browser, draw_icon_wallpaper, draw_icon_power,
         };
-        static const char* const labels[MENU_ITEMS] = { "About", "Terminal", "Files", "Wallpaper", "Exit to shell" };
+        static const char* const labels[MENU_ITEMS] = { "About", "Terminal", "Files", "Browser", "Wallpaper", "Exit to shell" };
         for (int i = 0; i < MENU_ITEMS; i++) {
             uint32_t bg = (g_menu_sel == i) ? 0x003A4A66u : 0x001D232Cu;
             gfx_fill_rect(menu_x + 24, menu_y + 8 + i * 28, menu_w - 32, 24, bg);
@@ -771,11 +781,13 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
 
     /* windows back-to-front: Files below or above the terminals */
     if (!g_files_front) explorer_draw(fi);
+    if (!g_browser_front) browser_draw(fi);
     for (int oi = 0; oi < TERM_WIN_MAX; oi++) {
         term_win_t* w = &g_terms[g_term_order[oi]];
         draw_terminal_window(fi, w);
     }
     if (g_files_front) explorer_draw(fi);
+    if (g_browser_front) browser_draw(fi);
 
     /* push backbuffer to framebuffer once per frame, then the cursor */
     fb_present();
@@ -868,7 +880,7 @@ void gui_poll(void) {
             /* click in menu items (the open menu is above every window) */
             if (click && g_menu_open) {
                 int menu_w = 236;
-                int menu_h = 168;
+                int menu_h = 196;
                 int menu_x = 8;
                 int menu_y = (int)fi->height - bar_h - menu_h - 8;
 
@@ -895,6 +907,12 @@ void gui_poll(void) {
                 click = 0;
             }
 
+            /* the Browser window, when it is in front of the terminals */
+            if (click && g_browser_front && browser_contains(mx, my)) {
+                browser_click(mx, my);
+                click = 0;
+            }
+
             /* terminal windows hit testing (front-to-back) */
             for (int oi = TERM_WIN_MAX - 1; click && oi >= 0; oi--) {
                 int wi = g_term_order[oi];
@@ -912,6 +930,7 @@ void gui_poll(void) {
                      * every window showing the same running command.) */
                     bring_term_front(wi);
                     g_files_front = 0;
+                    g_browser_front = 0;
 
                     int close_x = w->x + w->w - 28;
                     if (mx >= close_x && mx < close_x + 24 && my >= w->y + 2 && my < w->y + 18) {
@@ -929,9 +948,19 @@ void gui_poll(void) {
                 }
             }
 
+            /* the Browser window behind the terminals: clicking raises it
+             * (it is drawn above the Files window when both are behind) */
+            if (click && browser_contains(mx, my)) {
+                g_browser_front = 1;
+                g_files_front = 0;
+                browser_click(mx, my);
+                click = 0;
+            }
+
             /* the Files window behind the terminals: clicking raises it */
             if (click && explorer_contains(mx, my)) {
                 g_files_front = 1;
+                g_browser_front = 0;
                 explorer_click(mx, my);
                 click = 0;
             }
@@ -946,9 +975,10 @@ void gui_poll(void) {
                         slot = i;
                 if (slot == 0) g_about_open = 1;
                 else if (slot == 1) open_new_terminal();
-                else if (slot == 2) { explorer_open(NULL); g_files_front = 1; }
-                else if (slot == 3) open_wallpaper_app();
-                else if (slot == 4) { gui_set_enabled(0); return; }
+                else if (slot == 2) { explorer_open(NULL); g_files_front = 1; g_browser_front = 0; }
+                else if (slot == 3) { browser_open(NULL); g_browser_front = 1; g_files_front = 0; }
+                else if (slot == 4) open_wallpaper_app();
+                else if (slot == 5) { gui_set_enabled(0); return; }
             }
         }
 
@@ -966,6 +996,7 @@ void gui_poll(void) {
             if (!left) g_terms[i].dragging = 0;
         }
         explorer_mouse(mx, my, left);
+        browser_mouse(mx, my, left);
 
         gui_view_t view;
         capture_view(&view, sec);
@@ -1012,7 +1043,7 @@ void gui_set_enabled(int enabled) {
     g_about_open = 0;
     g_wallpaper_open = 0;
     g_force_redraw = 1;
-    if (!enabled) explorer_close();
+    if (!enabled) { explorer_close(); browser_close(); }
     /* Hide (don't tear down) any open windows: their vts and shell tasks
      * are permanent for the OS's lifetime (see term_win_t.vt), so a later
      * startx can bring them straight back instead of every window losing
@@ -1048,6 +1079,9 @@ int gui_focused_vt(void) {
     if (tt >= 0) return tty_vt(tt);
 
     if (!gfx_available() || !g_gui_enabled) return 0; /* plain console owns input */
+
+    /* the browser in front reads the keyboard itself (its own task) */
+    if (g_browser_front && browser_is_open()) return BROWSER_VT;
 
     /* Frontmost OPEN window, if any - g_term_order always lists every
      * slot, closed or not, so this has to skip closed ones explicitly. */
@@ -1100,6 +1134,7 @@ static void menu_activate(void) {
             g_menu_open = 0;
             explorer_open(NULL);
             g_files_front = 1;
+            g_browser_front = 0;
         } else {
             menu_close_redraw();          /* desktop only */
         }
@@ -1107,13 +1142,24 @@ static void menu_activate(void) {
     }
     if (g_menu_sel == 3) {
         if (gfx_available()) {
+            g_menu_open = 0;
+            browser_open(NULL);
+            g_browser_front = 1;
+            g_files_front = 0;
+        } else {
+            menu_close_redraw();          /* desktop only */
+        }
+        return;
+    }
+    if (g_menu_sel == 4) {
+        if (gfx_available()) {
             open_wallpaper_app();
         } else {
             menu_close_redraw();
         }
         return;
     }
-    if (g_menu_sel == 4) {
+    if (g_menu_sel == 5) {
         gui_set_enabled(0);
         return;
     }
@@ -1122,6 +1168,7 @@ static void menu_activate(void) {
 void gui_terminal_run(const char* cmd) {
     open_new_terminal();
     g_files_front = 0;              /* the new terminal comes up in front */
+    g_browser_front = 0;
     /* typed into the new window: it has the keyboard focus now */
     keyboard_inject(cmd);
 }
@@ -1130,7 +1177,20 @@ int gui_open_files(const char* path) {
     if (!gfx_available() || !g_gui_enabled) return 0;
     explorer_open(path);
     g_files_front = 1;
+    g_browser_front = 0;
     return 1;
+}
+
+int gui_open_browser(const char* url) {
+    if (!gfx_available() || !g_gui_enabled) return 0;
+    browser_open(url);
+    g_browser_front = 1;
+    g_files_front = 0;
+    return 1;
+}
+
+int gui_browser_focused(void) {
+    return gfx_available() && g_gui_enabled && g_browser_front && browser_is_open() && tty_current() < 0;
 }
 
 int gui_handle_arrow(char esc_code) {

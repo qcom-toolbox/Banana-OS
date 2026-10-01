@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Banana test page</title>
+<style>
+  body { font-family: sans-serif; background: #fdf6e3; color: #333; }
+  h1 { color: #b58900; border-bottom: 2px solid #b58900; }
+  .note { background-color: #fff3a0; padding: 6px; border: 1px solid #d0b000; }
+  #main p { margin: 6px 0; }
+  a { color: #268bd2; }
+  table.grid td, table.grid th { border: 1px solid #999; padding: 3px 6px; }
+  .right { text-align: right }
+  .box { width: 200px; margin: 8px auto; background: #eee8d5; text-align: center; padding: 4px }
+  ul li { color: #6c71c4 }
+</style>
+</head>
+<body>
+<h1>Welcome to Banana &amp; friends</h1>
+<div id="main">
+<p>This is <b>bold</b>, <i>italic</i>, <u>underlined</u>, <s>struck</s> and a <a href="/next">link to the next page</a>. Long text should wrap nicely across the width of the page without overflowing the right edge of the viewport at all.</p>
+<p class="note">A highlighted note with a border &mdash; &ldquo;quotes&rdquo; and caf&eacute;.</p>
+<h2>Lists</h2>
+<ul><li>First item<li>Second item<li>Third with <code>code</code></ul>
+<ol start="3"><li>three</li><li>four</li></ol>
+<h3>A table</h3>
+<table class="grid">
+<tr><th>Name</th><th>Fruit</th><th>Count</th></tr>
+<tr><td>Ann</td><td>Banana</td><td class="right">12</td></tr>
+<tr><td>Bob</td><td>Cherry pie with cream</td><td class="right">3</td></tr>
+<tr><td colspan="2">Total</td><td class="right">15</td></tr>
+</table>
+<div class="box">Centered box</div>
+<pre>
+preformatted   text
+    keeps  spaces
+</pre>
+<form action="/search">Search: <input name="q" value="bananas"> <input type="checkbox" checked> ripe <button>Go</button></form>
+<hr>
+<p style="text-align:center; font-size: 24px; color: green">Big centered</p>
+<p>Image: <img src="x.png" alt="banana picture" width="64" height="32"> after.</p>
+</div>
+</body>
+</html>

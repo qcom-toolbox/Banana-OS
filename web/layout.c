@@ -1,0 +1,868 @@
+#include "layout.h"
+#include "kstring.h"
+
+#define GLYPH 8
+
+/* ══ display list ═════════════════════════════════════════════════════ */
+
+typedef struct {
+    layout_t* L;
+    int       dry;              /* measuring only: emit nothing */
+    int       max_w;            /* widest line seen (measuring) */
+    int       max_word;         /* widest unbreakable piece (measuring) */
+} ctx_t;
+
+static dl_item_t* push(ctx_t* C, int kind) {
+    static dl_item_t dummy;
+    if (C->dry) { memset(&dummy, 0, sizeof(dummy)); return &dummy; }
+    layout_t* L = C->L;
+    if (L->n == L->cap) {
+        uint32_t nc = L->cap ? L->cap * 2 : 256;
+        dl_item_t* ni = (dl_item_t*)arena_alloc(L->A, nc * (uint32_t)sizeof(dl_item_t));
+        if (L->A->oom) { memset(&dummy, 0, sizeof(dummy)); return &dummy; }
+        if (L->n) memcpy(ni, L->items, L->n * sizeof(dl_item_t));
+        L->items = ni;
+        L->cap = nc;
+    }
+    dl_item_t* it = &L->items[L->n++];
+    memset(it, 0, sizeof(*it));
+    it->kind = (uint8_t)kind;
+    return it;
+}
+
+static void rect(ctx_t* C, int x, int y, int w, int h, uint32_t color, dom_node_t* node) {
+    if (w <= 0 || h <= 0) return;
+    dl_item_t* r = push(C, DL_RECT);
+    r->x = x; r->y = y; r->w = w; r->h = h;
+    r->color = color;
+    r->node = node;
+}
+
+static void borders(ctx_t* C, const style_t* st, int x, int y, int w, int h, dom_node_t* node) {
+    if (st->border[0]) rect(C, x, y, w, st->border[0], st->border_color[0], node);
+    if (st->border[2]) rect(C, x, y + h - st->border[2], w, st->border[2], st->border_color[2], node);
+    if (st->border[3]) rect(C, x, y, st->border[3], h, st->border_color[3], node);
+    if (st->border[1]) rect(C, x + w - st->border[1], y, st->border[1], h, st->border_color[1], node);
+}
+
+/* ══ text ═════════════════════════════════════════════════════════════ */
+
+uint32_t text_to_ascii(const char* s, uint32_t n, char* out) {
+    uint32_t o = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) { out[o++] = (c < 32 && c != '\n' && c != '\t') ? ' ' : (char)c; continue; }
+        uint32_t cp = 0;
+        int extra = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+        cp = c & (0x3F >> extra);
+        for (int k = 0; k < extra && i + 1 < n; k++) cp = (cp << 6) | ((unsigned char)s[++i] & 0x3F);
+        const char* r = "?";
+        switch (cp) {
+        case 0xA0: r = " "; break;
+        case 0xA9: r = "(c)"; break;
+        case 0xAE: r = "(R)"; break;
+        case 0x2122: r = "TM"; break;
+        case 0xAB: r = "<<"; break;
+        case 0xBB: r = ">>"; break;
+        case 0xB0: r = "o"; break;
+        case 0xB7: case 0x2022: case 0x25CF: r = "*"; break;
+        case 0xD7: r = "x"; break;
+        case 0xF7: r = "/"; break;
+        case 0x2013: case 0x2014: case 0x2212: r = "-"; break;
+        case 0x2018: case 0x2019: case 0x201A: case 0x2032: r = "'"; break;
+        case 0x201C: case 0x201D: case 0x201E: r = "\""; break;
+        case 0x2026: r = "..."; break;
+        case 0x20AC: r = "EUR"; break;
+        case 0xA3: r = "GBP"; break;
+        case 0x2190: r = "<-"; break;
+        case 0x2192: r = "->"; break;
+        case 0x2191: r = "^"; break;
+        case 0x2193: r = "v"; break;
+        case 0x2665: r = "<3"; break;
+        case 0x2713: case 0x2714: r = "v"; break;
+        case 0xDF: r = "ss"; break;
+        default:
+            if ((cp >= 0xE0 && cp <= 0xE5) || cp == 0xAA) r = "a";
+            else if (cp >= 0xC0 && cp <= 0xC5) r = "A";
+            else if (cp >= 0xE8 && cp <= 0xEB) r = "e";
+            else if (cp >= 0xC8 && cp <= 0xCB) r = "E";
+            else if (cp >= 0xEC && cp <= 0xEF) r = "i";
+            else if (cp >= 0xCC && cp <= 0xCF) r = "I";
+            else if ((cp >= 0xF2 && cp <= 0xF6) || cp == 0xF8) r = "o";
+            else if ((cp >= 0xD2 && cp <= 0xD6) || cp == 0xD8) r = "O";
+            else if (cp >= 0xF9 && cp <= 0xFC) r = "u";
+            else if (cp >= 0xD9 && cp <= 0xDC) r = "U";
+            else if (cp == 0xE7) r = "c";
+            else if (cp == 0xC7) r = "C";
+            else if (cp == 0xF1) r = "n";
+            else if (cp == 0xD1) r = "N";
+            else if (cp == 0xFD || cp == 0xFF) r = "y";
+            else if (cp == 0xFE0F || cp == 0x200B || cp == 0x200D || cp == 0xFEFF) r = "";
+        }
+        while (*r) out[o++] = *r++;
+    }
+    return o;
+}
+
+/* ══ inline formatting ════════════════════════════════════════════════ */
+
+typedef struct {
+    ctx_t*   C;
+    int      x0, w;             /* line box */
+    int      y;                 /* top of the current line */
+    int      cx;                /* x used on the current line */
+    int      line_h;
+    uint32_t first;             /* first display item of the line */
+    int      align;
+    int      space;             /* a collapsed space is pending */
+    int      empty;             /* nothing placed yet at all */
+    int      height;            /* total height so far */
+    int      lines;
+} inl_t;
+
+static int line_height(int scale) { return GLYPH * scale + 4 * scale; }
+
+static void finish_line(inl_t* I, int forced) {
+    if (I->line_h == 0 && forced) I->line_h = line_height(1);
+    if (I->line_h == 0) return;
+    ctx_t* C = I->C;
+    if (C->max_w < I->cx) C->max_w = I->cx;
+    if (!C->dry) {
+        int shift = 0;
+        if (I->align == ALIGN_CENTER) shift = (I->w - I->cx) / 2;
+        else if (I->align == ALIGN_RIGHT) shift = I->w - I->cx;
+        if (shift < 0) shift = 0;
+        for (uint32_t i = I->first; i < C->L->n; i++) {
+            dl_item_t* it = &C->L->items[i];
+            it->x += shift;
+            /* bottom-align everything on the line (text sits on a common baseline);
+             * the parts of an atomic box keep their offsets within it */
+            if (it->rel) {
+                it->y = I->y + I->line_h - it->boxh - 1 + it->yoff;
+                continue;
+            }
+            int pad = it->kind == DL_TEXT ? 2 * it->scale : 0;
+            it->y = I->y + I->line_h - it->h - pad;
+        }
+    }
+    I->y += I->line_h;
+    I->height += I->line_h;
+    I->cx = 0;
+    I->line_h = 0;
+    I->space = 0;
+    I->lines++;
+    if (!C->dry) I->first = C->L->n;
+}
+
+static void need_line_h(inl_t* I, int h) { if (I->line_h < h) I->line_h = h; }
+
+/* a piece of text that may not be broken */
+static void place_word(inl_t* I, const char* s, uint32_t n, const style_t* st, uint32_t bg, int has_bg,
+                       dom_node_t* node) {
+    int scale = st->scale ? st->scale : 1;
+    int cw = GLYPH * scale;
+    int ww = (int)n * cw;
+    int sw = I->space && I->cx > 0 ? cw : 0;
+    if (I->C->max_word < ww) I->C->max_word = ww;
+    if (I->cx > 0 && I->cx + sw + ww > I->w && !st->nowrap && !st->pre) {
+        finish_line(I, 0);
+        sw = 0;
+    }
+    /* a word wider than the line: split it */
+    while (ww > I->w && I->w >= cw && !st->pre) {
+        uint32_t fit = (uint32_t)((I->w - I->cx) / cw);
+        if (fit == 0) { finish_line(I, 0); continue; }
+        place_word(I, s, fit, st, bg, has_bg, node);
+        s += fit;
+        n -= fit;
+        ww = (int)n * cw;
+        finish_line(I, 0);
+    }
+    int same = !I->C->dry && sw && I->C->L->n > I->first && I->C->L->items[I->C->L->n - 1].node == node;
+    dl_item_t* t = push(I->C, DL_TEXT);
+    t->ulspace = (uint8_t)same;
+    char* text = (char*)s;
+    uint32_t len = n;
+    if (sw) {
+        /* the space joins the word, so underlines and backgrounds run on */
+        text = (char*)arena_alloc(I->C->L->A, n + 2);
+        text[0] = ' ';
+        memcpy(text + 1, s, n);
+        len = n + 1;
+    }
+    if (st->uppercase || st->lowercase) {
+        char* u = (char*)arena_alloc(I->C->L->A, len + 1);
+        for (uint32_t k = 0; k < len; k++) {
+            char c = text[k];
+            if (st->uppercase && c >= 'a' && c <= 'z') c = (char)(c - 32);
+            if (st->lowercase && c >= 'A' && c <= 'Z') c = (char)(c + 32);
+            u[k] = c;
+        }
+        text = u;
+    }
+    t->x = I->x0 + I->cx;
+    t->w = (int)len * cw;
+    t->h = cw;
+    t->text = text;
+    t->len = len;
+    t->scale = (uint8_t)scale;
+    t->color = st->color;
+    t->bold = st->bold;
+    t->italic = st->italic;
+    t->underline = st->underline;
+    t->strike = st->strike;
+    t->bg = bg;
+    t->has_bg = (uint8_t)has_bg;
+    t->node = node;
+    I->cx += sw + ww;
+    I->space = 0;
+    I->empty = 0;
+    need_line_h(I, line_height(scale));
+}
+
+/* an atomic inline box (image, form control) of w x h */
+static int place_box(inl_t* I, int w, int h) {
+    if (I->cx > 0 && I->cx + w > I->w) finish_line(I, 0);
+    int x = I->x0 + I->cx;
+    I->cx += w;
+    I->space = 0;
+    I->empty = 0;
+    need_line_h(I, h + 2);
+    if (I->C->max_word < w) I->C->max_word = w;
+    return x;
+}
+
+static void text_run(inl_t* I, const char* s, uint32_t n, const style_t* st, uint32_t bg, int has_bg, dom_node_t* node) {
+    ctx_t* C = I->C;
+    char* a = (char*)arena_alloc(C->L->A, n * 3 + 1);
+    n = text_to_ascii(s, n, a);
+    if (st->pre) {
+        uint32_t i = 0;
+        while (i <= n) {
+            uint32_t j = i;
+            while (j < n && a[j] != '\n') j++;
+            if (j > i) {
+                /* expand tabs */
+                uint32_t tabs = 0;
+                for (uint32_t k = i; k < j; k++) if (a[k] == '\t') tabs++;
+                if (tabs) {
+                    char* e = (char*)arena_alloc(C->L->A, (j - i) + tabs * 8 + 1);
+                    uint32_t o = 0;
+                    for (uint32_t k = i; k < j; k++) {
+                        if (a[k] == '\t') { do e[o++] = ' '; while (o % 8); }
+                        else e[o++] = a[k];
+                    }
+                    place_word(I, e, o, st, bg, has_bg, node);
+                } else {
+                    place_word(I, a + i, j - i, st, bg, has_bg, node);
+                }
+            }
+            if (j >= n) break;
+            finish_line(I, 1);
+            i = j + 1;
+        }
+        return;
+    }
+    uint32_t i = 0;
+    while (i < n) {
+        if (a[i] == ' ' || a[i] == '\n' || a[i] == '\t' || a[i] == '\r') {
+            if (I->cx > 0) I->space = 1;
+            i++;
+            continue;
+        }
+        uint32_t j = i;
+        while (j < n && a[j] != ' ' && a[j] != '\n' && a[j] != '\t' && a[j] != '\r') j++;
+        place_word(I, a + i, j - i, st, bg, has_bg, node);
+        i = j;
+        if (i < n) I->space = 1;
+    }
+}
+
+static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail);
+static int layout_children(ctx_t* C, dom_node_t* parent, int x, int y, int w);
+
+static int is_block_level(dom_node_t* e) {
+    if (e->type != DOM_ELEM || !e->style) return 0;
+    uint8_t d = e->style->display;
+    return d == DISP_BLOCK || d == DISP_LIST_ITEM || d == DISP_TABLE || d == DISP_TABLE_ROW ||
+           d == DISP_TABLE_CELL || d == DISP_TABLE_GROUP;
+}
+
+static int has_block_child(dom_node_t* e) {
+    for (dom_node_t* c = e->first; c; c = c->next) {
+        if (is_block_level(c)) return 1;
+        if (c->type == DOM_ELEM && c->style && c->style->display == DISP_INLINE && has_block_child(c)) return 1;
+    }
+    return 0;
+}
+
+static void form_text(ctx_t* C, int x, int y, int w, int h, const char* s, uint32_t n, uint32_t color,
+                      int scale, dom_node_t* node, int password, int center) {
+    int cw = GLYPH * scale;
+    int maxc = (w - 6) / cw;
+    if (maxc < 0) maxc = 0;
+    char* a = (char*)arena_alloc(C->L->A, n * 3 + 1);
+    n = text_to_ascii(s, n, a);
+    if (password) for (uint32_t i = 0; i < n; i++) a[i] = '*';
+    uint32_t start = 0;
+    if ((int)n > maxc) {
+        if (center) n = (uint32_t)maxc;
+        else start = n - (uint32_t)maxc;   /* show the end of long input */
+    }
+    dl_item_t* t = push(C, DL_TEXT);
+    t->text = a + start;
+    t->len = n - start;
+    t->scale = (uint8_t)scale;
+    t->color = color;
+    t->w = (int)t->len * cw;
+    t->h = cw;
+    t->x = center ? x + (w - t->w) / 2 : x + 3;
+    t->y = y + (h - cw) / 2;
+    t->node = node;
+    (void)node;
+}
+
+/* form controls and images: atomic boxes */
+/* the items from index `from` make up one atomic box of height h: their y
+ * are offsets from the box top, placed when the line is finished */
+static void mark_box(ctx_t* C, uint32_t from, int h) {
+    if (C->dry) return;
+    for (uint32_t i = from; i < C->L->n; i++) {
+        C->L->items[i].rel = 1;
+        C->L->items[i].yoff = (int16_t)C->L->items[i].y;
+        C->L->items[i].boxh = (int16_t)h;
+    }
+}
+
+static int str_to_px(const char* s) {
+    int v = 0;
+    while (*s == ' ') s++;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    return v;
+}
+
+/* form controls and images: atomic boxes */
+static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
+    ctx_t* C = I->C;
+    int scale = st->scale ? st->scale : 1;
+    int cw = GLYPH * scale;
+    const char* tag = e->tag;
+    uint32_t first = C->dry ? 0 : C->L->n;
+    if (strcmp(tag, "img") == 0) {
+        const char* aw = dom_attr(e, "width");
+        const char* ah = dom_attr(e, "height");
+        int w = aw ? str_to_px(aw) : 0, h = ah ? str_to_px(ah) : 0;
+        if (st->width != LEN_AUTO && st->width > 0) w = st->width;
+        if (st->height != LEN_AUTO && st->height > 0) h = st->height;
+        img_data_t* img = e->img;
+        int have = img && !img->failed && img->w > 0 && img->h > 0;
+        if (have) {
+            if (!w && !h) { w = img->w; h = img->h; }
+            else if (!w) w = img->w * h / img->h;
+            else if (!h) h = img->h * w / img->w;
+        }
+        if (st->width_pct) {
+            w = I->w * st->width_pct / 100;
+            if (have) h = img->h * w / img->w;
+        }
+        if (st->max_width != LEN_AUTO && st->max_width > 0 && w > st->max_width) { if (w) h = h * st->max_width / w; w = st->max_width; }
+        if (w > I->w && I->w > 0) { if (w) h = h * I->w / w; w = I->w; }
+        const char* alt = dom_attr(e, "alt");
+        if (!have && (!w || !h)) {                   /* nothing known: the alt text in a frame */
+            uint32_t al = alt ? (uint32_t)strlen(alt) : 0;
+            w = (int)(al ? al : 3) * 8 + 8;
+            if (w > I->w) w = I->w;
+            h = 16;
+        }
+        int x = place_box(I, w, h);
+        if (have && img->px) {
+            dl_item_t* it = push(C, DL_IMG);
+            it->x = x; it->w = w; it->h = h;
+            it->img = img;
+            it->node = e;
+        } else {
+            rect(C, x, 0, w, h, 0xC8C8C8, e);
+            rect(C, x + 1, 1, w - 2, h - 2, 0xEEEEEE, e);
+            if (alt && *alt) form_text(C, x, 0, w, h, alt, (uint32_t)strlen(alt), 0x555555, 1, e, 0, 1);
+        }
+        mark_box(C, first, h);
+        return;
+    }
+    const char* type = dom_attr(e, "type");
+    if (!type) type = "text";
+    int is_input = strcmp(tag, "input") == 0;
+    if (is_input && strcasecmp(type, "hidden") == 0) return;
+    int h = cw + 8;
+    if (is_input && (strcasecmp(type, "checkbox") == 0 || strcasecmp(type, "radio") == 0)) {
+        int x = place_box(I, 12 + 4, 12);
+        rect(C, x, 0, 12, 12, 0x707070, e);
+        rect(C, x + 1, 1, 10, 10, 0xFFFFFF, e);
+        if (e->form_init ? e->checked : dom_attr(e, "checked") != NULL) rect(C, x + 3, 3, 6, 6, 0x202020, e);
+        mark_box(C, first, 12);
+        return;
+    }
+    if (strcmp(tag, "textarea") == 0) {
+        const char* rows = dom_attr(e, "rows");
+        const char* cols = dom_attr(e, "cols");
+        int r = rows ? str_to_px(rows) : 3, c = cols ? str_to_px(cols) : 30;
+        if (r < 1) r = 1;
+        if (c < 4) c = 4;
+        int w = c * cw + 8, hh = r * (cw + 4) + 6;
+        if (st->width != LEN_AUTO && st->width > 0) w = st->width;
+        if (w > I->w) w = I->w;
+        int x = place_box(I, w, hh);
+        rect(C, x, 0, w, hh, 0x808080, e);
+        rect(C, x + 1, 1, w - 2, hh - 2, 0xFFFFFF, e);
+        const char* v = e->form_init ? (e->value ? e->value : "") : dom_text(C->L->A, e);
+        /* one line per row, wrapped at the width */
+        int perline = (w - 6) / cw;
+        if (perline < 1) perline = 1;
+        uint32_t vl = (uint32_t)strlen(v), pos = 0;
+        for (int row = 0; row < r && pos < vl; row++) {
+            uint32_t end = pos;
+            while (end < vl && v[end] != '\n' && (int)(end - pos) < perline) end++;
+            form_text(C, x, row * (cw + 4) + 2, w, cw + 4, v + pos, end - pos, 0x000000, scale, e, 0, 0);
+            pos = end;
+            if (pos < vl && v[pos] == '\n') pos++;
+        }
+        mark_box(C, first, hh);
+        return;
+    }
+    int button = !is_input || strcasecmp(type, "submit") == 0 || strcasecmp(type, "button") == 0 ||
+                 strcasecmp(type, "reset") == 0;
+    int is_select = strcmp(tag, "select") == 0;
+    if (is_select) button = 0;
+    const char* label;
+    if (button) {
+        if (is_input) label = dom_attr(e, "value") ? dom_attr(e, "value") : (strcasecmp(type, "reset") == 0 ? "Reset" : "Submit");
+        else label = dom_text(C->L->A, e);
+    } else if (is_select) {
+        label = "";
+        for (dom_node_t* o = e->first; o; o = o->next)
+            if (o->type == DOM_ELEM && strcmp(o->tag, "option") == 0) {
+                if (!*label || dom_attr(o, "selected")) label = dom_text(C->L->A, o);
+            }
+        if (e->value) label = e->value;
+    } else {
+        label = e->form_init ? (e->value ? e->value : "") : (dom_attr(e, "value") ? dom_attr(e, "value") : "");
+    }
+    if (button || is_select) {
+        while (*label == ' ' || *label == '\n' || *label == '\t') label++;
+    }
+    uint32_t ll = (uint32_t)strlen(label);
+    while (ll && (button || is_select) && (label[ll - 1] == ' ' || label[ll - 1] == '\n')) ll--;
+    int w;
+    if (button) w = (int)ll * cw + 16;
+    else if (is_select) w = (int)(ll + 3) * cw + 8;
+    else {
+        const char* size = dom_attr(e, "size");
+        int cols = size ? str_to_px(size) : 20;
+        if (cols < 2) cols = 2;
+        w = cols * cw + 8;
+    }
+    if (st->width != LEN_AUTO && st->width > 0) w = st->width;
+    if (w > I->w) w = I->w;
+    int x = place_box(I, w, h);
+    uint32_t face = button ? (st->has_bg ? st->bg : 0xDDDDDD) : 0xFFFFFF;
+    uint32_t edge = (C->L->focus == e) ? 0x3060C0 : button ? 0x777777 : 0x808080;
+    rect(C, x, 0, w, h, edge, e);
+    rect(C, x + 1, 1, w - 2, h - 2, face, e);
+    const char* ph = (!button && !is_select && !ll && C->L->focus != e) ? dom_attr(e, "placeholder") : NULL;
+    if (ph && *ph)                      /* grey hint while empty and not focused */
+        form_text(C, x, 0, w, h, ph, (uint32_t)strlen(ph), 0x999999, scale, e, 0, 0);
+    else
+        form_text(C, x, 0, w, h, label, ll, button ? st->color : 0x000000, scale, e,
+                  is_input && strcasecmp(type, "password") == 0, button);
+    if (is_select) {
+        dl_item_t* t = push(C, DL_TEXT);
+        t->text = "v";
+        t->len = 1;
+        t->scale = (uint8_t)scale;
+        t->x = x + w - cw - 4;
+        t->w = cw;
+        t->h = cw;
+        t->y = (h - cw) / 2;
+        t->node = e;
+    }
+    if (C->L->focus == e && !button && !is_select) {
+        dl_item_t* caret = push(C, DL_CARET);
+        int maxc = (w - 6) / cw;
+        int tl = (int)ll < maxc ? (int)ll : maxc;
+        caret->x = x + 3 + tl * cw;
+        caret->w = 1;
+        caret->h = cw + 2;
+        caret->y = (h - cw) / 2 - 1;
+        caret->color = 0x000000;
+    }
+    mark_box(C, first, h);
+}
+
+static void inline_node(inl_t* I, dom_node_t* n, uint32_t bg, int has_bg);
+
+static void inline_children(inl_t* I, dom_node_t* e, uint32_t bg, int has_bg) {
+    for (dom_node_t* c = e->first; c; c = c->next) inline_node(I, c, bg, has_bg);
+}
+
+static void inline_node(inl_t* I, dom_node_t* n, uint32_t bg, int has_bg) {
+    ctx_t* C = I->C;
+    if (n->type == DOM_TEXT) {
+        dom_node_t* p = n->parent;
+        const style_t* st = p && p->style ? p->style : NULL;
+        if (!st || !st->visible) return;
+        text_run(I, n->text, n->text_len, st, bg, has_bg, p);
+        return;
+    }
+    if (n->type != DOM_ELEM || !n->style || n->style->display == DISP_NONE) return;
+    const style_t* st = n->style;
+    const char* tag = n->tag;
+    if (strcmp(tag, "br") == 0) {
+        need_line_h(I, line_height(st->scale));
+        finish_line(I, 1);
+        return;
+    }
+    n->box_x = I->x0 + I->cx;
+    n->box_y = I->y;
+    if (strcmp(tag, "img") == 0 || strcmp(tag, "input") == 0 || strcmp(tag, "button") == 0 ||
+        strcmp(tag, "select") == 0 || strcmp(tag, "textarea") == 0) {
+        if (I->space && I->cx > 0) { I->cx += GLYPH * st->scale; I->space = 0; }
+        inline_replaced(I, n, st);
+        return;
+    }
+    if (st->has_bg) { bg = st->bg; has_bg = 1; }
+    (void)C;
+    inline_children(I, n, bg, has_bg);
+    n->box_w = I->x0 + I->cx - n->box_x;
+    n->box_h = I->line_h;
+}
+
+/* ══ blocks ═══════════════════════════════════════════════════════════ */
+
+/* inline content of a block, from child `from` until the next block-level child */
+static dom_node_t* run_inline(ctx_t* C, dom_node_t* parent, dom_node_t* from, int x, int y, int w, int* height) {
+    inl_t I;
+    memset(&I, 0, sizeof(I));
+    I.C = C;
+    I.x0 = x;
+    I.w = w;
+    I.y = y;
+    I.align = parent->style ? parent->style->align : ALIGN_LEFT;
+    I.empty = 1;
+    I.first = C->dry ? 0 : C->L->n;
+    dom_node_t* c = from;
+    for (; c; c = c->next) {
+        if (is_block_level(c)) break;
+        if (c->type == DOM_ELEM && c->style && c->style->display == DISP_INLINE && has_block_child(c)) break;
+        inline_node(&I, c, 0, 0);
+    }
+    finish_line(&I, 0);
+    *height = I.height;
+    return c;
+}
+
+static int list_ordinal(dom_node_t* li) {
+    int n = 1;
+    dom_node_t* p = li->parent;
+    if (p && p->type == DOM_ELEM) {
+        const char* start = dom_attr(p, "start");
+        if (start) n = (int)str_to_px(start);
+    }
+    for (dom_node_t* s = li->prev; s; s = s->prev)
+        if (s->type == DOM_ELEM && s->style && s->style->display == DISP_LIST_ITEM) n++;
+    return n;
+}
+
+static int layout_table(ctx_t* C, dom_node_t* t, int x, int y, int avail);
+
+/* children of a block: inline runs and blocks, with margin collapsing between blocks */
+static int layout_children(ctx_t* C, dom_node_t* parent, int x, int y, int w) {
+    int cy = y;
+    int prev_mb = 0;
+    dom_node_t* c = parent->first;
+    while (c) {
+        if (is_block_level(c) || (c->type == DOM_ELEM && c->style && c->style->display == DISP_INLINE && has_block_child(c))) {
+            if (c->style->display == DISP_NONE) { c = c->next; continue; }
+            int mt = c->style->margin[0];
+            int overlap = (prev_mb > 0 && mt > 0) ? (prev_mb < mt ? prev_mb : mt) : 0;
+            int h = layout_box(C, c, x, cy - overlap, w);
+            cy += h - overlap;
+            prev_mb = c->style->margin[2];
+            c = c->next;
+            continue;
+        }
+        int h = 0;
+        dom_node_t* next = run_inline(C, parent, c, x, cy, w, &h);
+        if (h > 0) prev_mb = 0;
+        cy += h;
+        if (next == c) c = c->next;                  /* safety */
+        else c = next;
+    }
+    return cy - y;
+}
+
+static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
+    const style_t* st = e->style;
+    if (!st || st->display == DISP_NONE) return 0;
+    if (st->display == DISP_TABLE) return layout_table(C, e, x, y, avail);
+    int ml = st->margin[3], mr = st->margin[1], mt = st->margin[0], mb = st->margin[2];
+    int bl = st->border[3], br = st->border[1], bt = st->border[0], bb = st->border[2];
+    int pl = st->padding[3], pr = st->padding[1], pt = st->padding[0], pb = st->padding[2];
+    int cw;
+    int explicit_w = 0;
+    if (st->width_pct) { cw = avail * st->width_pct / 100 - (bl + br + pl + pr); explicit_w = 1; }
+    else if (st->width != LEN_AUTO && st->width > 0) { cw = st->width; explicit_w = 1; }
+    else cw = avail - ml - mr - bl - br - pl - pr;
+    if (st->max_width != LEN_AUTO && st->max_width > 0 && cw > st->max_width) { cw = st->max_width; explicit_w = 1; }
+    if (cw < 8) cw = 8;
+    int bw = cw + bl + br + pl + pr;
+    if (explicit_w && st->margin_auto_lr && bw < avail) ml = (avail - bw) / 2;
+    if (bw > avail - ml && !explicit_w) bw = avail - ml;
+    int bx = x + ml, by = y + mt;
+    uint32_t bg_index = C->dry ? 0 : C->L->n;
+    int body_like = strcmp(e->tag, "body") == 0 || strcmp(e->tag, "html") == 0;
+    if (st->has_bg && !body_like) rect(C, bx, by, bw, 1, st->bg, e);
+    int content_y = by + bt + pt;
+    int ch = layout_children(C, e, bx + bl + pl, content_y, cw);
+    if (st->height != LEN_AUTO && st->height > 0) ch = st->height;
+    int bh = bt + pt + ch + pb + bb;
+    if (st->has_bg && !body_like && !C->dry) C->L->items[bg_index].h = bh;
+    borders(C, st, bx, by, bw, bh, e);
+    if (st->display == DISP_LIST_ITEM && st->list_style != LIST_NONE) {
+        int scale = st->scale ? st->scale : 1;
+        char m[16];
+        if (st->list_style == LIST_DECIMAL) ksnprintf(m, sizeof(m), "%d.", list_ordinal(e));
+        else kstrlcpy(m, st->list_style == LIST_CIRCLE ? "o" : st->list_style == LIST_SQUARE ? "#" : "*", sizeof(m));
+        uint32_t ml2 = (uint32_t)strlen(m);
+        dl_item_t* t = push(C, DL_TEXT);
+        char* mt2 = (char*)arena_alloc(C->L->A, ml2 + 1);
+        memcpy(mt2, m, ml2);
+        t->text = mt2;
+        t->len = ml2;
+        t->scale = (uint8_t)scale;
+        t->color = st->color;
+        t->w = (int)ml2 * GLYPH * scale;
+        t->h = GLYPH * scale;
+        t->x = bx + bl + pl - t->w - 6;
+        t->y = content_y + line_height(scale) - t->h - 2 * scale;
+        t->node = e;
+    }
+    e->box_x = bx;
+    e->box_y = by;
+    e->box_w = bw;
+    e->box_h = bh;
+    if (C->max_w < ml + bw) C->max_w = ml + bw;
+    return mt + bh + mb;
+}
+
+/* ══ tables ═══════════════════════════════════════════════════════════ */
+
+#define MAX_COLS 32
+#define MAX_ROWS 512
+
+static int collect_rows(dom_node_t* t, dom_node_t** rows, int max) {
+    int n = 0;
+    for (dom_node_t* c = t->first; c && n < max; c = c->next) {
+        if (c->type != DOM_ELEM || !c->style) continue;
+        if (c->style->display == DISP_TABLE_ROW) rows[n++] = c;
+        else if (c->style->display == DISP_TABLE_GROUP) n += collect_rows(c, rows + n, max - n);
+    }
+    return n;
+}
+
+static int span_of(dom_node_t* cell) {
+    const char* s = dom_attr(cell, "colspan");
+    int v = s ? (int)str_to_px(s) : 1;
+    return v < 1 ? 1 : v > MAX_COLS ? MAX_COLS : v;
+}
+
+/* content widths of a cell: max-content and the widest word */
+static void measure_cell(ctx_t* C, dom_node_t* cell, int* maxw, int* minw) {
+    ctx_t M;
+    M.L = C->L;
+    M.dry = 1;
+    M.max_w = 0;
+    M.max_word = 0;
+    layout_children(&M, cell, 0, 0, 100000);
+    const style_t* st = cell->style;
+    int extra = st->padding[1] + st->padding[3] + st->border[1] + st->border[3];
+    *maxw = M.max_w + extra;
+    *minw = M.max_word + extra;
+    if (st->width != LEN_AUTO && st->width > 0) { *maxw = *minw = st->width + extra; }
+}
+
+static int layout_table(ctx_t* C, dom_node_t* t, int x, int y, int avail) {
+    const style_t* st = t->style;
+    dom_node_t** rows = (dom_node_t**)arena_alloc(C->L->A, MAX_ROWS * (uint32_t)sizeof(dom_node_t*));
+    int nrows = collect_rows(t, rows, MAX_ROWS);
+    int ncols = 0;
+    for (int r = 0; r < nrows; r++) {
+        int c = 0;
+        for (dom_node_t* cell = rows[r]->first; cell; cell = cell->next)
+            if (cell->type == DOM_ELEM && cell->style && cell->style->display == DISP_TABLE_CELL) c += span_of(cell);
+        if (c > ncols) ncols = c;
+    }
+    if (ncols > MAX_COLS) ncols = MAX_COLS;
+    int mt = st->margin[0], mb = st->margin[2], ml = st->margin[3];
+    int bl = st->border[3], br = st->border[1], bt = st->border[0], bb = st->border[2];
+    int spacing = 2;
+    if (dom_attr(t, "cellspacing")) spacing = (int)str_to_px(dom_attr(t, "cellspacing"));
+    if (ncols == 0) return mt + bt + bb + mb;
+
+    int colmax[MAX_COLS], colmin[MAX_COLS];
+    memset(colmax, 0, sizeof(colmax));
+    memset(colmin, 0, sizeof(colmin));
+    for (int r = 0; r < nrows; r++) {
+        int c = 0;
+        for (dom_node_t* cell = rows[r]->first; cell && c < ncols; cell = cell->next) {
+            if (cell->type != DOM_ELEM || !cell->style || cell->style->display != DISP_TABLE_CELL) continue;
+            int sp = span_of(cell);
+            int mx, mn;
+            measure_cell(C, cell, &mx, &mn);
+            if (sp == 1) {
+                if (mx > colmax[c]) colmax[c] = mx;
+                if (mn > colmin[c]) colmin[c] = mn;
+            }
+            c += sp;
+        }
+    }
+    int sum_max = 0, sum_min = 0;
+    for (int c = 0; c < ncols; c++) {
+        if (colmin[c] < 8) colmin[c] = 8;
+        if (colmax[c] < colmin[c]) colmax[c] = colmin[c];
+        sum_max += colmax[c];
+        sum_min += colmin[c];
+    }
+    int frame = bl + br + spacing * (ncols + 1);
+    int tw;
+    if (st->width_pct) tw = avail * st->width_pct / 100;
+    else if (st->width != LEN_AUTO && st->width > 0) tw = st->width;
+    else tw = sum_max + frame < avail - ml ? sum_max + frame : avail - ml;
+    if (tw > avail - ml && avail - ml > 0) tw = avail - ml;
+    int inner = tw - frame;
+    if (inner < ncols * 8) inner = ncols * 8;
+    int colw[MAX_COLS];
+    if (sum_max <= inner) {
+        int extra = inner - sum_max;
+        for (int c = 0; c < ncols; c++) colw[c] = colmax[c] + (sum_max ? extra * colmax[c] / sum_max : extra / ncols);
+    } else if (sum_min >= inner) {
+        for (int c = 0; c < ncols; c++) colw[c] = inner * colmin[c] / (sum_min ? sum_min : 1);
+    } else {
+        int room = inner - sum_min, want = sum_max - sum_min;
+        for (int c = 0; c < ncols; c++) colw[c] = colmin[c] + (want ? room * (colmax[c] - colmin[c]) / want : 0);
+    }
+    if (st->margin_auto_lr && tw < avail) ml = (avail - tw) / 2;
+    int tx = x + ml, ty = y + mt;
+    uint32_t bg_index = C->dry ? 0 : C->L->n;
+    if (st->has_bg) rect(C, tx, ty, tw, 1, st->bg, t);
+    int cy = ty + bt + spacing;
+    for (int r = 0; r < nrows; r++) {
+        dom_node_t* row = rows[r];
+        uint32_t row_bg_index = C->dry ? 0 : C->L->n;
+        int row_bg = row->style && row->style->has_bg;
+        if (row_bg) rect(C, tx + bl, cy, tw - bl - br, 1, row->style->bg, row);
+        int cx = tx + bl + spacing;
+        int c = 0;
+        int row_h = 0;
+        uint32_t cell_bg[MAX_COLS];
+        dom_node_t* cells[MAX_COLS];
+        int cellx[MAX_COLS], cellw[MAX_COLS], ncells = 0;
+        for (dom_node_t* cell = row->first; cell && c < ncols; cell = cell->next) {
+            if (cell->type != DOM_ELEM || !cell->style || cell->style->display != DISP_TABLE_CELL) continue;
+            const style_t* cs = cell->style;
+            int sp = span_of(cell);
+            if (c + sp > ncols) sp = ncols - c;
+            int w = 0;
+            for (int k = 0; k < sp; k++) w += colw[c + k] + (k ? spacing : 0);
+            cell_bg[ncells] = C->dry ? 0 : C->L->n;
+            if (cs->has_bg) rect(C, cx, cy, w, 1, cs->bg, cell);
+            int inner_w = w - cs->padding[1] - cs->padding[3] - cs->border[1] - cs->border[3];
+            int h = layout_children(C, cell, cx + cs->border[3] + cs->padding[3], cy + cs->border[0] + cs->padding[0], inner_w);
+            h += cs->padding[0] + cs->padding[2] + cs->border[0] + cs->border[2];
+            if (cs->height != LEN_AUTO && cs->height > h) h = cs->height;
+            if (h > row_h) row_h = h;
+            cells[ncells] = cell;
+            cellx[ncells] = cx;
+            cellw[ncells] = w;
+            ncells++;
+            cx += w + spacing;
+            c += sp;
+        }
+        if (row_h == 0) row_h = line_height(1);
+        if (!C->dry) {
+            if (row_bg) C->L->items[row_bg_index].h = row_h;
+            for (int k = 0; k < ncells; k++) {
+                if (cells[k]->style->has_bg) C->L->items[cell_bg[k]].h = row_h;
+                borders(C, cells[k]->style, cellx[k], cy, cellw[k], row_h, cells[k]);
+                cells[k]->box_x = cellx[k];
+                cells[k]->box_y = cy;
+                cells[k]->box_w = cellw[k];
+                cells[k]->box_h = row_h;
+            }
+        }
+        cy += row_h + spacing;
+    }
+    int th = cy - ty + bb;
+    if (st->has_bg && !C->dry) C->L->items[bg_index].h = th;
+    borders(C, st, tx, ty, tw, th, t);
+    t->box_x = tx;
+    t->box_y = ty;
+    t->box_w = tw;
+    t->box_h = th;
+    if (C->max_w < ml + tw) C->max_w = ml + tw;
+    return mt + th + mb;
+}
+
+/* ══ entry points ═════════════════════════════════════════════════════ */
+
+static int inline_elem(dom_node_t* e) {
+    return e && e->type == DOM_ELEM && e->style &&
+           (e->style->display == DISP_INLINE || e->style->display == DISP_INLINE_BLOCK);
+}
+
+/* inline elements get their final boxes (after line alignment) from the
+ * items they produced: the union of them */
+static void inline_boxes(layout_t* L) {
+    for (uint32_t i = 0; i < L->n; i++)
+        for (dom_node_t* e = L->items[i].node; inline_elem(e); e = e->parent) e->box_w = -1;
+    for (uint32_t i = 0; i < L->n; i++) {
+        dl_item_t* it = &L->items[i];
+        for (dom_node_t* e = it->node; inline_elem(e); e = e->parent) {
+            if (e->box_w < 0) { e->box_x = it->x; e->box_y = it->y; e->box_w = it->w; e->box_h = it->h; continue; }
+            int x1 = e->box_x + e->box_w, y1 = e->box_y + e->box_h;
+            if (it->x < e->box_x) e->box_x = it->x;
+            if (it->y < e->box_y) e->box_y = it->y;
+            if (it->x + it->w > x1) x1 = it->x + it->w;
+            if (it->y + it->h > y1) y1 = it->y + it->h;
+            e->box_w = x1 - e->box_x;
+            e->box_h = y1 - e->box_y;
+        }
+    }
+}
+
+layout_t* layout_build(arena_t* A, dom_node_t* doc, int width, dom_node_t* focus) {
+    layout_t* L = (layout_t*)arena_alloc(A, sizeof(layout_t));
+    L->A = A;
+    L->width = width;
+    L->bg = 0xFFFFFF;
+    L->focus = focus;
+    dom_node_t* html = dom_find_tag(doc, "html");
+    dom_node_t* body = dom_find_tag(doc, "body");
+    if (html && html->style && html->style->has_bg) L->bg = html->style->bg;
+    if (body && body->style && body->style->has_bg) L->bg = body->style->bg;
+    ctx_t C;
+    memset(&C, 0, sizeof(C));
+    C.L = L;
+    int h = 0;
+    if (html && html->style) h = layout_box(&C, html, 0, 0, width);
+    L->height = h;
+    inline_boxes(L);
+    return L;
+}
+
+dom_node_t* layout_hit(layout_t* L, int x, int y) {
+    for (uint32_t i = L->n; i > 0; i--) {
+        dl_item_t* it = &L->items[i - 1];
+        if (!it->node) continue;
+        if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) return it->node;
+    }
+    return NULL;
+}
