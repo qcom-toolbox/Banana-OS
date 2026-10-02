@@ -37,6 +37,9 @@ static size_t  vt_col[VT_MAX];
 static uint8_t vt_color[VT_MAX];
 static uint8_t vt_used[VT_MAX] = {1, 0, 0, 0}; /* vt0 reserved */
 static int     vt_active = 0;
+/* a GUI terminal window's own text grid (0 = the whole screen's grid) */
+static size_t  vt_cols[VT_MAX];
+static size_t  vt_rows[VT_MAX];
 
 /* bumped on every change to any vt (text, colours, cursor): the GUI
  * compares it to decide whether terminal windows need repainting */
@@ -64,11 +67,13 @@ static size_t terminal_fb_rows(void) {
 }
 
 static size_t terminal_width(void) {
+    if (vt_active != 0 && vt_cols[vt_active] && term_mode != TERMINAL_MODE_VGA_TEXT) return vt_cols[vt_active];
     if (term_mode == TERMINAL_MODE_FRAMEBUFFER || term_mode == TERMINAL_MODE_SUSPENDED) return terminal_fb_cols();
     return VGA_WIDTH;
 }
 
 static size_t terminal_height(void) {
+    if (vt_active != 0 && vt_rows[vt_active] && term_mode != TERMINAL_MODE_VGA_TEXT) return vt_rows[vt_active];
     if (term_mode == TERMINAL_MODE_FRAMEBUFFER || term_mode == TERMINAL_MODE_SUSPENDED) return terminal_fb_rows();
     return VGA_HEIGHT;
 }
@@ -709,8 +714,8 @@ void terminal_vt_get_buffer(int vt, const char** chars, const uint8_t** colors, 
     }
     if (chars)  *chars = (const char*)&vt_chars[vt][0][0];
     if (colors) *colors = (const uint8_t*)&vt_colors[vt][0][0];
-    if (width)  *width = (int)terminal_width();
-    if (height) *height = (int)terminal_height();
+    if (width)  *width = (int)(vt_cols[vt] ? vt_cols[vt] : terminal_fb_cols());
+    if (height) *height = (int)(vt_rows[vt] ? vt_rows[vt] : terminal_fb_rows());
     if (stride) *stride = FB_MAX_COLS;
 }
 
@@ -726,4 +731,36 @@ void terminal_vt_get_cursor(int vt, size_t* row, size_t* col) {
 
 int terminal_is_capturing(void) {
     return capturing();
+}
+
+void terminal_vt_set_size(int vt, int cols, int rows) {
+    if (vt <= 0 || vt >= VT_MAX || !vt_used[vt]) return;
+    if (cols < 10) cols = 10;
+    if (rows < 3) rows = 3;
+    if (cols > FB_MAX_COLS) cols = FB_MAX_COLS;
+    if (rows > FB_MAX_ROWS) rows = FB_MAX_ROWS;
+    size_t old_cols = vt_cols[vt] ? vt_cols[vt] : term_fb_cols;
+    size_t old_rows = vt_rows[vt] ? vt_rows[vt] : term_fb_rows;
+    if ((size_t)cols == old_cols && (size_t)rows == old_rows && vt_cols[vt]) return;
+    /* the cursor's line stays visible: scroll the text up if the window got shorter */
+    if (vt_row[vt] >= (size_t)rows) {
+        size_t sh = vt_row[vt] - (size_t)rows + 1;
+        memmove(&vt_chars[vt][0][0], &vt_chars[vt][sh][0], (FB_MAX_ROWS - sh) * FB_MAX_COLS);
+        memmove(&vt_colors[vt][0][0], &vt_colors[vt][sh][0], (FB_MAX_ROWS - sh) * FB_MAX_COLS);
+        for (size_t y = FB_MAX_ROWS - sh; y < FB_MAX_ROWS; y++)
+            for (size_t x = 0; x < FB_MAX_COLS; x++) { vt_chars[vt][y][x] = ' '; vt_colors[vt][y][x] = vt_color[vt]; }
+        vt_row[vt] -= sh;
+    }
+    /* cells that come into view are blank */
+    for (size_t y = 0; y < FB_MAX_ROWS; y++)
+        for (size_t x = 0; x < FB_MAX_COLS; x++)
+            if ((y >= old_rows && y < (size_t)rows) || (x >= old_cols && x < (size_t)cols)) {
+                vt_chars[vt][y][x] = ' ';
+                vt_colors[vt][y][x] = vt_color[vt];
+            }
+    if (vt_col[vt] >= (size_t)cols) vt_col[vt] = (size_t)cols - 1;
+    vt_cols[vt] = (size_t)cols;
+    vt_rows[vt] = (size_t)rows;
+    if (vt == vt_active) { term_row = vt_row[vt]; term_col = vt_col[vt]; }
+    g_term_gen++;
 }

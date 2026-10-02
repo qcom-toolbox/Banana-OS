@@ -1222,6 +1222,7 @@ void lib_init(interp_t* I) {
     obj.f->statics = op;
     date.f->statics = dp;
     num.f->statics = np;
+    es_init(I);                                    /* script_es.c: the newer built-ins */
 }
 
 /* ══ PHP ══════════════════════════════════════════════════════════════ */

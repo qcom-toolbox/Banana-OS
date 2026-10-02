@@ -54,7 +54,7 @@ typedef struct host_class {
     int (*set)(interp_t* I, obj_t* self, const char* key, value_t v);
 } host_class_t;
 
-enum { OBJ_PLAIN = 0, OBJ_ARRAY, OBJ_PHPARRAY, OBJ_HOST };
+enum { OBJ_PLAIN = 0, OBJ_ARRAY, OBJ_PHPARRAY, OBJ_HOST, OBJ_ACCESSOR /* a getter/setter pair: props "get", "set" */ };
 
 struct obj {
     uint8_t  kind;
@@ -87,6 +87,11 @@ void      script_set_php_ext(interp_t* I, script_ext_fn fn);
 /* parses and runs a program; 0 = ok, -1 = error (script_error()) */
 int         script_run(interp_t* I, const char* src, uint32_t len, const char* name);
 const char* script_error(interp_t* I);
+/* ES modules: runs src in a scope of its own, its exports going into ns; the
+ * host loads what it imports (returning the namespace object, or throwing) */
+int         script_run_module(interp_t* I, const char* src, uint32_t len, const char* name, const char* url, obj_t* ns);
+typedef value_t (*script_import_fn)(interp_t* I, void* ctx, const char* spec, const char* base_url);
+void        script_set_import(interp_t* I, script_import_fn fn, void* ctx);
 /* calls a function value; 0 = ok, -1 = it threw (script_error()) */
 int         script_call(interp_t* I, value_t fn, value_t self, int argc, value_t* argv, value_t* ret);
 

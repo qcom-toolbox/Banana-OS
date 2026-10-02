@@ -17,6 +17,7 @@ typedef struct {
     int      is_slave;
     uint32_t sectors;    /* 28-bit LBA sector count (0 if unknown/ATAPI) */
     char     model[41];  /* IDENTIFY model string, NUL-terminated */
+    int      ahci_port;  /* SATA (kernel/ahci.c) device index, or -1 for an IDE drive */
 } ata_disk_t;
 
 /* Probes all 4 possible drives (primary/secondary x master/slave) into

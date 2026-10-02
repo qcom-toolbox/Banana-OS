@@ -42,10 +42,19 @@ typedef struct layout {
     int        width, height;
     uint32_t   bg;          /* page background */
     dom_node_t* focus;      /* focused form control (gets a caret) */
+    /* text selection to highlight (render.c): item/offset to item/offset, in display-list order */
+    int        sel_on, sel_i0, sel_o0, sel_i1, sel_o1;
 } layout_t;
 
 layout_t*   layout_build(arena_t* A, dom_node_t* doc, int width, dom_node_t* focus);
 dom_node_t* layout_hit(layout_t* L, int x, int y);   /* element at page coordinates */
+
+/* text selection: the text position (DL_TEXT item index, character) nearest a page point;
+ * 0 if the page has no text */
+int         layout_text_pos(layout_t* L, int x, int y, int* item, int* off);
+/* the text between two positions (in order), lines separated by '
+'; returns its length */
+uint32_t    layout_text_range(layout_t* L, int i0, int o0, int i1, int o1, char* out, uint32_t cap);
 
 /* UTF-8 text in the 7-bit font: e-acute -> e, quotes -> ', dashes -> - ... */
 uint32_t    text_to_ascii(const char* s, uint32_t n, char* out);

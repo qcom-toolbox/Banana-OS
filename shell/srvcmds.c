@@ -1,3 +1,4 @@
+#include "../net/upnp.h"
 #include "srvcmds.h"
 #include "netcmds.h"
 #include "../kernel/terminal.h"
@@ -60,6 +61,8 @@ static int boot_enabled(const char* name, uint16_t* port) {
 
 /* ── httpd ────────────────────────────────────────────────────────── */
 
+static uint16_t g_exposed;     /* Internet port the router forwards to httpd (httpd expose), 0 = none */
+
 static void cmd_httpd(int argc, char** argv) {
     const char* sub = argc >= 2 ? argv[1] : "status";
     uint16_t port = httpd_running() ? httpd_port() : 80;
@@ -70,6 +73,7 @@ static void cmd_httpd(int argc, char** argv) {
         httpd_print_status();
         uint16_t bp = 80;
         say("       at boot: %s\n", boot_enabled("httpd", &bp) ? "enabled" : "disabled (`httpd enable`)");
+        if (g_exposed) say("       exposed to the Internet on port %u (router UPnP)\n", (unsigned)g_exposed);
     } else if (strcmp(sub, "start") == 0 || strcmp(sub, "enable") == 0) {
         if (httpd_start(port, e, sizeof(e)) != 0) { fail("httpd", e); return; }
         if (strcmp(sub, "enable") == 0) boot_setting("httpd", 1, port);
@@ -78,9 +82,48 @@ static void cmd_httpd(int argc, char** argv) {
         httpd_stop();
         if (strcmp(sub, "disable") == 0) boot_setting("httpd", 0, 0);
         terminal_writeln("httpd: stopped");
+    } else if (strcmp(sub, "expose") == 0) {
+        /* httpd expose [internet port]: the router forwards that port to us */
+        uint16_t ext = 80;
+        if (argc >= 3 && !parse_port(argv[2], &ext)) { fail("httpd", "bad port number"); return; }
+        if (!httpd_running()) {
+            if (httpd_start(80, e, sizeof(e)) != 0) { fail("httpd", e); return; }
+            terminal_writeln("httpd: started on port 80");
+        }
+        terminal_writeln("httpd: asking the router (UPnP) to forward the port...");
+        char pub[48], err[200];
+        if (upnp_add_port(ext, httpd_port(), "Banana OS httpd", pub, sizeof(pub), err, sizeof(err)) != 0) {
+            fail("httpd", err);
+            char me[16];
+            ip4_to_str(net_if()->ip, me);
+            say("       You can also forward TCP port %u by hand in the router's settings, to %s port %u.\n",
+                (unsigned)ext, me, (unsigned)httpd_port());
+            return;
+        }
+        g_exposed = ext;
+        ip4_t pip = 0;
+        if (pub[0] && str_to_ip4(pub, &pip) && !upnp_is_private(pip)) {
+            if (ext == 80) say("httpd: exposed - from the Internet: http://%s/\n", pub);
+            else say("httpd: exposed - from the Internet: http://%s:%u/\n", pub, (unsigned)ext);
+        } else {
+            say("httpd: the router forwards port %u to this machine, but its own address (%s) is not\n"
+                "       a public one: your provider has another NAT in front of it (CGNAT), so the\n"
+                "       Internet still can't reach it. Ask the provider for a public IPv4 address.\n",
+                ext, pub[0] ? pub : "unknown");
+        }
+        terminal_writeln("       Anyone can now read " HTTPD_ROOT " and run its .php pages. Undo: httpd unexpose");
+    } else if (strcmp(sub, "unexpose") == 0) {
+        uint16_t ext = g_exposed ? g_exposed : 80;
+        if (argc >= 3 && !parse_port(argv[2], &ext)) { fail("httpd", "bad port number"); return; }
+        char err[200];
+        if (upnp_delete_port(ext, err, sizeof(err)) != 0) { fail("httpd", err); return; }
+        g_exposed = 0;
+        say("httpd: the router no longer forwards port %u\n", ext);
     } else {
-        terminal_writeln("usage: httpd [status | start [port] | stop | enable [port] | disable]");
-        terminal_writeln("       serves the files in " HTTPD_ROOT " (default port 80)");
+        terminal_writeln("usage: httpd [status | start [port] | stop | enable [port] | disable |");
+        terminal_writeln("              expose [internet port] | unexpose]");
+        terminal_writeln("       serves the files in " HTTPD_ROOT " (default port 80); expose asks the");
+        terminal_writeln("       router (UPnP) to make it reachable from the Internet");
     }
 }
 
@@ -177,6 +220,19 @@ int srvcmd_dispatch(const char* line) {
     if (strcmp(argv[0], "httpd") == 0)  { cmd_httpd(argc, argv); return 1; }
     if (strcmp(argv[0], "sshd") == 0)   { cmd_sshd(argc, argv); return 1; }
     if (strcmp(argv[0], "passwd") == 0) { cmd_passwd(argc, argv); return 1; }
+    if (strcmp(argv[0], "notepad") == 0) {
+        /* the desktop's text editor, optionally with a file (relative: to the current folder) */
+        char path[FS_PATH_LEN];
+        const char* p = argc >= 2 ? argv[1] : NULL;
+        if (p && p[0] != '/' && p[0] != '~') {
+            char cwd[FS_PATH_LEN];
+            fs_cwd_path(cwd, sizeof(cwd));
+            ksnprintf(path, sizeof(path), "%s%s%s", cwd, strcmp(cwd, "/") ? "/" : "", p);
+            p = path;
+        }
+        if (!gui_open_notepad(p)) terminal_writeln("notepad: Notepad is part of the desktop - run `startx` first (or use `edit`)");
+        return 1;
+    }
     if (strcmp(argv[0], "browser") == 0) {
         /* the desktop's web browser, optionally at an address */
         if (!gui_open_browser(argc >= 2 ? argv[1] : NULL))

@@ -1,6 +1,8 @@
 #include "page.h"
 #include "script_int.h"
 #include "kstring.h"
+#include "kheap.h"
+#include "prelude.h"
 
 /*
  * The DOM as JavaScript sees it: document, window, location, elements
@@ -195,17 +197,18 @@ static obj_t* event_proto(page_t* p) {
     return o;
 }
 
-static int dispatch(page_t* p, dom_node_t* target, const char* type, const char* keyname) {
+static int dispatch_ev(page_t* p, dom_node_t* target, const char* type, const char* keyname, obj_t* given) {
     if (!p->js || !target) return 0;
     interp_t* I = p->js;
-    obj_t* ev = obj_new(I, OBJ_PLAIN);
-    ev->proto = event_proto(p);
+    obj_t* ev = given ? given : obj_new(I, OBJ_PLAIN);
+    if (!given) ev->proto = event_proto(p);
     obj_set(I, ev, "type", v_str(I, type));
     obj_set(I, ev, "target", wrap(p, target));
     obj_set(I, ev, "srcElement", wrap(p, target));
     obj_set(I, ev, "defaultPrevented", v_bool(0));
     obj_set(I, ev, "cancelBubble", v_bool(0));
-    obj_set(I, ev, "bubbles", v_bool(1));
+    if (!given) obj_set(I, ev, "bubbles", v_bool(1));
+    int bubbles = v_truthy(I, obj_get(I, ev, "bubbles"));
     if (keyname) {
         obj_set(I, ev, "key", v_str(I, keyname));
         int code = keyname[1] ? 0 : (unsigned char)keyname[0];
@@ -241,12 +244,16 @@ static int dispatch(page_t* p, dom_node_t* target, const char* type, const char*
                 prevented = 1;
             }
         }
-        if (v_truthy(I, obj_get(I, ev, "cancelBubble"))) break;
+        if (v_truthy(I, obj_get(I, ev, "cancelBubble")) || !bubbles) break;
     }
     p->dispatch_depth--;
     if (v_truthy(I, obj_get(I, ev, "defaultPrevented"))) prevented = 1;
     changed(p);
     return prevented;
+}
+
+static int dispatch(page_t* p, dom_node_t* target, const char* type, const char* keyname) {
+    return dispatch_ev(p, target, type, keyname, NULL);
 }
 
 int jsdom_dispatch(page_t* p, dom_node_t* target, const char* type) { return dispatch(p, target, type, NULL); }
@@ -507,6 +514,13 @@ static value_t doc_get(interp_t* I, page_t* p, dom_node_t* d, const char* key, i
     if (K("images")) return find_list(I, d, 0, "img");
     if (K("links")) return find_list(I, d, 0, "a");
     if (K("activeElement")) return p->focus ? wrap(p, p->focus) : wrap(p, dom_body(d));
+    if (K("currentScript")) return p->cur_script ? wrap(p, p->cur_script) : v_null();
+    if (K("visibilityState")) return v_str(I, "visible");
+    if (K("hidden")) return v_bool(0);
+    if (K("characterSet") || K("charset")) return v_str(I, "UTF-8");
+    if (K("compatMode")) return v_str(I, "CSS1Compat");
+    if (K("referrer")) return v_str(I, "");
+    if (K("domain")) { const char* h = strstr(p->url, "://"); return v_str(I, h ? h + 3 : ""); }
     *found = 0;
     return v_undef();
 }
@@ -530,6 +544,17 @@ static value_t elem_get(interp_t* I, obj_t* self, const char* key, int* found) {
     if (K("lastElementChild")) return wrap(p, first_elem(n->last, 0));
     if (K("nextElementSibling")) return wrap(p, first_elem(n->next, 1));
     if (K("previousElementSibling")) return wrap(p, first_elem(n->prev, 0));
+    if (K("attributes")) {                           /* [{name, value}], a snapshot */
+        obj_t* arr = obj_new(I, OBJ_ARRAY);
+        for (dom_attr_t* a = n->type == DOM_ELEM ? n->attrs : NULL; a; a = a->next) {
+            obj_t* at = obj_new(I, OBJ_PLAIN);
+            obj_set(I, at, "name", v_str(I, a->name));
+            obj_set(I, at, "localName", v_str(I, a->name));
+            obj_set(I, at, "value", v_str(I, a->value ? a->value : ""));
+            arr_push(I, arr, v_obj(at));
+        }
+        return v_obj(arr);
+    }
     if (K("children") || K("childNodes")) {
         int elems_only = K("children");
         obj_t* a = obj_new(I, OBJ_ARRAY);
@@ -1253,6 +1278,17 @@ static value_t w_clearTimer(interp_t* I, value_t self, int argc, value_t* argv) 
     return v_undef();
 }
 
+static value_t w_open(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    page_t* p = P(I);
+    if (!argc || argv[0].t == V_UNDEF) return v_null();
+    url_resolve(p->url, v_cstr(I, argv[0]), p->nav, sizeof(p->nav));
+    p->nav_post = NULL;
+    p->nav_newtab = 1;
+    p->nav_pending = 1;
+    return v_null();
+}
+
 static value_t w_scrollTo(interp_t* I, value_t self, int argc, value_t* argv) {
     (void)self;
     num_t y = argc > 1 ? v_tonum(I, argv[1]) : 0;
@@ -1450,6 +1486,312 @@ static obj_t* table(interp_t* I, const method_t* m, int n, obj_t* proto) {
 
 #define TABLE(I, arr, proto) table(I, arr, (int)(sizeof(arr) / sizeof(arr[0])), proto)
 
+static value_t xhr_addEventListener(interp_t* I, value_t self, int argc, value_t* argv);
+/* ══ more web APIs: events, fetch, XMLHttpRequest, observers, ... ════ */
+
+/* new Event(type, {bubbles, detail}) / CustomEvent / KeyboardEvent / MouseEvent */
+static value_t js_Event(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    page_t* p = P(I);
+    obj_t* ev = obj_new(I, OBJ_PLAIN);
+    ev->proto = event_proto(p);
+    obj_set(I, ev, "type", v_str(I, arg_str(I, argc, argv, 0)));
+    obj_set(I, ev, "bubbles", v_bool(0));
+    obj_set(I, ev, "defaultPrevented", v_bool(0));
+    obj_set(I, ev, "cancelBubble", v_bool(0));
+    if (argc > 1 && argv[1].t == V_OBJ) {
+        obj_t* o = argv[1].o;
+        for (uint32_t i = 0; i < o->n; i++) obj_set(I, ev, o->props[i].key->s, o->props[i].v);
+    }
+    return v_obj(ev);
+}
+
+static value_t m_dispatchEvent(interp_t* I, value_t self, int argc, value_t* argv) {
+    dom_node_t* n = self_node(I, self);
+    value_t e = ARG(0);
+    if (!n || e.t != V_OBJ) return v_bool(1);
+    const char* type = v_cstr(I, obj_get(I, e.o, "type"));
+    return v_bool(!dispatch_ev(P(I), n, type, NULL, e.o));
+}
+
+static value_t m_toggleAttribute(interp_t* I, value_t self, int argc, value_t* argv) {
+    dom_node_t* n = self_node(I, self);
+    if (!n || n->type != DOM_ELEM) return v_bool(0);
+    const char* name = arg_str(I, argc, argv, 0);
+    int on = argc > 1 ? v_truthy(I, argv[1]) : !dom_attr(n, name);
+    if (on) dom_set_attr(&P(I)->A, n, name, "");
+    else dom_remove_attr(n, name);
+    changed(P(I));
+    return v_bool(on);
+}
+
+static value_t m_nothing(interp_t* I, value_t self, int argc, value_t* argv) { (void)I; (void)self; (void)argc; (void)argv; return v_undef(); }
+
+static value_t m_insertAdjacentElement(interp_t* I, value_t self, int argc, value_t* argv) {
+    dom_node_t* n = self_node(I, self);
+    dom_node_t* el = node_of(ARG(1));
+    if (!n || !el) return v_null();
+    const char* where = arg_str(I, argc, argv, 0);
+    if (strcasecmp(where, "beforebegin") == 0 && n->parent) insert(I, n->parent, el, n);
+    else if (strcasecmp(where, "afterend") == 0 && n->parent) insert(I, n->parent, el, n->next);
+    else if (strcasecmp(where, "afterbegin") == 0) insert(I, n, el, n->first);
+    else insert(I, n, el, NULL);
+    return ARG(1);
+}
+
+static value_t cl_replace(interp_t* I, value_t self, int argc, value_t* argv) {
+    dom_node_t* n = cl_node(self);
+    if (!n || !dom_has_class(n, arg_str(I, argc, argv, 0))) return v_bool(0);
+    class_edit(P(I), n, arg_str(I, argc, argv, 0), 0);
+    class_edit(P(I), n, arg_str(I, argc, argv, 1), 1);
+    return v_bool(1);
+}
+
+static value_t d_createElementNS(interp_t* I, value_t self, int argc, value_t* argv) {
+    value_t a[1] = { ARG(1) };
+    return d_createElement(I, self, 1, a);
+}
+
+static value_t js_Image(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self; (void)argc; (void)argv;
+    return wrap(P(I), dom_new_element(&P(I)->A, "img"));
+}
+
+/* constructors pages test with instanceof (Element, Node, ...): not callable */
+/* Element, Node, HTMLElement...: their prototypes are the element (or document)
+ * method tables, so polyfills added there reach every element. Calling one does
+ * nothing: that is what super() in `class X extends HTMLElement` needs */
+static value_t js_dom_class(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)I; (void)self; (void)argc; (void)argv;
+    return v_undef();
+}
+
+/* matchMedia(query): evaluated against the window width (min/max-width only) */
+static value_t js_matchMedia(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    const char* q = arg_str(I, argc, argv, 0);
+    int w = P(I)->width ? P(I)->width : 800, ok = 1;
+    const char* m;
+    if ((m = strstr(q, "min-width:"))) { int v = 0; m += 10; while (*m == ' ') m++; while (*m >= '0' && *m <= '9') v = v * 10 + (*m++ - '0'); if (strncmp(m, "em", 2) == 0 || strncmp(m, "rem", 3) == 0) v *= 16; ok &= w >= v; }
+    if ((m = strstr(q, "max-width:"))) { int v = 0; m += 10; while (*m == ' ') m++; while (*m >= '0' && *m <= '9') v = v * 10 + (*m++ - '0'); if (strncmp(m, "em", 2) == 0 || strncmp(m, "rem", 3) == 0) v *= 16; ok &= w <= v; }
+    if (strstr(q, "prefers-color-scheme: dark") || strstr(q, "print")) ok = 0;
+    if (strstr(q, "prefers-reduced-motion: reduce")) ok = 1;
+    obj_t* o = obj_new(I, OBJ_PLAIN);
+    obj_set(I, o, "matches", v_bool(ok));
+    obj_set(I, o, "media", v_str(I, q));
+    obj_set(I, o, "addListener", v_native(I, "addListener", m_nothing));
+    obj_set(I, o, "removeListener", v_native(I, "removeListener", m_nothing));
+    obj_set(I, o, "addEventListener", v_native(I, "addEventListener", m_nothing));
+    obj_set(I, o, "removeEventListener", v_native(I, "removeEventListener", m_nothing));
+    return v_obj(o);
+}
+
+/* IntersectionObserver: every observed element counts as visible at once
+ * (lazy-loaded images and "on scroll" content then simply show up);
+ * MutationObserver / ResizeObserver: accepted, never fire */
+static value_t io_observe(interp_t* I, value_t self, int argc, value_t* argv) {
+    if (self.t != V_OBJ) return v_undef();
+    value_t cb = obj_get(I, self.o, "__cb");
+    if (cb.t != V_FUNC || ARG(0).t != V_OBJ) return v_undef();
+    obj_t* entry = obj_new(I, OBJ_PLAIN);
+    obj_set(I, entry, "target", ARG(0));
+    obj_set(I, entry, "isIntersecting", v_bool(1));
+    obj_set(I, entry, "intersectionRatio", v_num(1));
+    obj_t* list = obj_new(I, OBJ_ARRAY);
+    arr_push(I, list, v_obj(entry));
+    value_t args[2] = { v_obj(list), self };
+    call_value(I, cb, self, 2, args);
+    return v_undef();
+}
+
+static value_t make_observer(interp_t* I, int argc, value_t* argv, int intersect) {
+    obj_t* o = obj_new(I, OBJ_PLAIN);
+    obj_set(I, o, "__cb", ARG(0));
+    obj_set(I, o, "observe", v_native(I, "observe", intersect ? io_observe : m_nothing));
+    obj_set(I, o, "unobserve", v_native(I, "unobserve", m_nothing));
+    obj_set(I, o, "disconnect", v_native(I, "disconnect", m_nothing));
+    obj_set(I, o, "takeRecords", v_native(I, "takeRecords", m_nothing));
+    return v_obj(o);
+}
+static value_t js_IntersectionObserver(interp_t* I, value_t self, int argc, value_t* argv) { (void)self; return make_observer(I, argc, argv, 1); }
+static value_t js_OtherObserver(interp_t* I, value_t self, int argc, value_t* argv) { (void)self; return make_observer(I, argc, argv, 0); }
+
+static value_t w_requestIdleCallback(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    value_t a[2] = { ARG(0), v_num(1) };
+    (void)argc;
+    return add_timer(I, 2, a, 0);
+}
+
+/* ── fetch() and XMLHttpRequest: done right away (the browser task may wait on the network) ── */
+
+static int do_request(page_t* p, const char* url_in, const char* method, const char* body, uint32_t blen,
+                      char** data, uint32_t* len, char* ctype, int ccap, char* err, int ecap, char* final_url) {
+    char url[1024];
+    url_resolve(p->url, url_in, url, sizeof(url));
+    kstrlcpy(final_url, url, 1024);
+    if (!p->env) { kstrlcpy(err, "no network", (size_t)ecap); return -1; }
+    if (p->env->request && (strcasecmp(method, "GET") != 0 || body))
+        return p->env->request(p->env->ctx, url, method, body, blen, "application/x-www-form-urlencoded",
+                               data, len, ctype, ccap, err, ecap);
+    if (!p->env->fetch) { kstrlcpy(err, "no network", (size_t)ecap); return -1; }
+    char fin[1024];
+    return p->env->fetch(p->env->ctx, url, data, len, ctype, ccap, fin, sizeof(fin), err, ecap);
+}
+
+static value_t resp_text(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)argc; (void)argv;
+    return es_promise_resolved(I, self.t == V_OBJ ? obj_get(I, self.o, "__body") : v_str(I, ""));
+}
+
+static value_t resp_json(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)argc; (void)argv;
+    value_t body = self.t == V_OBJ ? obj_get(I, self.o, "__body") : v_str(I, "");
+    value_t json = script_get_global(I, "JSON");
+    value_t parse = json.t == V_OBJ ? obj_get(I, json.o, "parse") : v_undef();
+    value_t p = es_promise_new(I);
+    value_t r;
+    if (parse.t == V_FUNC && script_call(I, parse, json, 1, &body, &r) == 0) es_promise_settle(I, p, 0, r);
+    else es_promise_settle(I, p, 1, v_str(I, "SyntaxError: bad JSON in the response"));
+    return p;
+}
+
+static value_t hdr_get(interp_t* I, value_t self, int argc, value_t* argv) {
+    if (self.t != V_OBJ) return v_null();
+    if (strcasecmp(arg_str(I, argc, argv, 0), "content-type") == 0) return obj_get(I, self.o, "__type");
+    return v_null();
+}
+
+static value_t js_fetch(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    page_t* p = P(I);
+    const char* url = ARG(0).t == V_OBJ ? v_cstr(I, obj_get(I, ARG(0).o, "url")) : arg_str(I, argc, argv, 0);
+    const char* method = "GET";
+    const char* body = NULL;
+    uint32_t blen = 0;
+    if (argc > 1 && argv[1].t == V_OBJ) {
+        value_t m = obj_get(I, argv[1].o, "method"), b = obj_get(I, argv[1].o, "body");
+        if (m.t == V_STR) method = m.s->s;
+        if (b.t != V_UNDEF && b.t != V_NULL) { str_t* bs = v_tostr(I, b); body = bs->s; blen = bs->len; }
+    }
+    char* data = NULL;
+    uint32_t len = 0;
+    char ctype[96] = "", err[160] = "", final_url[1024];
+    value_t pr = es_promise_new(I);
+    if (do_request(p, url, method, body, blen, &data, &len, ctype, sizeof(ctype), err, sizeof(err), final_url) != 0) {
+        obj_t* e = obj_new(I, OBJ_PLAIN);
+        obj_set(I, e, "name", v_str(I, "TypeError"));
+        obj_set(I, e, "message", v_str(I, err[0] ? err : "Failed to fetch"));
+        es_promise_settle(I, pr, 1, v_obj(e));
+        return pr;
+    }
+    obj_t* r = obj_new(I, OBJ_PLAIN);
+    obj_set(I, r, "ok", v_bool(1));
+    obj_set(I, r, "status", v_num(200));
+    obj_set(I, r, "statusText", v_str(I, "OK"));
+    obj_set(I, r, "url", v_str(I, final_url));
+    obj_set(I, r, "__body", v_strn(I, data ? data : "", len));
+    obj_set(I, r, "__type", v_str(I, ctype));
+    if (data) kfree(data);
+    obj_set(I, r, "text", v_native(I, "text", resp_text));
+    obj_set(I, r, "json", v_native(I, "json", resp_json));
+    obj_t* h = obj_new(I, OBJ_PLAIN);
+    obj_set(I, h, "__type", v_str(I, ctype));
+    obj_set(I, h, "get", v_native(I, "get", hdr_get));
+    obj_set(I, r, "headers", v_obj(h));
+    es_promise_settle(I, pr, 0, v_obj(r));
+    return pr;
+}
+
+static value_t xhr_open(interp_t* I, value_t self, int argc, value_t* argv) {
+    if (self.t != V_OBJ) return v_undef();
+    obj_set(I, self.o, "__method", v_str(I, arg_str(I, argc, argv, 0)));
+    obj_set(I, self.o, "__url", v_str(I, arg_str(I, argc, argv, 1)));
+    obj_set(I, self.o, "readyState", v_num(1));
+    return v_undef();
+}
+
+static void xhr_fire(interp_t* I, value_t x, const char* name) {
+    value_t h = obj_get(I, x.o, name);
+    if (h.t != V_FUNC) return;
+    obj_t* ev = obj_new(I, OBJ_PLAIN);
+    obj_set(I, ev, "type", v_str(I, name + 2));
+    obj_set(I, ev, "target", x);
+    value_t evv = v_obj(ev);
+    call_value(I, h, x, 1, &evv);
+}
+
+static value_t xhr_send(interp_t* I, value_t self, int argc, value_t* argv) {
+    if (self.t != V_OBJ) return v_undef();
+    page_t* p = P(I);
+    const char* body = NULL;
+    uint32_t blen = 0;
+    if (argc && argv[0].t != V_UNDEF && argv[0].t != V_NULL) { str_t* bs = v_tostr(I, argv[0]); body = bs->s; blen = bs->len; }
+    char* data = NULL;
+    uint32_t len = 0;
+    char ctype[96] = "", err[160] = "", final_url[1024];
+    int rc = do_request(p, v_cstr(I, obj_get(I, self.o, "__url")), v_cstr(I, obj_get(I, self.o, "__method")),
+                        body, blen, &data, &len, ctype, sizeof(ctype), err, sizeof(err), final_url);
+    obj_set(I, self.o, "readyState", v_num(4));
+    obj_set(I, self.o, "status", v_num(rc == 0 ? 200 : 0));
+    obj_set(I, self.o, "responseURL", v_str(I, final_url));
+    value_t text = v_strn(I, data ? data : "", len);
+    if (data) kfree(data);
+    obj_set(I, self.o, "responseText", text);
+    value_t rt = obj_get(I, self.o, "responseType");
+    if (rt.t == V_STR && strcmp(rt.s->s, "json") == 0) {
+        value_t json = script_get_global(I, "JSON");
+        value_t parse = json.t == V_OBJ ? obj_get(I, json.o, "parse") : v_undef();
+        value_t parsed = v_null();
+        if (parse.t == V_FUNC) script_call(I, parse, json, 1, &text, &parsed);
+        obj_set(I, self.o, "response", parsed);
+    } else {
+        obj_set(I, self.o, "response", text);
+    }
+    obj_set(I, self.o, "__type", v_str(I, ctype));
+    xhr_fire(I, self, "onreadystatechange");
+    xhr_fire(I, self, rc == 0 ? "onload" : "onerror");
+    xhr_fire(I, self, "onloadend");
+    return v_undef();
+}
+
+static value_t xhr_getResponseHeader(interp_t* I, value_t self, int argc, value_t* argv) { return hdr_get(I, self, argc, argv); }
+
+static value_t js_XMLHttpRequest(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self; (void)argc; (void)argv;
+    obj_t* x = obj_new(I, OBJ_PLAIN);
+    obj_set(I, x, "readyState", v_num(0));
+    obj_set(I, x, "status", v_num(0));
+    obj_set(I, x, "responseType", v_str(I, ""));
+    obj_set(I, x, "open", v_native(I, "open", xhr_open));
+    obj_set(I, x, "send", v_native(I, "send", xhr_send));
+    obj_set(I, x, "setRequestHeader", v_native(I, "setRequestHeader", m_nothing));
+    obj_set(I, x, "abort", v_native(I, "abort", m_nothing));
+    obj_set(I, x, "addEventListener", v_native(I, "addEventListener", xhr_addEventListener));
+    obj_set(I, x, "getResponseHeader", v_native(I, "getResponseHeader", xhr_getResponseHeader));
+    obj_set(I, x, "getAllResponseHeaders", v_native(I, "getAllResponseHeaders", m_nothing));
+    return v_obj(x);
+}
+
+/* xhr.addEventListener("load", f): stored as onload */
+static value_t xhr_addEventListener(interp_t* I, value_t self, int argc, value_t* argv) {
+    if (self.t != V_OBJ) return v_undef();
+    char k[48];
+    ksnprintf(k, sizeof(k), "on%s", arg_str(I, argc, argv, 0));
+    obj_set(I, self.o, k, ARG(1));
+    return v_undef();
+}
+
+static value_t w_getSelection(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self; (void)argc; (void)argv;
+    obj_t* s = obj_new(I, OBJ_PLAIN);
+    obj_set(I, s, "rangeCount", v_num(0));
+    obj_set(I, s, "toString", v_native(I, "toString", m_nothing));
+    obj_set(I, s, "removeAllRanges", v_native(I, "removeAllRanges", m_nothing));
+    obj_set(I, s, "addRange", v_native(I, "addRange", m_nothing));
+    return v_obj(s);
+}
+
 static const method_t ELEM_METHODS[] = {
     { "getAttribute", m_getAttribute }, { "setAttribute", m_setAttribute }, { "removeAttribute", m_removeAttribute },
     { "hasAttribute", m_hasAttribute }, { "getAttributeNames", m_getAttributeNames },
@@ -1462,12 +1804,16 @@ static const method_t ELEM_METHODS[] = {
     { "addEventListener", m_addEventListener }, { "removeEventListener", m_removeEventListener },
     { "click", m_click }, { "focus", m_focus }, { "blur", m_blur }, { "insertAdjacentHTML", m_insertAdjacentHTML },
     { "getBoundingClientRect", m_getBoundingClientRect }, { "submit", m_submit }, { "reset", m_reset },
+    { "dispatchEvent", m_dispatchEvent }, { "toggleAttribute", m_toggleAttribute }, { "scrollIntoView", m_nothing },
+    { "insertAdjacentElement", m_insertAdjacentElement }, { "animate", m_nothing }, { "attachShadow", m_nothing },
+    { "getClientRects", m_nothing }, { "scroll", m_nothing }, { "scrollTo", m_nothing },
 };
 
 static const method_t DOC_METHODS[] = {
     { "getElementById", d_getElementById }, { "createElement", d_createElement },
     { "createTextNode", d_createTextNode }, { "createDocumentFragment", d_createDocumentFragment },
-    { "write", d_write }, { "writeln", d_writeln },
+    { "write", d_write }, { "writeln", d_writeln }, { "createElementNS", d_createElementNS },
+    { "getSelection", w_getSelection }, { "hasFocus", m_nothing },
 };
 
 static const method_t STYLE_METHODS[] = {
@@ -1475,7 +1821,7 @@ static const method_t STYLE_METHODS[] = {
 };
 
 static const method_t CLASS_METHODS[] = {
-    { "add", cl_add }, { "remove", cl_remove }, { "contains", cl_contains }, { "toggle", cl_toggle },
+    { "add", cl_add }, { "remove", cl_remove }, { "contains", cl_contains }, { "toggle", cl_toggle }, { "replace", cl_replace },
 };
 
 static const method_t LOC_METHODS[] = {
@@ -1488,7 +1834,7 @@ static const method_t WIN_FUNCS[] = {
     { "clearTimeout", w_clearTimer }, { "clearInterval", w_clearTimer },
     { "requestAnimationFrame", w_requestAnimationFrame }, { "cancelAnimationFrame", w_clearTimer },
     { "scrollTo", w_scrollTo }, { "scroll", w_scrollTo }, { "getComputedStyle", w_getComputedStyle },
-    { "addEventListener", w_addEventListener },
+    { "addEventListener", w_addEventListener }, { "open", w_open },
 };
 
 static const method_t STORAGE_METHODS[] = {
@@ -1508,6 +1854,133 @@ static void js_log(void* ctx, const char* s, uint32_t n) {
 }
 
 static void js_out(void* ctx, const char* s, uint32_t n) { write_text((page_t*)ctx, s, n); }
+
+/* ══ ES modules ═══════════════════════════════════════════════════════ */
+
+struct page_module { char* url; obj_t* ns; };
+
+static void mod_log(page_t* p, const char* a, const char* b) {
+    if (!p->env || !p->env->log) return;
+    char buf[300];
+    ksnprintf(buf, sizeof(buf), "%s%s", a, b);
+    p->env->log(p->env->ctx, buf);
+}
+
+/* a module name to an address: relative to the importing module, or through the import map */
+static int module_resolve(page_t* p, const char* spec, const char* base, char* out, int cap) {
+    if (!base) base = p->url;
+    if (spec[0] == '.' || spec[0] == '/' || strstr(spec, "://")) {
+        url_resolve(base, spec, out, cap);
+        return 0;
+    }
+    obj_t* map = p->importmap;
+    if (!map) return -1;
+    int found = 0;
+    value_t v = prop_get_raw(map, spec, &found);
+    if (found && v.t == V_STR) { url_resolve(p->url, v.s->s, out, cap); return 0; }
+    for (uint32_t i = 0; i < map->n; i++) {         /* "pkg/": "https://cdn/pkg/" */
+        str_t* k = map->props[i].key;
+        value_t pv = map->props[i].v;
+        if (k->len && k->s[k->len - 1] == '/' && pv.t == V_STR && strncmp(spec, k->s, k->len) == 0) {
+            char joined[1024];
+            ksnprintf(joined, sizeof(joined), "%s%s", pv.s->s, spec + k->len);
+            url_resolve(p->url, joined, out, cap);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* the module at url, loaded and run once; NULL if it could not be fetched */
+static obj_t* module_load(page_t* p, const char* url) {
+    interp_t* I = p->js;
+    for (int i = 0; i < p->nmods; i++)
+        if (strcmp(p->mods[i].url, url) == 0) return p->mods[i].ns;   /* (also: cycles) */
+    if (p->nmods == p->mods_cap) {
+        int nc = p->mods_cap ? p->mods_cap * 2 : 16;
+        struct page_module* nm = (struct page_module*)arena_alloc(&p->A, (uint32_t)(nc * (int)sizeof(*nm)));
+        if (p->nmods) memcpy(nm, p->mods, (size_t)p->nmods * sizeof(*nm));
+        p->mods = nm;
+        p->mods_cap = nc;
+    }
+    obj_t* ns = obj_new(I, OBJ_PLAIN);
+    p->mods[p->nmods].url = arena_strdup(&p->A, url, (uint32_t)strlen(url));
+    p->mods[p->nmods].ns = ns;
+    p->nmods++;
+    char* data;
+    uint32_t len;
+    char ct[96], fin[1024], err[160];
+    if (!p->env || !p->env->fetch ||
+        p->env->fetch(p->env->ctx, url, &data, &len, ct, sizeof(ct), fin, sizeof(fin), err, sizeof(err)) != 0) {
+        mod_log(p, "browser: cannot load ", url);
+        return NULL;
+    }
+    const char* slash = strrchr(url, '/');
+    const char* nm0 = slash ? slash + 1 : url;
+    const char* name = arena_strdup(&p->A, nm0, (uint32_t)(strlen(nm0) > 80 ? 80 : strlen(nm0)));
+    if (script_run_module(I, data, len, name, url, ns) != 0) {
+        kstrlcpy(p->status, script_error(I), sizeof(p->status));
+        mod_log(p, "js: ", p->status);
+    }
+    kfree(data);                                     /* the syntax tree does not point into it */
+    return ns;
+}
+
+static value_t module_import(interp_t* I, void* ctx, const char* spec, const char* base) {
+    page_t* p = (page_t*)ctx;
+    char url[1024], msg[200];
+    if (module_resolve(p, spec, base, url, sizeof(url)) != 0) {
+        ksnprintf(msg, sizeof(msg), "TypeError: cannot resolve module \"%s\"", spec);
+        script_throw(I, msg);
+        return v_undef();
+    }
+    obj_t* ns = module_load(p, url);
+    if (!ns) {
+        ksnprintf(msg, sizeof(msg), "TypeError: cannot load module %s", url);
+        script_throw(I, msg);
+        return v_undef();
+    }
+    return v_obj(ns);
+}
+
+/* import("x"): a promise of the namespace (loaded right away) */
+static value_t w_import(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    value_t pr = es_promise_new(I);
+    value_t ns = module_import(I, P(I), argc ? v_cstr(I, argv[0]) : "", I->module_url);
+    if (I->ctl == CTL_THROW) {
+        value_t e = I->ret;
+        I->ctl = CTL_NONE;
+        es_promise_settle(I, pr, 1, e);
+    } else {
+        es_promise_settle(I, pr, 0, ns);
+    }
+    return pr;
+}
+
+/* <script type="module">: by address (once), or inline code */
+void jsdom_module(page_t* p, const char* url, const char* code, uint32_t len) {
+    if (!p->js) return;
+    if (!code) { module_load(p, url); return; }
+    obj_t* ns = obj_new(p->js, OBJ_PLAIN);
+    if (script_run_module(p->js, code, len, "inline module", url, ns) != 0) {
+        kstrlcpy(p->status, script_error(p->js), sizeof(p->status));
+        mod_log(p, "js: ", p->status);
+    }
+}
+
+/* <script type="importmap"> */
+void jsdom_importmap(page_t* p, const char* text, uint32_t len) {
+    interp_t* I = p->js;
+    if (!I) return;
+    value_t json = script_get_global(I, "JSON");
+    if (json.t != V_OBJ) return;
+    value_t parse = obj_get(I, json.o, "parse");
+    value_t arg = v_strn(I, text, len), r;
+    if (script_call(I, parse, json, 1, &arg, &r) != 0 || r.t != V_OBJ) return;
+    value_t imps = obj_get(I, r.o, "imports");
+    if (imps.t == V_OBJ) p->importmap = imps.o;
+}
 
 void jsdom_install(page_t* p) {
     interp_t* I = p->js;
@@ -1537,6 +2010,8 @@ void jsdom_install(page_t* p) {
 
     script_def_global(I, "window", v_obj(win));
     script_def_global(I, "self", v_obj(win));
+    script_def_global(I, "globalThis", v_obj(win));
+    script_def_global(I, "frames", v_obj(win));
     script_def_global(I, "document", doc);
     script_def_global(I, "location", v_obj(p->loc_obj));
 
@@ -1556,4 +2031,61 @@ void jsdom_install(page_t* p) {
 
     script_def_global(I, "localStorage", v_obj(TABLE(I, STORAGE_METHODS, NULL)));
     script_def_global(I, "sessionStorage", v_obj(TABLE(I, STORAGE_METHODS, NULL)));
+
+    /* events, network, observers and the other everyday APIs */
+    const char* const evs[] = { "Event", "CustomEvent", "KeyboardEvent", "MouseEvent", "FocusEvent", "InputEvent", "UIEvent" };
+    for (uint32_t i = 0; i < sizeof(evs) / sizeof(evs[0]); i++) script_def_global(I, evs[i], v_native(I, evs[i], js_Event));
+    const char* const classes[] = { "Node", "Element", "HTMLElement", "EventTarget", "HTMLDocument", "Document",
+                                    "Text", "Window", "HTMLInputElement", "HTMLAnchorElement", "HTMLImageElement",
+                                    "HTMLFormElement", "HTMLDivElement", "SVGElement", "DocumentFragment", "ShadowRoot",
+                                    "HTMLButtonElement", "HTMLSelectElement", "HTMLTextAreaElement", "HTMLLabelElement",
+                                    "HTMLSpanElement", "HTMLParagraphElement", "HTMLUListElement", "HTMLLIElement",
+                                    "HTMLTableElement", "HTMLScriptElement", "HTMLStyleElement", "HTMLLinkElement",
+                                    "HTMLMetaElement", "HTMLIFrameElement", "HTMLCanvasElement", "HTMLMediaElement",
+                                    "HTMLVideoElement", "HTMLTemplateElement", "HTMLDialogElement", "HTMLDetailsElement",
+                                    "HTMLHeadingElement", "HTMLBodyElement", "HTMLHtmlElement", "HTMLOptionElement",
+                                    "HTMLSlotElement", "HTMLUnknownElement", "SVGSVGElement", "CharacterData", "Comment" };
+    for (uint32_t i = 0; i < sizeof(classes) / sizeof(classes[0]); i++) {
+        value_t c = v_native(I, classes[i], js_dom_class);
+        int docish = strstr(classes[i], "Document") && strcmp(classes[i], "DocumentFragment") != 0;
+        obj_t* proto = strcmp(classes[i], "Window") == 0 ? obj_new(I, OBJ_PLAIN) : docish ? p->doc_obj : p->elem_proto;
+        c.f->statics = obj_new(I, OBJ_PLAIN);
+        obj_set(I, c.f->statics, "prototype", v_obj(proto));
+        script_def_global(I, classes[i], c);
+    }
+    script_def_global(I, "Image", v_native(I, "Image", js_Image));
+    script_def_global(I, "fetch", v_native(I, "fetch", js_fetch));
+    script_def_global(I, "XMLHttpRequest", v_native(I, "XMLHttpRequest", js_XMLHttpRequest));
+    script_def_global(I, "matchMedia", v_native(I, "matchMedia", js_matchMedia));
+    script_def_global(I, "getSelection", v_native(I, "getSelection", w_getSelection));
+    script_def_global(I, "IntersectionObserver", v_native(I, "IntersectionObserver", js_IntersectionObserver));
+    script_def_global(I, "MutationObserver", v_native(I, "MutationObserver", js_OtherObserver));
+    script_def_global(I, "ResizeObserver", v_native(I, "ResizeObserver", js_OtherObserver));
+    script_def_global(I, "PerformanceObserver", v_native(I, "PerformanceObserver", js_OtherObserver));
+    script_def_global(I, "requestIdleCallback", v_native(I, "requestIdleCallback", w_requestIdleCallback));
+    script_def_global(I, "cancelIdleCallback", v_native(I, "cancelIdleCallback", w_clearTimer));
+    script_def_global(I, "scrollBy", v_native(I, "scrollBy", m_nothing));
+    script_def_global(I, "devicePixelRatio", v_num(1));
+    obj_t* hist = obj_new(I, OBJ_PLAIN);
+    obj_set(I, hist, "pushState", v_native(I, "pushState", m_nothing));
+    obj_set(I, hist, "replaceState", v_native(I, "replaceState", m_nothing));
+    obj_set(I, hist, "back", v_native(I, "back", m_nothing));
+    obj_set(I, hist, "length", v_num(1));
+    obj_set(I, hist, "state", v_null());
+    script_def_global(I, "history", v_obj(hist));
+    obj_t* ce = obj_new(I, OBJ_PLAIN);
+    obj_set(I, ce, "define", v_native(I, "define", m_nothing));
+    obj_set(I, ce, "get", v_native(I, "get", m_nothing));
+    obj_set(I, ce, "whenDefined", v_native(I, "whenDefined", m_nothing));
+    script_def_global(I, "customElements", v_obj(ce));
+    script_set_import(I, module_import, p);
+    value_t imp = v_native(I, "import", w_import);   /* import(), import.meta */
+    imp.f->statics = obj_new(I, OBJ_PLAIN);
+    obj_t* meta = obj_new(I, OBJ_PLAIN);
+    obj_set(I, meta, "url", v_str(I, p->url));
+    obj_set(I, imp.f->statics, "meta", v_obj(meta));
+    script_def_global(I, "import", imp);
+    /* URL, URLSearchParams, performance marks: written in script (prelude.js) */
+    if (script_run(I, k_prelude, sizeof(k_prelude) - 1, "prelude") != 0 && p->env && p->env->log)
+        p->env->log(p->env->ctx, script_error(I));
 }

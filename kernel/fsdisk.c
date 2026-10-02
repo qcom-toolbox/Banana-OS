@@ -2,6 +2,7 @@
 #include "fs.h"
 #include "ata.h"
 #include "atapi.h"
+#include "disk.h"
 #include "types.h"
 #include "kheap.h"
 #include "kstring.h"
@@ -50,13 +51,13 @@ static uint32_t bytes_to_sectors(uint32_t bytes) {
 }
 
 int fsdisk_find_target(ata_disk_t* out) {
-    ata_disk_t all[4];
-    ata_probe_disks(all);
+    ata_disk_t all[DISK_MAX];
+    int n = disk_probe(all, DISK_MAX);
 
     int found = 0;
     ata_disk_t match;
-    for (int i = 0; i < 4; i++) {
-        if (all[i].present && !all[i].is_atapi) {
+    for (int i = 0; i < n; i++) {
+        if (!all[i].is_atapi) {
             found++;
             match = all[i];
         }
@@ -66,12 +67,13 @@ int fsdisk_find_target(ata_disk_t* out) {
     return -1;
 }
 
+/* the CD/DVD drive holding the Banana OS boot image */
 static int find_atapi_source(ata_disk_t* out) {
-    ata_disk_t all[4];
-    ata_probe_disks(all);
-    for (int i = 0; i < 4; i++) {
-        if (all[i].present && all[i].is_atapi) { *out = all[i]; return 1; }
-    }
+    ata_disk_t all[DISK_MAX];
+    int n = disk_probe(all, DISK_MAX);
+    uint32_t bytes;
+    for (int i = 0; i < n; i++)
+        if (all[i].is_atapi && disk_cd_iso_size(&all[i], &bytes) == 0) { *out = all[i]; return 1; }
     return 0;
 }
 
@@ -87,20 +89,10 @@ static int copy_boot_image(const ata_disk_t* src, const ata_disk_t* dst, uint32_
         uint32_t chunk = total_blocks - done_blocks;
         if (chunk > FSDISK_COPY_CHUNK_BLOCKS) chunk = FSDISK_COPY_CHUNK_BLOCKS;
 
-        if (atapi_read_blocks(src->bus, src->is_slave, done_blocks, chunk, g_buf) != 0)
+        if (disk_cd_read(src, done_blocks, chunk, g_buf) != 0)
             return -1;
 
-        uint32_t ata_lba     = done_blocks * 4u;
-        uint32_t ata_sectors = chunk * 4u;
-        uint32_t off = 0;
-        while (ata_sectors > 0) {
-            uint8_t piece = (uint8_t)((ata_sectors > 255u) ? 255u : ata_sectors);
-            if (ata_write_sectors(dst->bus, dst->is_slave, ata_lba, piece, g_buf + off) != 0)
-                return -1;
-            ata_lba     += piece;
-            ata_sectors -= piece;
-            off         += (uint32_t)piece * FSDISK_SECTOR;
-        }
+        if (disk_write(dst, done_blocks * 4u, chunk * 4u, g_buf) != 0) return -1;
         done_blocks += chunk;
     }
     return 0;
@@ -109,16 +101,8 @@ static int copy_boot_image(const ata_disk_t* src, const ata_disk_t* dst, uint32_
 /* Writes superblock + payload from `buf` (header space included at the
  * front) starting at FSDISK_BASE_LBA. */
 static int write_sectors(const ata_disk_t* disk, const uint8_t* buf, uint32_t sectors) {
-    uint32_t lba = FSDISK_BASE_LBA, done = 0;
-    while (done < sectors) {
-        uint8_t chunk = (uint8_t)((sectors - done > 255u) ? 255u : (sectors - done));
-        if (ata_write_sectors(disk->bus, disk->is_slave, lba, chunk,
-                               buf + done * FSDISK_SECTOR) != 0)
-            return -1;
-        lba  += chunk;
-        done += chunk;
-    }
-    return 0;
+    if (disk_write(disk, FSDISK_BASE_LBA, sectors, buf) != 0) return -1;
+    return disk_flush(disk);
 }
 
 static int write_snapshot_to(const ata_disk_t* disk) {
@@ -153,7 +137,7 @@ int fsdisk_install(void) {
     if (!find_atapi_source(&source)) return FSDISK_ERR_NO_SOURCE;
 
     uint32_t iso_bytes;
-    if (atapi_iso_size(source.bus, source.is_slave, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
+    if (disk_cd_iso_size(&source, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
     if (iso_bytes > FSDISK_BOOT_RESERVE_BYTES) return FSDISK_ERR_ISO_TOO_BIG;
 
     uint32_t fs_sectors  = bytes_to_sectors((uint32_t)sizeof(fsdisk_super_t) + fs_snapshot_size());
@@ -179,7 +163,7 @@ int fsdisk_try_load(void) {
     if (fsdisk_find_target(&target) != 1) return 0; /* none, or ambiguous */
     if (target.sectors <= FSDISK_BASE_LBA) return 0; /* too small to hold our region at all */
 
-    if (ata_read_sectors(target.bus, target.is_slave, FSDISK_BASE_LBA, 1, g_buf) != 0) return 0;
+    if (disk_read(&target, FSDISK_BASE_LBA, 1, g_buf) != 0) return 0;
 
     fsdisk_super_t sb;
     memcpy(&sb, g_buf, sizeof(sb));
@@ -193,15 +177,7 @@ int fsdisk_try_load(void) {
 
     uint8_t* buf = (uint8_t*)kmalloc(sectors * FSDISK_SECTOR);
     if (!buf) return 0;
-    uint32_t lba = FSDISK_BASE_LBA, done = 0;
-    int ok = 1;
-    while (done < sectors) {
-        uint8_t chunk = (uint8_t)((sectors - done > 255u) ? 255u : (sectors - done));
-        if (ata_read_sectors(target.bus, target.is_slave, lba, chunk,
-                              buf + done * FSDISK_SECTOR) != 0) { ok = 0; break; }
-        lba  += chunk;
-        done += chunk;
-    }
+    int ok = disk_read(&target, FSDISK_BASE_LBA, sectors, buf) == 0;
     if (ok && checksum_of(buf + sizeof(fsdisk_super_t), sb.payload_bytes) != sb.checksum) ok = 0;
     if (ok && fs_snapshot_load(buf + sizeof(fsdisk_super_t), sb.payload_bytes, sb.version) != 0) ok = 0;
     kfree(buf);

@@ -10,6 +10,8 @@
 #include "rtc.h"
 #include "serial.h"
 #include "gui.h"
+#include "clipboard.h"
+#include "winframe.h"
 #include "../net/http.h"
 #include "../web/page.h"
 #include "../web/render.h"
@@ -19,26 +21,27 @@
  * scripts, layout, rendering) happens in the "browser" task; the GUI
  * (any task calling gui_poll()) only paints the frame that task left in
  * g_view and queues clicks/commands for it.
+ *
+ * Tabs: each holds its own page, history, scroll position and status;
+ * only the current one is rendered, but every tab's timers keep running.
  */
 
-#define WIN_W     720
-#define WIN_H     520
 #define TITLE_H   20
-#define TOOL_Y    (TITLE_H + 3)
+#define TABS_Y    (TITLE_H + 3)
+#define TAB_H     20
+#define TOOL_Y    (TABS_Y + TAB_H + 2)
 #define TOOL_H    22
 #define VIEW_X    4
 #define VIEW_Y    (TOOL_Y + TOOL_H + 4)
 #define STATUS_H  16
 #define SB_W      12                    /* scrollbar */
-#define VIEW_W    (WIN_W - 2 * VIEW_X - SB_W)
-#define VIEW_H    (WIN_H - VIEW_Y - STATUS_H - 4)
 #define ADDR_X    124
-#define ADDR_W    (WIN_W - ADDR_X - 52)
+#define TAB_W     150
+#define MAX_TABS  8
 
 #define HOME_URL  "about:home"
 #define HIST_MAX  24
 #define MAX_DOC   (8u << 20)
-#define PAGE_MEM  (48u << 20)
 
 #define C_PANEL   0x001D232Cu
 #define C_TITLE   0x00384562u
@@ -46,38 +49,162 @@
 #define C_DIM     0x00AAB6C6u
 #define C_ERR     0x00F08070u
 
-enum { CMD_NONE = 0, CMD_CLICK, CMD_GO, CMD_BACK, CMD_FWD, CMD_RELOAD, CMD_HOME };
+enum { CMD_NONE = 0, CMD_CLICK, CMD_RCLICK, CMD_GO, CMD_BACK, CMD_FWD, CMD_RELOAD, CMD_HOME,
+       CMD_NEWTAB, CMD_CLOSETAB, CMD_PASTE };
 
 typedef struct { int kind, x, y; } cmd_t;
 
-static int      g_open;
-static int      g_x = 40, g_y = 20;
-static int      g_dragging, g_drag_dx, g_drag_dy;
-static int      g_sb_drag, g_sb_drag_dy;
-static uint32_t g_gen;
+typedef struct {
+    page_t*  page;
+    char     addr[1024];               /* the address bar's text for this tab */
+    char     title[128];
+    char     status[160];
+    int      status_err;
+    int      loading;
+    int      scroll, page_h;
+    char     hist[HIST_MAX][512];
+    int      hist_n, hist_pos;
+} tab_t;
 
-static int      g_task = -1;
-static uint32_t* g_view;                /* rendered page, VIEW_W x VIEW_H */
-static int      g_scroll, g_page_h;
-static int      g_render_req;
+static int        g_open;
+static win_geom_t g_win = { .x = 30, .y = 14, .w = 740, .h = 540, .min_w = 360, .min_h = 240 };
+static int        g_sb_drag, g_sb_drag_dy;
+static uint32_t   g_gen;
 
-static char     g_addr[1024];           /* address bar text */
-static int      g_addr_focus;
-static char     g_go_url[1024];         /* CMD_GO target */
-static char     g_title[128];
-static char     g_status[160];
-static int      g_status_err;
-static int      g_loading;
-static char     g_alert[256];
+static int        g_task = -1;
+static uint32_t*  g_view;               /* the current tab's rendered page */
+static int        g_vw, g_vh;           /* its size */
+static int        g_render_req;
 
-static cmd_t    g_cmds[16];
-static int      g_cmd_head, g_cmd_tail;
+static tab_t*     g_tabs[MAX_TABS];
+static int        g_ntabs, g_cur;
+static tab_t*     g_status_tab;          /* the tab a load reports to */
 
-static char     g_hist[HIST_MAX][512];
-static int      g_hist_n, g_hist_pos = -1;
+static int        g_addr_focus, g_addr_all;  /* address bar focused; its text all selected */
+static char       g_go_url[1024];        /* CMD_GO / CMD_NEWTAB target */
+static char       g_alert[256];
 
-static page_t*  g_page;
+/* page text selection, in page coordinates (the task maps it to text) */
+static int        g_press, g_selecting, g_sel_on;
+static int        g_px, g_py, g_sx, g_sy;
+
+static cmd_t      g_cmds[32];
+static int        g_cmd_head, g_cmd_tail;
+
 static page_env_t g_env;
+static uint32_t   g_page_mem = 48u << 20;
+
+static int view_w(void) { return g_win.w - 2 * VIEW_X - SB_W; }
+static int view_h(void) { return g_win.h - VIEW_Y - STATUS_H - 4; }
+static int addr_w(void) { return g_win.w - ADDR_X - 52; }
+
+static tab_t* cur_tab(void) { return g_ntabs ? g_tabs[g_cur] : NULL; }
+
+/* ══ cookies ══════════════════════════════════════════════════════════
+ * A small jar: name=value per host (or per Domain=), sent back to that
+ * host and its subdomains. Session cookies only - nothing is saved. */
+
+#define COOKIES 96
+typedef struct { char domain[96]; char name[64]; char value[256]; } cookie_t;
+static cookie_t g_cookies[COOKIES];
+static int g_ncookies;
+
+static void url_host(const char* url, char* host, int cap) {
+    const char* p = strstr(url, "://");
+    p = p ? p + 3 : url;
+    int n = 0;
+    while (p[n] && p[n] != '/' && p[n] != ':' && p[n] != '?' && p[n] != '#' && n < cap - 1) { host[n] = p[n]; n++; }
+    host[n] = 0;
+    for (char* c = host; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
+}
+
+static int domain_match(const char* host, const char* domain) {
+    size_t h = strlen(host), d = strlen(domain);
+    if (h < d) return 0;
+    if (strcmp(host + h - d, domain) != 0) return 0;
+    return h == d || host[h - d - 1] == '.';
+}
+
+static void cookie_header(const char* url, char* out, int cap) {
+    char host[96];
+    url_host(url, host, sizeof(host));
+    out[0] = 0;
+    int any = 0;
+    for (int i = 0; i < g_ncookies; i++) {
+        if (!domain_match(host, g_cookies[i].domain)) continue;
+        if (!any) kstrlcat(out, "Cookie: ", (size_t)cap);
+        else kstrlcat(out, "; ", (size_t)cap);
+        kstrlcat(out, g_cookies[i].name, (size_t)cap);
+        kstrlcat(out, "=", (size_t)cap);
+        kstrlcat(out, g_cookies[i].value, (size_t)cap);
+        any = 1;
+    }
+    if (any) kstrlcat(out, "\r\n", (size_t)cap);
+}
+
+static void cookie_set(const char* host, const char* line) {
+    /* name=value; Domain=x; Path=/; ... */
+    char name[64], value[256], domain[96];
+    int n = 0;
+    while (line[n] && line[n] != '=' && line[n] != ';' && n < 63) { name[n] = line[n]; n++; }
+    name[n] = 0;
+    while (n && name[n - 1] == ' ') name[--n] = 0;
+    if (line[n] != '=' || !name[0]) return;
+    const char* v = strchr(line, '=') + 1;
+    int vn = 0;
+    while (v[vn] && v[vn] != ';' && vn < 255) { value[vn] = v[vn]; vn++; }
+    value[vn] = 0;
+    kstrlcpy(domain, host, sizeof(domain));
+    int expired = 0;
+    for (const char* a = strchr(line, ';'); a; a = strchr(a + 1, ';')) {
+        const char* s = a + 1;
+        while (*s == ' ') s++;
+        if (strncasecmp(s, "domain=", 7) == 0) {
+            s += 7;
+            if (*s == '.') s++;
+            int k = 0;
+            while (s[k] && s[k] != ';' && k < 95) { domain[k] = (char)(s[k] >= 'A' && s[k] <= 'Z' ? s[k] + 32 : s[k]); k++; }
+            domain[k] = 0;
+            if (!domain_match(host, domain)) return;          /* not for another site */
+        } else if (strncasecmp(s, "max-age=0", 9) == 0 || strncasecmp(s, "max-age=-", 9) == 0) {
+            expired = 1;
+        }
+    }
+    for (int i = 0; i < g_ncookies; i++) {
+        if (strcmp(g_cookies[i].name, name) == 0 && strcmp(g_cookies[i].domain, domain) == 0) {
+            if (expired) { g_cookies[i] = g_cookies[--g_ncookies]; return; }
+            kstrlcpy(g_cookies[i].value, value, sizeof(g_cookies[i].value));
+            return;
+        }
+    }
+    if (expired) return;
+    if (g_ncookies == COOKIES) { memmove(&g_cookies[0], &g_cookies[1], sizeof(cookie_t) * (COOKIES - 1)); g_ncookies--; }
+    cookie_t* c = &g_cookies[g_ncookies++];
+    kstrlcpy(c->domain, domain, sizeof(c->domain));
+    kstrlcpy(c->name, name, sizeof(c->name));
+    kstrlcpy(c->value, value, sizeof(c->value));
+}
+
+/* every response's headers (redirects included): keep its cookies */
+static void on_headers(void* ctx, const http_response_t* r, const char* raw) {
+    (void)ctx;
+    char host[96];
+    url_host(r->final_url, host, sizeof(host));
+    for (const char* l = raw; l && *l; ) {
+        const char* e = strchr(l, '\n');
+        if (strncasecmp(l, "Set-Cookie:", 11) == 0) {
+            char line[512];
+            const char* v = l + 11;
+            while (*v == ' ') v++;
+            int n = 0;
+            while (v + n < (e ? e : v + strlen(v)) && v[n] != '\r' && n < 511) { line[n] = v[n]; n++; }
+            line[n] = 0;
+            cookie_set(host, line);
+        }
+        l = e ? e + 1 : NULL;
+    }
+}
+
 
 /* ══ clock for Date / PHP date() ══════════════════════════════════════ */
 
@@ -106,7 +233,7 @@ void web_init(void) {
 /* ══ small helpers ════════════════════════════════════════════════════ */
 
 static void push_cmd(int kind, int x, int y) {
-    int next = (g_cmd_head + 1) % 16;
+    int next = (g_cmd_head + 1) % 32;
     if (next == g_cmd_tail) return;           /* full: drop */
     g_cmds[g_cmd_head].kind = kind;
     g_cmds[g_cmd_head].x = x;
@@ -115,8 +242,10 @@ static void push_cmd(int kind, int x, int y) {
 }
 
 static void set_status(const char* s, int err) {
-    kstrlcpy(g_status, s, sizeof(g_status));
-    g_status_err = err;
+    tab_t* t = g_status_tab ? g_status_tab : cur_tab();
+    if (!t) return;
+    kstrlcpy(t->status, s, sizeof(t->status));
+    t->status_err = err;
     g_gen++;
 }
 
@@ -190,8 +319,9 @@ static const char HOME_HTML[] =
     "<button onclick=\"document.getElementById('n').textContent = ++clicks\">Click me</button></p>\n"
     "<p><input id=\"who\" placeholder=\"Type your name\" oninput=\"hello()\"> <span id=\"hi\"></span></p>\n"
     "</div>\n"
-    "<div class=\"card\"><h2>Keys</h2>Ctrl+L: address bar - Enter: go - Backspace: back - "
-    "arrows / space: scroll - Ctrl+R: reload</div>\n"
+    "<div class=\"card\"><h2>Keys</h2>Ctrl+L: address bar - Ctrl+N: new tab - Ctrl+W: close tab - "
+    "Backspace: back - arrows, space, PgUp, PgDn: scroll - Ctrl+R: reload - drag over text to select it, "
+    "Ctrl+C: copy - Ctrl+V or right-click: paste - right-click a link: open it in a new tab</div>\n"
     "</div>\n"
     "<script>\n"
     "var clicks = 0;\n"
@@ -317,9 +447,10 @@ static int on_body(void* ctx, const uint8_t* d, uint32_t n) {
     return 0;
 }
 
-static int env_fetch(void* ctx, const char* url, char** data, uint32_t* len, char* ctype, int ccap,
-                     char* final_url, int fcap, char* err, int ecap) {
-    (void)ctx;
+/* GET (or POST with a form body) url into a kmalloc'd buffer; 0 = ok */
+/* method NULL: GET, or POST when there is a body (body_type NULL: a form) */
+static int fetch_url(const char* url, const char* method, const char* post, uint32_t post_len, const char* body_type,
+                     char** data, uint32_t* len, char* ctype, int ccap, char* final_url, int fcap, char* err, int ecap) {
     ctype[0] = 0;
     err[0] = 0;
     kstrlcpy(final_url, url, (size_t)fcap);
@@ -345,7 +476,14 @@ static int env_fetch(void* ctx, const char* url, char** data, uint32_t* len, cha
     body_t b = { 0, 0, 0, 0 };
     http_request_t req;
     memset(&req, 0, sizeof(req));
-    req.method = "GET";
+    req.method = method ? method : post ? "POST" : "GET";
+    req.body = post;
+    req.body_len = post_len;
+    if (post) req.content_type = body_type ? body_type : "application/x-www-form-urlencoded";
+    char cookies[1024];
+    cookie_header(url, cookies, sizeof(cookies));
+    req.extra_headers = cookies[0] ? cookies : NULL;
+    req.on_headers = on_headers;
     req.follow_redirects = 1;
     req.max_redirects = 10;
     req.timeout_ms = 15000;
@@ -375,6 +513,21 @@ static int env_fetch(void* ctx, const char* url, char** data, uint32_t* len, cha
     return 0;
 }
 
+static int env_fetch(void* ctx, const char* url, char** data, uint32_t* len, char* ctype, int ccap,
+                     char* final_url, int fcap, char* err, int ecap) {
+    (void)ctx;
+    return fetch_url(url, NULL, NULL, 0, NULL, data, len, ctype, ccap, final_url, fcap, err, ecap);
+}
+
+/* fetch() / XMLHttpRequest with a method or a body */
+static int env_request(void* ctx, const char* url, const char* method, const char* body, uint32_t blen,
+                       const char* btype, char** data, uint32_t* len, char* rtype, int rcap, char* err, int ecap) {
+    (void)ctx;
+    char fin[1024];
+    return fetch_url(url, method, body ? body : "", body ? blen : 0, btype, data, len, rtype, rcap, fin, sizeof(fin),
+                     err, ecap);
+}
+
 static int env_decode_image(void* ctx, const uint8_t* data, uint32_t len, img_data_t* out, arena_t* A) {
     (void)ctx;
     image_t img;
@@ -401,15 +554,66 @@ static void env_log(void* ctx, const char* line) {
 
 /* ══ the browser task ═════════════════════════════════════════════════ */
 
+
+/* ══ the browser task ═════════════════════════════════════════════════ */
+
+/* the frame buffer follows the window's size */
+static void ensure_view(void) {
+    int w = view_w(), h = view_h();
+    if (w == g_vw && h == g_vh && g_view) return;
+    uint32_t* nv = (uint32_t*)kmalloc((uint32_t)w * (uint32_t)h * 4);
+    if (!nv) return;
+    memset32(nv, 0xFFFFFF, (size_t)w * (size_t)h);
+    uint32_t* old = g_view;
+    g_view = nv;                        /* pointer and size change together (no yield here) */
+    g_vw = w;
+    g_vh = h;
+    if (old) kfree(old);
+    g_render_req = 1;
+}
+
+/* the current text selection, mapped onto the layout's text runs */
+static int map_selection(layout_t* L) {
+    L->sel_on = 0;
+    if (!g_sel_on) return 0;
+    int i0, o0, i1, o1;
+    if (!layout_text_pos(L, g_px, g_py, &i0, &o0) || !layout_text_pos(L, g_sx, g_sy, &i1, &o1)) return 0;
+    if (i0 == i1 && o0 == o1) return 0;
+    L->sel_on = 1;
+    L->sel_i0 = i0; L->sel_o0 = o0; L->sel_i1 = i1; L->sel_o1 = o1;
+    return 1;
+}
+
 static void render_view(void) {
+    ensure_view();
     if (!g_view) return;
-    layout_t* L = g_page ? g_page->layout : NULL;
-    g_page_h = L ? L->height : 0;
-    int max = g_page_h - VIEW_H;
-    if (g_scroll > max) g_scroll = max;
-    if (g_scroll < 0) g_scroll = 0;
-    render_page(L, g_view, VIEW_W, VIEW_W, VIEW_H, 0, 0, VIEW_W, VIEW_H, g_scroll);
+    tab_t* t = cur_tab();
+    page_t* p = t ? t->page : NULL;
+    if (p && !t->loading) page_update(p, g_vw);
+    layout_t* L = p && !t->loading ? p->layout : NULL;
+    if (t) {
+        t->page_h = L ? L->height : 0;
+        int max = t->page_h - g_vh;
+        if (t->scroll > max) t->scroll = max;
+        if (t->scroll < 0) t->scroll = 0;
+    }
+    if (L) map_selection(L);
+    render_page(L, g_view, g_vw, g_vw, g_vh, 0, 0, g_vw, g_vh, t ? t->scroll : 0);
+    g_render_req = 0;
     g_gen++;
+}
+
+static void copy_selection(void) {
+    tab_t* t = cur_tab();
+    if (!t || !t->page || !t->page->layout) return;
+    layout_t* L = t->page->layout;
+    if (!map_selection(L)) return;
+    char* buf = (char*)kmalloc(CLIPBOARD_MAX);
+    if (!buf) return;
+    uint32_t n = layout_text_range(L, L->sel_i0, L->sel_o0, L->sel_i1, L->sel_o1, buf, CLIPBOARD_MAX);
+    clipboard_set(buf, n);
+    kfree(buf);
+    set_status("Copied", 0);
 }
 
 static void normalize_url(const char* in, char* out, int cap) {
@@ -425,10 +629,7 @@ static int starts_ci(const char* s, const char* p) { return strncasecmp(s, p, st
 
 /* plain text and pictures get a little HTML around them */
 static char* wrap_content(const char* url, const char* ctype, char* data, uint32_t* len) {
-    if (!ctype[0] || starts_ci(ctype, "text/html") || starts_ci(ctype, "application/xhtml")) {
-        /* sniff: binary data without a type is not HTML */
-        return data;
-    }
+    if (!ctype[0] || starts_ci(ctype, "text/html") || starts_ci(ctype, "application/xhtml")) return data;
     sbuf_t b = { 0, 0, 0 };
     if (starts_ci(ctype, "image/") || image_format((const uint8_t*)data, *len)) {
         sb_str(&b, "<html><head><title>");
@@ -451,157 +652,247 @@ static char* wrap_content(const char* url, const char* ctype, char* data, uint32
     return b.s;
 }
 
-static void load(const char* url_in, int add_history) {
+static void load(tab_t* t, const char* url_in, const char* post, uint32_t post_len, int add_history) {
     char url[1024], final_url[1024], ctype[96], err[200];
     normalize_url(url_in, url, sizeof(url));
-    kstrlcpy(g_addr, url, sizeof(g_addr));
-    g_addr_focus = 0;
-    g_loading = 1;
+    kstrlcpy(t->addr, url, sizeof(t->addr));
+    if (t == cur_tab()) { g_addr_focus = 0; g_sel_on = 0; }
+    t->loading = 1;
+    g_status_tab = t;
     set_status("Loading...", 0);
 
     char* data = NULL;
     uint32_t len = 0;
-    if (env_fetch(NULL, url, &data, &len, ctype, sizeof(ctype), final_url, sizeof(final_url), err, sizeof(err)) != 0) {
+    if (fetch_url(url, NULL, post, post_len, NULL, &data, &len, ctype, sizeof(ctype), final_url, sizeof(final_url), err, sizeof(err)) != 0) {
         data = error_page(url, err[0] ? err : "the page could not be loaded", &len);
         kstrlcpy(final_url, url, sizeof(final_url));
         kstrlcpy(ctype, "text/html", sizeof(ctype));
         set_status(err[0] ? err : "Error", 1);
     }
-    if (!data) { set_status("out of memory", 1); g_loading = 0; return; }
-    data = wrap_content(final_url, ctype, data, &len);
-    if (!data) { set_status("out of memory", 1); g_loading = 0; return; }
+    if (data) data = wrap_content(final_url, ctype, data, &len);
+    if (!data) { set_status("out of memory", 1); t->loading = 0; g_status_tab = NULL; return; }
 
-    if (g_page) { page_free(g_page); g_page = NULL; }
-    render_view();                          /* blank while the new page loads */
-    page_t* p = page_new(&g_env, PAGE_MEM);
-    if (!p) { kfree(data); set_status("out of memory", 1); g_loading = 0; return; }
-    p->view_h = VIEW_H;
+    if (t->page) { page_free(t->page); t->page = NULL; }
+    if (t == cur_tab()) render_view();      /* blank while the new page loads */
+    page_t* p = page_new(&g_env, g_page_mem);
+    if (!p) { kfree(data); set_status("out of memory", 1); t->loading = 0; g_status_tab = NULL; return; }
+    p->view_h = g_vh;
     uint32_t t0 = timer_ms();
-    page_load(p, final_url, data, len, VIEW_W);
+    page_load(p, final_url, data, len, g_vw);
     kfree(data);
-    g_page = p;
-    g_scroll = p->scroll_req > 0 ? p->scroll_req : 0;
+    t->page = p;
+    t->scroll = p->scroll_req > 0 ? p->scroll_req : 0;
     p->scroll_req = -1;
-    kstrlcpy(g_addr, final_url, sizeof(g_addr));
-    kstrlcpy(g_title, p->title[0] ? p->title : final_url, sizeof(g_title));
+    kstrlcpy(t->addr, final_url, sizeof(t->addr));
+    kstrlcpy(t->title, p->title[0] ? p->title : final_url, sizeof(t->title));
 
     if (add_history) {
-        if (g_hist_pos < g_hist_n - 1) g_hist_n = g_hist_pos + 1;   /* drop the forward part */
-        if (g_hist_n == HIST_MAX) {
-            for (int i = 1; i < HIST_MAX; i++) kstrlcpy(g_hist[i - 1], g_hist[i], sizeof(g_hist[0]));
-            g_hist_n--;
+        if (t->hist_pos < t->hist_n - 1) t->hist_n = t->hist_pos + 1;   /* drop the forward part */
+        if (t->hist_n == HIST_MAX) {
+            for (int i = 1; i < HIST_MAX; i++) kstrlcpy(t->hist[i - 1], t->hist[i], sizeof(t->hist[0]));
+            t->hist_n--;
         }
-        kstrlcpy(g_hist[g_hist_n], final_url, sizeof(g_hist[0]));
-        g_hist_pos = g_hist_n++;
-    } else if (g_hist_pos >= 0) {
-        kstrlcpy(g_hist[g_hist_pos], final_url, sizeof(g_hist[0]));
+        kstrlcpy(t->hist[t->hist_n], final_url, sizeof(t->hist[0]));
+        t->hist_pos = t->hist_n++;
+    } else if (t->hist_pos >= 0) {
+        kstrlcpy(t->hist[t->hist_pos], final_url, sizeof(t->hist[0]));
     }
 
-    if (!g_status_err) {
+    if (!t->status_err) {
         char msg[160];
-        if (p->status[0]) { kstrlcpy(msg, p->status, sizeof(msg)); g_status_err = 1; }
-        else ksnprintf(msg, sizeof(msg), "Done (%u ms)%s", timer_ms() - t0, p->A.oom ? " - out of page memory" : "");
+        if (p->status[0]) ksnprintf(msg, sizeof(msg), "Script error: %s", p->status);
+        else ksnprintf(msg, sizeof(msg), "Done (%u ms)%s", timer_ms() - t0, p->A.oom ? " - the page ran out of memory" : "");
         set_status(msg, p->status[0] != 0);
     }
     p->status[0] = 0;
-    g_loading = 0;
-    render_view();
+    t->loading = 0;
+    g_status_tab = NULL;
+    if (t == cur_tab()) render_view();
+    g_gen++;
 }
 
-/* after scripts or a click: navigation, alerts, scrolling, relayout */
-static void after_page_event(void) {
-    page_t* p = g_page;
+static void new_tab(const char* url) {
+    if (g_ntabs == MAX_TABS) { set_status("Too many tabs (8 at most)", 1); return; }
+    tab_t* t = (tab_t*)kzalloc(sizeof(tab_t));
+    if (!t) return;
+    t->hist_pos = -1;
+    int at = g_ntabs ? g_cur + 1 : 0;
+    for (int i = g_ntabs; i > at; i--) g_tabs[i] = g_tabs[i - 1];
+    g_tabs[at] = t;
+    g_ntabs++;
+    g_cur = at;
+    g_sel_on = 0;
+    load(t, url && *url ? url : HOME_URL, NULL, 0, 1);
+}
+
+static void close_tab(int i) {
+    if (i < 0 || i >= g_ntabs) return;
+    tab_t* t = g_tabs[i];
+    if (t->page) page_free(t->page);
+    kfree(t);
+    for (int k = i; k < g_ntabs - 1; k++) g_tabs[k] = g_tabs[k + 1];
+    g_ntabs--;
+    if (g_cur >= g_ntabs) g_cur = g_ntabs - 1;
+    if (g_cur < 0) g_cur = 0;
+    g_sel_on = 0;
+    g_render_req = 1;
+    g_gen++;
+    if (!g_ntabs) g_open = 0;                 /* the last tab closes the window */
+}
+
+/* after scripts or a click: navigation, alerts, titles, relayout */
+static void after_page_event(tab_t* t) {
+    page_t* p = t->page;
     if (!p) return;
     if (p->alert_pending) {
-        kstrlcpy(g_alert, p->alert, sizeof(g_alert));
+        if (t == cur_tab()) kstrlcpy(g_alert, p->alert, sizeof(g_alert));
         p->alert_pending = 0;
         g_gen++;
     }
     if (p->status[0]) {
-        set_status(p->status, 1);
+        g_status_tab = t;
+        char msg[200];
+        ksnprintf(msg, sizeof(msg), "Script error: %s", p->status);
+        set_status(msg, 1);
+        g_status_tab = NULL;
         p->status[0] = 0;
     }
-    if (p->title[0] && strcmp(p->title, g_title) != 0) {
-        kstrlcpy(g_title, p->title, sizeof(g_title));
+    if (p->title[0] && strcmp(p->title, t->title) != 0) {
+        kstrlcpy(t->title, p->title, sizeof(t->title));
         g_gen++;
     }
     if (p->nav_pending) {
         p->nav_pending = 0;
         char nav[1024];
         kstrlcpy(nav, p->nav, sizeof(nav));
-        load(nav, 1);
+        if (p->nav_newtab) { p->nav_newtab = 0; new_tab(nav); return; }
+        if (p->nav_post) {
+            /* the body lives in the page's arena, which the load frees */
+            uint32_t n = p->nav_post_len;
+            char* body = (char*)kmalloc(n + 1);
+            if (body) {
+                memcpy(body, p->nav_post, n);
+                body[n] = 0;
+                load(t, nav, body, n, 1);
+                kfree(body);
+            }
+            return;
+        }
+        load(t, nav, NULL, 0, 1);
         return;
     }
+    if (t != cur_tab()) return;               /* hidden tabs lay out when shown */
     int changed = p->dirty;
-    page_update(p, VIEW_W);
+    page_update(p, g_vw);
     if (p->scroll_req >= 0) {
-        g_scroll = p->scroll_req;
+        t->scroll = p->scroll_req;
         p->scroll_req = -1;
         changed = 1;
     }
-    if (changed || g_render_req) {
-        g_render_req = 0;
-        render_view();
-    }
+    if (changed) g_render_req = 1;
 }
 
 static void scroll_by(int dy) {
-    g_scroll += dy;
+    tab_t* t = cur_tab();
+    if (!t) return;
+    t->scroll += dy;
     g_render_req = 1;
 }
 
 static void history_go(int delta) {
-    int np = g_hist_pos + delta;
-    if (np < 0 || np >= g_hist_n) return;
-    g_hist_pos = np;
+    tab_t* t = cur_tab();
+    if (!t) return;
+    int np = t->hist_pos + delta;
+    if (np < 0 || np >= t->hist_n) return;
+    t->hist_pos = np;
     char url[512];
-    kstrlcpy(url, g_hist[np], sizeof(url));
-    load(url, 0);
+    kstrlcpy(url, t->hist[np], sizeof(url));
+    load(t, url, NULL, 0, 0);
+}
+
+static void paste_now(void) {
+    uint32_t n;
+    const char* clip = clipboard_get(&n);
+    tab_t* t = cur_tab();
+    if (!n || !t) return;
+    if (g_addr_focus) {
+        if (g_addr_all) { t->addr[0] = 0; g_addr_all = 0; }
+        size_t l = strlen(t->addr);
+        for (uint32_t i = 0; i < n && l < sizeof(t->addr) - 1; i++)
+            if ((unsigned char)clip[i] >= 32) t->addr[l++] = clip[i];
+        t->addr[l] = 0;
+        g_gen++;
+        return;
+    }
+    if (t->page && t->page->focus) {
+        for (uint32_t i = 0; i < n; i++) {
+            char c = clip[i];
+            if (c == '\r') continue;
+            if (c == '\n' && strcmp(t->page->focus->tag, "textarea") != 0) c = ' ';
+            page_key(t->page, c);
+        }
+        after_page_event(t);
+        return;
+    }
+    set_status("Click a text field first, then paste", 0);
 }
 
 static void handle_key(char c) {
-    if (c == 12) { g_addr_focus = 1; g_gen++; return; }            /* Ctrl+L */
-    if (c == 18) { push_cmd(CMD_RELOAD, 0, 0); return; }            /* Ctrl+R */
+    tab_t* t = cur_tab();
+    if (!t) return;
+    if (c == 12) { g_addr_focus = 1; g_addr_all = 1; g_gen++; return; }   /* Ctrl+L */
+    if (c == 18) { push_cmd(CMD_RELOAD, 0, 0); return; }                    /* Ctrl+R */
+    if (c == 14) { g_go_url[0] = 0; push_cmd(CMD_NEWTAB, 0, 0); return; }  /* Ctrl+N: new tab */
+    if (c == 23) { push_cmd(CMD_CLOSETAB, g_cur, 0); return; }              /* Ctrl+W */
+    if (c == 22) { paste_now(); return; }                                    /* Ctrl+V */
+    if (c == 3) {                                                            /* Ctrl+C */
+        if (g_addr_focus) { clipboard_set(t->addr, (uint32_t)strlen(t->addr)); set_status("Address copied", 0); }
+        else copy_selection();
+        return;
+    }
     if (g_alert[0]) {
         if (c == '\n' || c == 27 || c == ' ') { g_alert[0] = 0; g_gen++; }
         return;
     }
     if (g_addr_focus) {
-        size_t n = strlen(g_addr);
-        if (c == '\n') { kstrlcpy(g_go_url, g_addr, sizeof(g_go_url)); push_cmd(CMD_GO, 0, 0); }
-        else if (c == '\b') { if (n) g_addr[n - 1] = 0; }
-        else if (c == 27) { g_addr_focus = 0; if (g_page) kstrlcpy(g_addr, g_page->url, sizeof(g_addr)); }
-        else if ((unsigned char)c >= 32 && n < sizeof(g_addr) - 1) { g_addr[n] = c; g_addr[n + 1] = 0; }
+        if (c == 1) { g_addr_all = 1; g_gen++; return; }                     /* Ctrl+A */
+        size_t n = strlen(t->addr);
+        if (c == '\n') { kstrlcpy(g_go_url, t->addr, sizeof(g_go_url)); push_cmd(CMD_GO, 0, 0); }
+        else if (c == '\b') { if (g_addr_all) t->addr[0] = 0; else if (n) t->addr[n - 1] = 0; }
+        else if (c == 27) { g_addr_focus = 0; if (t->page) kstrlcpy(t->addr, t->page->url, sizeof(t->addr)); }
+        else if ((unsigned char)c >= 32) {
+            if (g_addr_all) { t->addr[0] = 0; n = 0; }
+            if (n < sizeof(t->addr) - 1) { t->addr[n] = c; t->addr[n + 1] = 0; }
+        }
+        g_addr_all = 0;
         g_gen++;
         return;
     }
-    if (g_page && page_key(g_page, c)) { after_page_event(); return; }
-    if (c == ' ') scroll_by(VIEW_H - 40);
+    if (t->page && !t->loading && page_key(t->page, c)) { after_page_event(t); return; }
+    if (c == ' ') scroll_by(g_vh - 40);
     else if (c == '\b') history_go(-1);
-    after_page_event();
 }
 
 static void handle_arrow(char a) {
     if (g_addr_focus) return;
     if (a == 'A') scroll_by(-40);
     else if (a == 'B') scroll_by(40);
-    else if (a == '5') scroll_by(-(VIEW_H - 40));       /* PgUp: ESC [ 5 ~ */
-    else if (a == '6') scroll_by(VIEW_H - 40);
-    else if (a == 'H') { g_scroll = 0; g_render_req = 1; }
-    else if (a == 'F') { g_scroll = 1 << 28; g_render_req = 1; }
-    after_page_event();
+    else if (a == 'I' || a == '5') scroll_by(-(g_vh - 40));   /* PgUp: ESC [ I (ESC [ 5 ~) */
+    else if (a == 'G' || a == '6') scroll_by(g_vh - 40);
+    else if (a == 'H') { if (cur_tab()) cur_tab()->scroll = 0; g_render_req = 1; }
+    else if (a == 'F') { if (cur_tab()) cur_tab()->scroll = 1 << 28; g_render_req = 1; }
 }
 
 static void read_keys(void) {
     if (!gui_browser_focused()) return;
-    for (int k = 0; k < 32; k++) {
+    for (int k = 0; k < 64; k++) {
         char c = keyboard_try_getchar();
         if (!c) return;
         if (c == 27) {
             char c2 = keyboard_try_getchar();
             if (c2 == '[') {
                 char c3 = keyboard_try_getchar();
-                if ((c3 == '5' || c3 == '6') ) keyboard_try_getchar();   /* '~' */
+                if (c3 >= '0' && c3 <= '9') keyboard_try_getchar();   /* '~' */
                 if (!gui_handle_arrow(c3)) handle_arrow(c3);
                 continue;
             }
@@ -617,51 +908,83 @@ static void read_keys(void) {
 static void run_commands(void) {
     while (g_cmd_tail != g_cmd_head) {
         cmd_t c = g_cmds[g_cmd_tail];
-        g_cmd_tail = (g_cmd_tail + 1) % 16;
+        g_cmd_tail = (g_cmd_tail + 1) % 32;
+        tab_t* t = cur_tab();
         switch (c.kind) {
         case CMD_CLICK:
-            if (g_page) {
+            if (t && t->page && !t->loading) {
                 g_addr_focus = 0;
-                page_click(g_page, c.x, c.y);
-                after_page_event();
+                page_click(t->page, c.x, c.y);
+                after_page_event(t);
+                g_render_req = 1;
             }
             break;
+        case CMD_RCLICK: {
+            char url[1024];
+            if (t && t->page && !t->loading && page_link_at(t->page, c.x, c.y, url, sizeof(url))) new_tab(url);
+            else paste_now();
+            break;
+        }
         case CMD_GO: {
             char url[1024];
             kstrlcpy(url, g_go_url, sizeof(url));
-            load(url, 1);
+            if (t) load(t, url, NULL, 0, 1);
+            else new_tab(url);
             break;
         }
+        case CMD_NEWTAB: {
+            char url[1024];
+            kstrlcpy(url, g_go_url, sizeof(url));
+            g_go_url[0] = 0;
+            new_tab(url);
+            break;
+        }
+        case CMD_CLOSETAB: close_tab(c.x); break;
         case CMD_BACK: history_go(-1); break;
         case CMD_FWD: history_go(1); break;
         case CMD_RELOAD:
-            if (g_hist_pos >= 0) { char url[512]; kstrlcpy(url, g_hist[g_hist_pos], sizeof(url)); load(url, 0); }
-            else load(HOME_URL, 1);
+            if (t && t->hist_pos >= 0) { char url[512]; kstrlcpy(url, t->hist[t->hist_pos], sizeof(url)); load(t, url, NULL, 0, 0); }
+            else if (t) load(t, HOME_URL, NULL, 0, 1);
             break;
-        case CMD_HOME: load(HOME_URL, 1); break;
+        case CMD_HOME: if (t) load(t, HOME_URL, NULL, 0, 1); break;
+        case CMD_PASTE: paste_now(); break;
         }
     }
 }
 
 static void browser_task(void) {
     g_env.fetch = env_fetch;
+    g_env.request = env_request;
     g_env.decode_image = env_decode_image;
     g_env.now_ms = timer_ms;
     g_env.log = env_log;
     g_env.ctx = NULL;
+    /* a page may use a share of the heap (big pages, images), within reason */
+    uint32_t heap = kheap_total_bytes();
+    g_page_mem = heap / 5;
+    if (g_page_mem > (96u << 20)) g_page_mem = 96u << 20;
+    if (g_page_mem < (16u << 20)) g_page_mem = 16u << 20;
     for (;;) {
         if (!g_open) {
-            /* closed: drop the page (frees its memory), wait */
-            if (g_page) { page_free(g_page); g_page = NULL; }
+            /* closed: drop the tabs (frees their pages), wait */
+            while (g_ntabs) close_tab(g_ntabs - 1);
+            g_open = 0;
             task_sleep_ms(100);
             continue;
         }
+        ensure_view();
         read_keys();
         run_commands();
-        if (g_page && !g_loading) {
-            if (page_tick(g_page)) g_page->dirty = 1;
-            if (g_page->dirty || g_page->nav_pending || g_page->alert_pending || g_render_req) after_page_event();
+        if (!g_ntabs) { g_go_url[0] = 0; new_tab(NULL); }
+        /* every tab's timers run; the current one is drawn */
+        for (int i = 0; i < g_ntabs; i++) {
+            tab_t* t = g_tabs[i];
+            if (!t->page || t->loading) continue;
+            if (page_tick(t->page)) t->page->dirty = 1;
+            if (t->page->dirty || t->page->nav_pending || t->page->alert_pending || t->page->status[0])
+                after_page_event(t);
         }
+        if (g_render_req) render_view();
         task_sleep_ms(10);
     }
 }
@@ -669,25 +992,19 @@ static void browser_task(void) {
 /* ══ window (GUI side) ════════════════════════════════════════════════ */
 
 void browser_open(const char* url) {
-    if (!g_view) {
-        g_view = (uint32_t*)kmalloc((uint32_t)VIEW_W * VIEW_H * 4);
-        if (!g_view) return;
-        memset32(g_view, 0xFFFFFF, (size_t)VIEW_W * VIEW_H);
-    }
     if (g_task < 0) {
         g_task = task_create_stack("browser", browser_task, 2u << 20);
         if (g_task < 0) return;
     }
-    if (url && *url) { kstrlcpy(g_go_url, url, sizeof(g_go_url)); push_cmd(CMD_GO, 0, 0); }
-    else if (!g_page && g_hist_pos < 0) { kstrlcpy(g_go_url, HOME_URL, sizeof(g_go_url)); push_cmd(CMD_GO, 0, 0); }
-    else if (!g_page) push_cmd(CMD_RELOAD, 0, 0);
+    if (url && *url) { kstrlcpy(g_go_url, url, sizeof(g_go_url)); push_cmd(g_open && g_ntabs ? CMD_NEWTAB : CMD_GO, 0, 0); }
     g_open = 1;
+    win_clamp(&g_win);
     g_gen++;
 }
 
 void browser_close(void) {
     g_open = 0;
-    g_dragging = 0;
+    g_win.dragging = g_win.resizing = 0;
     g_alert[0] = 0;
     g_gen++;
 }
@@ -695,12 +1012,24 @@ void browser_close(void) {
 int browser_is_open(void) { return g_open; }
 
 int browser_contains(int mx, int my) {
-    return g_open && inside(mx, my, g_x, g_y, WIN_W, WIN_H);
+    return g_open && inside(mx, my, g_win.x, g_win.y, g_win.w, g_win.h);
 }
 
 uint32_t browser_signature(void) {
     if (!g_open) return 0;
-    return g_gen * 2654435761u ^ (uint32_t)(g_x << 16 | g_y) ^ (uint32_t)gui_browser_focused() * 977u;
+    return g_gen * 2654435761u ^ (uint32_t)(g_win.x << 16 | g_win.y) ^ (uint32_t)(g_win.w << 20 | g_win.h << 4) ^
+           (uint32_t)gui_browser_focused() * 977u ^ (uint32_t)g_cur * 131u;
+}
+
+void browser_paste(void) { push_cmd(CMD_PASTE, 0, 0); }
+
+void browser_rclick(int mx, int my) {
+    tab_t* t = cur_tab();
+    int lx = mx - g_win.x, ly = my - g_win.y;
+    if (t && inside(lx, ly, VIEW_X, VIEW_Y, view_w(), view_h()))
+        push_cmd(CMD_RCLICK, lx - VIEW_X, ly - VIEW_Y + t->scroll);
+    else
+        push_cmd(CMD_PASTE, 0, 0);
 }
 
 static void tool_button(int x, int y, int w, const char* label, int enabled) {
@@ -711,9 +1040,10 @@ static void tool_button(int x, int y, int w, const char* label, int enabled) {
 }
 
 static void draw_clipped(int x, int y, const char* s, int max_chars, uint32_t fg, uint32_t bg, int tail) {
-    char buf[128];
+    char buf[160];
     int n = (int)strlen(s);
     if (max_chars > (int)sizeof(buf) - 1) max_chars = (int)sizeof(buf) - 1;
+    if (max_chars < 1) return;
     if (n <= max_chars) { gfx_draw_text(x, y, s, fg, bg); return; }
     if (tail) {                                     /* keep the end visible (typing) */
         kstrlcpy(buf, s + n - max_chars, sizeof(buf));
@@ -726,84 +1056,124 @@ static void draw_clipped(int x, int y, const char* s, int max_chars, uint32_t fg
     gfx_draw_text(x, y, buf, fg, bg);
 }
 
-static void blit_view(int x0, int y0) {
+static void blit_view(int x0, int y0, int w, int h) {
     int stride, tw, th;
     uint32_t* dst = fb_target(&stride, &tw, &th);
-    if (!dst || !g_view) return;
-    for (int y = 0; y < VIEW_H; y++) {
+    if (!dst) return;
+    uint32_t* src = g_view;
+    int sw = g_vw, sh = g_vh;
+    if (!src) { gfx_fill_rect(x0, y0, w, h, 0x00FFFFFFu); return; }
+    for (int y = 0; y < h; y++) {
         int ty = y0 + y;
         if (ty < 0 || ty >= th) continue;
+        if (y >= sh) { gfx_fill_rect(x0, ty, w, 1, 0x00E0E0E0u); continue; }
+        int cw = w < sw ? w : sw;
         int xs = x0 < 0 ? -x0 : 0;
-        int xe = x0 + VIEW_W > tw ? tw - x0 : VIEW_W;
-        if (xe <= xs) continue;
-        memcpy(dst + (size_t)ty * (size_t)stride + x0 + xs, g_view + (size_t)y * VIEW_W + xs, (size_t)(xe - xs) * 4);
+        int xe = x0 + cw > tw ? tw - x0 : cw;
+        if (xe > xs) memcpy(dst + (size_t)ty * (size_t)stride + x0 + xs, src + (size_t)y * (size_t)sw + xs, (size_t)(xe - xs) * 4);
+        if (cw < w) gfx_fill_rect(x0 + cw, ty, w - cw, 1, 0x00E0E0E0u);   /* resizing: until re-rendered */
     }
 }
 
-static void sb_geometry(int* thumb_y, int* thumb_h) {
-    int track = VIEW_H;
-    if (g_page_h <= VIEW_H) { *thumb_y = 0; *thumb_h = track; return; }
-    int h = track * VIEW_H / g_page_h;
+static void sb_geometry(tab_t* t, int* thumb_y, int* thumb_h) {
+    int track = view_h();
+    int ph = t ? t->page_h : 0;
+    if (ph <= track) { *thumb_y = 0; *thumb_h = track; return; }
+    int h = track * track / ph;
     if (h < 20) h = 20;
-    int range = g_page_h - VIEW_H;
+    int range = ph - track;
     *thumb_h = h;
-    *thumb_y = (track - h) * g_scroll / range;
+    *thumb_y = (track - h) * (t->scroll > range ? range : t->scroll) / range;
+}
+
+/* tab i's rectangle in the tab bar (window coordinates); width shrinks with many tabs */
+static int tab_width(void) {
+    int avail = g_win.w - 8 - 28;
+    int w = g_ntabs ? avail / g_ntabs : TAB_W;
+    return w > TAB_W ? TAB_W : w;
 }
 
 void browser_draw(const fb_info_t* fi) {
     (void)fi;
     if (!g_open) return;
-    int x = g_x, y = g_y;
+    int x = g_win.x, y = g_win.y, W = g_win.w, H = g_win.h;
     int focused = gui_browser_focused();
-    bevel(x, y, WIN_W, WIN_H, C_PANEL, 0x00505D72u, 0x0010141Cu);
+    tab_t* t = cur_tab();
+    bevel(x, y, W, H, C_PANEL, 0x00505D72u, 0x0010141Cu);
     uint32_t tbg = focused ? C_TITLE : 0x002A3240u;
-    bevel(x + 3, y + 3, WIN_W - 6, TITLE_H - 2, tbg, 0x00647692u, 0x00111923u);
-    char title[96];
-    ksnprintf(title, sizeof(title), "%s - Banana Browser", g_title[0] ? g_title : "New page");
-    draw_clipped(x + 10, y + 8, title, (WIN_W - 60) / 8, 0x00FFFFFFu, tbg, 0);
-    bevel(x + WIN_W - 28, y + 5, 20, 14, 0x00553333u, 0x00885555u, 0x00221111u);
-    gfx_draw_text(x + WIN_W - 22, y + 8, "x", 0x00FFFFFFu, 0x00553333u);
+    bevel(x + 3, y + 3, W - 6, TITLE_H - 2, tbg, 0x00647692u, 0x00111923u);
+    char title[160];
+    ksnprintf(title, sizeof(title), "%s - Banana Browser", t && t->title[0] ? t->title : "New tab");
+    draw_clipped(x + 10, y + 8, title, (W - 60) / 8, 0x00FFFFFFu, tbg, 0);
+    bevel(x + W - 28, y + 5, 20, 14, 0x00553333u, 0x00885555u, 0x00221111u);
+    gfx_draw_text(x + W - 22, y + 8, "x", 0x00FFFFFFu, 0x00553333u);
 
-    /* toolbar: < > R H [address] Go */
+    /* tabs */
+    int tw = tab_width();
+    for (int i = 0; i < g_ntabs; i++) {
+        int tx = x + 4 + i * tw;
+        uint32_t bg = i == g_cur ? 0x00F2F2F2u : 0x003A4250u;
+        uint32_t fg = i == g_cur ? 0x00101010u : C_TEXT;
+        bevel(tx, y + TABS_Y, tw - 2, TAB_H, bg, 0x00808A9Au, 0x00202630u);
+        tab_t* ti = g_tabs[i];
+        const char* label = ti->loading ? "Loading..." : ti->title[0] ? ti->title : "New tab";
+        draw_clipped(tx + 5, y + TABS_Y + 6, label, (tw - 26) / 8, fg, bg, 0);
+        gfx_draw_text(tx + tw - 13, y + TABS_Y + 6, "x", i == g_cur ? 0x00804040u : 0x00C08080u, bg);
+    }
+    int px = x + 4 + g_ntabs * tw;
+    bevel(px, y + TABS_Y, 22, TAB_H, 0x00303740u, 0x00535D6Eu, 0x0015191Fu);
+    gfx_draw_text(px + 7, y + TABS_Y + 6, "+", C_TEXT, 0x00303740u);
+
+    /* toolbar: < > R Hm [address] Go */
     int ty = y + TOOL_Y;
-    tool_button(x + 4, ty, 26, "<", g_hist_pos > 0);
-    tool_button(x + 32, ty, 26, ">", g_hist_pos < g_hist_n - 1);
-    tool_button(x + 60, ty, 26, g_loading ? "*" : "R", 1);
+    tool_button(x + 4, ty, 26, "<", t && t->hist_pos > 0);
+    tool_button(x + 32, ty, 26, ">", t && t->hist_pos < t->hist_n - 1);
+    tool_button(x + 60, ty, 26, t && t->loading ? "*" : "R", 1);
     tool_button(x + 88, ty, 32, "Hm", 1);
+    int aw = addr_w();
     uint32_t abg = g_addr_focus ? 0x00FFFFFFu : 0x00E8E8E8u;
-    bevel(x + ADDR_X, ty, ADDR_W, TOOL_H - 2, abg, 0x00606060u, 0x00C0C0C0u);
-    int maxc = (ADDR_W - 12) / 8;
-    draw_clipped(x + ADDR_X + 5, ty + 6, g_addr, maxc, 0x00101010u, abg, g_addr_focus);
-    if (g_addr_focus) {
-        int n = (int)strlen(g_addr);
+    bevel(x + ADDR_X, ty, aw, TOOL_H - 2, abg, 0x00606060u, 0x00C0C0C0u);
+    int maxc = (aw - 12) / 8;
+    const char* addr = t ? t->addr : "";
+    if (g_addr_focus && g_addr_all && addr[0]) {
+        int n = (int)strlen(addr);
+        if (n > maxc) n = maxc;
+        gfx_fill_rect(x + ADDR_X + 4, ty + 4, n * 8 + 2, 12, 0x00B4D5FEu);
+        draw_clipped(x + ADDR_X + 5, ty + 6, addr, maxc, 0x00101010u, 0x00B4D5FEu, 0);
+    } else {
+        draw_clipped(x + ADDR_X + 5, ty + 6, addr, maxc, 0x00101010u, abg, g_addr_focus);
+    }
+    if (g_addr_focus && !g_addr_all) {
+        int n = (int)strlen(addr);
         if (n > maxc) n = maxc;
         gfx_fill_rect(x + ADDR_X + 5 + n * 8, ty + 4, 2, 12, 0x00202020u);
     }
-    tool_button(x + ADDR_X + ADDR_W + 4, ty, 40, "Go", 1);
+    tool_button(x + ADDR_X + aw + 4, ty, 40, "Go", 1);
 
     /* page */
-    blit_view(x + VIEW_X, y + VIEW_Y);
-    /* scrollbar */
-    int sx = x + VIEW_X + VIEW_W;
-    gfx_fill_rect(sx, y + VIEW_Y, SB_W, VIEW_H, 0x002A3038u);
+    int vw = view_w(), vh = view_h();
+    blit_view(x + VIEW_X, y + VIEW_Y, vw, vh);
+    int sx = x + VIEW_X + vw;
+    gfx_fill_rect(sx, y + VIEW_Y, SB_W, vh, 0x002A3038u);
     int th, tyy;
-    sb_geometry(&tyy, &th);
+    sb_geometry(t, &tyy, &th);
     bevel(sx + 1, y + VIEW_Y + tyy, SB_W - 2, th, 0x00596678u, 0x007A889Cu, 0x00303844u);
 
     /* status bar */
-    int sy = y + WIN_H - STATUS_H - 2;
-    gfx_fill_rect(x + 3, sy, WIN_W - 6, STATUS_H, 0x00161B22u);
-    draw_clipped(x + 8, sy + 4, g_status, (WIN_W - 20) / 8, g_status_err ? C_ERR : C_DIM, 0x00161B22u, 0);
+    int sy = y + H - STATUS_H - 2;
+    gfx_fill_rect(x + 3, sy, W - 6, STATUS_H, 0x00161B22u);
+    if (t) draw_clipped(x + 8, sy + 4, t->status, (W - 30) / 8, t->status_err ? C_ERR : C_DIM, 0x00161B22u, 0);
+    gfx_draw_grip(x + W, y + H);
 
     /* alert() */
     if (g_alert[0]) {
-        int aw = 420, lines = 1;
+        int aw2 = 420, lines = 1;
         for (const char* s = g_alert; *s; s++) lines += *s == '\n';
         if (lines > 8) lines = 8;
         int ah = 60 + lines * 12;
-        int ax = x + (WIN_W - aw) / 2, ay = y + 120;
-        bevel(ax, ay, aw, ah, 0x00262C36u, 0x00707C90u, 0x000C0F14u);
-        gfx_fill_rect(ax + 3, ay + 3, aw - 6, 16, C_TITLE);
+        int ax = x + (W - aw2) / 2, ay = y + 120;
+        bevel(ax, ay, aw2, ah, 0x00262C36u, 0x00707C90u, 0x000C0F14u);
+        gfx_fill_rect(ax + 3, ay + 3, aw2 - 6, 16, C_TITLE);
         gfx_draw_text(ax + 8, ay + 7, "Message from the page", 0x00FFFFFFu, C_TITLE);
         const char* s = g_alert;
         for (int l = 0; l < lines && *s; l++) {
@@ -815,69 +1185,102 @@ void browser_draw(const fb_info_t* fi) {
             if (*s == '\n') s++;
             gfx_draw_text(ax + 12, ay + 28 + l * 12, line, C_TEXT, 0x00262C36u);
         }
-        tool_button(ax + aw / 2 - 30, ay + ah - 26, 60, "OK", 1);
+        tool_button(ax + aw2 / 2 - 30, ay + ah - 26, 60, "OK", 1);
     }
 }
 
 void browser_click(int mx, int my) {
     if (!browser_contains(mx, my)) return;
-    int lx = mx - g_x, ly = my - g_y;
+    int lx = mx - g_win.x, ly = my - g_win.y;
+    tab_t* t = cur_tab();
     g_gen++;
     if (g_alert[0]) { g_alert[0] = 0; return; }
     if (ly < TITLE_H + 2) {
-        if (lx >= WIN_W - 28 && lx < WIN_W - 8) { browser_close(); return; }
-        g_dragging = 1;
-        g_drag_dx = lx;
-        g_drag_dy = ly;
+        if (lx >= g_win.w - 28 && lx < g_win.w - 8) { browser_close(); return; }
+        if (win_title_press(&g_win, mx, my)) g_render_req = 1;
+        return;
+    }
+    if (win_grip_press(&g_win, mx, my)) return;
+    if (ly >= TABS_Y && ly < TABS_Y + TAB_H) {
+        int tw = tab_width();
+        int i = (lx - 4) / tw;
+        if (lx >= 4 && i < g_ntabs) {
+            if (lx - 4 - i * tw >= tw - 16) { push_cmd(CMD_CLOSETAB, i, 0); return; }
+            if (i != g_cur) { g_cur = i; g_sel_on = 0; g_addr_focus = 0; g_render_req = 1; }
+            return;
+        }
+        if (lx >= 4 + g_ntabs * tw && lx < 4 + g_ntabs * tw + 22) { g_go_url[0] = 0; push_cmd(CMD_NEWTAB, 0, 0); }
         return;
     }
     if (ly >= TOOL_Y && ly < TOOL_Y + TOOL_H) {
         g_addr_focus = 0;
+        int aw = addr_w();
         if (lx >= 4 && lx < 30) push_cmd(CMD_BACK, 0, 0);
         else if (lx >= 32 && lx < 58) push_cmd(CMD_FWD, 0, 0);
         else if (lx >= 60 && lx < 86) push_cmd(CMD_RELOAD, 0, 0);
         else if (lx >= 88 && lx < 120) push_cmd(CMD_HOME, 0, 0);
-        else if (lx >= ADDR_X && lx < ADDR_X + ADDR_W) g_addr_focus = 1;
-        else if (lx >= ADDR_X + ADDR_W + 4 && lx < ADDR_X + ADDR_W + 44) {
-            kstrlcpy(g_go_url, g_addr, sizeof(g_go_url));
+        else if (lx >= ADDR_X && lx < ADDR_X + aw) { g_addr_focus = 1; g_addr_all = 1; }
+        else if (lx >= ADDR_X + aw + 4 && lx < ADDR_X + aw + 44 && t) {
+            kstrlcpy(g_go_url, t->addr, sizeof(g_go_url));
             push_cmd(CMD_GO, 0, 0);
         }
         return;
     }
-    if (inside(lx, ly, VIEW_X + VIEW_W, VIEW_Y, SB_W, VIEW_H)) {
+    int vw = view_w(), vh = view_h();
+    if (inside(lx, ly, VIEW_X + vw, VIEW_Y, SB_W, vh)) {
         int th, tyy;
-        sb_geometry(&tyy, &th);
+        sb_geometry(t, &tyy, &th);
         int rel = ly - VIEW_Y;
         if (rel >= tyy && rel < tyy + th) { g_sb_drag = 1; g_sb_drag_dy = rel - tyy; }
-        else if (rel < tyy) scroll_by(-(VIEW_H - 40));
-        else scroll_by(VIEW_H - 40);
+        else if (rel < tyy) scroll_by(-(vh - 40));
+        else scroll_by(vh - 40);
         return;
     }
-    if (inside(lx, ly, VIEW_X, VIEW_Y, VIEW_W, VIEW_H)) {
+    if (inside(lx, ly, VIEW_X, VIEW_Y, vw, vh) && t) {
+        /* a click, or the start of a text selection: decided when the button goes up */
         g_addr_focus = 0;
-        push_cmd(CMD_CLICK, lx - VIEW_X, ly - VIEW_Y + g_scroll);
+        g_press = 1;
+        g_selecting = 0;
+        g_px = lx - VIEW_X;
+        g_py = ly - VIEW_Y + t->scroll;
+        if (g_sel_on) { g_sel_on = 0; g_render_req = 1; }
     }
 }
 
 void browser_mouse(int mx, int my, int left) {
-    if (!left) { g_dragging = 0; g_sb_drag = 0; return; }
-    if (g_sb_drag) {
+    if (!g_open) return;
+    if (win_mouse(&g_win, mx, my, left)) { g_render_req = 1; g_gen++; }
+    tab_t* t = cur_tab();
+    if (!left) {
+        if (g_press && !g_selecting && t) push_cmd(CMD_CLICK, g_px, g_py);
+        g_press = 0;
+        g_selecting = 0;
+        g_sb_drag = 0;
+        return;
+    }
+    if (g_sb_drag && t) {
         int th, tyy;
-        sb_geometry(&tyy, &th);
-        int track = VIEW_H - th;
-        if (track > 0 && g_page_h > VIEW_H) {
-            int pos = my - g_y - VIEW_Y - g_sb_drag_dy;
-            int ns = pos * (g_page_h - VIEW_H) / track;
-            if (ns != g_scroll) { g_scroll = ns; g_render_req = 1; }
+        sb_geometry(t, &tyy, &th);
+        int track = view_h() - th;
+        if (track > 0 && t->page_h > view_h()) {
+            int pos = my - g_win.y - VIEW_Y - g_sb_drag_dy;
+            int ns = pos * (t->page_h - view_h()) / track;
+            if (ns != t->scroll) { t->scroll = ns; g_render_req = 1; }
         }
         return;
     }
-    if (!g_dragging) return;
-    const fb_info_t* fi = fb_info();
-    int nx = mx - g_drag_dx, ny = my - g_drag_dy;
-    if (fi && nx + WIN_W > (int)fi->width) nx = (int)fi->width - WIN_W;
-    if (fi && ny + WIN_H > (int)fi->height - 28) ny = (int)fi->height - 28 - WIN_H;
-    if (nx < 0) nx = 0;
-    if (ny < 0) ny = 0;
-    if (nx != g_x || ny != g_y) { g_x = nx; g_y = ny; g_gen++; }
+    if (g_press && t) {
+        int lx = mx - g_win.x - VIEW_X, ly = my - g_win.y - VIEW_Y;
+        /* dragging past the top or bottom scrolls */
+        if (ly < 0 && t->scroll > 0) { t->scroll -= 16; g_render_req = 1; }
+        if (ly > view_h() && t->scroll < t->page_h - view_h()) { t->scroll += 16; g_render_req = 1; }
+        int px = lx, py = ly + t->scroll;
+        if (!g_selecting && (px - g_px) * (px - g_px) + (py - g_py) * (py - g_py) > 16) g_selecting = 1;
+        if (g_selecting && (px != g_sx || py != g_sy)) {
+            g_sx = px;
+            g_sy = py;
+            g_sel_on = 1;
+            g_render_req = 1;
+        }
+    }
 }

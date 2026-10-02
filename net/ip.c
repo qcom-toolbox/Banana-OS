@@ -81,6 +81,12 @@ int ip_send(ip4_t dst, uint8_t proto, const void* payload, uint32_t len) {
         return eth_send(ETH_BROADCAST, ETH_TYPE_IP, pkt, 20 + len);
     }
 
+    /* multicast (224.0.0.0/4): the group's Ethernet address, 01:00:5e + low 23 bits */
+    if ((dst >> 28) == 0xE) {
+        uint8_t mmac[6] = { 0x01, 0x00, 0x5E, (uint8_t)((dst >> 16) & 0x7F), (uint8_t)(dst >> 8), (uint8_t)dst };
+        return eth_send(mmac, ETH_TYPE_IP, pkt, 20 + len);
+    }
+
     /* on-link destinations go direct, everything else via the gateway */
     ip4_t next_hop = dst;
     if ((dst & nif->netmask) != (nif->ip & nif->netmask)) {

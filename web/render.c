@@ -75,6 +75,16 @@ void render_page(const layout_t* L, uint32_t* buf, int stride, int buf_w, int bu
             int s = it->scale ? it->scale : 1;
             int cw = 8 * s;
             if (it->has_bg) fill(&T, x, y - s, it->w, cw + 2 * s, it->bg);
+            if (L->sel_on) {
+                /* the selected part of this run */
+                int i0 = L->sel_i0, o0 = L->sel_o0, i1 = L->sel_i1, o1 = L->sel_o1;
+                if (i1 < i0 || (i1 == i0 && o1 < o0)) { int t = i0; i0 = i1; i1 = t; t = o0; o0 = o1; o1 = t; }
+                int me = (int)i;
+                if (me >= i0 && me <= i1) {
+                    int a = me == i0 ? o0 : 0, b = me == i1 ? o1 : (int)it->len;
+                    if (b > a) fill(&T, x + a * cw, y - s, (b - a) * cw, cw + 2 * s, 0xB4D5FE);
+                }
+            }
             for (uint32_t k = 0; k < it->len; k++)
                 glyph(&T, x + (int)k * cw, y, (unsigned char)it->text[k], s, it->color, it->bold, it->italic);
             if (it->underline) {

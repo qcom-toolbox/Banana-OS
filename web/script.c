@@ -1,5 +1,6 @@
 #include "script_int.h"
 #include "kstring.h"
+#include "kheap.h"
 
 /*
  * BananaScript core: values, the lexer and parser for both languages, and
@@ -215,9 +216,10 @@ str_t* v_tostr(interp_t* I, value_t v) {
             ksnprintf(buf, sizeof(buf), "[object %s]", o->hc ? o->hc->name : "Object");
             return str_new(I, buf, (uint32_t)strlen(buf));
         }
-        if (o->proto == I->proto_date) {
+        if (I->lang != LANG_PHP) {
+            /* a script-defined toString (class methods, URL...), or Date's own */
             value_t ts = obj_get(I, o, "toString");
-            if (ts.t == V_FUNC) {
+            if (ts.t == V_FUNC && (!ts.f->native || o->proto == I->proto_date)) {
                 value_t r = call_value(I, ts, v, 0, NULL);
                 if (r.t == V_STR) return r.s;
             }
@@ -404,12 +406,20 @@ value_t obj_get(interp_t* I, obj_t* o, const char* key) {
         if (strcmp(key, "length") == 0) return v_num(o->len);
     }
     value_t v = prop_get_raw(o, key, &found);
-    if (found) return v;
+    if (found) return (v.t == V_OBJ && v.o->kind == OBJ_ACCESSOR) ? accessor_get(I, v, v_obj(o)) : v;
     for (obj_t* p = o->proto; p; p = p->proto) {
         v = prop_get_raw(p, key, &found);
-        if (found) return v;
+        if (found) return (v.t == V_OBJ && v.o->kind == OBJ_ACCESSOR) ? accessor_get(I, v, v_obj(o)) : v;
     }
     return v_undef();
+}
+
+/* a getter's result (undefined without one) */
+value_t accessor_get(interp_t* I, value_t acc, value_t self) {
+    int f = 0;
+    value_t g = prop_get_raw(acc.o, "get", &f);
+    if (!f || g.t != V_FUNC) return v_undef();
+    return call_value(I, g, self, 0, NULL);
 }
 
 void obj_set(interp_t* I, obj_t* o, const char* key, value_t v) {
@@ -425,6 +435,20 @@ void obj_set(interp_t* I, obj_t* o, const char* key, value_t v) {
                 else if (nl > o->len) arr_set(I, o, nl - 1, v_undef());
             }
             return;
+        }
+    }
+    /* a setter (own or inherited) takes the assignment */
+    if (!(v.t == V_OBJ && v.o->kind == OBJ_ACCESSOR)) {
+        for (obj_t* p = o; p; p = p->proto) {
+            int f = 0;
+            value_t a = prop_get_raw(p, key, &f);
+            if (!f) continue;
+            if (a.t == V_OBJ && a.o->kind == OBJ_ACCESSOR) {
+                value_t s = prop_get_raw(a.o, "set", &f);
+                if (f && s.t == V_FUNC) call_value(I, s, v_obj(o), 1, &v);
+                return;
+            }
+            break;
         }
     }
     prop_set_raw(I, o, str_new(I, key, (uint32_t)strlen(key)), v);
@@ -494,6 +518,12 @@ static value_t join_array(interp_t* I, obj_t* a, const char* sep) {
 
 void script_throw(interp_t* I, const char* msg) {
     if (I->ctl == CTL_THROW) return;
+    if (I->A->oom && I->oom_err) {
+        I->ret = v_obj(I->oom_err);
+        I->ctl = CTL_THROW;
+        I->throw_line = I->line; I->throw_col = I->col;
+        return;
+    }
     obj_t* e = obj_new(I, OBJ_PLAIN);
     const char* colon = strchr(msg, ':');
     if (colon && colon - msg < 20 && colon[1] == ' ') {
@@ -505,6 +535,7 @@ void script_throw(interp_t* I, const char* msg) {
     }
     I->ret = v_obj(e);
     I->ctl = CTL_THROW;
+    I->throw_line = I->line; I->throw_col = I->col;
 }
 
 static void throwf(interp_t* I, const char* fmt, const char* a) {
@@ -515,10 +546,11 @@ static void throwf(interp_t* I, const char* fmt, const char* a) {
 
 /* ══ lexer ════════════════════════════════════════════════════════════ */
 
-enum { T_EOF = 0, T_NUM, T_STR, T_TPL, T_ID, T_VAR, T_OP, T_HTML, T_ECHOTAG };
+enum { T_EOF = 0, T_NUM, T_STR, T_TPL, T_ID, T_VAR, T_OP, T_HTML, T_ECHOTAG, T_REGEX };
 
 typedef struct {
     uint8_t     t;
+    uint16_t    col;         /* column (errors in minified code), capped */
     int         line;
     const char* p;
     uint32_t    len;
@@ -531,6 +563,7 @@ typedef struct {
     const char* src;
     uint32_t    len, pos;
     int         line;
+    const char* line_start;
     int         html;        /* PHP: outside <?php ?> */
     tok_t*      toks;
     uint32_t    ntok, cap;
@@ -539,6 +572,7 @@ typedef struct {
 } lexer_t;
 
 static const char* const OPS[] = {
+    ">>>=", ">>>", "||=", "&&=",
     "===", "!==", "**=", "?\?=", "...", "<=>", "<<=", ">>=",
     "==", "!=", "<=", ">=", "&&", "||", "??", "++", "--", "+=", "-=", "*=", "/=", "%=",
     ".=", "=>", "->", "::", "**", "<<", ">>", "?.", "|=", "&=", "^=", "<>",
@@ -548,10 +582,10 @@ static const char* const OPS[] = {
 
 static tok_t* lex_push(lexer_t* L, int t, const char* p, uint32_t len) {
     if (L->ntok == L->cap) {
+        /* tokens live only while parsing: on the heap, freed right after */
         uint32_t nc = L->cap ? L->cap * 2 : 256;
-        tok_t* nt = (tok_t*)arena_alloc(L->I->A, nc * (uint32_t)sizeof(tok_t));
-        if (L->I->A->oom) { L->err = "out of memory"; return NULL; }
-        if (L->ntok) memcpy(nt, L->toks, L->ntok * sizeof(tok_t));
+        tok_t* nt = (tok_t*)krealloc(L->toks, nc * (uint32_t)sizeof(tok_t));
+        if (!nt) { L->err = "out of memory"; return NULL; }
         L->toks = nt;
         L->cap = nc;
     }
@@ -561,6 +595,8 @@ static tok_t* lex_push(lexer_t* L, int t, const char* p, uint32_t len) {
     k->p = p;
     k->len = len;
     k->line = L->line;
+    if (L->line_start && p >= L->line_start && p <= L->src + L->len)
+        k->col = (uint16_t)(p - L->line_start + 1 > 65535 ? 65535 : p - L->line_start + 1);
     return k;
 }
 
@@ -570,7 +606,7 @@ static int id_start(int c, int php) {
 static int id_char(int c, int php) { return id_start(c, php) || is_digit((char)c); }
 
 static void count_lines(lexer_t* L, const char* a, const char* b) {
-    for (; a < b; a++) if (*a == '\n') L->line++;
+    for (; a < b; a++) if (*a == '\n') { L->line++; L->line_start = a + 1; }
 }
 
 /* JS-style string escapes into a new string */
@@ -606,6 +642,19 @@ static str_t* unescape(interp_t* I, const char* s, uint32_t n, int php_single) {
             }
             break;
         case 'u':
+            if (i + 1 < n && s[i + 1] == '{') {          /* \u{1F600} */
+                uint32_t v = 0, k = i + 2;
+                while (k < n && s[k] != '}') {
+                    char h = s[k++];
+                    v = v * 16 + (uint32_t)(is_digit(h) ? h - '0' : ((h | 32) - 'a' + 10));
+                }
+                i = k;
+                if (v < 0x80) buf[o++] = (char)v;
+                else if (v < 0x800) { buf[o++] = (char)(0xC0 | (v >> 6)); buf[o++] = (char)(0x80 | (v & 63)); }
+                else if (v < 0x10000) { buf[o++] = (char)(0xE0 | (v >> 12)); buf[o++] = (char)(0x80 | ((v >> 6) & 63)); buf[o++] = (char)(0x80 | (v & 63)); }
+                else { buf[o++] = (char)(0xF0 | (v >> 18)); buf[o++] = (char)(0x80 | ((v >> 12) & 63)); buf[o++] = (char)(0x80 | ((v >> 6) & 63)); buf[o++] = (char)(0x80 | (v & 63)); }
+                break;
+            }
             if (i + 4 < n) {
                 int v = 0;
                 for (int k = 1; k <= 4; k++) {
@@ -654,6 +703,97 @@ static void lex_html(lexer_t* L) {
     L->html = 0;
 }
 
+/* may a '/' here start a regular expression (rather than divide)? */
+static int regex_ok(lexer_t* L) {
+    if (!L->ntok) return 1;
+    tok_t* t = &L->toks[L->ntok - 1];
+    if (t->t == T_NUM || t->t == T_STR || t->t == T_TPL || t->t == T_REGEX || t->t == T_VAR) return 0;
+    if (t->t == T_ID) {
+        static const char* const kws[] = { "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+                                           "throw", "case", "do", "else", "yield", "await" };
+        for (uint32_t i = 0; i < sizeof(kws) / sizeof(kws[0]); i++)
+            if (t->len == strlen(kws[i]) && memcmp(t->p, kws[i], t->len) == 0) return 1;
+        return 0;
+    }
+    if (t->t == T_OP) {
+        if (t->len == 1 && (t->p[0] == ')' || t->p[0] == ']')) return 0;
+        if (t->len == 2 && (memcmp(t->p, "++", 2) == 0 || memcmp(t->p, "--", 2) == 0)) return 0;
+    }
+    return 1;
+}
+
+/* one shared copy of each identifier name (big scripts repeat them a lot) */
+static str_t* str_intern(interp_t* I, const char* s, uint32_t n) {
+    if (I->icount * 2 >= I->icap) {
+        uint32_t nc = I->icap ? I->icap * 2 : 1024;
+        str_t** nt = (str_t**)arena_alloc(I->A, nc * (uint32_t)sizeof(str_t*));
+        if (I->A->oom) return str_new(I, s, n);
+        for (uint32_t i = 0; i < I->icap; i++) {
+            str_t* e = I->itab[i];
+            if (!e) continue;
+            uint32_t h = 2166136261u;
+            for (uint32_t k = 0; k < e->len; k++) h = (h ^ (unsigned char)e->s[k]) * 16777619u;
+            uint32_t j = h & (nc - 1);
+            while (nt[j]) j = (j + 1) & (nc - 1);
+            nt[j] = e;
+        }
+        I->itab = nt;
+        I->icap = nc;
+    }
+    uint32_t h = 2166136261u;
+    for (uint32_t k = 0; k < n; k++) h = (h ^ (unsigned char)s[k]) * 16777619u;
+    uint32_t j = h & (I->icap - 1);
+    while (I->itab[j]) {
+        str_t* e = I->itab[j];
+        if (e->len == n && memcmp(e->s, s, n) == 0) return e;
+        j = (j + 1) & (I->icap - 1);
+    }
+    str_t* e = str_new(I, s, n);
+    I->itab[j] = e;
+    I->icount++;
+    return e;
+}
+
+/* template literals: given p just past an opening backtick, the closing one
+ * (or end); `${ ... }` parts may hold strings, braces and templates of their own */
+static const char* tpl_expr_end(const char* p, const char* end);
+static const char* tpl_end(const char* p, const char* end) {
+    while (p < end && *p != '`') {
+        if (*p == '\\' && p + 1 < end) { p += 2; continue; }
+        if (*p == '$' && p + 1 < end && p[1] == '{') {
+            p = tpl_expr_end(p + 2, end);
+            if (p < end) p++;                           /* the '}' */
+            continue;
+        }
+        p++;
+    }
+    return p;
+}
+/* given p just past "${", the '}' that closes it (or end) */
+static const char* tpl_expr_end(const char* p, const char* end) {
+    int depth = 1;
+    while (p < end) {
+        char ch = *p;
+        if (ch == '"' || ch == '\'') {
+            p++;
+            while (p < end && *p != ch && *p != '\n') { if (*p == '\\' && p + 1 < end) p++; p++; }
+            if (p < end) p++;
+            continue;
+        }
+        if (ch == '`') { p = tpl_end(p + 1, end); if (p < end) p++; continue; }
+        if (ch == '/' && p + 1 < end && p[1] == '*') {
+            p += 2;
+            while (p + 1 < end && !(p[0] == '*' && p[1] == '/')) p++;
+            p += 2;
+            continue;
+        }
+        if (ch == '{') depth++;
+        else if (ch == '}' && --depth == 0) return p;
+        p++;
+    }
+    return end;
+}
+
 static void lex_all(lexer_t* L) {
     interp_t* I = L->I;
     int php = I->lang == LANG_PHP;
@@ -667,7 +807,7 @@ static void lex_all(lexer_t* L) {
         const char* s = L->src + L->pos;
         const char* end = L->src + L->len;
         char c = *s;
-        if (c == '\n') { L->line++; L->pos++; continue; }
+        if (c == '\n') { L->line++; L->pos++; L->line_start = s + 1; continue; }
         if (is_space(c)) { L->pos++; continue; }
         /* comments */
         if (c == '/' && s + 1 < end && s[1] == '/') goto line_comment;
@@ -691,11 +831,21 @@ static void lex_all(lexer_t* L) {
         /* numbers */
         if (is_digit(c) || (c == '.' && s + 1 < end && is_digit(s[1]))) {
             const char* p = s;
+            num_t radix_v = -1;
             if (c == '0' && s + 1 < end && (s[1] == 'x' || s[1] == 'X')) {
                 p += 2;
-                while (p < end && (is_digit(*p) || ((*p | 32) >= 'a' && (*p | 32) <= 'f'))) p++;
+                while (p < end && (is_digit(*p) || *p == '_' || ((*p | 32) >= 'a' && (*p | 32) <= 'f'))) p++;
+            } else if (c == '0' && s + 1 < end && ((s[1] | 32) == 'b' || (s[1] | 32) == 'o')) {
+                int base = (s[1] | 32) == 'b' ? 2 : 8;
+                radix_v = 0;
+                p += 2;
+                while (p < end && ((*p >= '0' && *p < '0' + base) || *p == '_')) {
+                    if (*p != '_') radix_v = radix_v * base + (*p - '0');
+                    p++;
+                }
             } else {
-                while (p < end && (is_digit(*p) || *p == '.' || *p == '_')) p++;
+                int dot = 0;                                /* 1..toString(): the second dot is an operator */
+                while (p < end && (is_digit(*p) || (*p == '.' && !dot++) || *p == '_')) p++;
                 if (p < end && (*p == 'e' || *p == 'E')) {
                     p++;
                     if (p < end && (*p == '+' || *p == '-')) p++;
@@ -707,14 +857,16 @@ static void lex_all(lexer_t* L) {
             for (const char* q = s; q < p && n < sizeof(tmp) - 1; q++) if (*q != '_') tmp[n++] = *q;
             tmp[n] = 0;
             tok_t* t = lex_push(L, T_NUM, s, (uint32_t)(p - s));
-            if (t) t->n = str_tonum(tmp, 0);
+            if (t) t->n = radix_v >= 0 ? radix_v : str_tonum(tmp, 0);
+            if (!php && p < end && *p == 'n') p++;          /* BigInt literal: a plain number here */
             L->pos = (uint32_t)(p - L->src);
             continue;
         }
         /* strings */
         if (c == '"' || c == '\'' || (!php && c == '`')) {
             const char* p = s + 1;
-            while (p < end && *p != c) {
+            if (c == '`') p = tpl_end(p, end);
+            else while (p < end && *p != c) {
                 if (*p == '\\' && p + 1 < end) p++;
                 p++;
             }
@@ -736,11 +888,53 @@ static void lex_all(lexer_t* L) {
             L->pos = (uint32_t)(p - L->src);
             continue;
         }
-        if (id_start((unsigned char)c, php)) {
-            const char* p = s;
-            while (p < end && id_char((unsigned char)*p, php)) p++;
+        /* class private names: #x */
+        if (!php && c == '#' && s + 1 < end && id_start((unsigned char)s[1], 0)) {
+            const char* p = s + 1;
+            while (p < end && id_char((unsigned char)*p, 0)) p++;
             tok_t* t = lex_push(L, T_ID, s, (uint32_t)(p - s));
             if (t) t->s = str_new(I, s, (uint32_t)(p - s));
+            L->pos = (uint32_t)(p - L->src);
+            continue;
+        }
+        /* regular expression literals */
+        if (!php && c == '/' && regex_ok(L)) {
+            const char* p = s + 1;
+            int cls = 0;
+            while (p < end && *p != '\n') {
+                if (*p == '\\' && p + 1 < end) { p += 2; continue; }
+                if (*p == '[') cls = 1;
+                else if (*p == ']') cls = 0;
+                else if (*p == '/' && !cls) break;
+                p++;
+            }
+            if (p < end && *p == '/') {
+                const char* fs = p + 1;
+                const char* fe = fs;
+                while (fe < end && id_char((unsigned char)*fe, 0)) fe++;
+                tok_t* t = lex_push(L, T_REGEX, s + 1, (uint32_t)(p - s - 1));
+                if (t) t->s = str_new(I, fs, (uint32_t)(fe - fs));
+                L->pos = (uint32_t)(fe - L->src);
+                continue;
+            }
+        }
+        if (id_start((unsigned char)c, php) || (!php && c == '\\' && s + 1 < end && s[1] == 'u')) {
+            const char* p = s;
+            int esc = 0;                                 /* abc: escapes in a name */
+            while (p < end) {
+                if (id_char((unsigned char)*p, php)) { p++; continue; }
+                if (!php && *p == '\\' && p + 1 < end && p[1] == 'u') {
+                    esc = 1;
+                    p += 2;
+                    if (p < end && *p == '{') { while (p < end && *p != '}') p++; if (p < end) p++; }
+                    else p += 4;
+                    if (p > end) p = end;
+                    continue;
+                }
+                break;
+            }
+            tok_t* t = lex_push(L, T_ID, s, (uint32_t)(p - s));
+            if (t) t->s = esc ? unescape(I, s, (uint32_t)(p - s), 0) : str_intern(I, s, (uint32_t)(p - s));
             L->pos = (uint32_t)(p - L->src);
             continue;
         }
@@ -750,7 +944,9 @@ static void lex_all(lexer_t* L) {
             uint32_t ol = (uint32_t)strlen(OPS[i]);
             if ((uint32_t)(end - s) >= ol && memcmp(s, OPS[i], ol) == 0) {
                 if (ol == 2 && s[0] == '?' && s[1] == '.' && s + 2 < end && is_digit(s[2])) continue;
-                lex_push(L, T_OP, OPS[i], ol);
+                tok_t* ot = lex_push(L, T_OP, OPS[i], ol);  /* (p: the shared spelling) */
+                if (ot && L->line_start && s >= L->line_start)
+                    ot->col = (uint16_t)(s - L->line_start + 1 > 65535 ? 65535 : s - L->line_start + 1);
                 L->pos += ol;
                 matched = 1;
                 break;
@@ -776,13 +972,18 @@ typedef struct {
     int       php;
     const char* err;
     int       err_line;
+    const char* err_at;      /* where in the source */
+    node_t*   hoist;         /* JS: collects the `var` names of the function being parsed */
     int       depth;
+    int       no_in;        /* for (x in y): `in` is not an operator in the head */
 } parser_t;
 
 static node_t* parse_stmt(parser_t* P);
 static node_t* parse_expr(parser_t* P);
 static node_t* parse_assign(parser_t* P);
 static node_t* parse_block(parser_t* P);
+static node_t* parse_primary(parser_t* P);
+static node_t* parse_postfix(parser_t* P);
 
 static tok_t* pk(parser_t* P) { return &P->t[P->i]; }
 static tok_t* pkn(parser_t* P, uint32_t k) { return &P->t[P->i + k < P->n ? P->i + k : P->n - 1]; }
@@ -806,6 +1007,7 @@ static void perr(parser_t* P, const char* msg) {
     if (P->err) return;
     P->err = msg;
     P->err_line = pk(P)->line;
+    P->err_at = pk(P)->p;
 }
 static int accept(parser_t* P, const char* o) { if (is_op(P, o)) { nx(P); return 1; } return 0; }
 static void expect(parser_t* P, const char* o) {
@@ -820,6 +1022,7 @@ static node_t* mk(parser_t* P, int k) {
     node_t* n = (node_t*)arena_alloc(P->I->A, sizeof(node_t));
     n->k = (uint8_t)k;
     n->line = pk(P)->line;
+    n->col = pk(P)->col;
     return n;
 }
 
@@ -845,6 +1048,51 @@ static node_t* tpl_join(parser_t* P, node_t* acc, node_t* part) {
     return b;
 }
 
+/* tag`a${x}b${y}c` is tag(["a","b","c"] (with .raw), x, y) */
+static node_t* parse_tagged(parser_t* P, tok_t* t, node_t* tag) {
+    const char* s = t->p;
+    uint32_t n = t->len, lit = 0, i = 0;
+    node_t* arr = mk(P, N_ARRAY);
+    node_t** stail = &arr->a;
+    node_t* raw = mk(P, N_ARRAY);                    /* the same pieces, escapes left as written */
+    node_t** rtail = &raw->a;
+    node_t* vals = NULL;
+    node_t** vtail = &vals;
+    while (i <= n) {
+        int at_end = (i >= n);
+        if (!at_end && s[i] == '\\') { i += 2; continue; }
+        if (!at_end && !(s[i] == '$' && i + 1 < n && s[i + 1] == '{')) { i++; continue; }
+        if (i > n) i = n;
+        node_t* ln = mk(P, N_STR);
+        ln->s = unescape(P->I, s + lit, i - lit, 0);
+        *stail = ln;
+        stail = &ln->next;
+        node_t* rn = mk(P, N_STR);
+        rn->s = str_new(P->I, s + lit, i - lit);
+        *rtail = rn;
+        rtail = &rn->next;
+        if (at_end) break;
+        uint32_t start = i + 2;
+        uint32_t stop = (uint32_t)(tpl_expr_end(s + start, s + n) - s);
+        node_t* e = parse_sub(P, s + start, stop - start, t->line);
+        if (P->err) break;
+        *vtail = e;
+        while (*vtail) vtail = &(*vtail)->next;
+        i = stop + 1;
+        lit = i;
+    }
+    node_t* mark = mk(P, N_CALL);                    /* gives the strings array its .raw */
+    mark->a = mk(P, N_IDENT);
+    mark->a->s = str_new(P->I, "\x01tplstrings", 11);
+    mark->b = arr;
+    arr->next = raw;
+    mark->next = vals;
+    node_t* c = mk(P, N_CALL);
+    c->a = tag;
+    c->b = mark;
+    return c;
+}
+
 static node_t* parse_template(parser_t* P, tok_t* t) {
     const char* s = t->p;
     uint32_t n = t->len;
@@ -867,12 +1115,15 @@ static node_t* parse_template(parser_t* P, tok_t* t) {
         uint32_t start, stop;
         if (js_expr || php_brace) {
             start = js_expr ? i + 2 : i + 1;
-            int depth = 1;
             uint32_t j = start;
-            while (j < n && depth) {
-                if (s[j] == '{') depth++;
-                else if (s[j] == '}') depth--;
-                if (depth) j++;
+            if (js_expr) j = (uint32_t)(tpl_expr_end(s + start, s + n) - s);
+            else {
+                int depth = 1;
+                while (j < n && depth) {
+                    if (s[j] == '{') depth++;
+                    else if (s[j] == '}') depth--;
+                    if (depth) j++;
+                }
             }
             stop = j;
             i = j + 1;
@@ -920,7 +1171,9 @@ static node_t* parse_args(parser_t* P) {
     node_t** tail = &head;
     if (accept(P, ")")) return NULL;
     for (;;) {
-        node_t* e = parse_assign(P);
+        node_t* e;
+        if (!P->php && accept(P, "...")) { e = mk(P, N_SPREAD); e->a = parse_assign(P); }
+        else e = parse_assign(P);
         if (P->err) return head;
         *tail = e;
         tail = &e->next;
@@ -944,7 +1197,9 @@ static node_t* parse_params(parser_t* P) {
             if (pk(P)->t != T_VAR) { perr(P, "expected a $parameter"); return head; }
             p->s = nx(P)->s;
         } else {
-            p->s = ident(P);
+            if (accept(P, "...")) p->op = 'r';                     /* rest: ...args */
+            if (is_op(P, "[") || is_op(P, "{")) p->c = parse_primary(P);   /* destructured */
+            else p->s = ident(P);
         }
         if (accept(P, "=")) p->a = parse_assign(P);
         *tail = p;
@@ -958,6 +1213,17 @@ static node_t* parse_params(parser_t* P) {
     return head;
 }
 
+/* a function body; its `var` names are declared first thing (N_VARHOIST) */
+static node_t* parse_fn_body(parser_t* P) {
+    node_t* saved = P->hoist;
+    node_t* h = P->php ? NULL : mk(P, N_VARHOIST);
+    P->hoist = h;
+    node_t* b = parse_block(P);
+    P->hoist = saved;
+    if (h && h->a && b) { h->next = b->a; b->a = h; }
+    return b;
+}
+
 static node_t* parse_function(parser_t* P, int want_name) {
     node_t* f = mk(P, N_FUNC);
     if (pk(P)->t == T_ID) f->s = nx(P)->s;
@@ -968,7 +1234,7 @@ static node_t* parse_function(parser_t* P, int want_name) {
         expect(P, "(");
         while (!P->err && !accept(P, ")")) nx(P);
     }
-    f->b = parse_block(P);
+    f->b = parse_fn_body(P);
     return f;
 }
 
@@ -1001,7 +1267,7 @@ static node_t* parse_arrow(parser_t* P) {
     expect(P, "=>");
     f->c = (node_t*)1;                               /* marker: arrow */
     if (is_op(P, "{")) {
-        f->b = parse_block(P);
+        f->b = parse_fn_body(P);
     } else {
         f->op = 1;                                   /* expression body */
         f->b = parse_assign(P);
@@ -1014,7 +1280,17 @@ static node_t* parse_array_lit(parser_t* P, const char* close) {
     node_t** tail = &a->a;
     while (!P->err && !accept(P, close)) {
         node_t* item;
-        if (P->php) {
+        if (!P->php && is_op(P, ",")) {                     /* a hole: [a, , b] */
+            nx(P);
+            item = mk(P, N_EMPTY);
+            *tail = item;
+            tail = &item->next;
+            continue;
+        }
+        if (!P->php && accept(P, "...")) {
+            item = mk(P, N_SPREAD);
+            item->a = parse_assign(P);
+        } else if (P->php) {
             item = mk(P, N_PAIR);
             node_t* first = parse_assign(P);
             if (accept(P, "=>")) { item->a = first; item->b = parse_assign(P); }
@@ -1034,6 +1310,24 @@ static node_t* parse_object_lit(parser_t* P) {
     node_t** tail = &o->a;
     while (!P->err && !accept(P, "}")) {
         node_t* pr = mk(P, N_PAIR);
+        if (accept(P, "...")) {                             /* {...other} */
+            node_t* sp = mk(P, N_SPREAD);
+            sp->a = parse_assign(P);
+            *tail = sp;
+            tail = &sp->next;
+            if (!is_op(P, "}")) expect(P, ",");
+            continue;
+        }
+        int async = 0;
+        /* get x() {}, set x(v) {}, async m() {}, *gen() {} */
+        if (pk(P)->t == T_ID && (is_kw(P, pk(P), "get") || is_kw(P, pk(P), "set") || is_kw(P, pk(P), "async")) &&
+            !tok_is(pkn(P, 1), T_OP, ":") && !tok_is(pkn(P, 1), T_OP, "(") && !tok_is(pkn(P, 1), T_OP, ",") &&
+            !tok_is(pkn(P, 1), T_OP, "}") && !tok_is(pkn(P, 1), T_OP, "=")) {
+            if (is_kw(P, pk(P), "async")) async = 1;
+            else pr->op = (uint8_t)pk(P)->p[0];             /* 'g' / 's' */
+            nx(P);
+        }
+        accept(P, "*");
         tok_t* t = pk(P);
         if (t->t == T_ID || t->t == T_STR) {
             pr->s = t->s;
@@ -1056,18 +1350,80 @@ static node_t* parse_object_lit(parser_t* P) {
             node_t* f = mk(P, N_FUNC);
             f->s = pr->s;
             f->a = parse_params(P);
-            f->b = parse_block(P);
+            f->b = parse_fn_body(P);
+            if (async) f->n = 1;
             pr->b = f;
         } else {                                     /* {a} shorthand */
             node_t* id = mk(P, N_IDENT);
             id->s = pr->s;
             pr->b = id;
+            if (is_op(P, "=")) {                     /* {a = 1} (a destructuring default) */
+                nx(P);
+                node_t* as = mk(P, N_ASSIGN);
+                as->op = '=';
+                as->a = id;
+                as->b = parse_assign(P);
+                pr->b = as;
+            }
         }
         *tail = pr;
         tail = &pr->next;
         if (!is_op(P, "}")) expect(P, ",");
     }
     return o;
+}
+
+/* class Name extends Base { constructor() {} m() {} static s() {} get x() {} field = 1; } */
+static node_t* parse_class(parser_t* P) {
+    node_t* c = mk(P, N_CLASS);
+    if (pk(P)->t == T_ID && !kw(P, "extends")) c->s = nx(P)->s;
+    if (kw(P, "extends")) { nx(P); c->a = parse_postfix(P); }
+    expect(P, "{");
+    node_t** tail = &c->b;
+    while (!P->err && !accept(P, "}")) {
+        if (accept(P, ";")) continue;
+        node_t* m = mk(P, N_PAIR);
+        m->op = 'm';
+        int async = 0;
+        if (kw(P, "static") && !tok_is(pkn(P, 1), T_OP, "(") && !tok_is(pkn(P, 1), T_OP, "=")) {
+            nx(P);
+            m->n = 1;
+            if (is_op(P, "{")) {                             /* static { ... } */
+                m->op = 'b';
+                m->b = parse_block(P);
+                *tail = m;
+                tail = &m->next;
+                continue;
+            }
+        }
+        if (kw(P, "async") && !tok_is(pkn(P, 1), T_OP, "(") && !tok_is(pkn(P, 1), T_OP, "=")) { nx(P); async = 1; }
+        accept(P, "*");
+        if ((kw(P, "get") || kw(P, "set")) && !tok_is(pkn(P, 1), T_OP, "(") && !tok_is(pkn(P, 1), T_OP, "=") &&
+            !tok_is(pkn(P, 1), T_OP, ";") && !tok_is(pkn(P, 1), T_OP, "}")) {
+            m->op = (uint8_t)pk(P)->p[0];
+            nx(P);
+        }
+        tok_t* t = pk(P);
+        if (t->t == T_ID || t->t == T_STR) { m->s = t->s; nx(P); }
+        else if (t->t == T_NUM) { char b[32]; num_format(t->n, b, sizeof(b)); m->s = str_new(P->I, b, (uint32_t)strlen(b)); nx(P); }
+        else if (accept(P, "[")) { m->a = parse_assign(P); expect(P, "]"); }
+        else { perr(P, "bad class member"); break; }
+        if (is_op(P, "(")) {
+            node_t* f = mk(P, N_FUNC);
+            f->s = m->s;
+            f->a = parse_params(P);
+            f->b = parse_fn_body(P);
+            if (async) f->n = 1;
+            m->b = f;
+        } else {
+            if (m->op == 'm') m->op = 'f';                   /* a field */
+            if (accept(P, "=")) m->b = parse_assign(P);
+            semi(P);
+        }
+        *tail = m;
+        tail = &m->next;
+    }
+    return c;
 }
 
 static node_t* parse_primary(parser_t* P) {
@@ -1079,6 +1435,16 @@ static node_t* parse_primary(parser_t* P) {
     case T_STR: nx(P); n = mk(P, N_STR); n->s = t->s; P->depth--; return n;
     case T_TPL: nx(P); n = parse_template(P, t); P->depth--; return n;
     case T_VAR: nx(P); n = mk(P, N_IDENT); n->s = t->s; P->depth--; return n;
+    case T_REGEX: {
+        nx(P);
+        n = mk(P, N_REGEX);
+        n->s = str_new(P->I, t->p, t->len);
+        node_t* fl = mk(P, N_STR);
+        fl->s = t->s;
+        n->a = fl;
+        P->depth--;
+        return n;
+    }
     case T_ID:
         if (is_kw(P, t, "true"))  { nx(P); P->depth--; return mk(P, N_TRUE); }
         if (is_kw(P, t, "false")) { nx(P); P->depth--; return mk(P, N_FALSE); }
@@ -1086,12 +1452,35 @@ static node_t* parse_primary(parser_t* P) {
         if (!P->php) {
             if (is_kw(P, t, "undefined")) { nx(P); P->depth--; return mk(P, N_UNDEF); }
             if (is_kw(P, t, "this")) { nx(P); P->depth--; return mk(P, N_THIS); }
-            if (is_kw(P, t, "function")) { nx(P); n = parse_function(P, 0); P->depth--; return n; }
+            if (is_kw(P, t, "function")) { nx(P); accept(P, "*"); n = parse_function(P, 0); P->depth--; return n; }
+            if (is_kw(P, t, "async") && is_kw(P, pkn(P, 1), "function")) {
+                nx(P); nx(P);
+                accept(P, "*");
+                n = parse_function(P, 0);
+                n->n = 1;
+                P->depth--;
+                return n;
+            }
+            if (is_kw(P, t, "class")) { nx(P); n = parse_class(P); P->depth--; return n; }
+            if (is_kw(P, t, "super")) {
+                nx(P);
+                if (accept(P, "(")) { n = mk(P, N_SUPERCALL); n->b = parse_args(P); }
+                else {
+                    n = mk(P, N_SUPERMEMBER);
+                    if (accept(P, "[")) { n->a = parse_expr(P); expect(P, "]"); }
+                    else { expect(P, "."); n->s = ident(P); }
+                }
+                P->depth--;
+                return n;
+            }
             if (is_kw(P, t, "new")) {
                 nx(P);
                 n = mk(P, N_NEW);
-                node_t* c = mk(P, N_IDENT);
-                c->s = ident(P);
+                node_t* c;
+                if (accept(P, "(")) { c = parse_expr(P); expect(P, ")"); }   /* new (f())() */
+                else if (kw(P, "class")) { nx(P); c = parse_class(P); }
+                else if (kw(P, "this")) { nx(P); c = mk(P, N_THIS); }
+                else { c = mk(P, N_IDENT); c->s = ident(P); }
                 while (accept(P, ".")) {              /* new a.B() */
                     node_t* m = mk(P, N_MEMBER);
                     m->a = c;
@@ -1160,6 +1549,23 @@ static node_t* parse_postfix(parser_t* P) {
             m->s = ident(P);
             e = m;
         } else if (accept(P, "?.")) {
+            if (accept(P, "(")) {                     /* f?.() */
+                node_t* c = mk(P, N_CALL);
+                c->a = e;
+                c->op = 1;
+                c->b = parse_args(P);
+                e = c;
+                continue;
+            }
+            if (accept(P, "[")) {                     /* a?.[i] */
+                node_t* ix = mk(P, N_INDEX);
+                ix->a = e;
+                ix->op = 1;
+                ix->b = parse_expr(P);
+                expect(P, "]");
+                e = ix;
+                continue;
+            }
             node_t* m = mk(P, N_MEMBER);
             m->a = e;
             m->op = 1;
@@ -1183,7 +1589,9 @@ static node_t* parse_postfix(parser_t* P) {
             c->a = e;
             c->b = parse_args(P);
             e = c;
-        } else if (is_op(P, "++") || is_op(P, "--")) {
+        } else if (!P->php && pk(P)->t == T_TPL) {
+            e = parse_tagged(P, nx(P), e);           /* tag`x${y}` */
+        } else if ((is_op(P, "++") || is_op(P, "--")) && pk(P)->line == P->t[P->i - 1].line) {
             node_t* u = mk(P, N_UPDATE);
             u->op = (uint8_t)(nx(P)->p[0]);
             u->a = e;
@@ -1240,7 +1648,19 @@ static node_t* parse_unary(parser_t* P) {
         u->a = parse_unary(P);
         return u;
     }
-    if (!P->php && is_kw(P, t, "void")) { nx(P); parse_unary(P); return mk(P, N_UNDEF); }
+    if (!P->php && is_kw(P, t, "void")) {
+        nx(P);
+        node_t* s = mk(P, N_SEQ);                   /* evaluate, then undefined */
+        s->a = parse_unary(P);
+        s->a->next = mk(P, N_UNDEF);
+        return s;
+    }
+    if (!P->php && is_kw(P, t, "await")) {
+        nx(P);
+        node_t* u = mk(P, N_AWAIT);
+        u->a = parse_unary(P);
+        return u;
+    }
     if (!P->php && is_kw(P, t, "delete")) {
         nx(P);
         node_t* u = mk(P, N_UNARY);
@@ -1269,7 +1689,7 @@ static const binop_t BINOPS[] = {
     { "|", 4, OP_BOR, 0 }, { "^", 5, OP_BXOR, 0 }, { "&", 6, OP_BAND, 0 },
     { "==", 7, OP_EQ, 0 }, { "!=", 7, OP_NE, 0 }, { "===", 7, OP_SEQ, 0 }, { "!==", 7, OP_SNE, 0 }, { "<>", 7, OP_NE, 0 },
     { "<", 8, OP_LT, 0 }, { ">", 8, OP_GT, 0 }, { "<=", 8, OP_LE, 0 }, { ">=", 8, OP_GE, 0 }, { "<=>", 8, OP_SPACESHIP, 0 },
-    { "<<", 9, OP_SHL, 0 }, { ">>", 9, OP_SHR, 0 },
+    { "<<", 9, OP_SHL, 0 }, { ">>", 9, OP_SHR, 0 }, { ">>>", 9, OP_USHR, 0 },
     { "+", 10, OP_ADD, 0 }, { "-", 10, OP_SUB, 0 }, { ".", 10, OP_CONCAT, 0 },
     { "*", 11, OP_MUL, 0 }, { "/", 11, OP_DIV, 0 }, { "%", 11, OP_MOD, 0 },
     { "**", 12, OP_POW, 0 },
@@ -1281,6 +1701,12 @@ static const binop_t* binop_at(parser_t* P) {
         static const binop_t kand = { "and", 3, OP_AND, 1 }, kor = { "or", 2, OP_OR, 1 };
         if (is_kw(P, t, "and")) return &kand;
         if (is_kw(P, t, "or")) return &kor;
+        return NULL;
+    }
+    if (t->t == T_ID) {
+        static const binop_t kin = { "in", 8, OP_IN, 0 }, kinst = { "instanceof", 8, OP_INSTANCEOF, 0 };
+        if (is_kw(P, t, "in") && !P->no_in) return &kin;
+        if (is_kw(P, t, "instanceof")) return &kinst;
         return NULL;
     }
     if (t->t != T_OP) return NULL;
@@ -1327,15 +1753,26 @@ static node_t* parse_cond(parser_t* P) {
     return c;
 }
 
-static const char* const ASSIGN_OPS[] = { "=", "+=", "-=", "*=", "/=", "%=", ".=", "**=", "?\?=", "|=", "&=", "^=" };
-static const uint8_t ASSIGN_CODES[] = { '=', OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_CONCAT, OP_POW, OP_NULLISH, OP_BOR, OP_BAND, OP_BXOR };
+static const char* const ASSIGN_OPS[] = { "=", "+=", "-=", "*=", "/=", "%=", ".=", "**=", "?\?=", "|=", "&=", "^=",
+                                          "<<=", ">>=", ">>>=", "||=", "&&=" };
+static const uint8_t ASSIGN_CODES[] = { '=', OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_CONCAT, OP_POW, OP_NULLISH, OP_BOR, OP_BAND, OP_BXOR,
+                                        OP_SHL, OP_SHR, OP_USHR, OP_LOGOR_ASSIGN, OP_LOGAND_ASSIGN };
 
 static node_t* parse_assign(parser_t* P) {
     if (!P->php && arrow_ahead(P)) return parse_arrow(P);
+    if (!P->php && kw(P, "async") && (pkn(P, 1)->t == T_ID || tok_is(pkn(P, 1), T_OP, "("))) {
+        /* async x => ..., async (a) => ... */
+        uint32_t save = P->i;
+        nx(P);
+        if (arrow_ahead(P)) { node_t* f = parse_arrow(P); f->n = 1; return f; }
+        P->i = save;
+    }
+    if (!P->php && kw(P, "yield")) { nx(P); accept(P, "*"); return parse_assign(P); }   /* generators: not really */
     node_t* left = parse_cond(P);
     for (uint32_t i = 0; i < sizeof(ASSIGN_OPS) / sizeof(ASSIGN_OPS[0]); i++) {
         if (is_op(P, ASSIGN_OPS[i])) {
-            if (left->k != N_IDENT && left->k != N_MEMBER && left->k != N_INDEX) {
+            int pattern = !P->php && i == 0 && (left->k == N_ARRAY || left->k == N_OBJECT);   /* [a, b] = ... */
+            if (left->k != N_IDENT && left->k != N_MEMBER && left->k != N_INDEX && !pattern) {
                 perr(P, "invalid assignment target");
                 return left;
             }
@@ -1353,8 +1790,16 @@ static node_t* parse_assign(parser_t* P) {
 static node_t* parse_expr(parser_t* P) {
     node_t* e = parse_assign(P);
     /* comma operator: evaluate all, keep the last */
-    while (!P->err && is_op(P, ",") && 0) nx(P);
-    return e;
+    if (P->php || !is_op(P, ",")) return e;
+    node_t* s = mk(P, N_SEQ);
+    s->a = e;
+    node_t** tail = &e->next;
+    while (!P->err && accept(P, ",")) {
+        node_t* x = parse_assign(P);
+        *tail = x;
+        tail = &x->next;
+    }
+    return s;
 }
 
 /* ── statements ── */
@@ -1374,6 +1819,8 @@ static node_t* parse_stmts_until(parser_t* P, const char* const* ends, int nends
 
 static node_t* parse_block(parser_t* P) {
     node_t* blk = mk(P, N_BLOCK);
+    int saved_no_in = P->no_in;                      /* for (var f = function () { a in b }; ...) */
+    P->no_in = 0;
     expect(P, "{");
     node_t** tail = &blk->a;
     while (!P->err && !is_op(P, "}") && pk(P)->t != T_EOF) {
@@ -1383,6 +1830,7 @@ static node_t* parse_block(parser_t* P) {
         while (*tail) tail = &(*tail)->next;
     }
     expect(P, "}");
+    P->no_in = saved_no_in;
     return blk;
 }
 
@@ -1397,12 +1845,152 @@ static node_t* parse_var_decl(parser_t* P, int kind) {
     do {
         node_t* v = mk(P, N_VAR);
         v->op = (uint8_t)kind;
-        v->s = ident(P);
+        if (!P->php && (is_op(P, "[") || is_op(P, "{"))) v->c = parse_primary(P);   /* const {a, b} = o */
+        else v->s = ident(P);
         if (accept(P, "=")) v->a = parse_assign(P);
         *tail = v;
         tail = &v->next;
+        if (kind == 'v' && v->s && P->hoist) {       /* usable (as undefined) from the top of the function */
+            node_t* h = mk(P, N_IDENT);
+            h->s = v->s;
+            h->next = P->hoist->a;
+            P->hoist->a = h;
+        }
     } while (!P->err && accept(P, ","));
     return blk;
+}
+
+/* ── modules ──
+ * N_IMPORT: s = module name, a = bindings; op 'r' = re-export (export ... from)
+ * N_EXPORT: a = declaration (or, op 'd', the default value), b = bindings
+ * a binding is an N_STR: s = the name in the other module (import) / exported
+ * name (export), b = N_IDENT with the local name ("*": the whole namespace) */
+static node_t* parse_stmt(parser_t* P);
+static node_t* mk_binding(parser_t* P, str_t* name, str_t* local) {
+    node_t* b = mk(P, N_STR);
+    b->s = name;
+    if (local) { b->b = mk(P, N_IDENT); b->b->s = local; }
+    return b;
+}
+static str_t* name_tok(parser_t* P) {               /* an identifier, or a string: export { a as "b-c" } */
+    tok_t* t = nx(P);
+    if ((t->t == T_ID || t->t == T_STR) && t->s) return t->s;
+    perr(P, "expected a name");
+    return str_new(P->I, "", 0);
+}
+static str_t* module_spec(parser_t* P) {
+    if (pk(P)->t != T_STR) { perr(P, "expected a module name"); return NULL; }
+    str_t* s = nx(P)->s;
+    if (kw(P, "with") || kw(P, "assert")) { nx(P); if (is_op(P, "{")) parse_primary(P); }
+    return s;
+}
+
+static node_t* parse_import(parser_t* P) {
+    nx(P);
+    node_t* n = mk(P, N_IMPORT);
+    node_t** tail = &n->a;
+    if (pk(P)->t != T_STR) {
+        if (pk(P)->t == T_ID) {                      /* import x from / import x, {...} from */
+            *tail = mk_binding(P, str_new(P->I, "default", 7), nx(P)->s);
+            tail = &(*tail)->next;
+            accept(P, ",");
+        }
+        if (accept(P, "*")) {
+            if (!kw(P, "as")) { perr(P, "expected 'as'"); return n; }
+            nx(P);
+            *tail = mk_binding(P, str_new(P->I, "*", 1), nx(P)->s);
+            tail = &(*tail)->next;
+        } else if (accept(P, "{")) {
+            while (!P->err && !accept(P, "}")) {
+                str_t* name = name_tok(P);
+                str_t* local = name;
+                if (kw(P, "as")) { nx(P); local = nx(P)->s; }
+                *tail = mk_binding(P, name, local);
+                tail = &(*tail)->next;
+                if (!accept(P, ",")) { expect(P, "}"); break; }
+            }
+        }
+        if (!kw(P, "from")) { perr(P, "expected 'from'"); return n; }
+        nx(P);
+    }
+    n->s = module_spec(P);
+    semi(P);
+    return n;
+}
+
+static node_t* parse_export(parser_t* P) {
+    nx(P);
+    node_t* n = mk(P, N_EXPORT);
+    if (kw(P, "default")) {
+        nx(P);
+        int fn = kw(P, "function") && pkn(P, 1)->t == T_ID;
+        int afn = kw(P, "async") && is_kw(P, pkn(P, 1), "function") && pkn(P, 2)->t == T_ID;
+        int cls = kw(P, "class") && pkn(P, 1)->t == T_ID && !is_kw(P, pkn(P, 1), "extends");
+        if (fn || afn || cls) {                      /* export default function f() {} */
+            str_t* name = pkn(P, afn ? 2 : 1)->s;
+            n->a = parse_stmt(P);
+            n->b = mk_binding(P, str_new(P->I, "default", 7), name);
+            return n;
+        }
+        n->op = 'd';
+        n->a = parse_assign(P);
+        semi(P);
+        return n;
+    }
+    if (accept(P, "*")) {                            /* export * [as ns] from "m" */
+        node_t* imp = mk(P, N_IMPORT);
+        imp->op = 'r';
+        str_t* as = NULL;
+        if (kw(P, "as")) { nx(P); as = name_tok(P); }
+        imp->a = mk_binding(P, str_new(P->I, "*", 1), as);
+        if (!kw(P, "from")) { perr(P, "expected 'from'"); return imp; }
+        nx(P);
+        imp->s = module_spec(P);
+        semi(P);
+        return imp;
+    }
+    if (accept(P, "{")) {                            /* export { a, b as c } [from "m"] */
+        node_t* list = NULL;
+        node_t** tail = &list;
+        while (!P->err && !accept(P, "}")) {
+            str_t* local = name_tok(P);
+            str_t* ex = local;
+            if (kw(P, "as")) { nx(P); ex = name_tok(P); }
+            *tail = mk_binding(P, ex, local);
+            tail = &(*tail)->next;
+            if (!accept(P, ",")) { expect(P, "}"); break; }
+        }
+        if (kw(P, "from")) {
+            nx(P);
+            node_t* imp = mk(P, N_IMPORT);
+            imp->op = 'r';
+            /* re-export: the name over there, and the name to export it as */
+            node_t** it = &imp->a;
+            for (node_t* b = list; b; b = b->next) {
+                *it = mk_binding(P, b->b->s, b->s);
+                it = &(*it)->next;
+            }
+            imp->s = module_spec(P);
+            semi(P);
+            return imp;
+        }
+        n->b = list;
+        semi(P);
+        return n;
+    }
+    /* export var/let/const/function/class */
+    node_t* d = parse_stmt(P);
+    n->a = d;
+    node_t** tail = &n->b;
+    if (d && d->k == N_BLOCK) {
+        for (node_t* v = d->a; v; v = v->next)
+            if (v->k == N_VAR && v->s) { *tail = mk_binding(P, v->s, v->s); tail = &(*tail)->next; }
+    } else if (d && d->k == N_FUNCDECL && d->a && d->a->s) {
+        *tail = mk_binding(P, d->a->s, d->a->s);
+    } else if (d && d->k == N_CLASS && d->s) {
+        *tail = mk_binding(P, d->s, d->s);
+    }
+    return n;
 }
 
 static node_t* parse_if(parser_t* P) {
@@ -1465,10 +2053,40 @@ static node_t* parse_stmt(parser_t* P) {
             semi(P);
             return n;
         }
-        if (kw(P, "function") && pkn(P, 1)->t == T_ID) {
+        if (kw(P, "function") && (pkn(P, 1)->t == T_ID || tok_is(pkn(P, 1), T_OP, "*"))) {
             nx(P);
+            accept(P, "*");
             n = mk(P, N_FUNCDECL);
             n->a = parse_function(P, 1);
+            return n;
+        }
+        if (!P->php && kw(P, "async") && is_kw(P, pkn(P, 1), "function")) {
+            nx(P); nx(P);
+            accept(P, "*");
+            n = mk(P, N_FUNCDECL);
+            n->a = parse_function(P, 1);
+            n->a->n = 1;
+            return n;
+        }
+        if (!P->php && kw(P, "class") && pkn(P, 1)->t == T_ID) {
+            nx(P);
+            n = parse_class(P);
+            n->op = 1;                                       /* a declaration */
+            return n;
+        }
+        /* ES modules */
+        if (!P->php && kw(P, "export")) return parse_export(P);
+        if (!P->php && kw(P, "import") && !tok_is(pkn(P, 1), T_OP, "(") && !tok_is(pkn(P, 1), T_OP, "."))
+            return parse_import(P);
+        /* label: statement */
+        if (!P->php && tok_is(pkn(P, 1), T_OP, ":") && !kw(P, "default") && !kw(P, "case")) {
+            str_t* label = nx(P)->s;
+            nx(P);
+            n = mk(P, N_LABEL);
+            n->s = label;
+            n->a = parse_stmt(P);
+            if (n->a && (n->a->k == N_FOR || n->a->k == N_FOREACH || n->a->k == N_WHILE || n->a->k == N_DOWHILE))
+                n->a->s = label;
             return n;
         }
         if (kw(P, "if")) { nx(P); return parse_if(P); }
@@ -1495,11 +2113,30 @@ static node_t* parse_stmt(parser_t* P) {
         }
         if (kw(P, "for")) {
             nx(P);
+            if (!P->php && kw(P, "await")) nx(P);    /* for await (x of y): run as a plain for-of */
             expect(P, "(");
             /* for (let x of a) / for (k in o) */
             uint32_t save = P->i;
             int decl = 0;
             if (!P->php && (kw(P, "let") || kw(P, "const") || kw(P, "var"))) { nx(P); decl = 1; }
+            if (!P->php && (is_op(P, "[") || is_op(P, "{"))) {
+                /* for (const [k, v] of ...) */
+                uint32_t at = P->i;
+                const char* oerr = P->err;
+                node_t* pat = parse_primary(P);
+                if (!P->err && (kw(P, "of") || kw(P, "in"))) {
+                    n = mk(P, N_FOREACH);
+                    n->op = kw(P, "of") ? 'o' : 'i';
+                    nx(P);
+                    n->b = pat;
+                    n->a = parse_expr(P);
+                    expect(P, ")");
+                    n->d = parse_body(P);
+                    return n;
+                }
+                P->err = oerr;
+                P->i = at;
+            }
             if (!P->php && pk(P)->t == T_ID && (is_kw(P, pkn(P, 1), "of") || is_kw(P, pkn(P, 1), "in"))) {
                 n = mk(P, N_FOREACH);
                 node_t* v = mk(P, N_IDENT);
@@ -1519,7 +2156,9 @@ static node_t* parse_stmt(parser_t* P) {
                 if (!P->php && (kw(P, "let") || kw(P, "const") || kw(P, "var"))) {
                     int kind = kw(P, "var") ? 'v' : kw(P, "let") ? 'l' : 'c';
                     nx(P);
+                    P->no_in = 1;
                     n->a = parse_var_decl(P, kind);
+                    P->no_in = 0;
                 } else {
                     node_t* e = mk(P, N_EXPR);
                     e->a = parse_expr(P);
@@ -1580,8 +2219,15 @@ static node_t* parse_stmt(parser_t* P) {
             semi(P);
             return n;
         }
-        if (kw(P, "break")) { nx(P); if (pk(P)->t == T_NUM) nx(P); semi(P); return mk(P, N_BREAK); }
-        if (kw(P, "continue")) { nx(P); if (pk(P)->t == T_NUM) nx(P); semi(P); return mk(P, N_CONTINUE); }
+        if (kw(P, "break") || kw(P, "continue")) {
+            int brk = kw(P, "break");
+            int line = nx(P)->line;
+            n = mk(P, brk ? N_BREAK : N_CONTINUE);
+            if (pk(P)->t == T_NUM) nx(P);
+            else if (!P->php && pk(P)->t == T_ID && pk(P)->line == line) n->s = nx(P)->s;   /* break label */
+            semi(P);
+            return n;
+        }
         if (kw(P, "throw")) {
             nx(P);
             n = mk(P, N_THROW);
@@ -1666,7 +2312,6 @@ static node_t* parse_stmt(parser_t* P) {
             semi(P);
             return blk;
         }
-        if (!P->php && kw(P, "class")) { perr(P, "classes are not supported"); return NULL; }
     }
     n = mk(P, N_EXPR);
     n->a = parse_expr(P);
@@ -1682,7 +2327,7 @@ static node_t* parse_sub(parser_t* P, const char* s, uint32_t n, int line) {
     L.len = n;
     L.line = line;
     lex_all(&L);
-    if (L.err) { perr(P, L.err); return mk(P, N_UNDEF); }
+    if (L.err) { kfree(L.toks); perr(P, L.err); return mk(P, N_UNDEF); }
     parser_t Q;
     memset(&Q, 0, sizeof(Q));
     Q.I = P->I;
@@ -1692,7 +2337,8 @@ static node_t* parse_sub(parser_t* P, const char* s, uint32_t n, int line) {
     Q.depth = P->depth;
     node_t* e = parse_expr(&Q);
     if (!Q.err && pk(&Q)->t != T_EOF) perr(&Q, "bad expression in string");
-    if (Q.err) { P->err = Q.err; P->err_line = Q.err_line; }
+    if (Q.err) { P->err = Q.err; P->err_line = Q.err_line; P->err_at = Q.err_at; }
+    kfree(L.toks);
     return e;
 }
 
@@ -1701,6 +2347,10 @@ static node_t* parse_sub(parser_t* P, const char* s, uint32_t n, int line) {
 static value_t eval(interp_t* I, node_t* n);
 static void exec(interp_t* I, node_t* n);
 static void exec_list(interp_t* I, node_t* n);
+static void destructure(interp_t* I, node_t* pat, value_t v, int kind);
+static void init_fields(interp_t* I, func_t* cls);
+static void super_call(interp_t* I, func_t* cls, int argc, value_t* argv);
+static value_t key_of(interp_t* I, value_t k, char* buf, int cap, const char** out);
 
 static env_t* env_new(interp_t* I, env_t* parent, int is_func) {
     env_t* e = (env_t*)arena_alloc(I->A, sizeof(env_t));
@@ -1760,6 +2410,14 @@ static value_t make_func(interp_t* I, node_t* f) {
     fn->closure = I->cur;
     fn->name = f->s ? f->s->s : "anonymous";
     if (f->c == (node_t*)1) { fn->has_bound = 1; fn->bound_this = I->this_v; }
+    fn->is_async = f->n == 1;
+    fn->parent = v_undef();
+    fn->data = v_undef();
+    /* code inside a class (arrows, nested functions) knows it, for super */
+    if (I->cur_fn) {
+        fn->cls = I->cur_fn->is_class ? I->cur_fn : I->cur_fn->cls;
+        fn->home = I->cur_fn->home;
+    }
     value_t v = v_undef();
     v.t = V_FUNC;
     v.f = fn;
@@ -1777,7 +2435,10 @@ value_t call_value(interp_t* I, value_t fnv, value_t self, int argc, value_t* ar
     }
     value_t r;
     if (fn->native) {
+        func_t* saved_native = I->cur_native;
+        I->cur_native = fn;
         r = fn->nf(I, self, argc, argv);
+        I->cur_native = saved_native;
         I->depth--;
         return r;
     }
@@ -1791,30 +2452,107 @@ value_t call_value(interp_t* I, value_t fnv, value_t self, int argc, value_t* ar
     I->cur = e;
     I->fn_env = e;
     I->this_v = fn->has_bound ? fn->bound_this : self;
+    func_t* saved_cur_fn = I->cur_fn;
+    I->cur_fn = fn;
     int i = 0;
-    obj_t* args = obj_new(I, OBJ_ARRAY);
-    for (int k = 0; k < argc; k++) arr_push(I, args, argv[k]);
-    if (I->lang == LANG_JS) env_define(I, e, str_new(I, "arguments", 9), v_obj(args));
-    for (node_t* p = d->a; p; p = p->next, i++) {
-        value_t v = i < argc ? argv[i] : v_undef();
+    if (I->lang == LANG_JS && !fn->has_bound) {
+        obj_t* args = obj_new(I, OBJ_ARRAY);
+        for (int k = 0; k < argc; k++) arr_push(I, args, argv[k]);
+        env_define(I, e, str_new(I, "arguments", 9), v_obj(args));
+    }
+    for (node_t* p = d->a; p && !I->ctl; p = p->next, i++) {
+        value_t v;
+        if (p->op == 'r') {                                  /* ...rest */
+            obj_t* rest = obj_new(I, OBJ_ARRAY);
+            for (int k = i; k < argc; k++) arr_push(I, rest, argv[k]);
+            v = v_obj(rest);
+        } else {
+            v = i < argc ? argv[i] : v_undef();
+        }
         if (I->lang == LANG_PHP) v = php_array_copy(I, v);
         if ((i >= argc || v.t == V_UNDEF) && p->a) v = eval(I, p->a);
-        env_define(I, e, p->s, v);
+        if (p->c) destructure(I, p->c, v, 'l');
+        else env_define(I, e, p->s, v);
     }
-    if (d->op == 1) {
+    /* class constructors: a base class sets up its fields first; a derived
+     * one when super() returns; the implicit constructor of a derived class
+     * passes everything on */
+    if (fn->is_class && !I->ctl) {
+        if (fn->parent.t == V_UNDEF || fn->parent.t == V_NULL) init_fields(I, fn);
+        else if (d->d == (node_t*)2) super_call(I, fn, argc, argv);
+    }
+    if (I->ctl) {
+        /* a parameter default or destructuring threw */
+    } else if (d->op == 1) {
         r = eval(I, d->b);
     } else {
         exec(I, d->b);
         r = v_undef();
         if (I->lang == LANG_PHP) r = v_null();
         if (I->ctl == CTL_RETURN) { r = I->ret; I->ctl = CTL_NONE; }
-        else if (I->ctl == CTL_BREAK || I->ctl == CTL_CONTINUE) I->ctl = CTL_NONE;
+        else if (I->ctl == CTL_BREAK || I->ctl == CTL_CONTINUE) { I->ctl = CTL_NONE; I->label = NULL; }
     }
+    if (I->ctl != CTL_THROW && d->op == 1) r = I->ctl ? v_undef() : r;
     I->cur = saved_env;
     I->fn_env = saved_fn;
     I->this_v = saved_this;
+    I->cur_fn = saved_cur_fn;
     I->depth--;
+    if (fn->is_async) {
+        /* an async function returns a promise of its result (or of its exception) */
+        value_t p = es_promise_new(I);
+        if (I->ctl == CTL_THROW) {
+            value_t ex = I->ret;
+            I->ctl = CTL_NONE;
+            if (!(ex.t == V_STR && strcmp(ex.s->s, "__exit__") == 0)) { es_promise_settle(I, p, 1, ex); return p; }
+            I->ctl = CTL_THROW;
+            I->throw_line = I->line; I->throw_col = I->col;
+            I->ret = ex;
+            return p;
+        }
+        es_promise_settle(I, p, 0, r);
+        return p;
+    }
     return r;
+}
+
+/* ── classes ── */
+
+/* runs a class's instance field initializers on this */
+static void init_fields(interp_t* I, func_t* cls) {
+    if (I->this_v.t != V_OBJ) return;
+    for (node_t* m = cls->fields; m && !I->ctl; m = m->next) {
+        value_t v = m->b ? eval(I, m->b) : v_undef();
+        if (I->ctl) return;
+        const char* key;
+        char kb[24];
+        if (m->a) { value_t k = eval(I, m->a); if (I->ctl) return; key_of(I, k, kb, sizeof(kb), &key); }
+        else key = m->s->s;
+        obj_set(I, I->this_v.o, key, v);
+    }
+}
+
+/* super(...args) inside constructor `cls`: the parent constructor runs on this */
+static void super_call(interp_t* I, func_t* cls, int argc, value_t* argv) {
+    value_t parent = cls->parent;
+    if (parent.t != V_FUNC) { script_throw(I, "TypeError: super() without a parent class"); return; }
+    if (parent.f->native) {
+        /* built-in parents (Error, Map, ...): make one, adopt what it set */
+        value_t marker = v_undef();
+        marker.t = V_NULL;
+        marker.b = 0x4E57;
+        value_t made = call_value(I, parent, marker, argc, argv);
+        if (I->ctl) return;
+        if (made.t == V_OBJ && I->this_v.t == V_OBJ && made.o != I->this_v.o) {
+            obj_t* me = I->this_v.o;
+            for (uint32_t k = 0; k < made.o->n; k++) prop_set_raw(I, me, made.o->props[k].key, made.o->props[k].v);
+            if (made.o->host) me->host = made.o->host;
+        }
+    } else {
+        call_value(I, parent, I->this_v, argc, argv);
+        if (I->ctl) return;
+    }
+    init_fields(I, cls);
 }
 
 /* property read with string/array/number methods */
@@ -1881,6 +2619,7 @@ static value_t key_of(interp_t* I, value_t k, char* buf, int cap, const char** o
 
 /* where an assignment writes: variable or property */
 static void assign_to(interp_t* I, node_t* target, value_t v) {
+    if (target->k == N_ARRAY || target->k == N_OBJECT) { destructure(I, target, v, 0); return; }
     if (target->k == N_IDENT) {
         var_t* x = env_lookup(I, I->cur, target->s->s);
         if (x) {
@@ -1944,6 +2683,67 @@ static void assign_to(interp_t* I, node_t* target, value_t v) {
             key_of(I, k, kb, sizeof(kb), &key);
         }
         obj_set(I, ov.o, key, v);
+    }
+}
+
+/* binds one destructuring target: a name, a nested pattern, a property, with an optional default */
+static void bind_target(interp_t* I, node_t* t, value_t v, int kind) {
+    if (t->k == N_ASSIGN && t->op == '=') {
+        if (v.t == V_UNDEF) { v = eval(I, t->b); if (I->ctl) return; }
+        t = t->a;
+    }
+    if (t->k == N_ARRAY || t->k == N_OBJECT) { destructure(I, t, v, kind); return; }
+    if (t->k == N_IDENT && kind) {
+        env_t* target = kind == 'v' ? I->fn_env : I->cur;
+        if (!target) target = I->global;
+        var_t* x = env_define(I, target, t->s, v);
+        x->is_const = kind == 'c';
+        return;
+    }
+    assign_to(I, t, v);
+}
+
+/* [a, b, ...rest] = v / {a, b: c, ...rest} = v; kind 0 assigns, 'v' 'l' 'c' declare */
+static void destructure(interp_t* I, node_t* pat, value_t v, int kind) {
+    if (pat->k == N_ARRAY) {
+        obj_t* arr = es_to_array(I, v);
+        if (!arr) { script_throw(I, "TypeError: value is not iterable"); return; }
+        uint32_t i = 0;
+        for (node_t* e = pat->a; e && !I->ctl; e = e->next, i++) {
+            if (e->k == N_EMPTY) continue;
+            if (e->k == N_SPREAD) {
+                obj_t* rest = obj_new(I, OBJ_ARRAY);
+                for (uint32_t k = i; k < arr->len; k++) arr_push(I, rest, arr->items[k]);
+                bind_target(I, e->a, v_obj(rest), kind);
+                return;
+            }
+            bind_target(I, e, i < arr->len ? arr->items[i] : v_undef(), kind);
+        }
+        return;
+    }
+    if (v.t == V_UNDEF || v.t == V_NULL) { script_throw(I, "TypeError: cannot destructure undefined"); return; }
+    const char* used[64];
+    int nused = 0;
+    for (node_t* p = pat->a; p && !I->ctl; p = p->next) {
+        if (p->k == N_SPREAD) {
+            obj_t* rest = obj_new(I, OBJ_PLAIN);
+            if (v.t == V_OBJ)
+                for (uint32_t k = 0; k < v.o->n; k++) {
+                    int skip = 0;
+                    for (int u = 0; u < nused; u++) if (strcmp(used[u], v.o->props[k].key->s) == 0) skip = 1;
+                    if (!skip) prop_set_raw(I, rest, v.o->props[k].key, v.o->props[k].v);
+                }
+            bind_target(I, p->a, v_obj(rest), kind);
+            return;
+        }
+        const char* key;
+        char kb[24];
+        if (p->a) { value_t k = eval(I, p->a); if (I->ctl) return; key_of(I, k, kb, sizeof(kb), &key); key = arena_strdup(I->A, key, (uint32_t)strlen(key)); }
+        else key = p->s->s;
+        if (nused < 64) used[nused++] = key;
+        value_t pv = obj_getv(I, v, key);
+        if (I->ctl) return;
+        bind_target(I, p->b, pv, kind);
     }
 }
 
@@ -2015,6 +2815,24 @@ static value_t binary(interp_t* I, int op, value_t a, value_t b) {
     case OP_BXOR: return v_num(to_i32(v_tonum(I, a)) ^ to_i32(v_tonum(I, b)));
     case OP_SHL:  return v_num((int32_t)((uint32_t)to_i32(v_tonum(I, a)) << (to_i32(v_tonum(I, b)) & 31)));
     case OP_SHR:  return v_num(to_i32(v_tonum(I, a)) >> (to_i32(v_tonum(I, b)) & 31));
+    case OP_USHR: return v_num((num_t)((uint32_t)to_i32(v_tonum(I, a)) >> (to_i32(v_tonum(I, b)) & 31)));
+    case OP_INSTANCEOF: return v_bool(es_instanceof(I, a, b));
+    case OP_IN: {
+        if (b.t != V_OBJ && b.t != V_FUNC) { script_throw(I, "TypeError: 'in' needs an object"); return v_undef(); }
+        str_t* k = v_tostr(I, a);
+        if (b.t == V_FUNC) return v_bool(b.f->statics && (prop_get_raw(b.f->statics, k->s, &(int){0}), 1) && obj_get(I, b.f->statics, k->s).t != V_UNDEF);
+        obj_t* o = b.o;
+        if (o->kind == OBJ_ARRAY) {
+            uint32_t idx;
+            if (key_index(k->s, &idx)) return v_bool(idx < o->len);
+            if (strcmp(k->s, "length") == 0) return v_bool(1);
+        }
+        if (o->kind == OBJ_HOST && o->hc && o->hc->get) { int f = 0; o->hc->get(I, o, k->s, &f); if (f) return v_bool(1); }
+        for (obj_t* p = o; p; p = p->proto) { int f = 0; prop_get_raw(p, k->s, &f); if (f) return v_bool(1); }
+        int f = 0;
+        lib_member(I, b, k->s, &f);
+        return v_bool(f);
+    }
     case OP_NULLISH: return (a.t == V_UNDEF || a.t == V_NULL) ? b : a;
     }
     return v_undef();
@@ -2062,6 +2880,7 @@ static value_t eval_member_value(interp_t* I, node_t* n, value_t* self_out) {
         return obj_getv(I, ov, n->s->s);
     }
     if (!n->b) { script_throw(I, "Error: cannot use [] for reading"); return v_undef(); }
+    if (n->op == 1 && (ov.t == V_UNDEF || ov.t == V_NULL)) return v_undef();
     value_t k = eval(I, n->b);
     if (I->ctl) return v_undef();
     if (ov.t == V_OBJ && ov.o->kind == OBJ_PHPARRAY) {
@@ -2083,10 +2902,70 @@ static value_t eval_member_value(interp_t* I, node_t* n, value_t* self_out) {
     return obj_getv(I, ov, key);
 }
 
+/* evaluates call arguments (with ...spread) into *out; returns the count */
+static int eval_args(interp_t* I, node_t* list, value_t* small, int small_cap, value_t** out) {
+    int cnt = 0, spread = 0;
+    for (node_t* a = list; a; a = a->next) { cnt++; if (a->k == N_SPREAD) spread = 1; }
+    value_t* buf = small;
+    int cap = small_cap;
+    if (cnt > small_cap || spread) { cap = cnt + 16; buf = (value_t*)arena_alloc(I->A, (uint32_t)cap * (uint32_t)sizeof(value_t)); }
+    int n = 0;
+    for (node_t* a = list; a; a = a->next) {
+        if (a->k == N_SPREAD) {
+            value_t v = eval(I, a->a);
+            if (I->ctl) return 0;
+            obj_t* arr = es_to_array(I, v);
+            if (!arr) { script_throw(I, "TypeError: spread of a value that is not iterable"); return 0; }
+            if (n + (int)arr->len > cap) {
+                int nc = n + (int)arr->len + 16;
+                value_t* nb = (value_t*)arena_alloc(I->A, (uint32_t)nc * (uint32_t)sizeof(value_t));
+                memcpy(nb, buf, (size_t)n * sizeof(value_t));
+                buf = nb;
+                cap = nc;
+            }
+            for (uint32_t k = 0; k < arr->len; k++) buf[n++] = arr->items[k];
+            continue;
+        }
+        if (n >= cap) break;
+        buf[n++] = eval(I, a);
+        if (I->ctl) return 0;
+    }
+    *out = buf;
+    return n;
+}
+
+/* super.x: looked up above the object the running method belongs to */
+static value_t super_lookup(interp_t* I, node_t* n) {
+    obj_t* home = I->cur_fn ? I->cur_fn->home : NULL;
+    const char* key;
+    char kb[24];
+    if (n->a) { value_t k = eval(I, n->a); if (I->ctl) return v_undef(); key_of(I, k, kb, sizeof(kb), &key); }
+    else key = n->s->s;
+    if (!home || !home->proto) return v_undef();
+    obj_t* above = home->proto;
+    int f = 0;
+    for (obj_t* p = above; p; p = p->proto) {
+        value_t v = prop_get_raw(p, key, &f);
+        if (f) return (v.t == V_OBJ && v.o->kind == OBJ_ACCESSOR) ? accessor_get(I, v, I->this_v) : v;
+    }
+    /* built-in parents: their methods (toString, ...) */
+    return lib_member(I, I->this_v, key, &f);
+}
+
 static value_t eval_call(interp_t* I, node_t* n) {
     value_t self = v_undef();
     value_t fn;
     node_t* c = n->a;
+    if (c->k == N_SUPERMEMBER) {
+        fn = super_lookup(I, c);
+        if (I->ctl) return v_undef();
+        if (fn.t != V_FUNC) { script_throw(I, "TypeError: super method is not a function"); return v_undef(); }
+        value_t small[16];
+        value_t* argv;
+        int argc = eval_args(I, n->b, small, 16, &argv);
+        if (I->ctl) return v_undef();
+        return call_value(I, fn, I->this_v, argc, argv);
+    }
     if (I->lang == LANG_PHP && c->k == N_IDENT && c->op == 1) {
         const char* name = c->s->s;
         /* special forms that must not evaluate undefined variables strictly */
@@ -2150,6 +3029,7 @@ static value_t eval_call(interp_t* I, node_t* n) {
         if (I->ctl) return v_undef();
         if (fn.t != V_FUNC) {
             if (c->k == N_MEMBER && c->op == 1 && (self.t == V_UNDEF || self.t == V_NULL)) return v_undef();
+            if (n->op == 1 && (fn.t == V_UNDEF || fn.t == V_NULL)) return v_undef();
             throwf(I, "TypeError: %s is not a function", c->k == N_MEMBER ? c->s->s : "value");
             return v_undef();
         }
@@ -2157,21 +3037,126 @@ static value_t eval_call(interp_t* I, node_t* n) {
         fn = eval(I, c);
         if (I->ctl) return v_undef();
         if (fn.t != V_FUNC) {
+            if (n->op == 1 && (fn.t == V_UNDEF || fn.t == V_NULL)) return v_undef();   /* f?.() */
             throwf(I, "TypeError: %s is not a function", c->k == N_IDENT ? c->s->s : "value");
             return v_undef();
         }
     }
-    value_t argv[16];
-    int argc = 0;
-    for (node_t* a = n->b; a && argc < 16; a = a->next) {
-        argv[argc++] = eval(I, a);
-        if (I->ctl) return v_undef();
-    }
+    value_t small[16];
+    value_t* argv;
+    int argc = eval_args(I, n->b, small, 16, &argv);
+    if (I->ctl) return v_undef();
     return call_value(I, fn, self, argc, argv);
+}
+
+static node_t g_default_ctor_body;                 /* an empty block */
+
+/* class X extends Y { ... }: a constructor function with a prototype of methods */
+static value_t eval_class(interp_t* I, node_t* n) {
+    value_t parent = v_undef();
+    if (n->a) {
+        parent = eval(I, n->a);
+        if (I->ctl) return v_undef();
+        if (parent.t != V_FUNC && parent.t != V_NULL) { script_throw(I, "TypeError: class extends a value that is not a constructor"); return v_undef(); }
+    }
+    node_t* ctor = NULL;
+    for (node_t* m = n->b; m; m = m->next)
+        if (m->op == 'm' && !m->n && m->s && strcmp(m->s->s, "constructor") == 0) ctor = m->b;
+    if (!ctor) {
+        ctor = (node_t*)arena_alloc(I->A, sizeof(node_t));
+        ctor->k = N_FUNC;
+        g_default_ctor_body.k = N_BLOCK;
+        ctor->b = &g_default_ctor_body;
+        if (parent.t == V_FUNC) ctor->d = (node_t*)2;       /* pass the arguments to super() */
+    }
+    ctor->s = n->s;
+    value_t F = make_func(I, ctor);
+    func_t* fn = F.f;
+    fn->is_class = 1;
+    fn->parent = parent;
+    fn->cls = NULL;
+    if (n->s) fn->name = n->s->s;
+    obj_t* proto = obj_new(I, OBJ_PLAIN);
+    fn->statics = obj_new(I, OBJ_PLAIN);
+    if (parent.t == V_FUNC) {
+        value_t pp = obj_getv(I, parent, "prototype");
+        if (pp.t == V_OBJ) proto->proto = pp.o;
+        if (parent.f->statics) fn->statics->proto = parent.f->statics;    /* static inheritance */
+    }
+    fn->home = proto;
+    obj_set(I, fn->statics, "prototype", v_obj(proto));
+    prop_set_raw(I, proto, str_new(I, "constructor", 11), F);
+    /* the class's own name is visible inside it */
+    env_t* saved = I->cur;
+    I->cur = env_new(I, saved, 0);
+    if (n->s) env_define(I, I->cur, n->s, F);
+    fn->closure = I->cur;
+    func_t* saved_fn = I->cur_fn;
+    value_t saved_this = I->this_v;
+    node_t* fields = NULL;
+    node_t** ftail = &fields;
+    for (node_t* m = n->b; m && !I->ctl; m = m->next) {
+        obj_t* target = m->n ? fn->statics : proto;
+        if (m->op == 'b') {                                   /* static { } */
+            I->cur_fn = fn;
+            I->this_v = F;
+            exec(I, m->b);
+            continue;
+        }
+        if (m->op == 'f') {
+            if (!m->n) {                                      /* instance field: copied per object */
+                node_t* copy = (node_t*)arena_alloc(I->A, sizeof(node_t));
+                *copy = *m;
+                copy->next = NULL;
+                *ftail = copy;
+                ftail = &copy->next;
+                continue;
+            }
+            I->cur_fn = fn;
+            I->this_v = F;
+            value_t v = m->b ? eval(I, m->b) : v_undef();
+            if (I->ctl) break;
+            obj_set(I, target, m->s ? m->s->s : "", v);
+            continue;
+        }
+        if (m->b == ctor) continue;
+        const char* key;
+        char kb[24];
+        if (m->a) { value_t k = eval(I, m->a); if (I->ctl) break; key_of(I, k, kb, sizeof(kb), &key); key = arena_strdup(I->A, key, (uint32_t)strlen(key)); }
+        else key = m->s->s;
+        I->cur_fn = fn;
+        value_t mv = make_func(I, m->b);
+        mv.f->home = target;
+        mv.f->cls = fn;
+        if (m->op == 'g' || m->op == 's') {
+            int f = 0;
+            value_t acc = prop_get_raw(target, key, &f);
+            if (!f || acc.t != V_OBJ || acc.o->kind != OBJ_ACCESSOR) {
+                acc = v_obj(obj_new(I, OBJ_PLAIN));
+                acc.o->kind = OBJ_ACCESSOR;
+                prop_set_raw(I, target, str_new(I, key, (uint32_t)strlen(key)), acc);
+            }
+            prop_set_raw(I, acc.o, str_new(I, m->op == 'g' ? "get" : "set", 3), mv);
+        } else {
+            prop_set_raw(I, target, str_new(I, key, (uint32_t)strlen(key)), mv);
+        }
+    }
+    fn->fields = fields;
+    I->cur_fn = saved_fn;
+    I->this_v = saved_this;
+    I->cur = saved;
+    if (I->ctl) return v_undef();
+    if (n->op == 1 && n->s) {                                 /* a declaration: let-like binding */
+        var_t* x = env_define(I, I->cur ? I->cur : I->global, n->s, F);
+        (void)x;
+    }
+    return F;
 }
 
 static value_t eval(interp_t* I, node_t* n) {
     if (!n || !step(I)) return v_undef();
+    I->col = n->col;
+    I->line = n->line;
     switch (n->k) {
     case N_NUM: return v_num(n->n);
     case N_STR: return v_strv(n->s);
@@ -2219,6 +3204,15 @@ static value_t eval(interp_t* I, node_t* n) {
         obj_t* o = obj_new(I, OBJ_ARRAY);
         o->proto = NULL;
         for (node_t* p = n->a; p; p = p->next) {
+            if (p->k == N_EMPTY) { arr_push(I, o, v_undef()); continue; }
+            if (p->k == N_SPREAD) {
+                value_t sv = eval(I, p->a);
+                if (I->ctl) return v_undef();
+                obj_t* items = es_to_array(I, sv);
+                if (!items) { script_throw(I, "TypeError: spread of a value that is not iterable"); return v_undef(); }
+                for (uint32_t k = 0; k < items->len; k++) arr_push(I, o, items->items[k]);
+                continue;
+            }
             value_t v = eval(I, p);
             if (I->ctl) return v_undef();
             arr_push(I, o, v);
@@ -2230,6 +3224,20 @@ static value_t eval(interp_t* I, node_t* n) {
         for (node_t* p = n->a; p; p = p->next) {
             const char* key;
             char kb[24];
+            if (p->k == N_SPREAD) {                             /* {...other} */
+                value_t sv = eval(I, p->a);
+                if (I->ctl) return v_undef();
+                if (sv.t == V_OBJ) {
+                    if (sv.o->kind == OBJ_ARRAY)
+                        for (uint32_t k = 0; k < sv.o->len; k++) { char b[16]; ksnprintf(b, sizeof(b), "%u", k); obj_set(I, o, b, sv.o->items[k]); }
+                    for (uint32_t k = 0; k < sv.o->n; k++) {
+                        value_t pv = sv.o->props[k].v;
+                        if (pv.t == V_OBJ && pv.o->kind == OBJ_ACCESSOR) pv = accessor_get(I, pv, sv);
+                        prop_set_raw(I, o, sv.o->props[k].key, pv);
+                    }
+                }
+                continue;
+            }
             if (p->a) {
                 value_t k = eval(I, p->a);
                 if (I->ctl) return v_undef();
@@ -2239,9 +3247,50 @@ static value_t eval(interp_t* I, node_t* n) {
             }
             value_t v = eval(I, p->b);
             if (I->ctl) return v_undef();
+            if (v.t == V_FUNC && !v.f->native && p->b->k == N_FUNC) v.f->home = o;   /* super inside methods */
+            if (p->op == 'g' || p->op == 's') {
+                /* get x() {} / set x(v) {}: one accessor holds both */
+                int f = 0;
+                value_t acc = prop_get_raw(o, key, &f);
+                if (!f || acc.t != V_OBJ || acc.o->kind != OBJ_ACCESSOR) {
+                    acc = v_obj(obj_new(I, OBJ_PLAIN));
+                    acc.o->kind = OBJ_ACCESSOR;
+                    prop_set_raw(I, o, str_new(I, key, (uint32_t)strlen(key)), acc);
+                }
+                prop_set_raw(I, acc.o, str_new(I, p->op == 'g' ? "get" : "set", 3), v);
+                continue;
+            }
             obj_set(I, o, key, v);
         }
         return v_obj(o);
+    }
+    case N_REGEX: return es_regexp_new(I, n->s->s, n->s->len, n->a->s->s);
+    case N_SEQ: {
+        value_t v = v_undef();
+        for (node_t* e = n->a; e; e = e->next) { v = eval(I, e); if (I->ctl) return v_undef(); }
+        return v;
+    }
+    case N_CLASS: return eval_class(I, n);
+    case N_SUPERCALL: {
+        func_t* cls = I->cur_fn ? (I->cur_fn->is_class ? I->cur_fn : I->cur_fn->cls) : NULL;
+        if (!cls) { script_throw(I, "SyntaxError: super() outside a constructor"); return v_undef(); }
+        value_t small[16];
+        value_t* argv;
+        int argc = eval_args(I, n->b, small, 16, &argv);
+        if (I->ctl) return v_undef();
+        super_call(I, cls, argc, argv);
+        return v_undef();
+    }
+    case N_SUPERMEMBER: return super_lookup(I, n);
+    case N_AWAIT: {
+        value_t v = eval(I, n->a);
+        if (I->ctl) return v_undef();
+        value_t r;
+        int st = es_promise_state(I, v, &r);
+        if (st < 0) return v;                                 /* not a promise */
+        if (st == 0) { es_run_jobs(I); st = es_promise_state(I, v, &r); }
+        if (st == 2) { I->ret = r; I->ctl = CTL_THROW; I->throw_line = I->line; I->throw_col = I->col; return v_undef(); }
+        return st == 1 ? r : v_undef();                       /* still pending: cannot wait here */
     }
     case N_FUNC: return make_func(I, n);
     case N_MEMBER: case N_INDEX: return eval_member_value(I, n, NULL);
@@ -2249,12 +3298,10 @@ static value_t eval(interp_t* I, node_t* n) {
     case N_NEW: {
         value_t fn = eval(I, n->a);
         if (I->ctl) return v_undef();
-        value_t argv[16];
-        int argc = 0;
-        for (node_t* a = n->b; a && argc < 16; a = a->next) {
-            argv[argc++] = eval(I, a);
-            if (I->ctl) return v_undef();
-        }
+        value_t small[16];
+        value_t* argv;
+        int argc = eval_args(I, n->b, small, 16, &argv);
+        if (I->ctl) return v_undef();
         if (fn.t != V_FUNC) { throwf(I, "TypeError: %s is not a constructor", n->a->k == N_IDENT ? n->a->s->s : "value"); return v_undef(); }
         if (fn.f->native) {
             value_t marker = v_undef();
@@ -2346,6 +3393,14 @@ static value_t eval(interp_t* I, node_t* n) {
             }
             if (I->ctl) return v_undef();
             if (n->op == OP_NULLISH && old.t != V_UNDEF && old.t != V_NULL) return old;
+            if (n->op == OP_LOGOR_ASSIGN || n->op == OP_LOGAND_ASSIGN) {
+                int t = v_truthy(I, old);
+                if ((n->op == OP_LOGOR_ASSIGN) == (t != 0)) return old;
+                v = eval(I, n->b);
+                if (I->ctl) return v_undef();
+                assign_to(I, n->a, v);
+                return v;
+            }
             value_t r = eval(I, n->b);
             if (I->ctl) return v_undef();
             v = n->op == OP_NULLISH ? r : binary(I, n->op, old, r);
@@ -2417,6 +3472,8 @@ static void hoist(interp_t* I, node_t* list, env_t* e) {
             }
         } else if (I->lang == LANG_PHP && s->k == N_BLOCK && s->op == 1) {
             hoist(I, s->a, e);
+        } else if (s->k == N_EXPORT && s->op != 'd' && s->a && s->a->k == N_FUNCDECL) {
+            hoist(I, s->a, e);                       /* export function f() {} */
         }
     }
 }
@@ -2429,9 +3486,25 @@ static void out_str(interp_t* I, str_t* s) {
     if (I->out && s->len) I->out(I->out_ctx, s->s, s->len);
 }
 
+/* after a loop body ran: 1 = leave the loop (break, a labelled break/continue for an
+ * outer loop, return, throw), 0 = go on (ctl cleared) */
+static int loop_exit(interp_t* I, node_t* loop) {
+    if (I->ctl == CTL_BREAK || I->ctl == CTL_CONTINUE) {
+        int mine = !I->label || (loop->s && strcmp(loop->s->s, I->label->s) == 0);
+        if (!mine) return 1;
+        int brk = I->ctl == CTL_BREAK;
+        I->ctl = CTL_NONE;
+        I->label = NULL;
+        return brk;
+    }
+    return I->ctl != CTL_NONE;
+}
+
 static void foreach_body(interp_t* I, node_t* n, value_t key, value_t val, int* stop) {
     if (n->c) assign_to(I, n->c, key);
-    if (n->b->k == N_IDENT) {
+    if (n->b->k == N_ARRAY || n->b->k == N_OBJECT) {
+        destructure(I, n->b, val, I->lang == LANG_JS ? 'l' : 0);
+    } else if (n->b->k == N_IDENT) {
         if (I->lang == LANG_JS) env_define(I, I->cur, n->b->s, val);
         else assign_to(I, n->b, val);
     } else {
@@ -2439,20 +3512,73 @@ static void foreach_body(interp_t* I, node_t* n, value_t key, value_t val, int* 
     }
     if (I->ctl) { *stop = 1; return; }
     exec(I, n->d);
-    if (I->ctl == CTL_BREAK) { I->ctl = CTL_NONE; *stop = 1; }
-    else if (I->ctl == CTL_CONTINUE) I->ctl = CTL_NONE;
-    else if (I->ctl) *stop = 1;
+    if (loop_exit(I, n)) *stop = 1;
+}
+
+/* modules: the exported names' current values into the namespace object */
+static void export_copy(interp_t* I, node_t* n) {
+    if (!I->module_ns || n->op == 'd') return;
+    for (node_t* b = n->b; b; b = b->next) {
+        if (!b->b) continue;
+        var_t* x = env_lookup(I, I->cur, b->b->s->s);
+        if (x) obj_set(I, I->module_ns, b->s->s, x->v);
+    }
+}
+static void export_pass(interp_t* I, node_t* list) {
+    for (node_t* s = list; s; s = s->next)
+        if (s->k == N_EXPORT) export_copy(I, s);
+}
+
+static void exec_import(interp_t* I, node_t* n) {
+    if (!n->s) return;
+    if (!I->import_fn) { script_throw(I, "SyntaxError: import is only available in pages"); return; }
+    value_t ns = I->import_fn(I, I->import_ctx, n->s->s, I->module_url);
+    if (I->ctl) return;
+    if (ns.t != V_OBJ) ns = v_obj(obj_new(I, OBJ_PLAIN));
+    for (node_t* b = n->a; b; b = b->next) {
+        int all = b->s->len == 1 && b->s->s[0] == '*';
+        if (n->op == 'r') {                          /* export ... from */
+            if (!I->module_ns) continue;
+            if (all && !b->b) {
+                for (uint32_t i = 0; i < ns.o->n; i++)
+                    if (strcmp(ns.o->props[i].key->s, "default") != 0)
+                        prop_set_raw(I, I->module_ns, ns.o->props[i].key, ns.o->props[i].v);
+            } else if (b->b) {
+                obj_set(I, I->module_ns, b->b->s->s, all ? ns : obj_get(I, ns.o, b->s->s));
+            }
+        } else if (b->b) {
+            env_define(I, I->cur, b->b->s, all ? ns : obj_get(I, ns.o, b->s->s));
+        }
+    }
 }
 
 static void exec(interp_t* I, node_t* n) {
     if (!n || !step(I)) return;
     I->line = n->line;
+    I->col = n->col;
     switch (n->k) {
     case N_EMPTY: case N_FUNCDECL: return;
+    case N_IMPORT: exec_import(I, n); return;
+    case N_EXPORT:
+        if (n->op == 'd') {
+            value_t v = eval(I, n->a);
+            if (!I->ctl && I->module_ns) obj_set(I, I->module_ns, "default", v);
+            return;
+        }
+        if (n->a) exec(I, n->a);
+        if (!I->ctl) export_copy(I, n);
+        return;
+    case N_VARHOIST: {
+        env_t* target = I->fn_env ? I->fn_env : I->global;
+        for (node_t* x = n->a; x; x = x->next)
+            if (!env_find_local(target, x->s->s)) env_define(I, target, x->s, v_undef());
+        return;
+    }
     case N_EXPR: eval(I, n->a); return;
     case N_VAR: {
         value_t v = n->a ? eval(I, n->a) : v_undef();
         if (I->ctl) return;
+        if (n->c) { destructure(I, n->c, v, n->op); return; }
         env_t* target = (n->op == 'v') ? I->fn_env : I->cur;
         if (!target) target = I->global;
         var_t* x = env_define(I, target, n->s, v);
@@ -2480,16 +3606,12 @@ static void exec(interp_t* I, node_t* n) {
             value_t c = eval(I, n->a);
             if (I->ctl || !v_truthy(I, c)) return;
             exec(I, n->b);
-            if (I->ctl == CTL_BREAK) { I->ctl = CTL_NONE; return; }
-            if (I->ctl == CTL_CONTINUE) { I->ctl = CTL_NONE; continue; }
-            if (I->ctl) return;
+            if (loop_exit(I, n)) return;
         }
     case N_DOWHILE:
         for (;;) {
             exec(I, n->b);
-            if (I->ctl == CTL_BREAK) { I->ctl = CTL_NONE; return; }
-            if (I->ctl == CTL_CONTINUE) I->ctl = CTL_NONE;
-            if (I->ctl) return;
+            if (loop_exit(I, n)) return;
             value_t c = eval(I, n->a);
             if (I->ctl || !v_truthy(I, c)) return;
         }
@@ -2517,9 +3639,7 @@ static void exec(interp_t* I, node_t* n) {
             } else {
                 exec(I, n->d);
             }
-            if (I->ctl == CTL_BREAK) { I->ctl = CTL_NONE; break; }
-            if (I->ctl == CTL_CONTINUE) I->ctl = CTL_NONE;
-            if (I->ctl) break;
+            if (loop_exit(I, n)) break;
             if (n->c) exec(I, n->c);
         }
         I->cur = saved;
@@ -2533,7 +3653,10 @@ static void exec(interp_t* I, node_t* n) {
         int stop = 0;
         if (it.t == V_OBJ) {
             obj_t* o = it.o;
-            if (n->op == 'o' && o->kind == OBJ_ARRAY) {
+            obj_t* iter = (n->op == 'o' && o->kind != OBJ_ARRAY) ? es_to_array(I, it) : NULL;
+            if (iter) {
+                for (uint32_t i = 0; i < iter->len && !stop; i++) foreach_body(I, n, v_num(i), iter->items[i], &stop);
+            } else if (n->op == 'o' && o->kind == OBJ_ARRAY) {
                 for (uint32_t i = 0; i < o->len && !stop; i++) foreach_body(I, n, v_num(i), o->items[i], &stop);
             } else if (n->op == 'i' && o->kind == OBJ_ARRAY) {
                 for (uint32_t i = 0; i < o->len && !stop; i++) {
@@ -2575,18 +3698,29 @@ static void exec(interp_t* I, node_t* n) {
         I->cur = saved;
         return;
     }
-    case N_RETURN:
-        I->ret = n->a ? eval(I, n->a) : (I->lang == LANG_PHP ? v_null() : v_undef());
-        if (I->ctl == CTL_THROW) return;
+    case N_RETURN: {
+        value_t r = n->a ? eval(I, n->a) : (I->lang == LANG_PHP ? v_null() : v_undef());
+        if (I->ctl == CTL_THROW) return;             /* I->ret holds the exception */
+        I->ret = r;
         I->ctl = CTL_RETURN;
         return;
-    case N_BREAK: I->ctl = CTL_BREAK; return;
-    case N_CONTINUE: I->ctl = CTL_CONTINUE; return;
+    }
+    case N_BREAK: I->ctl = CTL_BREAK; I->label = n->s; return;
+    case N_CONTINUE: I->ctl = CTL_CONTINUE; I->label = n->s; return;
+    case N_LABEL:
+        exec(I, n->a);
+        if ((I->ctl == CTL_BREAK || I->ctl == CTL_CONTINUE) && I->label && strcmp(I->label->s, n->s->s) == 0) {
+            I->ctl = CTL_NONE;
+            I->label = NULL;
+        }
+        return;
+    case N_CLASS: eval(I, n); return;
     case N_THROW: {
         value_t v = eval(I, n->a);
         if (I->ctl) return;
         I->ret = v;
         I->ctl = CTL_THROW;
+        I->throw_line = I->line; I->throw_col = I->col;
         return;
     }
     case N_TRY: {
@@ -2621,7 +3755,7 @@ static void exec(interp_t* I, node_t* n) {
         }
         if (!start) for (node_t* c = n->b; c; c = c->next) if (!c->a) { start = c; break; }
         for (node_t* c = start; c && !I->ctl; c = c->next) exec(I, c->b);
-        if (I->ctl == CTL_BREAK) I->ctl = CTL_NONE;
+        if (I->ctl == CTL_BREAK && !I->label) I->ctl = CTL_NONE;
         return;
     }
     case N_ECHO:
@@ -2663,6 +3797,11 @@ interp_t* script_new(arena_t* A, int lang) {
     I->depth_limit = 150;
     I->this_v = v_undef();
     lib_init(I);
+    /* made now: when memory runs out there is none left to make it */
+    obj_t* oe = obj_new(I, OBJ_PLAIN);
+    obj_set(I, oe, "name", v_str(I, "InternalError"));
+    obj_set(I, oe, "message", v_str(I, "out of memory"));
+    I->oom_err = oe;
     return I;
 }
 
@@ -2699,9 +3838,12 @@ static void set_uncaught(interp_t* I) {
     if (I->lang == LANG_PHP)
         ksnprintf(I->err, sizeof(I->err), "Fatal error: Uncaught %s in %s on line %d", s->s,
                   I->src_name ? I->src_name : "script", I->line);
+    else if (I->throw_col > 1)                             /* minified code: where on the line */
+        ksnprintf(I->err, sizeof(I->err), "Uncaught %s (%s, line %d:%d)", s->s,
+                  I->src_name ? I->src_name : "script", I->throw_line, I->throw_col);
     else
         ksnprintf(I->err, sizeof(I->err), "Uncaught %s (%s, line %d)", s->s,
-                  I->src_name ? I->src_name : "script", I->line);
+                  I->src_name ? I->src_name : "script", I->throw_line);
 }
 
 /* script_run/script_call may be re-entered from a native (a DOM method
@@ -2725,7 +3867,21 @@ static void leave(interp_t* I, run_state_t* s, int nested) {
     if (nested) { I->ret = s->ret; I->line = s->line; I->depth = s->depth; I->src_name = s->src_name; }
 }
 
-int script_run(interp_t* I, const char* src, uint32_t len, const char* name) {
+/* add the source around a syntax error to the message: minified code is all on one line */
+static void near_text(interp_t* I, const char* src, uint32_t len, const char* at) {
+    if (!at || at < src || at > src + len) return;
+    const char* s = at - 20 < src ? src : at - 20;
+    const char* e = at + 20 > src + len ? src + len : at + 20;
+    char snip[48];
+    int n = 0;
+    for (const char* q = s; q < e && n < (int)sizeof(snip) - 1; q++) snip[n++] = ((unsigned char)*q < ' ') ? ' ' : *q;
+    snip[n] = 0;
+    uint32_t used = (uint32_t)strlen(I->err);
+    ksnprintf(I->err + used, sizeof(I->err) - used, " near `%s`", snip);
+}
+
+/* a program (ns NULL) or a module (its own scope; exports into ns) */
+static int run_program(interp_t* I, const char* src, uint32_t len, const char* name, const char* url, obj_t* ns) {
     I->err[0] = 0;
     I->src_name = name;
     lexer_t L;
@@ -2734,11 +3890,14 @@ int script_run(interp_t* I, const char* src, uint32_t len, const char* name) {
     L.src = src;
     L.len = len;
     L.line = 1;
+    L.line_start = src;
     L.html = (I->lang == LANG_PHP);
     lex_all(&L);
     if (L.err) {
         ksnprintf(I->err, sizeof(I->err), "%s: %s in %s on line %d",
                   I->lang == LANG_PHP ? "Parse error" : "SyntaxError", L.err, name ? name : "script", L.err_line);
+        near_text(I, src, len, src + (L.pos < len ? L.pos : len));
+        kfree(L.toks);
         return -1;
     }
     parser_t P;
@@ -2750,25 +3909,59 @@ int script_run(interp_t* I, const char* src, uint32_t len, const char* name) {
     node_t* prog = mk(&P, N_BLOCK);
     prog->op = 1;
     node_t** tail = &prog->a;
+    node_t* hoisted = P.php ? NULL : mk(&P, N_VARHOIST);
+    P.hoist = hoisted;
     while (!P.err && pk(&P)->t != T_EOF) {
         node_t* s = parse_stmt(&P);
         if (!s) continue;
         *tail = s;
         while (*tail) tail = &(*tail)->next;
     }
+    if (hoisted && hoisted->a) { hoisted->next = prog->a; prog->a = hoisted; }
+    kfree(L.toks);                                   /* the tree does not point into them */
     if (P.err) {
         ksnprintf(I->err, sizeof(I->err), "%s: %s in %s on line %d",
                   I->lang == LANG_PHP ? "Parse error" : "SyntaxError", P.err, name ? name : "script", P.err_line);
+        near_text(I, src, len, P.err_at);
         return -1;
+    }
+    if (ns) {                                        /* imports are done before the rest */
+        node_t* imps = NULL;
+        node_t** it = &imps;
+        node_t* rest = NULL;
+        node_t** rt = &rest;
+        for (node_t* s = prog->a; s; ) {
+            node_t* nxt = s->next;
+            s->next = NULL;
+            if (s->k == N_IMPORT || s->k == N_VARHOIST) { *it = s; it = &s->next; }
+            else { *rt = s; rt = &s->next; }
+            s = nxt;
+        }
+        *it = rest;
+        prog->a = imps;
     }
     run_state_t st;
     int nested = enter(I, &st);
-    I->cur = I->global;
-    I->fn_env = I->global;
+    obj_t* saved_ns = I->module_ns;
+    const char* saved_url = I->module_url;
+    if (ns) {
+        env_t* m = env_new(I, I->global, 1);
+        I->cur = m;
+        I->fn_env = m;
+        I->module_ns = ns;
+        I->module_url = url;
+    } else {
+        I->cur = I->global;
+        I->fn_env = I->global;
+    }
     I->this_v = v_undef();
     I->ctl = CTL_NONE;
-    hoist(I, prog->a, I->global);
+    hoist(I, prog->a, I->cur);
+    if (ns) export_pass(I, prog->a);                 /* functions, for modules importing this one back */
     exec_list(I, prog->a);
+    if (ns && !I->ctl) export_pass(I, prog->a);
+    I->module_ns = saved_ns;
+    I->module_url = saved_url;
     int rc = 0;
     if (I->ctl == CTL_THROW) {
         set_uncaught(I);
@@ -2776,7 +3969,21 @@ int script_run(interp_t* I, const char* src, uint32_t len, const char* name) {
     }
     I->ctl = CTL_NONE;
     leave(I, &st, nested);
+    if (!nested && I->jobs && I->lang == LANG_JS) es_run_jobs(I);   /* promise reactions */
     return rc;
+}
+
+int script_run(interp_t* I, const char* src, uint32_t len, const char* name) {
+    return run_program(I, src, len, name, NULL, NULL);
+}
+
+int script_run_module(interp_t* I, const char* src, uint32_t len, const char* name, const char* url, obj_t* ns) {
+    return run_program(I, src, len, name, url, ns);
+}
+
+void script_set_import(interp_t* I, script_import_fn fn, void* ctx) {
+    I->import_fn = fn;
+    I->import_ctx = ctx;
 }
 
 int script_call(interp_t* I, value_t fn, value_t self, int argc, value_t* argv, value_t* ret) {
@@ -2795,5 +4002,6 @@ int script_call(interp_t* I, value_t fn, value_t self, int argc, value_t* argv, 
     }
     I->ctl = CTL_NONE;
     leave(I, &st, nested);
+    if (!nested && I->jobs && I->lang == LANG_JS) es_run_jobs(I);   /* promise reactions */
     return rc;
 }

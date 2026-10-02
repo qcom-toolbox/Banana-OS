@@ -18,6 +18,9 @@ typedef struct page_env {
     /* GET url into a kmalloc'd buffer (caller kfree()s); 0 = ok */
     int  (*fetch)(void* ctx, const char* url, char** data, uint32_t* len,
                   char* ctype, int ctype_cap, char* final_url, int final_cap, char* err, int err_cap);
+    /* optional: a request with a method and body (fetch(), XMLHttpRequest); 0 = ok */
+    int  (*request)(void* ctx, const char* url, const char* method, const char* body, uint32_t blen,
+                    const char* ctype, char** data, uint32_t* len, char* rtype, int rcap, char* err, int ecap);
     /* decode an image into out (pixels in the arena); 0 = ok */
     int  (*decode_image)(void* ctx, const uint8_t* data, uint32_t len, img_data_t* out, arena_t* A);
     uint32_t (*now_ms)(void);
@@ -54,10 +57,16 @@ typedef struct page {
     int          alert_pending;
     char         nav[1024];           /* navigation requested (link, location.href, form) */
     int          nav_pending;
+    int          nav_newtab;          /* ...in a new tab (target=_blank, window.open) */
+    char*        nav_post;            /* ...as a POST with this form body (NULL: GET) */
+    uint32_t     nav_post_len;
     int          scroll_req;          /* scroll position requested (#fragment), -1 none */
     char*        write_buf;           /* document.write() collected during a script */
     uint32_t     write_len, write_cap;
     dom_node_t*  cur_script;
+    struct page_module* mods;         /* ES modules loaded, by address */
+    int          nmods, mods_cap;
+    obj_t*       importmap;           /* <script type=importmap>: its "imports" */
     value_t*     onload;              /* window.onload / DOMContentLoaded handlers */
     int          nonload;
     int          js_disabled;
@@ -91,6 +100,9 @@ int     page_tick(page_t* p);
 /* y of the element with id/name (for #fragments), -1 if none */
 int     page_anchor_y(page_t* p, const char* name);
 
+/* the link (absolute URL) at page coordinates; 0 if there is none */
+int     page_link_at(page_t* p, int x, int y, char* out, int cap);
+
 /* resolves a link against a base URL */
 void    url_resolve(const char* base, const char* rel, char* out, int cap);
 
@@ -99,5 +111,7 @@ void    jsdom_install(page_t* p);
 int     jsdom_dispatch(page_t* p, dom_node_t* target, const char* type);   /* 1 = default prevented */
 int     jsdom_dispatch_key(page_t* p, dom_node_t* target, const char* type, const char* key);
 void    jsdom_run_handlers_from_attrs(page_t* p);
+void    jsdom_module(page_t* p, const char* url, const char* code, uint32_t len);   /* code NULL: load url */
+void    jsdom_importmap(page_t* p, const char* text, uint32_t len);
 
 #endif

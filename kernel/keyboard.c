@@ -278,10 +278,15 @@ static int translate_scancode_set2(uint8_t sc, char* out) {
         if (sc == 0x6B) { push_arrow('D'); *out = q_pop(); set2_e0 = 0; return 1; }
         if (sc == 0x14) { ctrl_held = 1; set2_e0 = 0; return 0; }
         if (sc == 0x11) { alt_held = 1; set2_e0 = 0; return 0; }  /* right alt */
+        /* Home End PgUp PgDn Delete: ESC [ H/F/I/G/P (three bytes, like the arrows) */
+        if (sc == 0x6C) { push_arrow('H'); *out = q_pop(); set2_e0 = 0; return 1; }
+        if (sc == 0x69) { push_arrow('F'); *out = q_pop(); set2_e0 = 0; return 1; }
+        if (sc == 0x7D) { push_arrow('I'); *out = q_pop(); set2_e0 = 0; return 1; }
+        if (sc == 0x7A) { push_arrow('G'); *out = q_pop(); set2_e0 = 0; return 1; }
         if (sc == 0x71) {                                          /* Delete key */
-            if (ctrl_held && alt_held) ctrl_alt_del_pending = 1;
             set2_e0 = 0;
-            return 0;
+            if (ctrl_held && alt_held) { ctrl_alt_del_pending = 1; return 0; }
+            push_arrow('P'); *out = q_pop(); return 1;
         }
         set2_e0 = 0;
         return 0;
@@ -355,10 +360,14 @@ static int process_scancode_byte(uint8_t sc, char* out) {
         if (sc == 0x9D) { ctrl_held = 0; set1_e0 = 0; return 0; }  /* right ctrl up */
         if (sc == 0x38) { alt_held = 1; set1_e0 = 0; return 0; }   /* right alt down */
         if (sc == 0xB8) { alt_held = 0; set1_e0 = 0; return 0; }   /* right alt up */
+        if (sc == 0x47) { push_arrow('H'); *out = q_pop(); set1_e0 = 0; return 1; }   /* Home */
+        if (sc == 0x4F) { push_arrow('F'); *out = q_pop(); set1_e0 = 0; return 1; }   /* End */
+        if (sc == 0x49) { push_arrow('I'); *out = q_pop(); set1_e0 = 0; return 1; }   /* PgUp */
+        if (sc == 0x51) { push_arrow('G'); *out = q_pop(); set1_e0 = 0; return 1; }   /* PgDn */
         if (sc == 0x53) {                                          /* Delete key down */
-            if (ctrl_held && alt_held) ctrl_alt_del_pending = 1;
             set1_e0 = 0;
-            return 0;
+            if (ctrl_held && alt_held) { ctrl_alt_del_pending = 1; return 0; }
+            push_arrow('P'); *out = q_pop(); return 1;
         }
         set1_e0 = 0;
         return 0;

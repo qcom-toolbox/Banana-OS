@@ -280,6 +280,31 @@ static void text_run(inl_t* I, const char* s, uint32_t n, const style_t* st, uin
 
 static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail);
 static int layout_children(ctx_t* C, dom_node_t* parent, int x, int y, int w);
+static void measure_cell(ctx_t* C, dom_node_t* cell, int* maxw, int* minw);
+
+static uint32_t g_layout_gen = 1;
+
+/* elements that take no room and show nothing: skip links pushed off screen,
+ * "visually hidden" text, collapsed or invisible out-of-flow boxes */
+static int out_of_sight(const style_t* st) {
+    if (st->position == POS_ABSOLUTE || st->position == POS_FIXED) {
+        if ((st->left != LEN_AUTO && st->left < -400) || (st->top != LEN_AUTO && st->top < -400)) return 1;
+        if (st->clipped || !st->visible) return 1;
+        if (st->width != LEN_AUTO && st->width <= 1 && !st->width_pct) return 1;
+        if (st->height != LEN_AUTO && st->height <= 1) return 1;
+    }
+    if (st->overflow_hidden && (st->clipped || (st->height != LEN_AUTO && st->height <= 1))) return 1;
+    return 0;
+}
+
+/* max-content / min-content widths, once per element per layout */
+static void measure(ctx_t* C, dom_node_t* e, int* maxw, int* minw) {
+    if (e->meas_gen == g_layout_gen) { *maxw = e->meas_max; *minw = e->meas_min; return; }
+    measure_cell(C, e, maxw, minw);
+    e->meas_gen = g_layout_gen;
+    e->meas_max = *maxw;
+    e->meas_min = *minw;
+}
 
 static int is_block_level(dom_node_t* e) {
     if (e->type != DOM_ELEM || !e->style) return 0;
@@ -520,12 +545,46 @@ static void inline_node(inl_t* I, dom_node_t* n, uint32_t bg, int has_bg) {
         finish_line(I, 1);
         return;
     }
+    if (out_of_sight(st)) return;
     n->box_x = I->x0 + I->cx;
     n->box_y = I->y;
-    if (strcmp(tag, "img") == 0 || strcmp(tag, "input") == 0 || strcmp(tag, "button") == 0 ||
-        strcmp(tag, "select") == 0 || strcmp(tag, "textarea") == 0) {
+    int replaced = strcmp(tag, "img") == 0 || strcmp(tag, "input") == 0 || strcmp(tag, "button") == 0 ||
+                   strcmp(tag, "select") == 0 || strcmp(tag, "textarea") == 0;
+    if (replaced) {
+        if (!st->visible) return;
         if (I->space && I->cx > 0) { I->cx += GLYPH * st->scale; I->space = 0; }
         inline_replaced(I, n, st);
+        return;
+    }
+    if (st->display == DISP_INLINE_BLOCK || st->display == DISP_TABLE) {
+        /* an atomic box: shrink-to-fit width, laid out where it lands on the line */
+        int ml = st->margin[3], mr = st->margin[1];
+        int extra = st->padding[1] + st->padding[3] + st->border[1] + st->border[3];
+        int bw;
+        if (st->width_pct) bw = I->w * st->width_pct / 100;
+        else if (st->width != LEN_AUTO && st->width > 0) bw = st->width + extra;
+        else {
+            int maxw, minw;
+            measure(C, n, &maxw, &minw);
+            bw = maxw;
+            if (bw > I->w - ml - mr) bw = I->w - ml - mr;
+            if (bw < minw) bw = minw;
+        }
+        if (st->max_width != LEN_AUTO && st->max_width > 0 && bw > st->max_width + extra) bw = st->max_width + extra;
+        if (bw < extra + 1) bw = extra + 1;
+        int total = bw + ml + mr;
+        if (I->space && I->cx > 0) { I->cx += GLYPH * st->scale; I->space = 0; }
+        if (I->cx > 0 && I->cx + total > I->w) finish_line(I, 0);
+        int x = I->x0 + I->cx;
+        uint32_t first = C->dry ? 0 : C->L->n;
+        int h = layout_box(C, n, x, 0, total);
+        mark_box(C, first, h);
+        I->cx += total;
+        I->space = 0;
+        I->empty = 0;
+        need_line_h(I, h);
+        if (C->max_word < total) C->max_word = total;
+        if (C->max_w < I->cx) C->max_w = I->cx;
         return;
     }
     if (st->has_bg) { bg = st->bg; has_bg = 1; }
@@ -601,7 +660,7 @@ static int layout_children(ctx_t* C, dom_node_t* parent, int x, int y, int w) {
 
 static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     const style_t* st = e->style;
-    if (!st || st->display == DISP_NONE) return 0;
+    if (!st || st->display == DISP_NONE || out_of_sight(st)) return 0;
     if (st->display == DISP_TABLE) return layout_table(C, e, x, y, avail);
     int ml = st->margin[3], mr = st->margin[1], mt = st->margin[0], mb = st->margin[2];
     int bl = st->border[3], br = st->border[1], bt = st->border[0], bb = st->border[2];
@@ -619,14 +678,14 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     int bx = x + ml, by = y + mt;
     uint32_t bg_index = C->dry ? 0 : C->L->n;
     int body_like = strcmp(e->tag, "body") == 0 || strcmp(e->tag, "html") == 0;
-    if (st->has_bg && !body_like) rect(C, bx, by, bw, 1, st->bg, e);
+    if (st->has_bg && !body_like && st->visible) rect(C, bx, by, bw, 1, st->bg, e);
     int content_y = by + bt + pt;
     int ch = layout_children(C, e, bx + bl + pl, content_y, cw);
     if (st->height != LEN_AUTO && st->height > 0) ch = st->height;
     int bh = bt + pt + ch + pb + bb;
-    if (st->has_bg && !body_like && !C->dry) C->L->items[bg_index].h = bh;
-    borders(C, st, bx, by, bw, bh, e);
-    if (st->display == DISP_LIST_ITEM && st->list_style != LIST_NONE) {
+    if (st->has_bg && !body_like && st->visible && !C->dry) C->L->items[bg_index].h = bh;
+    if (st->visible) borders(C, st, bx, by, bw, bh, e);
+    if (st->display == DISP_LIST_ITEM && st->list_style != LIST_NONE && st->visible) {
         int scale = st->scale ? st->scale : 1;
         char m[16];
         if (st->list_style == LIST_DECIMAL) ksnprintf(m, sizeof(m), "%d.", list_ordinal(e));
@@ -839,6 +898,7 @@ static void inline_boxes(layout_t* L) {
 }
 
 layout_t* layout_build(arena_t* A, dom_node_t* doc, int width, dom_node_t* focus) {
+    g_layout_gen++;
     layout_t* L = (layout_t*)arena_alloc(A, sizeof(layout_t));
     L->A = A;
     L->width = width;
@@ -865,4 +925,63 @@ dom_node_t* layout_hit(layout_t* L, int x, int y) {
         if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) return it->node;
     }
     return NULL;
+}
+
+/* ══ text selection ═══════════════════════════════════════════════════ */
+
+static int char_w(const dl_item_t* it) { return 8 * (it->scale ? it->scale : 1); }
+
+int layout_text_pos(layout_t* L, int x, int y, int* item, int* off) {
+    int best = -1, best_off = 0;
+    int line_hit = -1;              /* last text item on the point's line that starts left of it */
+    int after = -1;                 /* first text item below the point */
+    int last = -1;
+    for (uint32_t i = 0; i < L->n; i++) {
+        dl_item_t* it = &L->items[i];
+        if (it->kind != DL_TEXT || !it->len) continue;
+        last = (int)i;
+        int top = it->y - 2, bottom = it->y + char_w(it) + 3;
+        if (y >= top && y < bottom) {
+            if (x >= it->x && x < it->x + it->w) {
+                int o = (x - it->x + char_w(it) / 2) / char_w(it);
+                if (o > (int)it->len) o = (int)it->len;
+                best = (int)i;
+                best_off = o;
+                break;
+            }
+            if (it->x <= x) line_hit = (int)i;
+            else if (after < 0 || L->items[after].y > it->y) after = (int)i;
+        } else if (it->y > y && after < 0) {
+            after = (int)i;
+        }
+    }
+    if (best < 0 && line_hit >= 0) { best = line_hit; best_off = (int)L->items[line_hit].len; }
+    if (best < 0 && after >= 0) { best = after; best_off = 0; }
+    if (best < 0 && last >= 0) { best = last; best_off = (int)L->items[last].len; }
+    if (best < 0) return 0;
+    *item = best;
+    *off = best_off;
+    return 1;
+}
+
+uint32_t layout_text_range(layout_t* L, int i0, int o0, int i1, int o1, char* out, uint32_t cap) {
+    if (i1 < i0 || (i1 == i0 && o1 < o0)) { int t = i0; i0 = i1; i1 = t; t = o0; o0 = o1; o1 = t; }
+    uint32_t n = 0;
+    int prev_y = -1, prev_end = 0;
+    for (int i = i0; i <= i1 && i < (int)L->n; i++) {
+        dl_item_t* it = &L->items[i];
+        if (it->kind != DL_TEXT) continue;
+        int a = i == i0 ? o0 : 0, b = i == i1 ? o1 : (int)it->len;
+        if (a > (int)it->len) a = (int)it->len;
+        if (b > (int)it->len) b = (int)it->len;
+        if (prev_y >= 0 && n + 1 < cap) {
+            if (it->y > prev_y + 2) out[n++] = '\n';              /* a new line */
+            else if (it->x > prev_end + 1 && n && out[n - 1] != ' ' && (b > a && it->text[a] != ' ')) out[n++] = ' ';
+        }
+        for (int k = a; k < b && n + 1 < cap; k++) out[n++] = it->text[k];
+        prev_y = it->y;
+        prev_end = it->x + it->w;
+    }
+    out[n] = 0;
+    return n;
 }

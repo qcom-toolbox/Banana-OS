@@ -31,6 +31,12 @@ Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux k
 - **PHP** - `httpd` runs `.php` pages (`$_GET`, `$_SERVER`, `header()`, ~90 functions, files) with the same interpreter; try `http://localhost/demo.php`
 - **Permanent settings** - the network configuration (static IP or DHCP, chosen interface) and the servers to start at boot are saved in `/etc` and applied at every boot of an installed system
 - **Shell** - output redirection (`cmd > file`, `cmd >> file`) and command lists (`a; b`, `a && b`)
+- **SATA** - an AHCI driver next to the IDE one: SATA hard disks and SATA CD/DVD drives (QEMU `-machine q35`, VirtualBox's SATA controller); `install`, `sync` and booting from the disk work on either; `disks` lists them
+- **Resizable windows** - terminals, Files, Browser and Notepad resize from their bottom-right corner, and a double-click on a title bar maximizes / restores; a terminal's shell and the editor follow its new size
+- **Copy and paste** - one clipboard for the whole desktop: drag over a terminal's text to copy it and right-click to paste; Ctrl+C / Ctrl+X / Ctrl+V in Notepad, the editor and the browser
+- **Notepad** - a GUI text editor window (`notepad [file]`, the desktop, or double-click a text file in Files): mouse selection, scrollbars, Open / Save / Save as / Find
+- **Browser tabs** - up to 8 tabs (Ctrl+N, Ctrl+W, right-click a link to open it in a new one), a cookie jar, POST forms, and a much bigger web engine (below) for real-world pages
+- **Expose a local server to the internet** - `httpd expose` asks your router (UPnP) to forward a public port to Banana OS's web server
 
 ## Project Layout
 
@@ -54,7 +60,12 @@ Banana-OS/
 │   ├── fb.c, gfx.c     # Framebuffer + 2D drawing
 │   ├── gui.c/h         # Desktop GUI (taskbar/start menu/windows/wallpaper app)
 │   ├── explorer.c      # "Files" window (file explorer)
-│   ├── browser.c       # "Browser" window (runs web/ in its own task)
+│   ├── browser.c       # "Browser" window with tabs (runs web/ in its own task)
+│   ├── notepad.c       # "Notepad" window (GUI text editor)
+│   ├── winframe.c      # Window moving / resizing / maximizing, shared by the windows
+│   ├── clipboard.c     # The desktop's clipboard
+│   ├── textbuf.c       # Text buffer with selection (editor, Notepad)
+│   ├── ahci.c, disk.c  # SATA (AHCI) driver; disk.c puts IDE and SATA drives behind one API
 │   ├── tty.c           # Remote terminals (SSH sessions)
 │   ├── config.c        # key=value settings in /etc (network, services)
 │   ├── passwd.c        # Password hashes (PBKDF2) in /etc/shadow
@@ -75,14 +86,17 @@ Banana-OS/
 │   ├── http.c          # HTTP/1.1 client (curl, wget)
 │   ├── httpd.c         # Web server
 │   ├── httpd_php.c     # .php pages for httpd
+│   ├── upnp.c          # UPnP IGD client (httpd expose: port forwarding on the router)
 │   └── sshd.c          # SSH server
 ├── web/                # Browser engine: html.c (parser + DOM), css.c, layout.c, render.c,
-│                       #   script.c + script_lib.c (JavaScript and PHP interpreter), jsdom.c, page.c
+│                       #   script.c + script_lib.c + script_es.c (JavaScript and PHP interpreter),
+│                       #   regex.c (regular expressions), jsdom.c (the DOM, ES modules), page.c,
+│                       #   prelude.js (web APIs written in JavaScript; prelude.h is generated from it)
 ├── crypto/             # SHA-256/512, HMAC/HKDF/PBKDF2, ChaCha20, Poly1305, AES-128-GCM, X25519, Ed25519, self-tests
 ├── shell/
 │   ├── shell.c/h       # Banana shell
 │   ├── netcmds.c       # ifconfig, ping, curl, wget, ...
-│   ├── srvcmds.c       # sshd, httpd, passwd, files, browser
+│   ├── srvcmds.c       # sshd, httpd, passwd, files, browser, notepad
 │   ├── wpcmd.c         # wallpaper command
 │   └── editor.c/h      # Nano-like text editor
 ├── third_party/        # stb_image (runtime image decoding), lodepng
@@ -114,9 +128,12 @@ Banana-OS/
 - Built-in editor and live system monitor
 - Networking: e1000 + RTL8139 drivers, USB adapters (RTL8152/8152B, CDC-ECM), TCP/IP stack, DHCP, DNS, HTTP + HTTPS (TLS 1.3), saved configuration
 - Servers: SSH (password login, 2 sessions) and a web server with PHP pages, optionally started at boot
-- Web browser: HTML + CSS layout, images, forms, JavaScript with a DOM, history
+- Web browser: tabs, HTML + CSS layout (selectors level 4, variables, `calc()`, media queries), images, forms, JavaScript (ES2020+ with classes, modules, promises, regular expressions) with a DOM, history, copy and paste
+- Notepad: a GUI text editor
+- One clipboard shared by the terminals, the editor, Notepad and the browser; resizable, maximizable windows
 - File explorer window with text/picture previews
-- Real bootable disk install (`install`/`sync`) - installs onto a dedicated ATA hard disk so Banana OS boots on its own, with a persistent filesystem, no CD required
+- Real bootable disk install (`install`/`sync`) - installs onto a dedicated IDE or SATA hard disk so Banana OS boots on its own, with a persistent filesystem, no CD required
+- Storage: IDE (ATA/ATAPI) and SATA (AHCI) disks and CD/DVD drives
 - Serial console on COM1 (output mirror + input)
 
 # Minimum Requirements
@@ -143,12 +160,16 @@ Banana-OS/
   - Terminal
   - Files
   - Browser
+  - Notepad
   - Wallpaper
   - Quit GUI
 - Files - the file explorer (below)
 - Browser - the web browser (below)
+- Notepad - a text editor window: click to place the cursor, drag to select, double-click selects a word; Ctrl+A/C/X/V, Ctrl+S save, Ctrl+O open, Ctrl+N new, Ctrl+F find and Ctrl+G find next, right-click pastes; closing it with unsaved changes asks whether to save them
 - Wallpaper app - pick one of 10 built-in presets, or one of your own pictures from `~/Pictures`
 - Up to 4 terminal windows (draggable, closable, focusable, scrollable), each running its own independent shell task
+- Every window resizes from its bottom-right corner; double-click a title bar to maximize it (and again to restore)
+- Copy and paste: drag over a terminal's text to select and copy it, right-click to paste it (into the shell, or whatever runs there); Notepad, the editor (Ctrl+C / Ctrl+V) and the browser share the same clipboard
 - PS/2 mouse and Synaptics touchpad (absolute mode + tap-to-click) both work for pointing
 - Ctrl+Alt+Delete quits the GUI immediately, from anywhere
 
@@ -255,6 +276,8 @@ For example, `edit /var/www/hello.php`, then open `http://<address>/hello.php?na
 <?php foreach ([1, 2, 3] as $n) echo "<p>$n squared is " . $n * $n . "</p>"; ?>
 ```
 
+**On the internet**: `httpd expose [port]` asks your router, over UPnP, to forward a public port (80 by default) to Banana OS's web server, and prints the public address (`http://<public ip>:<port>/`); `httpd unexpose` removes the forwarding. It needs a router with UPnP turned on and Banana OS on that router's LAN (bridged networking in a VM); behind QEMU's NAT or a carrier-grade NAT it says so. Anything in `/var/www` is then readable by anyone, and `.php` pages run for them.
+
 In **QEMU's user-mode network** (the default `make run`), the guest is behind QEMU's NAT, so forward ports to reach the servers from your computer:
 
 ```bash
@@ -270,7 +293,8 @@ Open it from the desktop (`startx`): the **Files** icon or Start menu entry, or 
 
 - Click selects, double-click opens a folder; **Up** / **Home** navigate
 - The right pane previews the selection: text files show their first lines, pictures a thumbnail, folders their size
-- **Edit** (text) opens the file in the editor in a new terminal window; **Set as wallpaper** (pictures); double-click does the same
+- **Edit** (text) opens the file in Notepad; **Set as wallpaper** (pictures); double-click does the same
+- The window resizes from its bottom-right corner
 - **New folder**, **Delete** (click twice to confirm; folders are deleted with their contents), **Terminal** opens a terminal in the current folder, **Refresh**
 - The window can be dragged by its title bar, and stacks with the terminal windows
 
@@ -278,13 +302,18 @@ Open it from the desktop (`startx`): the **Files** icon or Start menu entry, or 
 
 Open it from the desktop (`startx`): the **Browser** icon or Start menu entry, or `browser [address]` in a terminal (`browser localhost/demo.php`, `browser example.com`, `browser /home/banana`).
 
-- Addresses: `http://` and `https://` (redirects followed), `file:///path` (files and folder listings), `about:home` (the start page). A bare name gets `http://`, a path gets `file://`
+- Addresses: `http://` and `https://` (redirects followed, cookies kept for the session), `file:///path` (files and folder listings), `about:home` (the start page). A bare name gets `http://`, a path gets `file://`
 - **<** / **>** history, **R** reload, **Hm** start page, the address bar (click it or Ctrl+L, Enter to go); scrollbar, arrow keys, space and PgUp/PgDn scroll; Backspace goes back; Ctrl+R reloads
-- HTML: a forgiving parser (missing end tags, entities, `<script>`/`<style>`), headings, paragraphs, lists, tables, links (`#anchors` too), `<pre>`, images (PNG/JPEG/GIF/BMP), forms (text fields, textareas, checkboxes, radio buttons, selects, buttons - submitted as GET)
-- CSS: `<style>`, `<link rel=stylesheet>` and `style=""`; tag/class/id/attribute selectors, descendant and child combinators, specificity and `!important`; colors, backgrounds, borders, margins/padding, widths, `margin: auto`, font size (scaled 8x8 font), bold/italic/underline, `text-align`, `display`, `visibility`, `white-space`
-- JavaScript: Banana OS's own interpreter for a basic JavaScript - `var/let/const`, functions, arrow functions, closures, objects, arrays, template strings, `try/catch`, and the usual String/Array/Math/JSON/Date methods. The DOM: `document.getElementById/querySelector(All)/createElement/write`, `innerHTML`, `textContent`, `value`, `style`, `classList`, `appendChild`/`remove`/..., `addEventListener` and `onclick=""`-style handlers (click, input, change, submit, keydown, load), `setTimeout/setInterval`, `alert()`, `location`, `localStorage` (for the page's lifetime)
-- Not supported: regular expressions, classes, `fetch`/XMLHttpRequest, CSS floats/flexbox/grid/positioning, fonts other than the built-in one. A script error is shown in the status bar and the rest of the page still works
-- Pages run in the browser's own task (a 2 MiB stack); a page gets at most 48 MiB, and a script stops after 5 million steps
+- **Tabs**: **+** or Ctrl+N opens one, its **x** or Ctrl+W closes it, a right-click on a link (or `target=_blank`, `window.open`) opens the link in a new tab; up to 8, each with its own page and history
+- **Copy and paste**: drag over the page's text to select it, Ctrl+C copies; Ctrl+V or a right-click pastes into the address bar or the focused text field
+- The window resizes from its bottom-right corner (the page is laid out again for the new width); double-click the title to maximize
+- HTML: a forgiving parser (missing end tags, entities, `<script>`/`<style>`), headings, paragraphs, lists, tables, links (`#anchors` too), `<pre>`, images (PNG/JPEG/GIF/BMP), forms (text fields, textareas, checkboxes, radio buttons, selects, buttons - submitted as GET or POST)
+- CSS: `<style>`, `<link rel=stylesheet>` and `style=""`; selectors up to level 4 (`+` `~` `>` combinators, `:not()`, `:is()`, `:where()`, `:nth-child()` and friends, `:checked`, attribute operators), specificity and `!important`, custom properties (`var(--x)`), `calc()`/`min()`/`max()`/`clamp()`, `hsl()`/`rgba()`, `@media` width queries, `@supports`, `@layer`; colors, backgrounds, borders, margins/padding, widths, `margin: auto`, font size (scaled 8x8 font), bold/italic/underline, `text-align`, `display` (flex rows and floats are laid out as inline blocks), `position`, `opacity`, `visibility`, `white-space`
+- JavaScript: Banana OS's own interpreter - `var/let/const` (with hoisting), functions, arrows, closures, classes (fields, `#private`, getters/setters, `static`, `extends`/`super`), destructuring, spread/rest, template strings (tagged too), labels, `async`/`await`, `for...of`, regular expressions (named groups, lookaround, flags `gimsuy`), Promise, Map/Set/WeakMap, Symbol, `Function()`/`eval`, and the usual String/Array/Object/Math/JSON/Date methods. **ES modules**: `<script type="module">`, `import`/`export` in all their forms, `import()`, `import.meta`, import maps; `nomodule` fallbacks are skipped
+- The DOM: `document.getElementById/querySelector(All)/createElement/write`, `innerHTML`, `textContent`, `value`, `style`, `classList`, `attributes`, `appendChild`/`remove`/`insertAdjacent*`/..., events (`addEventListener`, `dispatchEvent`, `Event`/`CustomEvent`, `onclick=""` handlers: click, input, change, submit, keydown/keyup, load), `Element.prototype` and friends (polyfills work), `setTimeout/setInterval`, `requestAnimationFrame`, `fetch` and `XMLHttpRequest` (GET and POST), `URL`/`URLSearchParams`, `AbortController`, `MessageChannel`, `history`, `matchMedia`, observers (as no-ops), `alert()`, `location`, `localStorage` (for the page's lifetime)
+- Real sites: Wikipedia, Hacker News, MDN and BBC News load with their scripts; big script-heavy apps (GitHub) partly work, within the page's memory
+- Not supported: CSS grid and real flexbox layout, fonts other than the built-in one, `<canvas>`, video, WebSockets, generators (`function*`). A script error is shown in the status bar (with the line and column) and the rest of the page still works
+- Pages run in the browser's own task (a 2 MiB stack); a page gets a fifth of the free memory (16 to 96 MiB), and a script stops after 5 million steps
 
 ## USB
 
@@ -438,7 +467,8 @@ Bash-flavored extras (available in both personas, since they share one engine):
 | `shutdown [now\|-c]` | Schedule shutdown (60s), immediate shutdown, or cancel |
 | `reboot` | Immediate reboot |
 | `halt` | Hard CPU halt |
-| `install` | Install Banana OS onto a dedicated ATA hard disk - bootable, with a persistent filesystem |
+| `install` | Install Banana OS onto a dedicated IDE or SATA hard disk - bootable, with a persistent filesystem |
+| `disks` | List the IDE and SATA (AHCI) disks and CD/DVD drives |
 | `sync` | Re-write the filesystem to the installed disk on demand |
 | **Networking** | |
 | `ifconfig [<if> <ip> [netmask m] [gw g] [dns d]]` | Show the interfaces, or configure one statically |
@@ -458,17 +488,19 @@ Bash-flavored extras (available in both personas, since they share one engine):
 | `passwd [-d]` | Set (or remove) the password of `banana`, used for SSH logins |
 | `sshd [status\|start [port]\|stop\|enable [port]\|disable]` | SSH server (port 22); `enable` also starts it at boot |
 | `httpd [status\|start [port]\|stop\|enable [port]\|disable]` | Web server for `/var/www` (port 80, `.php` pages run); `enable` also starts it at boot |
+| `httpd expose [port]` / `httpd unexpose` | Forward a public port on your router (UPnP) to the web server, and back |
 | **Wallpaper / desktop** | |
 | `wallpaper [list\|reset\|preset <n>\|url <url>\|<file> [fill\|fit\|stretch\|center]]` | Show or change the desktop wallpaper |
 | `files [folder]` | Open the file explorer (desktop running) |
 | `browser [address]` | Open the web browser, optionally at an address (desktop running) |
+| `notepad [file]` | Open Notepad, optionally on a file (desktop running) |
 | **Shell syntax** | |
 | `cmd > file`, `cmd >> file` | Write / append a command's output to a file |
 | `cmd1; cmd2`, `cmd1 && cmd2` | Run commands one after the other |
 
 ## Installing to a Hard Disk (`install` / `sync`)
 
-By default Banana OS boots from the GRUB CD/ISO every time and its filesystem is in-memory only, reset on every reboot. `install` does a real install onto a **second, dedicated IDE/ATA hard disk** attached to the VM (never the GRUB boot CD - the driver detects and skips ATAPI/optical drives):
+By default Banana OS boots from the GRUB CD/ISO every time and its filesystem is in-memory only, reset on every reboot. `install` does a real install onto a **second, dedicated IDE or SATA hard disk** attached to the VM (never the boot CD - optical drives are detected and skipped; `disks` shows what was found):
 
 ```bash
 # QEMU: create a blank disk image (64 MB+; 32 MB is reserved for the boot
@@ -477,7 +509,13 @@ qemu-img create -f raw disk.img 128M
 qemu-system-i386 -cdrom Banana_OS.iso -m 256 -nic user,model=e1000 -drive file=disk.img,format=raw,if=ide
 ```
 
-In VirtualBox, attach a second blank virtual hard disk (IDE, 128 MB+) to the same VM that boots `Banana_OS.iso`.
+In VirtualBox, attach a second blank virtual hard disk (IDE or SATA, 128 MB+) to the same VM that boots `Banana_OS.iso`.
+
+SATA (AHCI) works the same way - in QEMU with the q35 machine, whose disk controller is AHCI:
+
+```bash
+qemu-system-x86_64 -machine q35 -m 256 -cdrom Banana_OS.iso -drive file=disk.img,format=raw,if=none,id=d0 -device ide-hd,drive=d0,bus=ide.1
+```
 
 Then, inside Banana OS:
 

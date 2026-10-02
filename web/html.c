@@ -130,7 +130,12 @@ static void sb_add(sbuf_t* b, const char* s, uint32_t n) {
         uint32_t nc = b->cap ? b->cap * 2 : 256;
         while (nc < b->len + n + 1) nc *= 2;
         char* nb = (char*)arena_alloc(b->A, nc);
-        if (b->A->oom) return;
+        if (b->A->oom) {
+            /* out of page memory: the text so far (at least an empty string) */
+            static char empty[1];
+            if (!b->buf) { b->buf = empty; b->cap = 0; }
+            return;
+        }
         if (b->len) memcpy(nb, b->buf, b->len);
         b->buf = nb;
         b->cap = nc;

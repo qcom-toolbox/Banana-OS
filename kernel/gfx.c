@@ -88,3 +88,10 @@ void gfx_draw_text_scaled(int x, int y, int scale, const char* s, uint32_t fg, u
     }
 }
 
+
+void gfx_draw_grip(int right, int bottom) {
+    /* three diagonal rows of dots, like most desktops */
+    for (int row = 0; row < 3; row++)
+        for (int k = 0; k <= row; k++)
+            gfx_fill_rect(right - 5 - (row - k) * 4, bottom - 5 - k * 4, 2, 2, 0x008A96AAu);
+}

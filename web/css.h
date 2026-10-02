@@ -35,7 +35,25 @@ typedef struct style {
     int      max_width;             /* px or LEN_AUTO */
     int      font_px;               /* computed font size (for em) */
     int      margin_auto_lr;        /* margin: 0 auto - centered block */
+    uint8_t  position;              /* POS_* */
+    uint8_t  overflow_hidden;
+    uint8_t  clipped;               /* clip: rect(0 0 0 0) / clip-path: inset(50%) - visually hidden */
+    uint8_t  flex_row;              /* display: flex/grid laying its children out in a row */
+    uint8_t  floated;
+    int      left, top;             /* px or LEN_AUTO (position offsets) */
+    struct css_var* vars;           /* custom properties (--x), inherited */
 } style_t;
+
+enum { POS_STATIC = 0, POS_RELATIVE, POS_ABSOLUTE, POS_FIXED, POS_STICKY };
+
+typedef struct css_var {
+    const char* name;
+    const char* value;
+    struct css_var* next;
+} css_var_t;
+
+/* the viewport width @media queries are evaluated against (page.c sets it) */
+extern int css_viewport_w;
 
 typedef struct css_sheet css_sheet_t;
 

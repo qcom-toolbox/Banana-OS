@@ -14,6 +14,9 @@
 #include "../kernel/types.h"
 #include "../kernel/ata.h"
 #include "../kernel/fsdisk.h"
+#include "../kernel/disk.h"
+#include "../kernel/ahci.h"
+#include "../kernel/clipboard.h"
 #include "netcmds.h"
 #include "srvcmds.h"
 #include "../kernel/serial.h"
@@ -766,7 +769,8 @@ static void cmd_help(void) {
         "  shutdown [now|-c]  schedule shutdown (60s), now, or cancel",
         "  reboot             immediate reboot",
         "  halt               hard halt (no ACPI)",
-        "  install            install to a dedicated ATA disk (bootable, persistent)",
+        "  disks              list the IDE and SATA drives",
+        "  install            install to a dedicated IDE or SATA disk (bootable, persistent)",
         "  sync               re-write filesystem to the installed disk now",
         "  time <command>     run a command and print how long it took",
         "",
@@ -790,11 +794,13 @@ static void cmd_help(void) {
         "  wallpaper url <u>  download a picture to ~/Pictures and use it",
         "  files [folder]     open the desktop's file explorer (also: Files icon)",
         "  browser [url]      open the desktop's web browser (also: Browser icon)",
+        "  notepad [file]     open the desktop's text editor (also: Notepad icon)",
         "",
         "Servers:",
         "  passwd             set the password of banana (the SSH login)",
         "  sshd start|stop    SSH server (port 22): ssh banana@<this machine>",
         "  httpd start|stop   web server (port 80) for /var/www, runs .php pages",
+        "  httpd expose       make it reachable from the Internet (router UPnP)",
         "  sshd/httpd enable  also start it at every boot (disable: undo)",
         "",
         "Shell: cmd > file, cmd >> file, cmd1; cmd2, cmd1 && cmd2",
@@ -1174,12 +1180,12 @@ static const char* const known_cmds[] = {
     "ls", "cd", "pwd", "mkdir", "rm", "touch", "cp", "mv", "edit", "cat", "run",
     "uptime", "top", "exit", "start", "stop", "startx", "stopx",
     "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
-    "hw_info", "shutdown", "reboot", "halt", "install", "sync", "history", "which", "type",
+    "hw_info", "shutdown", "reboot", "halt", "install", "sync", "disks", "history", "which", "type",
     "alias", "unalias", "export", "unset", "env", "chsh",
     "grep", "wc", "head", "tail", "find", "time",
     /* shell/netcmds.c + shell/wpcmd.c */
     "ifconfig", "dhcp", "ping", "nslookup", "host", "netstat", "arp", "curl", "wget",
-    "cryptotest", "wallpaper", "lsusb", "usb", "httpd", "sshd", "passwd", "files", "browser", (void*)0
+    "cryptotest", "wallpaper", "lsusb", "usb", "httpd", "sshd", "passwd", "files", "browser", "notepad", (void*)0
 };
 
 static void cmd_which(const char* args) {
@@ -1528,12 +1534,13 @@ static int prompt_yes_no(void) {
 }
 
 static void print_disk_line(const ata_disk_t* d) {
-    char b[16];
+    char b[16], where[32];
+    disk_describe(d, where, sizeof(where));
     terminal_write("  ");
-    terminal_write(d->bus == ATA_BUS_PRIMARY ? "primary " : "secondary ");
-    terminal_write(d->is_slave ? "slave" : "master");
+    terminal_write(where);
     terminal_write("  ");
-    terminal_write(d->is_atapi ? "(ATAPI/CD - skipped)" : d->model[0] ? d->model : "(unknown model)");
+    terminal_write(d->is_atapi ? "CD/DVD" : d->model[0] ? d->model : "(unknown model)");
+    if (d->is_atapi && d->model[0]) { terminal_write(" "); terminal_write(d->model); }
     if (!d->is_atapi && d->sectors) {
         terminal_write("  ~");
         terminal_write(u32_to_str(d->sectors / 2048u, b, sizeof(b))); /* 512B sectors -> MB */
@@ -1542,15 +1549,23 @@ static void print_disk_line(const ata_disk_t* d) {
     terminal_putchar('\n');
 }
 
+static void cmd_disks(void) {
+    ata_disk_t all[DISK_MAX];
+    int n = disk_probe(all, DISK_MAX);
+    if (!n) terminal_writeln("disks: no IDE or SATA drive found");
+    for (int i = 0; i < n; i++) print_disk_line(&all[i]);
+    terminal_write(ahci_status());
+}
+
 static void cmd_install(void) {
-    ata_disk_t all[4];
-    ata_probe_disks(all);
+    ata_disk_t all[DISK_MAX];
+    int nd = disk_probe(all, DISK_MAX);
 
     int found = 0;
     ata_disk_t target;
-    for (int i = 0; i < 4; i++) {
-        if (all[i].present) print_disk_line(&all[i]);
-        if (all[i].present && !all[i].is_atapi) { found++; target = all[i]; }
+    for (int i = 0; i < nd; i++) {
+        print_disk_line(&all[i]);
+        if (!all[i].is_atapi) { found++; target = all[i]; }
     }
 
     if (found == 0) {
@@ -1562,7 +1577,7 @@ static void cmd_install(void) {
     }
     if (found > 1) {
         terminal_write_color(
-            "install: multiple ATA hard disks found - detach extras so exactly one\n"
+            "install: multiple hard disks found - detach extras so exactly one\n"
             "is attached, then try again.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }
@@ -1772,12 +1787,24 @@ static void shell_readline(char* buf, int maxlen, int persona) {
 
             if (gui_handle_arrow(c3)) continue;
 
-            if (c3 == 'D' || c3 == 'C') {
+            if (c3 == 'D' || c3 == 'C' || c3 == 'H' || c3 == 'F') {
                 if (c3 == 'D' && cur > 0) cur--;
                 else if (c3 == 'C' && cur < len) cur++;
+                else if (c3 == 'H' && cur > 0) cur = 0;            /* Home */
+                else if (c3 == 'F' && cur < len) cur = len;        /* End */
                 else continue;
                 line_place_cursor(start, cur);
                 line_serial_echo(buf, len, cur, persona);
+                continue;
+            }
+            if (c3 == 'P') {                                  /* Delete */
+                if (cur >= len) continue;
+                for (int i = cur; i < len; i++) buf[i] = buf[i + 1];
+                len--;
+                buf[len] = 0;
+                line_repaint(&start, buf, len, prev_len, cur);
+                line_serial_echo(buf, len, cur, persona);
+                prev_len = len;
                 continue;
             }
             if (c3 == 'A') { /* history up */
@@ -1807,6 +1834,17 @@ static void shell_readline(char* buf, int maxlen, int persona) {
         } else if (gui_handle_key(c)) {
             /* GUI consumed this key (e.g. Ctrl+T Start menu) */
             continue;
+        } else if (c == 22) { /* Ctrl+V: paste the clipboard (as one line: it never runs anything by itself) */
+            uint32_t n;
+            const char* clip = clipboard_get(&n);
+            for (uint32_t k = 0; k < n && len < maxlen - 1; k++) {
+                char ch = clip[k];
+                if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+                if ((unsigned char)ch < 32) continue;
+                for (int i = len; i > cur; i--) buf[i] = buf[i - 1];
+                buf[cur++] = ch;
+                len++;
+            }
         } else if (c == 3) { /* Ctrl+C: cancel line, do not execute history entry */
             buf[0] = '\0';
             line_place_cursor(start, len);
@@ -2098,6 +2136,7 @@ static void dispatch_cmd(const char* raw_line, int persona) {
     }
     if (k_strcmp(line, "chsh")     == 0) { cmd_chsh("", persona); return; }
 
+    if (k_strcmp(line, "disks")    == 0) { cmd_disks();       return; }
     if (k_strcmp(line, "install")  == 0) { cmd_install();     return; }
     if (k_strcmp(line, "sync")     == 0) { cmd_sync();        return; }
     if (k_strncmp(line, "time ", 5) == 0) {

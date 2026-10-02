@@ -227,7 +227,7 @@ static void set_title(page_t* p) {
 
 static int is_js(dom_node_t* s) {
     const char* t = dom_attr(s, "type");
-    if (!t || !*t) return 1;
+    if (!t || !*t) return !dom_attr(s, "nomodule");   /* modules work here: skip their fallbacks */
     return strcasecmp(t, "text/javascript") == 0 || strcasecmp(t, "application/javascript") == 0 ||
            strcasecmp(t, "module") == 0 || strcasecmp(t, "text/ecmascript") == 0;
 }
@@ -249,33 +249,50 @@ static void flush_writes(page_t* p) {
 }
 
 static void run_script(page_t* p, dom_node_t* s) {
-    if (s->script_done || !is_js(s)) return;
+    if (s->script_done) return;
+    const char* ty = dom_attr(s, "type");
+    if (ty && strcasecmp(ty, "importmap") == 0) {
+        s->script_done = 1;
+        if (s->first && s->first->type == DOM_TEXT) jsdom_importmap(p, s->first->text, s->first->text_len);
+        return;
+    }
+    if (!is_js(s)) return;
     s->script_done = 1;
+    int module = ty && strcasecmp(ty, "module") == 0;
     const char* src_attr = dom_attr(s, "src");
+    if (p->A.oom) return;                           /* out of page memory: no more scripts */
     const char* code;
     uint32_t len;
-    char name[128];
+    char* fetched = NULL;
+    const char* name;
     if (src_attr) {
         char url[1024], ct[96];
         url_resolve(p->url, src_attr, url, sizeof(url));
-        char* data;
-        if (fetch(p, url, &data, &len, ct, sizeof(ct)) != 0) return;
-        char* copy = arena_strdup(&p->A, data, len);
-        kfree(data);
-        code = copy;
+        if (module) {                               /* fetched (once) and run by jsdom */
+            p->cur_script = s;
+            jsdom_module(p, url, NULL, 0);
+            flush_writes(p);
+            p->cur_script = NULL;
+            return;
+        }
+        if (fetch(p, url, &fetched, &len, ct, sizeof(ct)) != 0) return;
+        code = fetched;                             /* parsed straight from the download */
         const char* slash = strrchr(url, '/');
-        kstrlcpy(name, slash ? slash + 1 : url, sizeof(name));
+        const char* nm = slash ? slash + 1 : url;
+        name = arena_strdup(&p->A, nm, (uint32_t)(strlen(nm) > 80 ? 80 : strlen(nm)));
     } else {
         if (!s->first || s->first->type != DOM_TEXT) return;
         code = s->first->text;
         len = s->first->text_len;
-        kstrlcpy(name, "inline script", sizeof(name));
+        name = "inline script";
     }
     p->cur_script = s;
-    if (script_run(p->js, code, len, name) != 0) {
+    if (module) jsdom_module(p, p->url, code, len);
+    else if (script_run(p->js, code, len, name) != 0) {
         kstrlcpy(p->status, script_error(p->js), sizeof(p->status));
         plog(p, "js: %s", p->status);
     }
+    if (fetched) kfree(fetched);                    /* the syntax tree does not point into it */
     flush_writes(p);
     p->cur_script = NULL;
 }
@@ -348,6 +365,7 @@ void page_update(page_t* p, int width) {
      * in their own arena, emptied first */
     arena_free_all(&p->LA);
     arena_init(&p->LA, LAYOUT_MEM);
+    css_viewport_w = width;                 /* @media (min-width / max-width) */
     css_style_tree(&p->LA, p->doc, p->sheets, p->nsheets);
     p->layout = layout_build(&p->LA, p->doc, width, p->focus);
     p->width = width;
@@ -424,6 +442,8 @@ static void navigate(page_t* p, const char* href) {
         return;
     }
     url_resolve(p->url, href, p->nav, sizeof(p->nav));
+    p->nav_post = NULL;
+    p->nav_newtab = 0;
     p->nav_pending = 1;
 }
 
@@ -474,9 +494,9 @@ static void form_fields(dom_node_t* n, dom_node_t* submitter, char* q, int cap) 
 static void submit_form(page_t* p, dom_node_t* form, dom_node_t* submitter) {
     if (!form) return;
     if (jsdom_dispatch(p, form, "submit")) return;          /* preventDefault() / return false */
-    char q[1024];
-    q[0] = 0;
-    form_fields(form, submitter, q, sizeof(q));
+    const int qcap = 16384;
+    char* q = (char*)arena_alloc(&p->A, qcap);
+    form_fields(form, submitter, q, qcap);
     const char* action = dom_attr(form, "action");
     char base[1024];
     if (action && *action) url_resolve(p->url, action, base, sizeof(base));
@@ -485,8 +505,31 @@ static void submit_form(page_t* p, dom_node_t* form, dom_node_t* submitter) {
     if (qm) *qm = 0;
     char* hm = strchr(base, '#');
     if (hm) *hm = 0;
-    ksnprintf(p->nav, sizeof(p->nav), "%s?%s", base, q);
+    const char* method = dom_attr(form, "method");
+    if (method && strcasecmp(method, "post") == 0) {
+        kstrlcpy(p->nav, base, sizeof(p->nav));
+        p->nav_post = q;
+        p->nav_post_len = (uint32_t)strlen(q);
+    } else {
+        ksnprintf(p->nav, sizeof(p->nav), "%s?%s", base, q);
+        p->nav_post = NULL;
+    }
+    const char* target = dom_attr(form, "target");
+    p->nav_newtab = target && strcasecmp(target, "_blank") == 0;
     p->nav_pending = 1;
+}
+
+int page_link_at(page_t* p, int x, int y, char* out, int cap) {
+    if (!p->layout) return 0;
+    for (dom_node_t* e = layout_hit(p->layout, x, y); e && e->type == DOM_ELEM; e = e->parent) {
+        if (strcmp(e->tag, "a") == 0 && dom_attr(e, "href")) {
+            const char* href = dom_attr(e, "href");
+            if (strncasecmp(href, "javascript:", 11) == 0) return 0;
+            url_resolve(p->url, href, out, cap);
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static int is_text_field(dom_node_t* e) {
@@ -548,6 +591,8 @@ void page_click(page_t* p, int x, int y) {
                 return;
             }
             navigate(p, href);
+            const char* target = dom_attr(e, "target");
+            p->nav_newtab = target && strcasecmp(target, "_blank") == 0;
             return;
         }
         if (is_text_field(e)) { p->focus = e; return; }

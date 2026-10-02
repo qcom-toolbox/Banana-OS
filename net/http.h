@@ -35,6 +35,13 @@ typedef struct {
     int      max_redirects;    /* default 10 */
     uint32_t timeout_ms;       /* per connect/read wait; default 20 s */
     const char* user_agent;
+    /* optional request body (POST): sent with Content-Type and Content-Length */
+    const char* body;
+    uint32_t body_len;
+    const char* content_type;
+    /* optional extra header lines, each ending in "
+" (cookies, SOAPAction, ...) */
+    const char* extra_headers;
     int      tls_ciphers;      /* TLS_CIPHERS_* (tls.h), 0 = offer all */
 
     /* all optional */

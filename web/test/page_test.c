@@ -15,6 +15,26 @@ static void logf_(void* ctx, const char* s) { (void)ctx; fprintf(stderr, "[log] 
 static int fetch(void* ctx, const char* url, char** data, uint32_t* len, char* ct, int ccap,
                  char* fin, int fcap, char* err, int ecap) {
     (void)ctx; (void)ct; (void)ccap; (void)fin; (void)fcap; (void)err; (void)ecap;
+    if (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0) {
+        /* real pages: through curl */
+        char cmd[2300];
+        snprintf(cmd, sizeof(cmd), "curl -sL --max-time 20 -A 'Mozilla/5.0' '%s'", url);
+        FILE* f = popen(cmd, "r");
+        if (!f) return -1;
+        size_t cap = 1 << 20, n = 0;
+        char* buf = malloc(cap);
+        size_t r;
+        while ((r = fread(buf + n, 1, cap - n - 1, f)) > 0) {
+            n += r;
+            if (n + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+        }
+        pclose(f);
+        buf[n] = 0;
+        fprintf(stderr, "[fetch] %s -> %zu bytes\n", url, n);
+        *data = buf;
+        *len = (uint32_t)n;
+        return 0;
+    }
     const char* path = url;
     if (strncmp(path, "file://", 7) == 0) path += 7;
     char clean[1024];
@@ -25,8 +45,8 @@ static int fetch(void* ctx, const char* url, char** data, uint32_t* len, char* c
     FILE* f = fopen(clean, "rb");
     fprintf(stderr, "[fetch] %s -> %s\n", url, f ? "ok" : "missing");
     if (!f) return -1;
-    char* buf = malloc(1 << 20);
-    size_t n = fread(buf, 1, (1 << 20) - 1, f);
+    char* buf = malloc(8 << 20);
+    size_t n = fread(buf, 1, (8 << 20) - 1, f);
     fclose(f);
     buf[n] = 0;
     *data = buf;
@@ -42,13 +62,14 @@ int main(int argc, char** argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     FILE* f = fopen(argv[1], "rb");
     if (!f) return 2;
-    static char src[1 << 20];
+    static char src[8 << 20];
     size_t n = fread(src, 1, sizeof(src) - 1, f);
     fclose(f);
-    page_env_t env = { fetch, NULL, now_ms, logf_, NULL };
+    page_env_t env = { .fetch = fetch, .now_ms = now_ms, .log = logf_ };
     page_t* p = page_new(&env, 64u << 20);
     char url[600];
-    snprintf(url, sizeof(url), "file:///%s", argv[1]);
+    if (getenv("PAGE_URL")) snprintf(url, sizeof(url), "%s", getenv("PAGE_URL"));   /* the page's real address */
+    else snprintf(url, sizeof(url), "file:///%s", argv[1]);
     page_load(p, url, src, (uint32_t)n, width);
     fprintf(stderr, "title: '%s' status: '%s'\n", p->title, p->status);
     for (int i = 3; i < argc; i++) {

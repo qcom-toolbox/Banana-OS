@@ -48,7 +48,19 @@ enum {
     N_SWITCH,       /* a: discriminant, b: list of N_CASE */
     N_CASE,         /* a: test (NULL = default), b: statement list */
     N_GLOBAL,       /* PHP global $x: s */
-    N_EMPTY
+    N_EMPTY,
+    /* later JavaScript */
+    N_REGEX,        /* s: pattern, a: N_STR flags */
+    N_SPREAD,       /* ...a (array/object literals, call arguments, rest elements) */
+    N_SEQ,          /* a, b (comma operator): a = list */
+    N_LABEL,        /* s: label, a: statement */
+    N_CLASS,        /* s: name, a: superclass, b: members (N_PAIR: op 'm'/'g'/'s'/'f', n = 1 static); op 1: declaration */
+    N_SUPERCALL,    /* super(b...) */
+    N_SUPERMEMBER,  /* super.s */
+    N_AWAIT,        /* await a */
+    N_VARHOIST,     /* a = list of `var` names to declare (undefined) on entry */
+    N_IMPORT,       /* import ... from s (see parse_import) */
+    N_EXPORT,       /* export a / export { b } */
 };
 
 /* binary/unary operator codes (op field) */
@@ -58,12 +70,13 @@ enum {
     OP_AND, OP_OR, OP_NULLISH,
     OP_NOT, OP_NEG, OP_PLUS, OP_BITNOT,
     OP_BAND, OP_BOR, OP_BXOR, OP_SHL, OP_SHR,
-    OP_SPACESHIP, OP_IN, OP_INSTANCEOF
+    OP_SPACESHIP, OP_IN, OP_INSTANCEOF, OP_USHR, OP_LOGAND_ASSIGN, OP_LOGOR_ASSIGN
 };
 
 typedef struct node {
     uint8_t  k;
     uint8_t  op;
+    uint16_t col;            /* column, capped (errors in minified code) */
     int      line;
     struct node *a, *b, *c, *d;
     struct node* next;       /* lists */
@@ -96,6 +109,13 @@ struct func {
     value_t    bound_this;   /* arrow functions keep the outer `this` */
     int        has_bound;
     obj_t*     statics;      /* properties of the function itself (String.fromCharCode, F.prototype) */
+    value_t    data;         /* natives: a value they were made with (promise resolvers, bound arguments) */
+    value_t    parent;       /* classes: the superclass constructor (undefined if none) */
+    obj_t*     home;         /* class members: the object they belong to (super.x looks above it) */
+    node_t*    fields;       /* class constructors: instance field initializers (N_PAIR list) */
+    struct func* cls;        /* methods and arrows inside a class: that class's constructor */
+    int        is_class;
+    int        is_async;
 };
 
 enum { CTL_NONE = 0, CTL_BREAK, CTL_CONTINUE, CTL_RETURN, CTL_THROW };
@@ -110,6 +130,9 @@ struct interp {
     int       ctl;
     value_t   ret;           /* return value / thrown value */
     int       line;          /* line being run (errors) */
+    int       col;
+    int       throw_line, throw_col;   /* where the exception was thrown */
+    obj_t*    oom_err;       /* thrown when the arena is exhausted */
     uint32_t  steps, step_limit;
     uint32_t  depth, depth_limit;
     char      err[200];
@@ -126,6 +149,22 @@ struct interp {
     obj_t*    proto_object;
     uint32_t  running;       /* script_run/script_call nesting (natives calling back) */
     script_ext_fn php_ext;   /* host-provided PHP functions (httpd: header, files) */
+    func_t*   cur_fn;        /* the JS function running (super, class fields) */
+    func_t*   cur_native;    /* the native function running (its data) */
+    obj_t*    proto_regexp;
+    obj_t*    proto_promise;
+    obj_t*    proto_map;
+    obj_t*    proto_set;
+    obj_t*    jobs;          /* promise reactions waiting to run (an array) */
+    uint32_t  job_head;
+    str_t*    label;         /* break/continue with a label */
+    int       draining;      /* es_run_jobs() is running */
+    str_t**   itab;          /* interned identifier names (the lexer) */
+    uint32_t  icap, icount;
+    obj_t*    module_ns;     /* the module running: its exports */
+    const char* module_url;  /* ...and its address (relative imports) */
+    script_import_fn import_fn;
+    void*     import_ctx;
 };
 
 /* helpers shared with script_lib.c */
@@ -144,6 +183,17 @@ void    arr_set(interp_t* I, obj_t* a, uint32_t i, value_t v);
 value_t call_value(interp_t* I, value_t fn, value_t self, int argc, value_t* argv);
 num_t   str_tonum(const char* s, int php);
 int     num_isnan(num_t x);
+/* script_es.c: RegExp, Promise, Map/Set, Symbol and the newer built-ins */
+void    es_init(interp_t* I);
+value_t es_regexp_new(interp_t* I, const char* pattern, uint32_t len, const char* flags);
+value_t es_promise_new(interp_t* I);
+void    es_promise_settle(interp_t* I, value_t p, int rejected, value_t v);
+value_t es_promise_resolved(interp_t* I, value_t v);
+int     es_promise_state(interp_t* I, value_t p, value_t* out);   /* 0 pending, 1 fulfilled, 2 rejected, -1 not a promise */
+void    es_run_jobs(interp_t* I);
+obj_t*  es_to_array(interp_t* I, value_t v);   /* an iterable/array-like as an array (NULL: not iterable) */
+int     es_instanceof(interp_t* I, value_t v, value_t ctor);
+value_t accessor_get(interp_t* I, value_t acc, value_t self);
 num_t   num_floor(num_t x);
 void    lib_init(interp_t* I);          /* script_lib.c: built-in globals */
 value_t lib_member(interp_t* I, value_t ov, const char* key, int* found);   /* methods of strings, arrays, numbers */

@@ -6,15 +6,17 @@
 #include "timer.h"
 #include "image.h"
 #include "wallpaper.h"
+#include "winframe.h"
+#include "gui.h"
 
-#define WIN_W    600
-#define WIN_H    404
+#define WIN_W    g_win.w
+#define WIN_H    g_win.h
 #define TITLE_H  20
 #define LIST_X   8
 #define LIST_Y   70
-#define LIST_W   356
+#define LIST_W   (WIN_W - 244)
 #define ROW_H    16
-#define ROWS     17                     /* visible rows */
+#define ROWS     ((WIN_H - 116) / ROW_H - 1)   /* visible rows */
 #define PREV_X   (LIST_X + LIST_W + 10)
 #define PREV_W   (WIN_W - PREV_X - 8)
 #define THUMB_W  (PREV_W - 8)
@@ -36,8 +38,9 @@ typedef struct {
 } item_t;
 
 static int      g_open;
-static int      g_x = 100, g_y = 56;
-static int      g_dragging, g_drag_dx, g_drag_dy;
+static win_geom_t g_win = { .x = 100, .y = 56, .w = 600, .h = 404, .min_w = 470, .min_h = 230 };
+#define g_x g_win.x
+#define g_y g_win.y
 static char     g_path[FS_PATH_LEN] = "/home/banana";
 static item_t   g_items[MAX_ITEMS];
 static int      g_count;
@@ -186,13 +189,13 @@ static int is_image_file(int fidx) {
 
 void explorer_open(const char* path) {
     g_open = 1;
-    g_dragging = 0;
+    g_win.dragging = g_win.resizing = 0;
     go(path && path[0] ? path : "/home/banana");
 }
 
 void explorer_close(void) {
     g_open = 0;
-    g_dragging = 0;
+    g_win.dragging = g_win.resizing = 0;
     drop_thumb();
     g_gen++;
 }
@@ -207,7 +210,7 @@ uint32_t explorer_signature(void) {
     if (!g_open) return 0;
     /* files changed by a terminal meanwhile show up too */
     return g_gen * 2654435761u ^ fs_used_files() * 40503u ^ fs_used_dirs() * 977u ^
-           fs_ram_used_bytes() ^ (uint32_t)(g_x << 16 | g_y);
+           fs_ram_used_bytes() ^ (uint32_t)(g_x << 16 | g_y) ^ (uint32_t)(g_win.w << 20 | g_win.h << 8);
 }
 
 /* ── actions ──────────────────────────────────────────────────────── */
@@ -262,7 +265,7 @@ static void delete_selected(void) {
 
 static void open_item(int i) {
     const item_t* it = &g_items[i];
-    char path[FS_PATH_LEN], cmd[FS_PATH_LEN + 16];
+    char path[FS_PATH_LEN];
     child_path(item_name(it), path, sizeof(path));
     if (it->is_dir) { go(path); return; }
     if (is_image_file(it->idx)) {
@@ -275,8 +278,7 @@ static void open_item(int i) {
         set_status(msg);
         return;
     }
-    ksnprintf(cmd, sizeof(cmd), "edit \"%s\"\n", path);
-    gui_terminal_run(cmd);
+    gui_open_notepad(path);          /* text: the desktop's Notepad */
 }
 
 static void terminal_here(void) {
@@ -309,11 +311,10 @@ void explorer_click(int mx, int my) {
 
     if (ly < TITLE_H + 2) {
         if (lx >= WIN_W - 28 && lx < WIN_W - 8) { explorer_close(); return; }
-        g_dragging = 1;
-        g_drag_dx = lx;
-        g_drag_dy = ly;
+        win_title_press(&g_win, mx, my);
         return;
     }
+    if (win_grip_press(&g_win, mx, my)) return;
     if (ly >= 26 && ly < 44) {
         for (int i = 0; i < TOOL_COUNT; i++) {
             if (lx < TOOLS[i].x || lx >= TOOLS[i].x + TOOLS[i].w) continue;
@@ -356,15 +357,11 @@ void explorer_click(int mx, int my) {
 }
 
 void explorer_mouse(int mx, int my, int left) {
-    if (!left) { g_dragging = 0; return; }
-    if (!g_dragging) return;
-    const fb_info_t* fi = fb_info();
-    int nx = mx - g_drag_dx, ny = my - g_drag_dy;
-    if (nx < 0) nx = 0;
-    if (ny < 0) ny = 0;
-    if (fi && nx + WIN_W > (int)fi->width) nx = (int)fi->width - WIN_W;
-    if (fi && ny + WIN_H > (int)fi->height - 28) ny = (int)fi->height - 28 - WIN_H;
-    if (nx != g_x || ny != g_y) { g_x = nx; g_y = ny; g_gen++; }
+    if (win_mouse(&g_win, mx, my, left)) {
+        g_gen++;
+        if (g_scroll > g_count - ROWS) g_scroll = g_count - ROWS;
+        if (g_scroll < 0) g_scroll = 0;
+    }
 }
 
 /* ── drawing ──────────────────────────────────────────────────────── */
@@ -547,4 +544,5 @@ void explorer_draw(const fb_info_t* fi) {
     else ksnprintf(st, sizeof(st), "%d item%s", g_count, g_count == 1 ? "" : "s");
     draw_clip(x + LIST_X, y + WIN_H - 16, st, (WIN_W - 16) / 8,
               g_confirm_delete ? C_WARN : C_DIM, C_PANEL);
+    gfx_draw_grip(x + WIN_W, y + WIN_H);
 }

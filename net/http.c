@@ -259,20 +259,28 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
     int default_port = (u->https && u->port == 443) || (!u->https && u->port == 80);
     if (default_port) kstrlcpy(host_hdr, u->host, sizeof(host_hdr));
     else ksnprintf(host_hdr, sizeof(host_hdr), "%s:%u", u->host, u->port);
-    char* rq = (char*)kmalloc(2048);
+    uint32_t rqcap = 2048 + (req->extra_headers ? (uint32_t)strlen(req->extra_headers) : 0);
+    char* rq = (char*)kmalloc(rqcap);
     if (!rq) { s_close(s); kfree(s); return NET_ERR_NOMEM; }
-    int rqlen = ksnprintf(rq, 2048,
+    char body_hdr[160] = "";
+    if (req->body)
+        ksnprintf(body_hdr, sizeof(body_hdr), "Content-Type: %s\r\nContent-Length: %u\r\n",
+                  req->content_type ? req->content_type : "application/x-www-form-urlencoded", req->body_len);
+    int rqlen = ksnprintf(rq, rqcap,
         "%s %s HTTP/1.1\r\n"
         "Host: %s\r\n"
         "User-Agent: %s\r\n"
         "Accept: */*\r\n"
+        "%s%s"
         "Connection: close\r\n"
         "\r\n",
-        method, u->path, host_hdr, req->user_agent ? req->user_agent : "BananaOS/0.5");
-    if (rqlen >= 2048) rqlen = 2047;
+        method, u->path, host_hdr, req->user_agent ? req->user_agent : "BananaOS/0.5",
+        body_hdr, req->extra_headers ? req->extra_headers : "");
+    if (rqlen >= (int)rqcap) rqlen = (int)rqcap - 1;
     if (req->on_request) req->on_request(req->ctx, rq);
     rc = s_write(s, rq, (uint32_t)rqlen);
     kfree(rq);
+    if (rc >= 0 && req->body && req->body_len) rc = s_write(s, req->body, req->body_len);
     if (rc < 0) {
         ksnprintf(errmsg, errlen, "failed to send request: %s", net_strerror(rc));
         s_close(s); kfree(s);
@@ -391,6 +399,8 @@ int http_fetch(const char* url, const http_request_t* req, http_response_t* resp
     char cur[1024];
     kstrlcpy(cur, url, sizeof(cur));
     int max = req->max_redirects ? req->max_redirects : 10;
+    http_request_t cur_req = *req;          /* a 303 (or 301/302 after POST) turns into a GET */
+    req = &cur_req;
 
     for (int hop = 0; hop <= max; hop++) {
         url_t u;
@@ -407,6 +417,11 @@ int http_fetch(const char* url, const http_request_t* req, http_response_t* resp
         info(req, "Redirected (%d) to %s", resp->status, next);
         kstrlcpy(cur, next, sizeof(cur));
         resp->body_bytes = 0;
+        if (cur_req.body && (resp->status == 303 || resp->status == 301 || resp->status == 302)) {
+            cur_req.method = "GET";
+            cur_req.body = NULL;
+            cur_req.body_len = 0;
+        }
     }
     ksnprintf(errmsg, errmsg_len, "too many redirects");
     return NET_ERR_PROTO;

@@ -31,6 +31,10 @@ int gui_close_terminal_by_vt(int vt);
 int gui_open_files(const char* path);
 /* opens the Browser window (url NULL: its current page); 0 if the desktop is not running */
 int gui_open_browser(const char* url);
+/* opens Notepad (path NULL: what it has open, or a new text); 0 if the desktop is not running */
+int gui_open_notepad(const char* path);
+/* 1 while Notepad is the front window (it gets the keyboard) */
+int gui_notepad_focused(void);
 
 #endif
 

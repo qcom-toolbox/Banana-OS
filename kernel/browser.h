@@ -23,6 +23,10 @@ int  browser_contains(int mx, int my);
 void browser_click(int mx, int my);
 void browser_mouse(int mx, int my, int left);
 uint32_t browser_signature(void);
+/* Ctrl+V / right-click: the clipboard into the focused field or the address bar */
+void browser_paste(void);
+/* right-click: a link opens in a new tab, elsewhere it pastes */
+void browser_rclick(int mx, int my);
 
 /* provided by gui.c: 1 while the browser window is the front window */
 int  gui_browser_focused(void);

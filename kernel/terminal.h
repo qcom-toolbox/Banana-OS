@@ -63,6 +63,8 @@ void terminal_vt_set_active(int vt);   /* selects vt for subsequent output */
 int  terminal_vt_get_active(void);
 void terminal_vt_get_buffer(int vt, const char** chars, const uint8_t** colors, int* width, int* height, int* stride);
 void terminal_vt_get_cursor(int vt, size_t* row, size_t* col);
+/* a GUI window's text grid: output to that vt wraps and scrolls at this size */
+void terminal_vt_set_size(int vt, int cols, int rows);
 
 /* Text grid of the active terminal (columns / usable rows). */
 size_t terminal_get_width(void);
