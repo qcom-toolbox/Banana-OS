@@ -19,6 +19,7 @@
 #include "../kernel/clipboard.h"
 #include "netcmds.h"
 #include "srvcmds.h"
+#include "syscmds.h"
 #include "../kernel/serial.h"
 #include "../kernel/kstring.h"
 #include "../kernel/kheap.h"
@@ -109,15 +110,19 @@ static void k_strcpy_n(char* dst, const char* src, int maxlen) {
     dst[i] = '\0';
 }
 
+/* one word; quotes group words ("My Documents") and are dropped, like a real shell */
 static int next_token(const char** p, char* out, int outlen) {
     const char* s = k_skip_spaces(*p);
-    int i = 0;
+    int i = 0, n = 0;
+    char q = 0;
     if (!*s) return 0;
-    while (s[i] && s[i] != ' ') {
-        if (i < outlen - 1) out[i] = s[i];
-        i++;
+    while (s[i] && (q || s[i] != ' ')) {
+        char c = s[i++];
+        if (q) { if (c == q) { q = 0; continue; } }
+        else if (c == 0x22 || c == 0x27) { q = c; continue; }
+        if (n < outlen - 1) out[n++] = c;
     }
-    out[(i < outlen - 1) ? i : (outlen - 1)] = '\0';
+    out[n] = '\0';
     *p = s + i;
     return 1;
 }
@@ -1961,14 +1966,8 @@ static void dispatch(const char* raw_line, int persona) {
     while (n > 0 && (cmd[n - 1] == ' ' || cmd[n - 1] == '\t')) n--;
     cmd[n] = 0;
     const char* t = k_skip_spaces(raw_line + pos + (append ? 2 : 1));
-    int pl = 0;
-    for (; t[pl] && t[pl] != 0x20 && pl < FS_PATH_LEN - 1; pl++) path[pl] = t[pl];
-    path[pl] = 0;
-    if (path[0] == 0x22 || path[0] == 0x27) {          /* "quoted name" */
-        int k = 0;
-        for (int i = 1; path[i] && path[i] != path[0]; i++) path[k++] = path[i];
-        path[k] = 0;
-    }
+    path[0] = 0;
+    next_token(&t, path, sizeof(path));          /* "quoted name" too */
     if (!path[0]) {
         terminal_write_color("sh: syntax error: file name expected after >\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
@@ -2204,6 +2203,7 @@ static void dispatch_cmd(const char* raw_line, int persona) {
     if (k_strncmp(line, "hw_info ", 8) == 0) { cmd_hw_info(k_skip_spaces(line+8)); return; }
 
     /* network commands (shell/netcmds.c) */
+    if (syscmd_dispatch(line)) return;
     if (srvcmd_dispatch(line)) return;
     if (netcmd_dispatch(line)) return;
 

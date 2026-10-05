@@ -158,7 +158,7 @@ static void send_listing(tcp_conn_t* c, int head_only, const char* url, const ch
         kstrlcat(b, "/</a></td><td>-</td></tr>", cap);
     }
     for (int i = 0; i < nf; i++) {
-        fs_file_t* f = fs_get_file(files[i]);
+        fs_file_t* f = fs_file_info(files[i]);
         char size[24];
         ksnprintf(size, sizeof(size), "%u", f->size);
         kstrlcat(b, "<tr><td><a href=\"", cap);
@@ -303,7 +303,7 @@ static void handle(tcp_conn_t* c) {
             while (fl > 1 && fspath[fl - 1] == '/') fspath[--fl] = '\0';
 
             int fidx = fs_find_file(fspath);
-            if (fidx >= 0 && is_php(fs_get_file(fidx)->name)) {
+            if (fidx >= 0 && is_php(fs_file_info(fidx)->name)) {
                 code = serve_php(c, head_only, req, method, target, path, fspath, ipstr);
             } else if (fidx >= 0) {
                 fs_file_t* f = fs_get_file(fidx);

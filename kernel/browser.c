@@ -408,7 +408,7 @@ static int fetch_file(const char* path, char** data, uint32_t* len, char* ctype,
     }
     int nf = fs_list_files(p, idx, FS_MAX_FILES);
     for (int i = 0; i < nf; i++, row++) {
-        fs_file_t* f = fs_get_file(idx[i]);
+        fs_file_t* f = fs_file_info(idx[i]);
         char link[FS_PATH_LEN + 16], size[24];
         ksnprintf(link, sizeof(link), "file://%s%s%s", p, slash, f->name);
         ksnprintf(size, sizeof(size), "%u bytes", f->size);

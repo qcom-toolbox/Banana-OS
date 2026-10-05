@@ -8,7 +8,7 @@
 #include "kstring.h"
 
 #define FSDISK_MAGIC   0x414E4142u /* "BANA" */
-#define FSDISK_VERSION 2u   /* = FS_SNAPSHOT_V2; version 1 disks (Banana OS 0.4) still load */
+#define FSDISK_VERSION 3u   /* = FS_SNAPSHOT_V3; version 1 and 2 disks (Banana OS 0.4, 0.5) still load */
 #define FSDISK_SECTOR  512u
 
 /* Reserved space at the start of the target disk for the raw-copied boot
@@ -168,7 +168,7 @@ int fsdisk_try_load(void) {
     fsdisk_super_t sb;
     memcpy(&sb, g_buf, sizeof(sb));
     if (sb.magic != FSDISK_MAGIC) return 0;
-    if (sb.version != FS_SNAPSHOT_V1 && sb.version != FS_SNAPSHOT_V2) return 0;
+    if (sb.version != FS_SNAPSHOT_V1 && sb.version != FS_SNAPSHOT_V2 && sb.version != FS_SNAPSHOT_V3) return 0;
     if (sb.payload_bytes == 0 || sb.payload_bytes > FSDISK_MAX_PAYLOAD) return 0;
 
     uint32_t total   = (uint32_t)sizeof(fsdisk_super_t) + sb.payload_bytes;
@@ -185,7 +185,7 @@ int fsdisk_try_load(void) {
 
     g_target = target;
     g_have_target = 1;
-    /* upgrade a 0.4 (v1) disk to the current format right away */
+    /* upgrade an older disk to the current format right away */
     if (sb.version != FSDISK_VERSION) write_snapshot_to(&target);
     return 1;
 }

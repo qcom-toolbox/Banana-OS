@@ -552,7 +552,7 @@ static void wp_scan_pictures(void) {
     g_wp_pic_count = 0;
     g_wp_pic_total = 0;
     for (int i = 0; i < n && i < 64; i++) {
-        fs_file_t* f = fs_get_file(idx[i]);
+        fs_file_t* f = fs_file_info(idx[i]);
         if (!wallpaper_is_image_name(f->name)) continue;
         if (g_wp_pic_count < WP_PICS_MAX) g_wp_pics[g_wp_pic_count++] = idx[i];
         g_wp_pic_total++;
@@ -616,7 +616,7 @@ static void draw_wallpaper_app(const fb_info_t* fi) {
         draw_bevel_box(x, y, w, h, bg, 0x0056667Fu, 0x0010151Fu);
         draw_icon_picture(x + 6, y + 6);
         char name[29];
-        kstrlcpy(name, fs_get_file(g_wp_pics[i])->name, sizeof(name));
+        kstrlcpy(name, fs_file_info(g_wp_pics[i])->name, sizeof(name));
         gfx_draw_text(x + 28, y + 10, name, 0x00E8EEF6u, bg);
     }
     if (g_wp_pic_total > g_wp_pic_count) {
@@ -660,7 +660,7 @@ static int wallpaper_app_click(const fb_info_t* fi, int mx, int my) {
         if (mx >= x && mx < x + w && my >= y && my < y + h) {
             /* decode on the next frame, after "Loading..." is on screen */
             g_wp_pending = g_wp_pics[i];
-            ksnprintf(g_wp_status, sizeof(g_wp_status), "Loading %s...", fs_get_file(g_wp_pics[i])->name);
+            ksnprintf(g_wp_status, sizeof(g_wp_status), "Loading %s...", fs_file_info(g_wp_pics[i])->name);
             return 1;
         }
     }

@@ -17,6 +17,7 @@
 #include "random.h"
 #include "../net/net.h"
 #include "../usb/usbcore.h"
+#include "blockdev.h"
 #include "../shell/shell.h"
 
 #define MULTIBOOT2_MAGIC 0x36D76289
@@ -67,7 +68,8 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     keyboard_init();  /* drain buffer after USB init */
     random_init();
     net_init();       /* NIC probe + netd task; DHCP runs in the background */
-    usb_stack_init(); /* xHCI/EHCI: USB network adapters, keyboards, mice */
+    blockdev_init();  /* mounts USB sticks (FAT32) under /mnt once they show up */
+    usb_stack_init(); /* xHCI/EHCI: USB network adapters, keyboards, mice, sticks */
     daemon_init();
     gui_init();
 

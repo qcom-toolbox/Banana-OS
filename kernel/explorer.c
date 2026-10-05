@@ -100,7 +100,7 @@ static void human_size(uint32_t n, char* out, int cap) {
 
 static const char* item_name(const item_t* it) {
     if (it->is_dir) { const fs_dir_t* d = fs_get_dir(it->idx); return d ? d->name : "?"; }
-    fs_file_t* f = fs_get_file(it->idx);
+    fs_file_t* f = fs_file_info(it->idx);
     return (f && f->used) ? f->name : "?";
 }
 
@@ -123,7 +123,7 @@ static void drop_thumb(void) {
 
 /* the folder's contents: sub-folders first, then files, both A-Z */
 static void scan(void) {
-    int d[FS_MAX_DIRS], f[FS_MAX_FILES];
+    static int d[FS_MAX_DIRS], f[FS_MAX_FILES];   /* static: the GUI runs on 16 KiB task stacks */
     int nd = fs_list_dirs(g_path, d, FS_MAX_DIRS);
     if (nd < 0) {                       /* folder vanished: go home */
         kstrlcpy(g_path, "/home/banana", sizeof(g_path));
@@ -181,7 +181,7 @@ static int is_text_file(int fidx) {
 }
 
 static int is_image_file(int fidx) {
-    fs_file_t* f = fs_get_file(fidx);
+    fs_file_t* f = fs_file_info(fidx);
     return f && f->used && wallpaper_is_image_name(f->name);
 }
 
@@ -418,7 +418,7 @@ static void draw_preview(int px, int py, int ph) {
         uint32_t bytes = 0;
         for (int i = 0; i < g_count; i++) {
             if (g_items[i].is_dir) nd++;
-            else { nf++; bytes += fs_get_file(g_items[i].idx)->size; }
+            else { nf++; bytes += fs_file_info(g_items[i].idx)->size; }
         }
         draw_clip(x, y, g_path, cols, C_TEXT, C_LIST);
         ksnprintf(line, sizeof(line), "%d folders, %d files", nd, nf);
@@ -520,7 +520,7 @@ void explorer_draw(const fb_info_t* fi) {
         draw_clip(x + LIST_X + 24, ry + 4, item_name(it), 27, it->is_dir ? C_FOLDER : C_TEXT, bg);
         char size[24];
         if (it->is_dir) kstrlcpy(size, "folder", sizeof(size));
-        else human_size(fs_get_file(it->idx)->size, size, sizeof(size));
+        else human_size(fs_file_info(it->idx)->size, size, sizeof(size));
         gfx_draw_text(x + LIST_X + LIST_W - 94, ry + 4, size, C_DIM, bg);
     }
     /* scrollbar: top half pages up, bottom half pages down */
