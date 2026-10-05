@@ -1,5 +1,7 @@
 #include "pci.h"
 #include "io.h"
+#include "paging.h"
+#include "serial.h"
 
 #define PCI_ADDR 0xCF8
 #define PCI_DATA 0xCFC
@@ -79,14 +81,24 @@ int pci_find(uint16_t vendor, uint16_t device, pci_dev_t* out) {
     return pci_scan(find_cb, &f) ? 1 : 0;
 }
 
-uint32_t pci_bar(const pci_dev_t* d, int bar, int* is_io) {
+uintptr_t pci_bar(const pci_dev_t* d, int bar, int* is_io) {
     uint32_t v = pci_read32(d->bus, d->dev, d->fn, (uint8_t)(0x10 + bar * 4));
     if (v & 1) {
         if (is_io) *is_io = 1;
         return v & ~0x3u;
     }
     if (is_io) *is_io = 0;
-    return v & ~0xFu;
+    uint64_t addr = v & ~0xFu;
+    if ((v & 0x6) == 0x4 && bar < 5)                 /* a 64-bit BAR: the high half follows */
+        addr |= (uint64_t)pci_read32(d->bus, d->dev, d->fn, (uint8_t)(0x14 + bar * 4)) << 32;
+    if (addr >= (4ull << 30)) {
+        /* UEFI firmware puts 64-bit BARs high: map 16 MiB of it */
+        if (!mmio_map(addr, 16ull << 20)) {
+            klog("pci: %02x:%02x.%u BAR%d at %llx is out of reach\n", d->bus, d->dev, d->fn, bar, addr);
+            return 0;
+        }
+    }
+    return (uintptr_t)addr;
 }
 
 void pci_enable(const pci_dev_t* d) {

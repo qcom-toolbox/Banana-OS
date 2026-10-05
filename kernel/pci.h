@@ -25,9 +25,10 @@ int pci_scan(int (*cb)(const pci_dev_t* d, void* ctx), void* ctx);
 /* First device matching vendor:device, returns 1 if found. */
 int pci_find(uint16_t vendor, uint16_t device, pci_dev_t* out);
 
-/* Base address register `bar` (0-5): memory BARs return the address,
+/* Base address register `bar` (0-5): memory BARs return the address (one
+ * above 4 GiB is mapped first: kernel/paging.h; 0 if out of reach),
  * I/O BARs return the port base; *is_io tells which. */
-uint32_t pci_bar(const pci_dev_t* d, int bar, int* is_io);
+uintptr_t pci_bar(const pci_dev_t* d, int bar, int* is_io);
 
 /* Enables I/O + memory decoding and bus mastering (needed for DMA). */
 void pci_enable(const pci_dev_t* d);

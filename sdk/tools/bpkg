@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""bpkg - Banana OS app packages (.bpk).
+
+  bpkg pack -o app.bpk manifest app-i686 app-x86_64 [data files...]
+  bpkg list app.bpk              what is inside
+  bpkg extract app.bpk [dir]     unpack it
+  bpkg check app.bpk             validate (manifest, programs, relocations)
+
+Format (little endian): "BPK1", uint32 count, count entries of
+{ char name[56]; uint32 offset; uint32 size; }, then the file data.
+Files are stored under their base name; a data file given as dir=path
+(e.g. levels=assets/levels.txt) is stored as that name instead.
+"""
+import os
+import re
+import struct
+import sys
+
+MAGIC = b"BPK1"
+ENT = struct.Struct("<56sII")
+
+
+def die(msg):
+    print("bpkg: " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def read_pkg(path):
+    data = open(path, "rb").read()
+    if data[:4] != MAGIC:
+        die(f"{path}: not a .bpk package")
+    (count,) = struct.unpack_from("<I", data, 4)
+    files = []
+    for i in range(count):
+        raw, off, size = ENT.unpack_from(data, 8 + i * ENT.size)
+        name = raw.split(b"\0", 1)[0].decode()
+        if off + size > len(data):
+            die(f"{path}: {name} runs past the end")
+        files.append((name, data[off:off + size]))
+    return files
+
+
+def pack(out, inputs):
+    files = []
+    for item in inputs:
+        if "=" in item and not os.path.exists(item):
+            name, src = item.split("=", 1)
+        else:
+            name, src = os.path.basename(item), item
+        if len(name.encode()) > 55 or name.startswith("/") or ".." in name:
+            die(f"bad name in package: {name}")
+        files.append((name, open(src, "rb").read()))
+    names = [n for n, _ in files]
+    if "manifest" not in names:
+        die("a package needs a manifest")
+    off = 8 + len(files) * ENT.size
+    table, blob = b"", b""
+    for name, content in files:
+        table += ENT.pack(name.encode(), off + len(blob), len(content))
+        blob += content
+    with open(out, "wb") as f:
+        f.write(MAGIC + struct.pack("<I", len(files)) + table + blob)
+    print(f"bpkg: {out}: {len(files)} files, {off + len(blob)} bytes")
+
+
+def elf_check(name, content):
+    """a static PIE with only relative relocations, for the right CPU"""
+    if content[:4] != b"\x7fELF":
+        return f"{name}: not an ELF file"
+    is64 = content[4] == 2
+    etype, machine = struct.unpack_from("<HH", content, 16)
+    want = 62 if name.endswith("x86_64") else 3
+    if machine != want:
+        return f"{name}: built for the wrong CPU (machine {machine})"
+    if etype != 3:
+        return f"{name}: not position-independent (ET_DYN expected)"
+    if is64:
+        phoff, = struct.unpack_from("<Q", content, 32)
+        phentsize, phnum = struct.unpack_from("<HH", content, 54)
+    else:
+        phoff, = struct.unpack_from("<I", content, 28)
+        phentsize, phnum = struct.unpack_from("<HH", content, 42)
+    for i in range(phnum):
+        p = phoff + i * phentsize
+        ptype, = struct.unpack_from("<I", content, p)
+        if ptype == 3:
+            return f"{name}: asks for a dynamic linker (link with -pie --no-dynamic-linker)"
+    return None
+
+
+def check(path):
+    files = dict(read_pkg(path))
+    if "manifest" not in files:
+        die(f"{path}: no manifest")
+    mf = dict(l.split("=", 1) for l in files["manifest"].decode().splitlines() if "=" in l)
+    name = mf.get("name", "")
+    if not re.fullmatch(r"[a-z0-9_-]{1,24}", name):
+        die(f"{path}: bad app name '{name}' (a-z, 0-9, - and _, at most 24)")
+    if mf.get("type", "console") not in ("console", "gui"):
+        die(f"{path}: type must be console or gui")
+    progs = [p for p in ("app-i686", "app-x86_64") if p in files]
+    if not progs:
+        die(f"{path}: no program (app-i686 / app-x86_64)")
+    for p in progs:
+        err = elf_check(p, files[p])
+        if err:
+            die(f"{path}: {err}")
+    print(f"bpkg: {path}: ok - {mf.get('title', name)} {mf.get('version', '')} ({mf.get('type', 'console')}, {' + '.join(progs)})")
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] in ("-h", "--help", "help"):
+        print(__doc__)
+        return
+    cmd = argv[1]
+    if cmd == "pack":
+        args = argv[2:]
+        if len(args) < 3 or args[0] != "-o":
+            die("usage: bpkg pack -o out.bpk manifest files...")
+        pack(args[1], args[2:])
+    elif cmd == "list":
+        for name, content in read_pkg(argv[2]):
+            print(f"{len(content):10d}  {name}")
+    elif cmd == "extract":
+        dest = argv[3] if len(argv) > 3 else "."
+        for name, content in read_pkg(argv[2]):
+            out = os.path.join(dest, name)
+            os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+            open(out, "wb").write(content)
+            print("  " + out)
+    elif cmd == "check":
+        check(argv[2])
+    else:
+        die(f"unknown command {cmd} (pack, list, extract, check)")
+
+
+if __name__ == "__main__":
+    main(sys.argv)

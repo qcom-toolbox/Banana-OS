@@ -1,5 +1,5 @@
 # Banana OS 0.5 Makefile
-# Requires: nasm, gcc-multilib, ld, grub-pc-bin, grub-efi-amd64-bin,
+# Requires: nasm, gcc-multilib, ld, python3 (the SDK packager), grub-pc-bin, grub-efi-amd64-bin,
 #           grub-common, xorriso, mtools
 #
 # Builds two kernels from the same sources - kernel.bin (i386, 32-bit) and
@@ -30,8 +30,8 @@ LIBGCC64 := $(shell $(CC) -m64 -print-libgcc-file-name)
 C_SRCS   = $(wildcard kernel/*.c) $(wildcard shell/*.c) $(wildcard net/*.c) \
            $(wildcard crypto/*.c) $(wildcard usb/*.c) $(wildcard web/*.c) \
            third_party/stb/stb_image_impl.c
-ASM_SRCS   = boot/boot.asm kernel/isr.asm kernel/task_switch.asm
-ASM_SRCS64 = boot/boot64.asm kernel/isr64.asm kernel/task_switch64.asm
+ASM_SRCS   = boot/boot.asm kernel/isr.asm kernel/task_switch.asm kernel/appcall.asm kernel/exbin.asm
+ASM_SRCS64 = boot/boot64.asm kernel/isr64.asm kernel/task_switch64.asm kernel/appcall64.asm kernel/exbin.asm
 # the boot object must come first: it carries the Multiboot2 header
 OBJS     = $(ASM_SRCS:.asm=.o) $(C_SRCS:.c=.o)
 OBJS64   = $(ASM_SRCS64:.asm=.o64) $(C_SRCS:.c=.o64)
@@ -113,7 +113,30 @@ run-tap: Banana_OS.iso
 	    -device e1000,netdev=n0
 
 clean:
+	for e in $(EXAMPLES); do $(MAKE) -s -C sdk/examples/$$e clean; done
+	rm -f banana-sdk.tar.gz
 	rm -f $(OBJS) $(OBJS64) $(DEPS) kernel.bin kernel64.bin iso/boot/kernel.bin \
 	      iso/boot/kernel64.bin Banana_OS.iso
 
+
+# ── SDK: example apps (embedded in the kernel: ~/Examples) and the tarball ──
+EXAMPLES     = hello guess paint clock tones
+EXAMPLE_BPKS = $(foreach e,$(EXAMPLES),sdk/examples/$(e)/$(e).bpk)
+SDK_DEPS     = $(wildcard sdk/lib/*.c sdk/include/*.h) sdk/banana.mk sdk/tools/bpkg
+
+define EXAMPLE_RULE
+sdk/examples/$(1)/$(1).bpk: $$(wildcard sdk/examples/$(1)/*.c) sdk/examples/$(1)/Makefile $$(SDK_DEPS)
+	$$(MAKE) -s -C sdk/examples/$(1)
+endef
+$(foreach e,$(EXAMPLES),$(eval $(call EXAMPLE_RULE,$(e))))
+
+kernel/exbin.o kernel/exbin.o64: $(EXAMPLE_BPKS)
+
+.PHONY: examples sdk
+examples: $(EXAMPLE_BPKS)
+
+# banana-sdk.tar.gz: everything needed to build apps on another Linux machine
+sdk: $(EXAMPLE_BPKS)
+	tar czf banana-sdk.tar.gz --transform 's,^sdk,banana-sdk,' --exclude=build --exclude='*.bpk' sdk
+	@echo "banana-sdk.tar.gz: unpack it anywhere, then see banana-sdk/README.md"
 -include $(DEPS)

@@ -6,3 +6,8 @@
 *.o64
 *.o64.d
 kernel64.bin
+
+# SDK build outputs
+sdk/examples/*/build/
+*.bpk
+banana-sdk.tar.gz

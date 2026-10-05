@@ -869,8 +869,8 @@ int fat32_mount(blockdev_t* bd, const char* path, char* err, int errcap) {
     if (path) kstrlcpy(where, path, sizeof(where));
     else {
         for (int i = 1; i <= FS_MAX_MOUNTS; i++) {
-            if (i == 1) kstrlcpy(where, "/mnt/usb", sizeof(where));
-            else ksnprintf(where, sizeof(where), "/mnt/usb%d", i);
+            if (i == 1) ksnprintf(where, sizeof(where), "/mnt/%s", bd->kind[0] ? bd->kind : "usb");
+            else ksnprintf(where, sizeof(where), "/mnt/%s%d", bd->kind[0] ? bd->kind : "usb", i);
             if (fs_find_dir(where) < 0) break;
         }
     }

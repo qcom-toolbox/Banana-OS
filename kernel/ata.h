@@ -18,6 +18,7 @@ typedef struct {
     uint32_t sectors;    /* 28-bit LBA sector count (0 if unknown/ATAPI) */
     char     model[41];  /* IDENTIFY model string, NUL-terminated */
     int      ahci_port;  /* SATA (kernel/ahci.c) device index, or -1 for an IDE drive */
+    int      nvme;       /* NVMe drive (kernel/nvme.c) index + 1, or 0 */
 } ata_disk_t;
 
 /* Probes all 4 possible drives (primary/secondary x master/slave) into

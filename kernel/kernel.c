@@ -18,6 +18,8 @@
 #include "../net/net.h"
 #include "../usb/usbcore.h"
 #include "blockdev.h"
+#include "audio.h"
+#include "nvme.h"
 #include "../shell/shell.h"
 
 #define MULTIBOOT2_MAGIC 0x36D76289
@@ -68,7 +70,9 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     keyboard_init();  /* drain buffer after USB init */
     random_init();
     net_init();       /* NIC probe + netd task; DHCP runs in the background */
+    audio_init();     /* HD Audio / AC'97 sound card (PC speaker otherwise) */
     blockdev_init();  /* mounts USB sticks (FAT32) under /mnt once they show up */
+    nvme_init();      /* NVMe SSDs: disks for install/sync, FAT32 partitions in /mnt/nvme */
     usb_stack_init(); /* xHCI/EHCI: USB network adapters, keyboards, mice, sticks */
     daemon_init();
     gui_init();

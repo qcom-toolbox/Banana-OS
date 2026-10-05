@@ -25,7 +25,7 @@ void browser_mouse(int mx, int my, int left);
 uint32_t browser_signature(void);
 /* Ctrl+V / right-click: the clipboard into the focused field or the address bar */
 void browser_paste(void);
-/* right-click: a link opens in a new tab, elsewhere it pastes */
+/* right-click: the menu (open / save a link, back, reload, copy, paste, save page...) */
 void browser_rclick(int mx, int my);
 
 /* provided by gui.c: 1 while the browser window is the front window */

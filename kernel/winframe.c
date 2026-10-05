@@ -5,8 +5,8 @@
 void win_clamp(win_geom_t* g) {
     const fb_info_t* fi = fb_info();
     int sw = fi ? (int)fi->width : 800, sh = fi ? (int)fi->height - WIN_TASKBAR : 572;
-    if (sw > 800) sw = 800;                 /* the desktop's backbuffer */
-    if (sh > 600 - WIN_TASKBAR) sh = 600 - WIN_TASKBAR;
+    if (sw > 2560) sw = 2560;               /* the desktop's backbuffer (kernel/gui.c) */
+    if (sh > 1600 - WIN_TASKBAR) sh = 1600 - WIN_TASKBAR;
     if (g->w < g->min_w) g->w = g->min_w;
     if (g->h < g->min_h) g->h = g->min_h;
     if (g->w > sw) g->w = sw;

@@ -14,7 +14,8 @@
 typedef struct blockdev {
     int      used;
     int      present;            /* 0 once unplugged */
-    char     name[16];           /* "usb0" */
+    char     name[16];           /* "usb0", "nvme0" */
+    char     kind[8];            /* "usb", "nvme": the mount point is /mnt/<kind>[N] */
     char     model[40];          /* "QEMU QEMU HARDDISK" */
     uint32_t sectors;            /* 512-byte sectors */
     uint32_t sector_size;
@@ -31,6 +32,11 @@ blockdev_t* blockdev_register(const char* model, uint32_t sectors, uint32_t sect
                               int (*read)(blockdev_t*, uint32_t, uint32_t, void*),
                               int (*write)(blockdev_t*, uint32_t, uint32_t, const void*),
                               void* priv);
+/* the same for another kind of drive ("nvme") */
+blockdev_t* blockdev_register_kind(const char* kind, const char* model, uint32_t sectors, uint32_t sector_size,
+                                   int (*read)(blockdev_t*, uint32_t, uint32_t, void*),
+                                   int (*write)(blockdev_t*, uint32_t, uint32_t, const void*),
+                                   void* priv);
 void        blockdev_unregister(blockdev_t* bd);
 blockdev_t* blockdev_get(int i);          /* NULL if slot i is unused */
 

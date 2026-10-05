@@ -537,7 +537,7 @@ static void bios_handoff(ehci_t* e, const pci_dev_t* pd) {
 int ehci_init_controller(const pci_dev_t* pd) {
     if (g_ehci_count >= MAX_EHCI) return -1;
     int is_io = 0;
-    uint32_t bar = pci_bar(pd, 0, &is_io);
+    uintptr_t bar = pci_bar(pd, 0, &is_io);
     if (is_io || !bar) return -1;
     pci_enable(pd);
 

@@ -35,6 +35,24 @@ int gui_open_browser(const char* url);
 int gui_open_notepad(const char* path);
 /* 1 while Notepad is the front window (it gets the keyboard) */
 int gui_notepad_focused(void);
+/* 1 while an installed app's window is in front (it gets the keyboard) */
+int gui_appwin_focused(void);
+
+/* opens Apps / the Task Manager; 0 if the desktop is not running */
+int gui_open_apps(void);
+int gui_open_taskmgr(void);
+void gui_raise_files(void);
+
+/* the open windows (taskbar order), for the Task Manager */
+typedef struct {
+    int  handle;
+    char title[48];
+    int  minimized;
+    int  focused;
+} gui_win_info_t;
+int  gui_windows(gui_win_info_t* out, int max);
+void gui_window_close(int handle);
+void gui_window_activate(int handle);   /* restore + bring to front */
 
 #endif
 

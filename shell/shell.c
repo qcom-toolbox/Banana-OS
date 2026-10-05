@@ -24,6 +24,7 @@
 #include "../kernel/kstring.h"
 #include "../kernel/kheap.h"
 #include "../kernel/tty.h"
+#include "../kernel/examples.h"
 
 extern char _kernel_end[];   /* boot/linker.ld */
 
@@ -2207,6 +2208,9 @@ static void dispatch_cmd(const char* raw_line, int persona) {
     if (srvcmd_dispatch(line)) return;
     if (netcmd_dispatch(line)) return;
 
+    /* an installed app (pkg) */
+    if (syscmd_try_app(line)) return;
+
     /* unknown */
     terminal_write_color(shell_kind_name(persona), VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     terminal_write_color(": command not found: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
@@ -2274,7 +2278,10 @@ void shell_run(void) {
     /* If a dedicated ATA disk was previously `install`ed, load its saved
      * filesystem instead of reseeding the defaults - this is what makes
      * files persist across reboots. See kernel/fsdisk.c. */
-    if (!fsdisk_try_load()) fs_init();
+    if (!fsdisk_try_load()) {
+        fs_init();
+        examples_seed();          /* the SDK example apps in ~/Examples */
+    }
 
     /* saved network settings, services enabled at boot (shell/srvcmds.c) */
     services_boot();

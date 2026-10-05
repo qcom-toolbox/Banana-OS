@@ -261,7 +261,7 @@ static int find_hba(const pci_dev_t* d, void* ctx) {
     if (d->class_code != 0x01 || d->subclass != 0x06 || d->prog_if != 0x01) return 0;
     if (g_nhba >= MAX_HBA) return 1;
     int io;
-    uint32_t bar = pci_bar(d, 5, &io);
+    uintptr_t bar = pci_bar(d, 5, &io);
     if (!bar || io) return 0;
     pci_enable(d);
     hba_t* h = &g_hba[g_nhba++];

@@ -33,6 +33,7 @@ typedef struct {
     uint32_t     cpu_pct;
     int          vt;             /* terminal output target, restored on switch-in */
     int          background;     /* daemon: never reads the keyboard (task_set_background) */
+    void*        stack_mem;      /* kmalloc'd stack (task_create_stack), or NULL */
 } task_t;
 
 static task_t  g_tasks[TASK_MAX];
@@ -90,12 +91,21 @@ int task_create(const char* name, void (*entry)(void)) {
 }
 
 int task_create_stack(const char* name, void (*entry)(void), uint32_t stack_bytes) {
-    if (g_count >= TASK_MAX) return -1;
-
-    task_t* t = &g_tasks[g_count];
-    t->pid = (uint32_t)g_count;
+    /* a finished task's slot (apps run as tasks that end) is reused */
+    task_t* t = NULL;
+    for (int i = 1; i < g_count; i++) {
+        if (g_tasks[i].state == TASK_UNUSED && &g_tasks[i] != g_current) { t = &g_tasks[i]; break; }
+    }
+    if (!t) {
+        if (g_count >= TASK_MAX) return -1;
+        t = &g_tasks[g_count];
+        t->pid = (uint32_t)g_count;
+        t->stack_mem = NULL;
+        g_count++;
+    }
+    /* the old stack of a reused slot is free now: nothing runs on it */
+    if (t->stack_mem) { kfree(t->stack_mem); t->stack_mem = NULL; }
     set_name(t->name, name, TASK_NAME_MAX);
-    t->state = TASK_READY;
     t->entry = entry;
     t->sleep_until_tick = 0;
     t->window_ticks = 0;
@@ -111,7 +121,8 @@ int task_create_stack(const char* name, void (*entry)(void), uint32_t stack_byte
     uintptr_t* sp = &t->stack[TASK_STACK_WORDS];
     if (stack_bytes > sizeof(t->stack)) {
         uint8_t* mem = (uint8_t*)kmalloc(stack_bytes + 16);
-        if (!mem) return -1;
+        if (!mem) { t->state = TASK_UNUSED; return -1; }
+        t->stack_mem = mem;
         sp = (uintptr_t*)(((uintptr_t)mem + stack_bytes) & ~(uintptr_t)15);
     }
 #ifdef __x86_64__
@@ -132,7 +143,7 @@ int task_create_stack(const char* name, void (*entry)(void), uint32_t stack_byte
 #endif
     t->sp = sp;
 
-    g_count++;
+    t->state = TASK_READY;
     return (int)t->pid;
 }
 

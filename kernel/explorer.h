@@ -19,6 +19,8 @@ void explorer_draw(const fb_info_t* fi);
 int  explorer_contains(int mx, int my);  /* point inside the window */
 void explorer_click(int mx, int my);     /* left button went down there */
 void explorer_mouse(int mx, int my, int left);   /* dragging the window */
+void explorer_rclick(int mx, int my);    /* right-click: its menu */
+void explorer_key(char c);               /* keys while Files is in front */
 /* changes whenever the window needs repainting (gui.c's redraw check) */
 uint32_t explorer_signature(void);
 

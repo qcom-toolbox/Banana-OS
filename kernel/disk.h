@@ -4,7 +4,7 @@
 #include "types.h"
 #include "ata.h"
 
-/* Disks of every kind - IDE (ata.c, atapi.c) and SATA (ahci.c) - behind
+/* Disks of every kind - IDE (ata.c, atapi.c), SATA (ahci.c), NVMe (nvme.c) - behind
  * one interface, for install/sync and the disk listing. */
 
 #define DISK_MAX 20

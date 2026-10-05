@@ -113,7 +113,7 @@ netdev_t* rtl8139_probe(void) {
     if (!pci_find(0x10EC, 0x8139, &pd)) return NULL;
 
     int is_io = 0;
-    uint32_t bar0 = pci_bar(&pd, 0, &is_io);
+    uintptr_t bar0 = pci_bar(&pd, 0, &is_io);
     if (!is_io || !bar0) return NULL;
     pci_enable(&pd);
     g_io = (uint16_t)bar0;

@@ -193,7 +193,7 @@ netdev_t* e1000_probe(void) {
     if (!model) return NULL;
 
     int is_io = 0;
-    uint32_t bar0 = pci_bar(&pd, 0, &is_io);
+    uintptr_t bar0 = pci_bar(&pd, 0, &is_io);
     if (is_io || !bar0) return NULL;
     pci_enable(&pd);
     g_mmio = (volatile uint8_t*)(uintptr_t)bar0;

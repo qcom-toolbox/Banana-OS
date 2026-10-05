@@ -78,6 +78,7 @@ static int identify_one(int bus, int is_slave, ata_disk_t* out) {
     out->sectors  = 0;
     out->model[0] = '\0';
     out->ahci_port = -1;
+    out->nvme = 0;
 
     uint16_t io = bus_io(bus);
 

@@ -11,13 +11,23 @@ blockdev_t* blockdev_register(const char* model, uint32_t sectors, uint32_t sect
                               int (*read)(blockdev_t*, uint32_t, uint32_t, void*),
                               int (*write)(blockdev_t*, uint32_t, uint32_t, const void*),
                               void* priv) {
+    return blockdev_register_kind("usb", model, sectors, sector_size, read, write, priv);
+}
+
+blockdev_t* blockdev_register_kind(const char* kind, const char* model, uint32_t sectors, uint32_t sector_size,
+                                   int (*read)(blockdev_t*, uint32_t, uint32_t, void*),
+                                   int (*write)(blockdev_t*, uint32_t, uint32_t, const void*),
+                                   void* priv) {
+    int same = 0;
+    for (int i = 0; i < BLOCKDEV_MAX; i++) if (g_bd[i].used && strcmp(g_bd[i].kind, kind) == 0) same++;
     for (int i = 0; i < BLOCKDEV_MAX; i++) {
         blockdev_t* bd = &g_bd[i];
         if (bd->used) continue;
         memset(bd, 0, sizeof(*bd));
         bd->used = 1;
         bd->present = 1;
-        ksnprintf(bd->name, sizeof(bd->name), "usb%d", i);
+        kstrlcpy(bd->kind, kind, sizeof(bd->kind));
+        ksnprintf(bd->name, sizeof(bd->name), "%s%d", kind, same);
         kstrlcpy(bd->model, model, sizeof(bd->model));
         bd->sectors = sectors;
         bd->sector_size = sector_size;

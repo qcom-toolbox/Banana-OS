@@ -8,6 +8,10 @@
 #include "wallpaper.h"
 #include "winframe.h"
 #include "gui.h"
+#include "pkg.h"
+#include "audio.h"
+#include "ctxmenu.h"
+#include "blockdev.h"
 
 #define WIN_W    g_win.w
 #define WIN_H    g_win.h
@@ -263,11 +267,39 @@ static void delete_selected(void) {
     set_status(msg);
 }
 
+static int has_ext(const char* name, const char* ext) {
+    const char* dot = strrchr(name, '.');
+    return dot && strcasecmp(dot, ext) == 0;
+}
+
+static void install_package(const char* path) {
+    char msg[160];
+    set_status("Installing...");
+    if (pkg_install(path, msg, sizeof(msg)) == 0) {
+        char m2[96];
+        kstrlcpy(m2, msg, sizeof(m2));
+        set_status(m2);
+    } else {
+        char m2[96];
+        ksnprintf(m2, sizeof(m2), "Not installed: %s", msg);
+        set_status(m2);
+    }
+}
+
+static void play_sound(const char* path) {
+    char err[80], msg[96];
+    if (audio_play_wav(path, err, sizeof(err)) == 0) ksnprintf(msg, sizeof(msg), "Playing %s", strrchr(path, '/') + 1);
+    else ksnprintf(msg, sizeof(msg), "Cannot play it: %s", err);
+    set_status(msg);
+}
+
 static void open_item(int i) {
     const item_t* it = &g_items[i];
     char path[FS_PATH_LEN];
     child_path(item_name(it), path, sizeof(path));
     if (it->is_dir) { go(path); return; }
+    if (has_ext(item_name(it), ".bpk")) { install_package(path); return; }
+    if (has_ext(item_name(it), ".wav")) { play_sound(path); return; }
     if (is_image_file(it->idx)) {
         char err[80], msg[96];
         set_status("Setting the wallpaper...");
@@ -287,12 +319,268 @@ static void terminal_here(void) {
     gui_terminal_run(cmd);
 }
 
+
+/* ── copy / cut / paste of files, rename, the right-click menu ────── */
+
+static char g_clip[FS_PATH_LEN];      /* a file or folder copied (or cut) in Files */
+static int  g_clip_cut;
+static int  g_renaming = -1;          /* item being renamed */
+static char g_rename[FS_NAME_LEN];
+
+/* copies a folder and everything in it */
+static int copy_tree(const char* src, const char* dst, int depth) {
+    if (depth > 12 || fs_mkdir(dst) < 0) return -1;
+    static int idx[FS_MAX_FILES];
+    int rc = 0;
+    int nf = fs_list_files(src, idx, FS_MAX_FILES);
+    for (int i = 0; i < nf && i < FS_MAX_FILES; i++) {
+        char s[FS_PATH_LEN], d[FS_PATH_LEN];
+        const char* name = fs_file_info(idx[i])->name;
+        ksnprintf(s, sizeof(s), "%s/%s", src, name);
+        ksnprintf(d, sizeof(d), "%s/%s", dst, name);
+        if (fs_copy(s, d) < 0) rc = -1;
+    }
+    int dirs[32];
+    int nd = fs_list_dirs(src, dirs, 32);
+    char names[32][FS_NAME_LEN];
+    int n = nd < 32 ? nd : 32;
+    for (int i = 0; i < n; i++) kstrlcpy(names[i], fs_get_dir(dirs[i])->name, FS_NAME_LEN);
+    for (int i = 0; i < n; i++) {
+        char s[FS_PATH_LEN], d[FS_PATH_LEN];
+        ksnprintf(s, sizeof(s), "%s/%s", src, names[i]);
+        ksnprintf(d, sizeof(d), "%s/%s", dst, names[i]);
+        if (copy_tree(s, d, depth + 1) < 0) rc = -1;
+    }
+    return rc;
+}
+
+static void clip_selected(int cut) {
+    if (g_sel < 0) return;
+    child_path(item_name(&g_items[g_sel]), g_clip, sizeof(g_clip));
+    g_clip_cut = cut;
+    char msg[96];
+    ksnprintf(msg, sizeof(msg), "%s \"%s\" - paste it in another folder", cut ? "Cut" : "Copied", item_name(&g_items[g_sel]));
+    set_status(msg);
+}
+
+static void paste_here(void) {
+    if (!g_clip[0]) return;
+    const char* base = strrchr(g_clip, '/');
+    base = base ? base + 1 : g_clip;
+    char dst[FS_PATH_LEN], msg[96];
+    child_path(base, dst, sizeof(dst));
+    /* "name (2)" when it exists already (pasting into the same folder) */
+    for (int n = 2; (fs_find_file(dst) >= 0 || fs_find_dir(dst) >= 0) && n < 100; n++) {
+        char nm[FS_NAME_LEN];
+        ksnprintf(nm, sizeof(nm), "%s (%d)", base, n);
+        child_path(nm, dst, sizeof(dst));
+    }
+    int ok;
+    set_status(g_clip_cut ? "Moving..." : "Copying...");
+    if (fs_find_dir(g_clip) >= 0) ok = g_clip_cut ? fs_move(g_clip, dst) >= 0 : copy_tree(g_clip, dst, 0) == 0;
+    else ok = g_clip_cut ? fs_move(g_clip, dst) >= 0 : fs_copy(g_clip, dst) >= 0;
+    if (ok) ksnprintf(msg, sizeof(msg), "%s \"%s\"", g_clip_cut ? "Moved" : "Pasted", base);
+    else ksnprintf(msg, sizeof(msg), "Could not %s \"%s\"%s", g_clip_cut ? "move" : "copy", base,
+                   fs_io_error() ? " (the USB stick reported an error)" : "");
+    if (ok && g_clip_cut) g_clip[0] = 0;
+    scan();
+    set_status(msg);
+}
+
+static void new_text_file(void) {
+    char name[FS_NAME_LEN], path[FS_PATH_LEN];
+    for (int n = 1; n < 100; n++) {
+        if (n == 1) kstrlcpy(name, "New text.txt", sizeof(name));
+        else ksnprintf(name, sizeof(name), "New text %d.txt", n);
+        child_path(name, path, sizeof(path));
+        if (fs_find_dir(path) >= 0 || fs_find_file(path) >= 0) continue;
+        if (fs_write_path(path, "", 0) < 0) { set_status("Could not create the file"); return; }
+        scan();
+        for (int i = 0; i < g_count; i++)
+            if (!g_items[i].is_dir && strcmp(item_name(&g_items[i]), name) == 0) g_sel = i;
+        set_status("Created a text file - right-click > Rename (or Ctrl+R) to name it");
+        return;
+    }
+}
+
+static void start_rename(void) {
+    if (g_sel < 0) return;
+    g_renaming = g_sel;
+    kstrlcpy(g_rename, item_name(&g_items[g_sel]), sizeof(g_rename));
+    set_status("Type the new name, Enter to rename, Esc to cancel");
+}
+
+static void finish_rename(void) {
+    int i = g_renaming;
+    g_renaming = -1;
+    if (i < 0 || i >= g_count || !g_rename[0] || strchr(g_rename, '/')) { set_status("Not renamed"); return; }
+    char from[FS_PATH_LEN], to[FS_PATH_LEN], msg[96];
+    child_path(item_name(&g_items[i]), from, sizeof(from));
+    child_path(g_rename, to, sizeof(to));
+    if (strcmp(from, to) == 0) { set_status(""); return; }
+    if (fs_find_file(to) >= 0 || fs_find_dir(to) >= 0) { set_status("That name is taken"); return; }
+    if (fs_move(from, to) < 0) ksnprintf(msg, sizeof(msg), "Could not rename it%s", fs_io_error() ? " (volume error)" : "");
+    else ksnprintf(msg, sizeof(msg), "Renamed to \"%s\"", g_rename);
+    scan();
+    for (int k = 0; k < g_count; k++) if (strcmp(item_name(&g_items[k]), g_rename) == 0) g_sel = k;
+    set_status(msg);
+}
+
+static void eject_here(void) {
+    int mnt = fs_path_mount(g_path);
+    if (!mnt) return;
+    char point[FS_PATH_LEN], msg[96];
+    kstrlcpy(point, fs_mount_point(mnt), sizeof(point));
+    go("/home/banana");
+    if (!blockdev_eject(mnt)) fs_unmount(mnt);
+    ksnprintf(msg, sizeof(msg), "%s ejected - the stick can be removed", point);
+    set_status(msg);
+}
+
+enum { M_OPEN = 1, M_EDIT, M_INSTALL, M_PLAY, M_WALLPAPER, M_COPY, M_CUT, M_PASTE, M_RENAME, M_DELETE,
+       M_NEWFOLDER, M_NEWFILE, M_TERMINAL, M_REFRESH, M_USB, M_EJECT, M_PROPS };
+
+static void menu_cb(int id, void* arg) {
+    (void)arg;
+    char path[FS_PATH_LEN], msg[96];
+    if (g_sel >= 0 && g_sel < g_count) child_path(item_name(&g_items[g_sel]), path, sizeof(path));
+    else path[0] = 0;
+    g_gen++;
+    switch (id) {
+    case M_OPEN: if (g_sel >= 0) open_item(g_sel); break;
+    case M_EDIT: if (path[0]) gui_open_notepad(path); break;
+    case M_INSTALL: if (path[0]) install_package(path); break;
+    case M_PLAY: if (path[0]) play_sound(path); break;
+    case M_WALLPAPER: if (g_sel >= 0) open_item(g_sel); break;
+    case M_COPY: clip_selected(0); break;
+    case M_CUT: clip_selected(1); break;
+    case M_PASTE: paste_here(); break;
+    case M_RENAME: start_rename(); break;
+    case M_DELETE: g_confirm_delete = 1; delete_selected(); break;
+    case M_NEWFOLDER: new_folder(); break;
+    case M_NEWFILE: new_text_file(); break;
+    case M_TERMINAL:
+        if (g_sel >= 0 && g_items[g_sel].is_dir) {
+            char cmd[FS_PATH_LEN + 16];
+            ksnprintf(cmd, sizeof(cmd), "cd \"%s\"\n", path);
+            gui_terminal_run(cmd);
+        } else {
+            terminal_here();
+        }
+        break;
+    case M_REFRESH: scan(); set_status("Refreshed"); break;
+    case M_USB: go("/mnt/usb"); break;
+    case M_EJECT: eject_here(); break;
+    case M_PROPS:
+        if (g_sel >= 0 && !g_items[g_sel].is_dir) {
+            fs_file_t* f = fs_file_info(g_items[g_sel].idx);
+            char size[24];
+            human_size(f->size, size, sizeof(size));
+            ksnprintf(msg, sizeof(msg), "%s: %s (%u bytes)%s", f->name, size, f->size, f->mnt ? ", on a USB stick" : "");
+            set_status(msg);
+        }
+        break;
+    }
+}
+
+/* the list row under the mouse: item index, -1 for empty space, -2 outside the list */
+static int row_at(int mx, int my) {
+    int lx = mx - g_x, ly = my - g_y;
+    int sb_x = LIST_X + LIST_W - 14;
+    if (lx < LIST_X || lx >= sb_x || ly < LIST_Y + ROW_H || ly >= LIST_Y + ROW_H * (ROWS + 1)) return -2;
+    int row = (ly - LIST_Y - ROW_H) / ROW_H + g_scroll;
+    return row < g_count ? row : -1;
+}
+
+void explorer_rclick(int mx, int my) {
+    if (!explorer_contains(mx, my)) return;
+    int row = row_at(mx, my);
+    if (row == -2) row = g_sel;
+    g_renaming = -1;
+    ctx_item_t items[CTX_MAX_ITEMS];
+    int n = 0;
+    if (row >= 0) {
+        g_sel = row;
+        g_confirm_delete = 0;
+        const item_t* it = &g_items[row];
+        const char* name = item_name(it);
+        items[n++] = (ctx_item_t){ "Open", M_OPEN, 0 };
+        if (!it->is_dir) {
+            if (has_ext(name, ".bpk")) items[n++] = (ctx_item_t){ "Install app", M_INSTALL, 0 };
+            if (has_ext(name, ".wav")) items[n++] = (ctx_item_t){ "Play", M_PLAY, 0 };
+            if (is_image_file(it->idx)) items[n++] = (ctx_item_t){ "Set as wallpaper", M_WALLPAPER, 0 };
+            items[n++] = (ctx_item_t){ "Edit in Notepad", M_EDIT, 0 };
+        } else {
+            items[n++] = (ctx_item_t){ "Open in a terminal", M_TERMINAL, 0 };
+        }
+        items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
+        items[n++] = (ctx_item_t){ "Cut", M_CUT, 0 };
+        items[n++] = (ctx_item_t){ "Copy", M_COPY, 0 };
+        items[n++] = (ctx_item_t){ "Rename", M_RENAME, 0 };
+        items[n++] = (ctx_item_t){ "Delete", M_DELETE, 0 };
+        if (!it->is_dir) {
+            items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
+            items[n++] = (ctx_item_t){ "Properties", M_PROPS, 0 };
+        }
+    } else {
+        g_sel = -1;
+        items[n++] = (ctx_item_t){ "Paste", M_PASTE, g_clip[0] == 0 };
+        items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
+        items[n++] = (ctx_item_t){ "New folder", M_NEWFOLDER, 0 };
+        items[n++] = (ctx_item_t){ "New text file", M_NEWFILE, 0 };
+        items[n++] = (ctx_item_t){ "Open a terminal here", M_TERMINAL, 0 };
+        items[n++] = (ctx_item_t){ "Refresh", M_REFRESH, 0 };
+        items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
+        if (fs_path_mount(g_path)) items[n++] = (ctx_item_t){ "Eject this USB stick", M_EJECT, 0 };
+        else items[n++] = (ctx_item_t){ "Go to the USB stick", M_USB, fs_find_dir("/mnt/usb") < 0 };
+    }
+    g_gen++;
+    ctxmenu_open(mx, my, items, n, menu_cb, NULL);
+}
+
+/* keys while Files is the front window */
+void explorer_key(char c) {
+    static int esc;
+    g_gen++;
+    if (g_renaming >= 0) {
+        size_t n = strlen(g_rename);
+        if (c == '\n') finish_rename();
+        else if (c == 27) { g_renaming = -1; set_status("Not renamed"); }
+        else if (c == '\b') { if (n) g_rename[n - 1] = 0; }
+        else if ((unsigned char)c >= 32 && c != '/' && n < FS_NAME_LEN - 1) { g_rename[n] = c; g_rename[n + 1] = 0; }
+        return;
+    }
+    if (esc == 1) {
+        esc = c == '[' ? 2 : 0;
+        if (esc) return;
+    } else if (esc == 2) {
+        esc = 0;
+        if (c == 'A' && g_sel > 0) g_sel--;
+        else if (c == 'A' && g_sel < 0 && g_count) g_sel = 0;
+        else if (c == 'B' && g_sel < g_count - 1) g_sel++;
+        else if (c == 'P' && g_sel >= 0) { g_confirm_delete = 1; delete_selected(); }     /* Delete */
+        if (g_sel >= 0 && g_sel < g_scroll) g_scroll = g_sel;
+        if (g_sel >= g_scroll + ROWS) g_scroll = g_sel - ROWS + 1;
+        return;
+    }
+    switch (c) {
+    case 27: esc = 1; return;
+    case '\n': if (g_sel >= 0) open_item(g_sel); return;
+    case '\b': go_up(); return;
+    case 3: clip_selected(0); return;            /* Ctrl+C */
+    case 24: clip_selected(1); return;           /* Ctrl+X */
+    case 22: paste_here(); return;               /* Ctrl+V */
+    case 18: start_rename(); return;             /* Ctrl+R: rename */
+    case 14: new_folder(); return;               /* Ctrl+N */
+    case 23: explorer_close(); return;           /* Ctrl+W */
+    }
+}
 /* ── mouse ────────────────────────────────────────────────────────── */
 
 /* toolbar buttons: x offset, width, label */
 static const struct { int x, w; const char* label; } TOOLS[] = {
     { 8, 40, "Up" }, { 52, 48, "Home" }, { 104, 96, "New folder" }, { 204, 64, "Delete" },
-    { 272, 80, "Terminal" }, { 356, 64, "Refresh" },
+    { 272, 80, "Terminal" }, { 356, 64, "Refresh" }, { 424, 40, "USB" },
 };
 #define TOOL_COUNT (int)(sizeof(TOOLS) / sizeof(TOOLS[0]))
 
@@ -326,6 +614,10 @@ void explorer_click(int mx, int my) {
             case 3: delete_selected(); break;
             case 4: terminal_here(); break;
             case 5: scan(); set_status("Refreshed"); break;
+            case 6:
+                if (fs_find_dir("/mnt/usb") >= 0) go("/mnt/usb");
+                else set_status("No USB stick mounted (FAT32 sticks show up in /mnt/usb)");
+                break;
             }
             return;
         }
@@ -447,7 +739,7 @@ static void draw_preview(int px, int py, int ph) {
         int img = is_image_file(it->idx), txt = !img && is_text_file(it->idx);
         ksnprintf(line, sizeof(line), "%s, %s", img ? "Picture" : txt ? "Text" : "Binary", size);
         gfx_draw_text(x, y + 16, line, C_DIM, C_LIST);
-        action = img ? "Set as wallpaper" : "Edit";
+        action = img ? "Set as wallpaper" : has_ext(f->name, ".bpk") ? "Install app" : has_ext(f->name, ".wav") ? "Play" : "Edit";
         int top = y + 36;
         if (img) {
             if (g_thumb_for != it->idx) make_thumb(it->idx);
@@ -492,7 +784,7 @@ void explorer_draw(const fb_info_t* fi) {
     gfx_draw_text(x + WIN_W - 22, y + 6, "x", 0x00FFFFFFu, 0x006D2F2Fu);
 
     for (int i = 0; i < TOOL_COUNT; i++) {
-        int enabled = (i != 3 || g_sel >= 0) && (i != 0 || strcmp(g_path, "/") != 0);
+        int enabled = (i != 3 || g_sel >= 0) && (i != 0 || strcmp(g_path, "/") != 0) && (i != 6 || fs_find_dir("/mnt/usb") >= 0);
         const char* label = (i == 3 && g_confirm_delete) ? "Sure?" : TOOLS[i].label;
         button(x + TOOLS[i].x, y + 26, TOOLS[i].w, label, enabled);
     }
@@ -540,7 +832,8 @@ void explorer_draw(const fb_info_t* fi) {
 
     /* status line */
     char st[96];
-    if (g_status[0]) kstrlcpy(st, g_status, sizeof(st));
+    if (g_renaming >= 0) ksnprintf(st, sizeof(st), "New name: %s_   (Enter: rename, Esc: cancel)", g_rename);
+    else if (g_status[0]) kstrlcpy(st, g_status, sizeof(st));
     else ksnprintf(st, sizeof(st), "%d item%s", g_count, g_count == 1 ? "" : "s");
     draw_clip(x + LIST_X, y + WIN_H - 16, st, (WIN_W - 16) / 8,
               g_confirm_delete ? C_WARN : C_DIM, C_PANEL);

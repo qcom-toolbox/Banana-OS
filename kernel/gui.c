@@ -16,6 +16,11 @@
 #include "browser.h"
 #include "notepad.h"
 #include "clipboard.h"
+#include "kheap.h"
+#include "appwin.h"
+#include "ctxmenu.h"
+#include "launcher.h"
+#include "taskmgr.h"
 #include "../net/net.h"
 #include "../shell/shell.h"
 
@@ -24,13 +29,30 @@
 
 #define TASKBAR_ROW (VGA_HEIGHT - 1)
 
+/* the Start menu and the desktop shortcuts: the same entries */
+enum { ACT_ABOUT = 0, ACT_TERMINAL, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_WALLPAPER, ACT_QUIT };
+#define MENU_ITEMS 9
+static const char* const MENU_LABELS[MENU_ITEMS] = {
+    "About", "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Wallpaper", "Exit to shell",
+};
+static const char* const ICON_LABELS[MENU_ITEMS] = {
+    "About", "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Wallpaper", "Quit GUI",
+};
+#define START_MENU_W 236
+#define START_MENU_H (16 + MENU_ITEMS * 28)
+#define ICON_W 132
+#define ICON_H 38
+#define ICON_X 18
+#define ICON_Y 22
+#define ICON_STEP (ICON_H + 10)
+
 static int g_menu_open = 0;
-static int g_menu_sel = 0; /* 0=About, 1=Terminal, 2=Files, 3=Browser, 4=Notepad, 5=Wallpaper, 6=Quit GUI */
-#define MENU_ITEMS 7
-/* The app windows (Files, Browser, Notepad) and the terminal windows share
- * one stacking order: the app windows have their own back-to-front order,
- * and at most one of them - g_front_app - is above the terminals. */
-enum { APP_FILES = 0, APP_BROWSER, APP_NOTEPAD, APP_COUNT };
+static int g_menu_sel = 0;     /* an ACT_* */
+/* The app windows (Files, Browser, Notepad, Apps, Task Manager and the
+ * windows of installed apps) and the terminal windows share one stacking
+ * order: the app windows have their own back-to-front order, and at most
+ * one of them - g_front_app - is above the terminals. */
+enum { APP_FILES = 0, APP_BROWSER, APP_NOTEPAD, APP_LAUNCHER, APP_TASKMGR, APP_APPWIN, APP_COUNT };
 typedef struct {
     int      (*is_open)(void);
     void     (*draw)(const fb_info_t* fi);
@@ -39,14 +61,28 @@ typedef struct {
     void     (*mouse)(int mx, int my, int left);
     uint32_t (*signature)(void);
     void     (*close)(void);
+    void     (*rclick)(int mx, int my);
+    const char* title;
 } app_t;
+static void explorer_rclick_menu(int mx, int my);
+static void notepad_rclick_menu(int mx, int my);
 static const app_t g_apps[APP_COUNT] = {
-    { explorer_is_open, explorer_draw, explorer_contains, explorer_click, explorer_mouse, explorer_signature, explorer_close },
-    { browser_is_open, browser_draw, browser_contains, browser_click, browser_mouse, browser_signature, browser_close },
-    { notepad_is_open, notepad_draw, notepad_contains, notepad_click, notepad_mouse, notepad_signature, notepad_close },
+    { explorer_is_open, explorer_draw, explorer_contains, explorer_click, explorer_mouse, explorer_signature, explorer_close, explorer_rclick_menu, "Files" },
+    { browser_is_open, browser_draw, browser_contains, browser_click, browser_mouse, browser_signature, browser_close, browser_rclick, "Browser" },
+    { notepad_is_open, notepad_draw, notepad_contains, notepad_click, notepad_mouse, notepad_signature, notepad_close, notepad_rclick_menu, "Notepad" },
+    { launcher_is_open, launcher_draw, launcher_contains, launcher_click, launcher_mouse, launcher_signature, launcher_close, launcher_rclick, "Apps" },
+    { taskmgr_is_open, taskmgr_draw, taskmgr_contains, taskmgr_click, taskmgr_mouse, taskmgr_signature, taskmgr_close, taskmgr_rclick, "Task Manager" },
+    { appwin_is_open, appwin_draw, appwin_contains, appwin_click, appwin_mouse, appwin_signature, appwin_close_all, appwin_rclick, "App" },
 };
 static int g_front_app = -1;                        /* -1: a terminal window is in front */
-static int g_app_order[APP_COUNT] = { APP_FILES, APP_BROWSER, APP_NOTEPAD };   /* back to front */
+static int g_app_order[APP_COUNT] = { APP_FILES, APP_BROWSER, APP_NOTEPAD, APP_LAUNCHER, APP_TASKMGR, APP_APPWIN };   /* back to front */
+static int g_app_min[APP_COUNT];                    /* minimized to the taskbar */
+
+/* open and not minimized (the app windows minimize one by one) */
+static int app_visible(int a) {
+    if (a == APP_APPWIN) return appwin_any_visible();
+    return g_apps[a].is_open() && !g_app_min[a];
+}
 
 static void raise_app(int a) {
     int pos = 0;
@@ -61,7 +97,7 @@ static int app_at(int mx, int my, int with_front) {
     for (int i = APP_COUNT - 1; i >= 0; i--) {
         int a = g_app_order[i];
         if (!with_front && a == g_front_app) continue;
-        if (g_apps[a].contains(mx, my)) return a;
+        if (app_visible(a) && g_apps[a].contains(mx, my)) return a;
     }
     return -1;
 }
@@ -96,6 +132,7 @@ typedef struct {
     uint32_t title_click_ms;      /* double-click on the title bar */
     int selecting, sel;           /* mouse text selection (cells, buffer rows) */
     int s_r0, s_c0, s_r1, s_c1;
+    int minimized;                /* to the taskbar */
 } term_win_t;
 
 #define TERM_WIN_MAX 4
@@ -146,13 +183,6 @@ static void draw_bevel_box(int x, int y, int w, int h, uint32_t base, uint32_t h
     gfx_fill_rect(x + w - 1, y, 1, h, lo);
 }
 
-static void draw_flux_toolbar_button(int x, int y, int w, int h, const char* label, int pressed) {
-    uint32_t base = pressed ? 0x00252B33u : 0x00303740u;
-    uint32_t hi = pressed ? 0x002E3640u : 0x00535D6Eu;
-    uint32_t lo = pressed ? 0x00141920u : 0x0015191Fu;
-    draw_bevel_box(x, y, w, h, base, hi, lo);
-    gfx_draw_text(x + 8, y + 8, label, 0x00E6EDF5u, base);
-}
 
 static void draw_icon_terminal(int x, int y, uint32_t bg) {
     (void)bg;
@@ -197,6 +227,25 @@ static void draw_icon_browser(int x, int y, uint32_t bg) {
     gfx_fill_rect(x + 8, y + 6, 3, 3, 0x0057B65Au);
     gfx_fill_rect(x + 1, y + 6, 12, 1, 0x00A9CCF5u);
     gfx_fill_rect(x + 6, y, 1, 12, 0x00A9CCF5u);
+}
+
+/* four tiles */
+static void draw_icon_apps(int x, int y, uint32_t bg) {
+    (void)bg;
+    gfx_fill_rect(x + 1, y, 5, 5, 0x003A7BD5u);
+    gfx_fill_rect(x + 8, y, 5, 5, 0x0057B65Au);
+    gfx_fill_rect(x + 1, y + 7, 5, 5, 0x00F4D35Eu);
+    gfx_fill_rect(x + 8, y + 7, 5, 5, 0x00E07040u);
+}
+
+/* a little CPU graph */
+static void draw_icon_taskmgr(int x, int y, uint32_t bg) {
+    (void)bg;
+    draw_bevel_box(x, y, 14, 12, 0x00161D28u, 0x00475A78u, 0x000E1118u);
+    gfx_fill_rect(x + 2, y + 7, 2, 3, 0x0057B65Au);
+    gfx_fill_rect(x + 5, y + 4, 2, 6, 0x0057B65Au);
+    gfx_fill_rect(x + 8, y + 6, 2, 4, 0x0057B65Au);
+    gfx_fill_rect(x + 11, y + 2, 2, 8, 0x0057B65Au);
 }
 
 static void draw_icon_power(int x, int y, uint32_t bg) {
@@ -313,7 +362,7 @@ static void bring_term_front(int idx) {
 static int term_at(int mx, int my) {
     for (int oi = TERM_WIN_MAX - 1; oi >= 0; oi--) {
         term_win_t* w = &g_terms[g_term_order[oi]];
-        if (w->open && mx >= w->x && mx < w->x + w->w && my >= w->y && my < w->y + w->h) return g_term_order[oi] + 1;
+        if (w->open && !w->minimized && mx >= w->x && mx < w->x + w->w && my >= w->y && my < w->y + w->h) return g_term_order[oi] + 1;
     }
     return 0;
 }
@@ -334,6 +383,7 @@ static int open_new_terminal(void) {
         }
 
         g_terms[i].open = 1;
+        g_terms[i].minimized = 0;
         g_terms[i].dragging = 0;
         g_terms[i].sel = 0;
         term_apply_size(&g_terms[i]);
@@ -346,7 +396,7 @@ static int open_new_terminal(void) {
 }
 
 static void draw_terminal_window(const fb_info_t* fi, const term_win_t* win) {
-    if (!win || !win->open) return;
+    if (!win || !win->open || win->minimized) return;
     if (!fi) return;
 
     term_win_t w = *win;
@@ -372,6 +422,9 @@ static void draw_terminal_window(const fb_info_t* fi, const term_win_t* win) {
     int bx = w.x + w.w - 28;
     draw_bevel_box(bx, w.y + 4, 20, 12, 0x006D2F2Fu, 0x00A14747u, 0x00301717u);
     gfx_draw_text(bx + 6, w.y + 6, "x", 0x00FFFFFFu, 0x006D2F2Fu);
+    /* minimize (to the taskbar) */
+    draw_bevel_box(bx - 24, w.y + 4, 20, 12, 0x00303740u, 0x00535D6Eu, 0x0015191Fu);
+    gfx_draw_text(bx - 18, w.y + 5, "_", 0x00FFFFFFu, 0x00303740u);
 
     /* client area */
     int cx = w.x + pad;
@@ -515,8 +568,7 @@ static void draw_menu(void) {
         uint8_t bg = VGA_COLOR_DARK_GREY;
         if (g_menu_sel == i) { fg = VGA_COLOR_WHITE; bg = VGA_COLOR_BLUE; }
 
-        static const char* const items[MENU_ITEMS] = { " About app", " Terminal", " Files", " Browser", " Notepad", " Wallpaper", " Quit GUI" };
-        const char* item = items[i];
+        const char* item = MENU_LABELS[i];
         /* fill the rest of the row in highlight color for clean look */
         for (size_t x = 0; x < menu_w - 2; x++) {
             terminal_putentryat(' ', fg, bg, menu_y + (size_t)i, menu_x + 1 + x);
@@ -755,25 +807,53 @@ void gui_init(void) {
  * full 800x600 backbuffer to the real framebuffer on every single
  * terminal_putchar() - including plain shell typing - forever after the
  * first startx, since nothing ever called fb_clear_backbuffer(). */
-static uint32_t g_desktop_backbuf[800u * 600u];
-static int      g_backbuf_active = 0;
+/* The desktop is as big as the screen: GRUB asks for 800x600, but UEFI
+ * firmware often only offers the panel's native mode (1920x1080, ...),
+ * so the backbuffer and the wallpaper cache are sized at the first startx
+ * (up to 2560x1600; the 800x600 static ones if that allocation fails). */
+#define DESK_MAX_W 2560u
+#define DESK_MAX_H 1600u
+static uint32_t  g_desk_static[800u * 600u];
+static uint32_t  g_wall_static[800u * 600u];
+static uint32_t* g_desktop_backbuf = g_desk_static;
+static uint32_t* g_wallpaper_cache = g_wall_static;
+static uint32_t  g_desk_w = 800, g_desk_h = 600;
+static int       g_backbuf_active = 0;
 
 /* Cache of the rendered wallpaper: rendering it (bilinear upscale of a
  * preset, or copying a decoded user picture) only happens when the
  * wallpaper actually changes, never per frame. */
-static uint32_t g_wallpaper_cache[800u * 600u];
 static uint32_t g_wallpaper_cache_gen = 0;
 
+static void size_desktop(const fb_info_t* fi) {
+    uint32_t w = fi->width > DESK_MAX_W ? DESK_MAX_W : fi->width;
+    uint32_t h = fi->height > DESK_MAX_H ? DESK_MAX_H : fi->height;
+    if (w <= 800 && h <= 600) { g_desk_w = w; g_desk_h = h; return; }
+    if (g_desktop_backbuf != g_desk_static && w == g_desk_w && h == g_desk_h) return;
+    uint32_t* bb = (uint32_t*)kmalloc(w * h * 4);
+    uint32_t* wc = (uint32_t*)kmalloc(w * h * 4);
+    if (!bb || !wc) {
+        kfree(bb); kfree(wc);
+        g_desk_w = fi->width < 800 ? fi->width : 800;
+        g_desk_h = fi->height < 600 ? fi->height : 600;
+        return;
+    }
+    g_desktop_backbuf = bb;
+    g_wallpaper_cache = wc;
+    g_desk_w = w;
+    g_desk_h = h;
+    g_wallpaper_cache_gen = (uint32_t)-1;
+}
+
 static void refresh_wallpaper_cache(const fb_info_t* fi) {
+    (void)fi;
     if (g_wallpaper_cache_gen == wallpaper_generation()) return;
-    int w = (int)fi->width < 800 ? (int)fi->width : 800;
-    int h = (int)fi->height < 600 ? (int)fi->height : 600;
-    wallpaper_render(g_wallpaper_cache, w, h, 800);
+    wallpaper_render(g_wallpaper_cache, (int)g_desk_w, (int)g_desk_h, (int)g_desk_w);
     g_wallpaper_cache_gen = wallpaper_generation();
 }
 
 static void blit_wallpaper_cache(void) {
-    memcpy(g_desktop_backbuf, g_wallpaper_cache, sizeof(g_desktop_backbuf));
+    memcpy(g_desktop_backbuf, g_wallpaper_cache, (size_t)g_desk_w * g_desk_h * 4);
 }
 
 /* ── mouse cursor ──────────────────────────────────────────────────
@@ -790,6 +870,190 @@ static void draw_cursor(int mx, int my) {
                 fb_putpixel_direct(mx + cx, my + cy, 0x00FFFFFFu);
 }
 
+/* ── windows on the taskbar ────────────────────────────────────────
+ * Every open window gets a taskbar button, in the order the windows
+ * were opened. A window is named by a handle: kind << 8 | index. */
+#define WK_TERM   1
+#define WK_APP    2
+#define WK_APPWIN 3
+#define TB_MAX    24
+static int      g_tb[TB_MAX];
+static int      g_ntb;
+static uint32_t g_tb_gen;
+
+static int win_exists(int h) {
+    int k = h >> 8, i = h & 0xFF;
+    if (k == WK_TERM) return i < TERM_WIN_MAX && g_terms[i].open;
+    if (k == WK_APP) return i < APP_APPWIN && g_apps[i].is_open();
+    if (k == WK_APPWIN) return appwin_info(i, NULL, 0, NULL);
+    return 0;
+}
+
+static int win_minimized(int h) {
+    int k = h >> 8, i = h & 0xFF;
+    if (k == WK_TERM) return g_terms[i].minimized;
+    if (k == WK_APP) return g_app_min[i];
+    int m = 0;
+    appwin_info(i, NULL, 0, &m);
+    return m;
+}
+
+/* the window that has the focus */
+static int win_front(void) {
+    if (g_front_app == APP_APPWIN) { int id = appwin_front_id(); return id >= 0 ? (WK_APPWIN << 8 | id) : 0; }
+    if (g_front_app >= 0) return app_visible(g_front_app) ? (WK_APP << 8 | g_front_app) : 0;
+    for (int oi = TERM_WIN_MAX - 1; oi >= 0; oi--) {
+        int wi = g_term_order[oi];
+        if (g_terms[wi].open && !g_terms[wi].minimized) return WK_TERM << 8 | wi;
+    }
+    return 0;
+}
+
+static void win_title(int h, char* out, int cap) {
+    int k = h >> 8, i = h & 0xFF;
+    if (k == WK_TERM) {
+        int n = 0;
+        for (int j = 0; j <= i; j++) if (g_terms[j].open) n++;
+        ksnprintf(out, (size_t)cap, "Terminal %d", n);
+    } else if (k == WK_APP) {
+        kstrlcpy(out, g_apps[i].title, (size_t)cap);
+    } else {
+        appwin_info(i, out, cap, NULL);
+    }
+}
+
+/* keeps g_tb in step with the windows that exist */
+static void sync_taskbar(void) {
+    int n = 0;
+    for (int j = 0; j < g_ntb; j++) if (win_exists(g_tb[j])) g_tb[n++] = g_tb[j];
+    if (n != g_ntb) g_tb_gen++;
+    g_ntb = n;
+    int cand[TB_MAX], nc = 0;
+    for (int i = 0; i < TERM_WIN_MAX; i++) cand[nc++] = WK_TERM << 8 | i;
+    for (int a = 0; a < APP_APPWIN; a++) cand[nc++] = WK_APP << 8 | a;
+    for (int i = 0; i < APPWIN_MAX && nc < TB_MAX; i++) cand[nc++] = WK_APPWIN << 8 | i;
+    for (int c = 0; c < nc; c++) {
+        if (!win_exists(cand[c])) {
+            /* a closed window forgets it was minimized */
+            int k = cand[c] >> 8, i = cand[c] & 0xFF;
+            if (k == WK_TERM) g_terms[i].minimized = 0;
+            if (k == WK_APP) g_app_min[i] = 0;
+            continue;
+        }
+        int have = 0;
+        for (int j = 0; j < g_ntb; j++) if (g_tb[j] == cand[c]) have = 1;
+        if (!have && g_ntb < TB_MAX) { g_tb[g_ntb++] = cand[c]; g_tb_gen++; }
+    }
+}
+
+static void win_activate(int h) {
+    int k = h >> 8, i = h & 0xFF;
+    if (k == WK_TERM) { g_terms[i].minimized = 0; bring_term_front(i); g_front_app = -1; }
+    else if (k == WK_APP) { g_app_min[i] = 0; raise_app(i); }
+    else if (k == WK_APPWIN) { appwin_activate(i); raise_app(APP_APPWIN); }
+    g_tb_gen++;
+}
+
+static void win_minimize(int h) {
+    int k = h >> 8, i = h & 0xFF;
+    if (k == WK_TERM) g_terms[i].minimized = 1;
+    else if (k == WK_APP) { g_app_min[i] = 1; if (g_front_app == i) g_front_app = -1; }
+    else if (k == WK_APPWIN) { appwin_minimize(i, 1); if (!appwin_any_visible() && g_front_app == APP_APPWIN) g_front_app = -1; }
+    g_tb_gen++;
+}
+
+static void win_close(int h) {
+    int k = h >> 8, i = h & 0xFF;
+    if (k == WK_TERM) { g_terms[i].open = 0; g_terms[i].minimized = 0; }
+    else if (k == WK_APP) { g_apps[i].close(); g_app_min[i] = 0; if (g_front_app == i) g_front_app = -1; }
+    else if (k == WK_APPWIN) appwin_request_close(i);
+    g_tb_gen++;
+}
+
+/* taskbar geometry: Start button, window buttons, then the tray */
+#define BAR_H     28
+#define START_X   4
+#define START_W   88
+#define TB_X      (START_X + START_W + 8)
+#define TB_BTN_W  150
+
+static int tray_x(const fb_info_t* fi) {
+    char net[40];
+    netif_t* nif = net_if();
+    if (!nif->dev) kstrlcpy(net, "no network", sizeof(net));
+    else ksnprintf(net, sizeof(net), "%s 255.255.255.255", nif->dev->ifname);
+    return (int)fi->width - 8 - 64 - 16 - (int)strlen(net) * 8;
+}
+
+static int tb_btn_w(const fb_info_t* fi) {
+    int avail = tray_x(fi) - 12 - TB_X;
+    if (!g_ntb) return TB_BTN_W;
+    int w = avail / g_ntb;
+    return w > TB_BTN_W ? TB_BTN_W : w;
+}
+
+/* the taskbar button under the mouse, -1 if none */
+static int tb_button_at(const fb_info_t* fi, int mx, int my) {
+    int bar_y = (int)fi->height - BAR_H;
+    if (my < bar_y + 3 || my >= bar_y + BAR_H - 3) return -1;
+    int bw = tb_btn_w(fi);
+    if (mx < TB_X || bw < 8) return -1;
+    int j = (mx - TB_X) / bw;
+    return j < g_ntb ? j : -1;
+}
+
+/* a little glyph per kind of window */
+static void draw_win_glyph(int h, int x, int y, uint32_t bg) {
+    int k = h >> 8, i = h & 0xFF;
+    if (k == WK_TERM) { draw_icon_terminal(x, y, bg); return; }
+    if (k == WK_APP) {
+        if (i == APP_FILES) draw_icon_files(x, y, bg);
+        else if (i == APP_BROWSER) draw_icon_browser(x, y, bg);
+        else if (i == APP_NOTEPAD) draw_icon_notepad(x, y, bg);
+        else if (i == APP_LAUNCHER) draw_icon_apps(x, y, bg);
+        else draw_icon_taskmgr(x, y, bg);
+        return;
+    }
+    draw_bevel_box(x, y, 14, 12, 0x00D0A030u, 0x00F0D070u, 0x00604010u);
+}
+
+static void draw_taskbar_fb(const fb_info_t* fi) {
+    int bar_y = (int)fi->height - BAR_H;
+    draw_bevel_box(0, bar_y, (int)fi->width, BAR_H, 0x00192026u, 0x004F5A6Eu, 0x0010141Bu);
+    /* Start */
+    uint32_t sbg = g_menu_open ? 0x002E4A70u : 0x00354463u;
+    draw_bevel_box(START_X, bar_y + 3, START_W, BAR_H - 6, sbg, 0x006B7892u, 0x00111824u);
+    gfx_fill_rect(START_X + 8, bar_y + 9, 10, 10, 0x00F4D35Eu);
+    gfx_fill_rect(START_X + 10, bar_y + 11, 6, 6, 0x00C9A227u);
+    gfx_draw_text(START_X + 26, bar_y + 10, "banana", 0x00FFFFFFu, sbg);
+    /* one button per window */
+    int bw = tb_btn_w(fi), front = win_front();
+    for (int j = 0; j < g_ntb; j++) {
+        int h = g_tb[j];
+        int x = TB_X + j * bw;
+        int active = h == front, min = win_minimized(h);
+        uint32_t base = active ? 0x00405478u : min ? 0x00222831u : 0x00303740u;
+        uint32_t hi = active ? 0x00222A36u : 0x00535D6Eu, lo = active ? 0x006B7892u : 0x0015191Fu;
+        draw_bevel_box(x, bar_y + 3, bw - 4, BAR_H - 6, base, hi, lo);
+        if (bw >= 40) draw_win_glyph(h, x + 6, bar_y + 8, base);
+        char t[48];
+        win_title(h, t, sizeof(t));
+        int maxc = (bw - 34) / 8;
+        if (maxc < 1) continue;
+        if ((int)strlen(t) > maxc) { t[maxc] = 0; if (maxc > 1) t[maxc - 1] = '.'; }
+        gfx_draw_text(x + 26, bar_y + 10, t, min ? 0x009AA6B6u : 0x00E8EEF6u, base);
+    }
+    /* tray: network, clock */
+    char clk[9], net[40];
+    format_clock(clk);
+    format_net_status(net, sizeof(net));
+    int clk_x = (int)fi->width - 8 - 64;
+    gfx_fill_rect(clk_x - 10, bar_y + 6, 1, BAR_H - 12, 0x004F5A6Eu);
+    gfx_draw_text(clk_x, bar_y + 10, clk, 0x00E8EEF6u, 0x00192026u);
+    uint32_t col = net_if()->configured ? 0x008FE3A1u : 0x00C9A45Cu;
+    gfx_draw_text(clk_x - 18 - (int)strlen(net) * 8, bar_y + 10, net, col, 0x00192026u);
+}
+
 /* Everything that affects what the desktop looks like (besides
  * wallpaper/terminal content, which have their own change counters).
  * A frame is only rendered when this, those counters, or the clock's
@@ -798,9 +1062,9 @@ static void draw_cursor(int mx, int my) {
 typedef struct {
     int menu_open, menu_sel, about_open, wallpaper_open;
     int term_open[TERM_WIN_MAX], term_x[TERM_WIN_MAX], term_y[TERM_WIN_MAX], term_order[TERM_WIN_MAX];
-    int term_w[TERM_WIN_MAX], term_h[TERM_WIN_MAX], term_sel[TERM_WIN_MAX];
-    int pic_count, pending, front_app, app_order[APP_COUNT];
-    uint32_t sec, term_gen, wp_gen, net_state, app_sig[APP_COUNT];
+    int term_w[TERM_WIN_MAX], term_h[TERM_WIN_MAX], term_sel[TERM_WIN_MAX], term_min[TERM_WIN_MAX];
+    int pic_count, pending, front_app, app_order[APP_COUNT], app_min[APP_COUNT];
+    uint32_t sec, term_gen, wp_gen, net_state, app_sig[APP_COUNT], ctx_sig, tb_gen;
     char status[96];
 } gui_view_t;
 
@@ -817,6 +1081,7 @@ static void capture_view(gui_view_t* v, uint32_t sec) {
         v->term_order[i] = g_term_order[i];
         v->term_w[i] = g_terms[i].w;
         v->term_h[i] = g_terms[i].h;
+        v->term_min[i] = g_terms[i].minimized;
         v->term_sel[i] = g_terms[i].sel ? g_terms[i].s_r0 * 7919 + g_terms[i].s_c0 * 31 + g_terms[i].s_r1 * 131 + g_terms[i].s_c1 + 1 : 0;
     }
     v->pic_count = g_wp_pic_count;
@@ -829,78 +1094,33 @@ static void capture_view(gui_view_t* v, uint32_t sec) {
     for (int a = 0; a < APP_COUNT; a++) {
         v->app_order[a] = g_app_order[a];
         v->app_sig[a] = g_apps[a].signature();
+        v->app_min[a] = g_app_min[a];
     }
+    v->ctx_sig = ctxmenu_signature();
+    v->tb_gen = g_tb_gen;
     kstrlcpy(v->status, g_wp_status, sizeof(v->status));
 }
 
 static gui_view_t g_last_view;
 static int        g_force_redraw = 1;
 
-static void render_desktop(const fb_info_t* fi, int mx, int my) {
-    int bar_h = 28;
-    int bar_y = (int)fi->height - bar_h;
-    int start_x = 8;
-    int clk_w = 8 * 8;
-    int clk_x = (int)fi->width - clk_w - 8; /* clock stays at far right */
-    int quit_x = clk_x - 76 - 16;           /* quit before clock */
-    if (quit_x < (start_x + 88 + 12)) quit_x = start_x + 88 + 12;
+static void (*const g_menu_icons[MENU_ITEMS])(int, int, uint32_t) = {
+    draw_icon_info, draw_icon_terminal, draw_icon_files, draw_icon_browser, draw_icon_notepad,
+    draw_icon_apps, draw_icon_taskmgr, draw_icon_wallpaper, draw_icon_power,
+};
 
+static int start_menu_y(const fb_info_t* fi) { return (int)fi->height - BAR_H - START_MENU_H - 4; }
+
+static void render_desktop(const fb_info_t* fi, int mx, int my) {
     refresh_wallpaper_cache(fi);
     blit_wallpaper_cache();
 
     /* desktop shortcuts */
-    {
-        int icon_w = 132, icon_h = 38;
-        int sx = 18, sy = 22;
-
-        static void (*const icons[MENU_ITEMS])(int, int, uint32_t) = {
-            draw_icon_info, draw_icon_terminal, draw_icon_files, draw_icon_browser, draw_icon_notepad, draw_icon_wallpaper, draw_icon_power,
-        };
-        static const char* const labels[MENU_ITEMS] = { "About", "Terminal", "Files", "Browser", "Notepad", "Wallpaper", "Quit GUI" };
-        for (int i = 0; i < MENU_ITEMS; i++) {
-            int iy = sy + (icon_h + 10) * i;
-            draw_bevel_box(sx, iy, icon_w, icon_h, 0x0029313Du, 0x00586678u, 0x0010151Eu);
-            icons[i](sx + 8, iy + 12, 0x0029313Du);
-            gfx_draw_text(sx + 30, iy + 13, labels[i], 0x00F0F6FFu, 0x0029313Du);
-        }
-    }
-
-    char clk[9];
-    format_clock(clk);
-
-    /* toolbar */
-    draw_bevel_box(0, bar_y, (int)fi->width, bar_h, 0x00192026u, 0x004F5A6Eu, 0x0010141Bu);
-    draw_flux_toolbar_button(start_x - 4, bar_y + 5, 88, 18, "banana", g_menu_open);
-    draw_flux_toolbar_button(quit_x - 4, bar_y + 5, 76, 18, "exit", 0);
-    gfx_draw_text(clk_x, bar_y + 10, clk, 0x00E8EEF6u, 0x00192026u);
-    {
-        char net[40];
-        format_net_status(net, sizeof(net));
-        int nx = quit_x - 16 - (int)strlen(net) * 8;
-        uint32_t col = net_if()->configured ? 0x008FE3A1u : 0x00C9A45Cu;
-        gfx_draw_text(nx, bar_y + 10, net, col, 0x00192026u);
-    }
-
-    /* root menu */
-    if (g_menu_open) {
-        int menu_w = 236;
-        int menu_h = 224;
-        int menu_x = 8;
-        int menu_y = (int)fi->height - bar_h - menu_h - 8;
-        draw_bevel_box(menu_x, menu_y, menu_w, menu_h, 0x001D232Cu, 0x00505E74u, 0x0010151Du);
-        gfx_fill_rect(menu_x + 2, menu_y + 2, 18, menu_h - 4, 0x00354463u);
-        gfx_draw_text(menu_x + 5, menu_y + 8, "B", 0x00F4F8FFu, 0x00354463u);
-
-        static void (*const icons[MENU_ITEMS])(int, int, uint32_t) = {
-            draw_icon_info, draw_icon_terminal, draw_icon_files, draw_icon_browser, draw_icon_notepad, draw_icon_wallpaper, draw_icon_power,
-        };
-        static const char* const labels[MENU_ITEMS] = { "About", "Terminal", "Files", "Browser", "Notepad", "Wallpaper", "Exit to shell" };
-        for (int i = 0; i < MENU_ITEMS; i++) {
-            uint32_t bg = (g_menu_sel == i) ? 0x003A4A66u : 0x001D232Cu;
-            gfx_fill_rect(menu_x + 24, menu_y + 8 + i * 28, menu_w - 32, 24, bg);
-            icons[i](menu_x + 28, menu_y + 14 + i * 28, bg);
-            gfx_draw_text(menu_x + 48, menu_y + 16 + i * 28, labels[i], 0x00E8EEF6u, bg);
-        }
+    for (int i = 0; i < MENU_ITEMS; i++) {
+        int iy = ICON_Y + ICON_STEP * i;
+        draw_bevel_box(ICON_X, iy, ICON_W, ICON_H, 0x0029313Du, 0x00586678u, 0x0010151Eu);
+        g_menu_icons[i](ICON_X + 8, iy + 12, 0x0029313Du);
+        gfx_draw_text(ICON_X + 30, iy + 13, ICON_LABELS[i], 0x00F0F6FFu, 0x0029313Du);
     }
 
     if (g_about_open) {
@@ -924,16 +1144,182 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
     /* windows back to front: the app windows behind the terminals, the
      * terminals, then the app window in front of them (if any) */
     for (int i = 0; i < APP_COUNT; i++)
-        if (g_app_order[i] != g_front_app) g_apps[g_app_order[i]].draw(fi);
+        if (g_app_order[i] != g_front_app && app_visible(g_app_order[i])) g_apps[g_app_order[i]].draw(fi);
     for (int oi = 0; oi < TERM_WIN_MAX; oi++) {
         term_win_t* w = &g_terms[g_term_order[oi]];
         draw_terminal_window(fi, w);
     }
-    if (g_front_app >= 0) g_apps[g_front_app].draw(fi);
+    if (g_front_app >= 0 && app_visible(g_front_app)) g_apps[g_front_app].draw(fi);
+
+    draw_taskbar_fb(fi);
+
+    /* the Start menu */
+    if (g_menu_open) {
+        int menu_x = START_X, menu_y = start_menu_y(fi);
+        draw_bevel_box(menu_x, menu_y, START_MENU_W, START_MENU_H, 0x001D232Cu, 0x00505E74u, 0x0010151Du);
+        gfx_fill_rect(menu_x + 2, menu_y + 2, 18, START_MENU_H - 4, 0x00354463u);
+        gfx_draw_text(menu_x + 5, menu_y + 8, "B", 0x00F4F8FFu, 0x00354463u);
+        for (int i = 0; i < MENU_ITEMS; i++) {
+            uint32_t bg = (g_menu_sel == i) ? 0x003A4A66u : 0x001D232Cu;
+            gfx_fill_rect(menu_x + 24, menu_y + 8 + i * 28, START_MENU_W - 32, 24, bg);
+            g_menu_icons[i](menu_x + 28, menu_y + 14 + i * 28, bg);
+            gfx_draw_text(menu_x + 48, menu_y + 16 + i * 28, MENU_LABELS[i], 0x00E8EEF6u, bg);
+        }
+    }
+
+    ctxmenu_draw();
 
     /* push backbuffer to framebuffer once per frame, then the cursor */
     fb_present();
     draw_cursor(mx, my);
+}
+
+/* ── right-click menus ─────────────────────────────────────────────── */
+
+static void do_action(int act);
+
+static void desktop_menu_cb(int id, void* arg) { (void)arg; do_action(id); }
+
+static void open_desktop_menu(int mx, int my) {
+    ctx_item_t items[] = {
+        { "Terminal", ACT_TERMINAL, 0 },
+        { "Files", ACT_FILES, 0 },
+        { "Browser", ACT_BROWSER, 0 },
+        { "Notepad", ACT_NOTEPAD, 0 },
+        { "Apps", ACT_APPS, 0 },
+        { CTX_SEP, 0, 0 },
+        { "Task Manager", ACT_TASKMGR, 0 },
+        { "Change wallpaper...", ACT_WALLPAPER, 0 },
+        { "About Banana OS", ACT_ABOUT, 0 },
+        { CTX_SEP, 0, 0 },
+        { "Exit to shell", ACT_QUIT, 0 },
+    };
+    ctxmenu_open(mx, my, items, (int)(sizeof(items) / sizeof(items[0])), desktop_menu_cb, NULL);
+}
+
+static void icon_menu_cb(int id, void* arg) { (void)arg; do_action(id); }
+
+static void open_icon_menu(int slot, int mx, int my) {
+    char open[40];
+    ksnprintf(open, sizeof(open), "Open %s", ICON_LABELS[slot]);
+    ctx_item_t items[] = { { open, slot, 0 } };
+    ctxmenu_open(mx, my, items, 1, icon_menu_cb, NULL);
+}
+
+/* taskbar: Task Manager & co, or one window's button */
+enum { TBM_TASKMGR = 1, TBM_SHOW_DESKTOP, TBM_RESTORE_ALL, TBM_RESTORE, TBM_MINIMIZE, TBM_CLOSE, TBM_QUIT, TBM_TERMINAL };
+static int g_tbmenu_win;
+
+static void taskbar_menu_cb(int id, void* arg) {
+    (void)arg;
+    switch (id) {
+    case TBM_TASKMGR: do_action(ACT_TASKMGR); break;
+    case TBM_SHOW_DESKTOP: for (int j = 0; j < g_ntb; j++) win_minimize(g_tb[j]); g_front_app = -1; break;
+    case TBM_RESTORE_ALL: for (int j = 0; j < g_ntb; j++) if (win_minimized(g_tb[j])) win_activate(g_tb[j]); break;
+    case TBM_RESTORE: if (win_exists(g_tbmenu_win)) win_activate(g_tbmenu_win); break;
+    case TBM_MINIMIZE: if (win_exists(g_tbmenu_win)) win_minimize(g_tbmenu_win); break;
+    case TBM_CLOSE: if (win_exists(g_tbmenu_win)) win_close(g_tbmenu_win); break;
+    case TBM_TERMINAL: do_action(ACT_TERMINAL); break;
+    case TBM_QUIT: do_action(ACT_QUIT); break;
+    }
+}
+
+static void open_taskbar_menu(const fb_info_t* fi, int mx, int my) {
+    int j = tb_button_at(fi, mx, my);
+    if (j >= 0) {
+        g_tbmenu_win = g_tb[j];
+        int min = win_minimized(g_tbmenu_win);
+        ctx_item_t items[] = {
+            { "Restore", TBM_RESTORE, !min && win_front() == g_tbmenu_win },
+            { "Minimize", TBM_MINIMIZE, min },
+            { CTX_SEP, 0, 0 },
+            { "Close window", TBM_CLOSE, 0 },
+            { CTX_SEP, 0, 0 },
+            { "Task Manager", TBM_TASKMGR, 0 },
+        };
+        ctxmenu_open(mx, my, items, 6, taskbar_menu_cb, NULL);
+        return;
+    }
+    ctx_item_t items[] = {
+        { "Task Manager", TBM_TASKMGR, 0 },
+        { CTX_SEP, 0, 0 },
+        { "Show the desktop", TBM_SHOW_DESKTOP, g_ntb == 0 },
+        { "Restore all windows", TBM_RESTORE_ALL, g_ntb == 0 },
+        { CTX_SEP, 0, 0 },
+        { "New terminal", TBM_TERMINAL, 0 },
+        { "Exit to shell", TBM_QUIT, 0 },
+    };
+    ctxmenu_open(mx, my, items, 7, taskbar_menu_cb, NULL);
+}
+
+/* a terminal window */
+enum { TM_COPY = 1, TM_PASTE, TM_CLEAR, TM_MINIMIZE, TM_CLOSE, TM_NEW };
+static int g_tmenu_term;
+
+static void term_menu_cb(int id, void* arg) {
+    (void)arg;
+    term_win_t* w = &g_terms[g_tmenu_term];
+    if (!w->open) return;
+    switch (id) {
+    case TM_COPY: if (w->sel) term_copy_selection(w); break;
+    case TM_PASTE: bring_term_front(g_tmenu_term); g_front_app = -1; keyboard_inject("\x16"); break;
+    case TM_CLEAR: bring_term_front(g_tmenu_term); g_front_app = -1; keyboard_inject("clear\n"); break;
+    case TM_MINIMIZE: win_minimize(WK_TERM << 8 | g_tmenu_term); break;
+    case TM_CLOSE: w->open = 0; g_tb_gen++; break;
+    case TM_NEW: do_action(ACT_TERMINAL); break;
+    }
+}
+
+static void open_term_menu(int wi, int mx, int my) {
+    g_tmenu_term = wi;
+    uint32_t n;
+    clipboard_get(&n);
+    ctx_item_t items[] = {
+        { "Copy", TM_COPY, !g_terms[wi].sel },
+        { "Paste", TM_PASTE, n == 0 },
+        { "Clear", TM_CLEAR, 0 },
+        { CTX_SEP, 0, 0 },
+        { "New terminal", TM_NEW, 0 },
+        { "Minimize", TM_MINIMIZE, 0 },
+        { "Close", TM_CLOSE, 0 },
+    };
+    ctxmenu_open(mx, my, items, 7, term_menu_cb, NULL);
+}
+
+/* Notepad: its own Ctrl keys */
+static void notepad_menu_cb(int id, void* arg) { (void)arg; notepad_key((char)id); }
+
+static void notepad_rclick_menu(int mx, int my) {
+    uint32_t n;
+    clipboard_get(&n);
+    ctx_item_t items[] = {
+        { "Cut", 24, 0 },
+        { "Copy", 3, 0 },
+        { "Paste", 22, n == 0 },
+        { "Select all", 1, 0 },
+        { CTX_SEP, 0, 0 },
+        { "Find...", 6, 0 },
+        { "Open...", 15, 0 },
+        { "Save", 19, 0 },
+    };
+    ctxmenu_open(mx, my, items, 8, notepad_menu_cb, NULL);
+}
+
+static void explorer_rclick_menu(int mx, int my) {
+    explorer_rclick(mx, my);
+}
+
+/* ── the desktop loop ───────────────────────────────────────────────── */
+
+static int icon_at(int mx, int my) {
+    for (int i = 0; i < MENU_ITEMS; i++)
+        if (mx >= ICON_X && mx < ICON_X + ICON_W && my >= ICON_Y + ICON_STEP * i && my < ICON_Y + ICON_STEP * i + ICON_H)
+            return i;
+    return -1;
+}
+
+int gui_appwin_focused(void) {
+    return gfx_available() && g_gui_enabled && g_front_app == APP_APPWIN && appwin_any_visible() && tty_current() < 0;
 }
 
 void gui_poll(void) {
@@ -960,19 +1346,32 @@ void gui_poll(void) {
         static uint32_t last_frame_ms = 0;
         static int prev_left = 0;
 
-        /* Notepad has no task of its own: while it is in front, the keys
-         * are handed to it from here (Ctrl+T and the Start menu first) */
-        if (gui_notepad_focused()) {
+        sync_taskbar();
+        if (g_front_app >= 0 && !app_visible(g_front_app)) g_front_app = -1;
+        if (appwin_take_new()) raise_app(APP_APPWIN);   /* a new app window comes up in front */
+        appwin_focus(g_front_app == APP_APPWIN);
+
+        /* Notepad and app windows have no keyboard task of their own:
+         * while one is in front, keys are handed to it from here (Ctrl+T
+         * and the Start menu first). Apps and Task Manager read no keys
+         * (Esc closes them). */
+        if (gui_notepad_focused() || gui_appwin_focused() ||
+            ((g_front_app == APP_LAUNCHER || g_front_app == APP_TASKMGR || g_front_app == APP_FILES) &&
+             app_visible(g_front_app) && tty_current() < 0)) {
             for (int k = 0; k < 64; k++) {
                 char c = keyboard_try_getchar();
                 if (!c) break;
                 if (g_menu_open || c == 20) { gui_handle_key(c); continue; }
-                notepad_key(c);
+                if (g_front_app == APP_NOTEPAD) notepad_key(c);
+                else if (g_front_app == APP_APPWIN) appwin_key(c);
+                else if (g_front_app == APP_FILES) explorer_key(c);
+                else if (c == 27) g_apps[g_front_app].close();
             }
         }
 
         if (!g_backbuf_active) {
-            fb_set_backbuffer(g_desktop_backbuf, 800u, 600u);
+            size_desktop(fi);
+            fb_set_backbuffer(g_desktop_backbuf, g_desk_w, g_desk_h);
             g_backbuf_active = 1;
             g_force_redraw = 1;
             /* the saved wallpaper (/etc/wallpaper) is applied on first use */
@@ -988,6 +1387,7 @@ void gui_poll(void) {
         if (my > (int)fi->height - 1) my = (int)fi->height - 1;
 
         uint32_t sec = timer_ticks() / 100u;
+        int bar_y = (int)fi->height - BAR_H;
 
         /* mouse click handling (rising edge) */
         int left = ms.btn_left ? 1 : 0;
@@ -997,42 +1397,41 @@ void gui_poll(void) {
         int right = ms.btn_right ? 1 : 0;
         int rclick = right && !prev_right;
         prev_right = right;
+
+        ctxmenu_hover(mx, my);
+
         if (rclick) {
-            /* right-click pastes the clipboard into the window under the mouse */
-            int a = (g_front_app >= 0 && g_apps[g_front_app].contains(mx, my)) ? g_front_app : -1;
-            if (a < 0 && !term_at(mx, my)) a = app_at(mx, my, 0);
-            if (a >= 0) {
-                raise_app(a);
-                if (a == APP_BROWSER) browser_rclick(mx, my);
-                if (a == APP_NOTEPAD) notepad_paste();
-            } else {
-                int wi = term_at(mx, my);
-                if (wi) {
-                    bring_term_front(wi - 1);
-                    g_front_app = -1;
-                    /* as Ctrl+V: the shell pastes it as one line, the editor as text */
-                    uint32_t n;
-                    clipboard_get(&n);
-                    if (n) keyboard_inject("\x16");
-                }
+            /* right-click: the menu of whatever is under the mouse */
+            ctxmenu_close();
+            g_menu_open = 0;
+            int a = (g_front_app >= 0 && app_visible(g_front_app) && g_apps[g_front_app].contains(mx, my)) ? g_front_app : -1;
+            int wi = a < 0 ? term_at(mx, my) : 0;
+            if (a < 0 && !wi) a = app_at(mx, my, 0);
+            if (my >= bar_y) {
+                open_taskbar_menu(fi, mx, my);
+            } else if (a >= 0) {
+                if (a != g_front_app) raise_app(a);
+                g_apps[a].rclick(mx, my);
+            } else if (wi) {
+                bring_term_front(wi - 1);
+                g_front_app = -1;
+                open_term_menu(wi - 1, mx, my);
+            } else if (!g_wallpaper_open && !g_about_open) {
+                int slot = icon_at(mx, my);
+                if (slot >= 0) open_icon_menu(slot, mx, my);
+                else open_desktop_menu(mx, my);
             }
         }
-
-        int bar_h = 28;
-        int bar_y = (int)fi->height - bar_h;
-
-        /* Start button hitbox around "[Start]" text */
-        int start_x = 8;
-        int start_w = 88;
-        int quit_w = 76;
-        int clk_w_for_hit = 8 * 8;
-        int clk_x_for_hit = (int)fi->width - clk_w_for_hit - 8;
-        int quit_x = clk_x_for_hit - quit_w - 16; /* quit before clock */
-        if (quit_x < (start_x + start_w + 12)) quit_x = start_x + start_w + 12;
 
         /* the picture picked earlier is decoded once a frame showing its
          * "Loading..." status has actually been painted */
         if (g_wp_pending >= 0 && g_last_view.pending == g_wp_pending) wallpaper_app_do_pending();
+
+        if (click && ctxmenu_is_open()) {
+            ctxmenu_click(mx, my);        /* an item, or a click outside that just closes it */
+            click = 0;
+            if (!g_gui_enabled) return;
+        }
 
         if (click) {
             if (g_about_open) {
@@ -1042,28 +1441,30 @@ void gui_poll(void) {
                 if (wallpaper_app_click(fi, mx, my)) click = 0;
             }
 
-            /* click on taskbar Start */
-            if (click && my >= bar_y + 5 && my < bar_y + 23 && mx >= start_x - 4 && mx < (start_x - 4 + start_w)) {
-                g_menu_open = !g_menu_open;
-                if (g_menu_open) g_menu_sel = 0;
-            }
-
-            /* click on Quit GUI button */
-            if (click && my >= bar_y + 5 && my < bar_y + 23 && mx >= quit_x - 4 && mx < (quit_x - 4 + quit_w)) {
-                gui_set_enabled(0);
-                return;
+            /* the taskbar: Start, a window's button */
+            if (click && my >= bar_y) {
+                if (mx >= START_X && mx < START_X + START_W) {
+                    g_menu_open = !g_menu_open;
+                    if (g_menu_open) g_menu_sel = 0;
+                } else {
+                    int j = tb_button_at(fi, mx, my);
+                    if (j >= 0) {
+                        int h = g_tb[j];
+                        /* like Windows: restore, bring to front, or minimize the front one */
+                        if (win_minimized(h)) win_activate(h);
+                        else if (win_front() == h) win_minimize(h);
+                        else win_activate(h);
+                    }
+                    g_menu_open = 0;
+                }
+                click = 0;
             }
 
             /* click in menu items (the open menu is above every window) */
             if (click && g_menu_open) {
-                int menu_w = 236;
-                int menu_h = 224;
-                int menu_x = 8;
-                int menu_y = (int)fi->height - bar_h - menu_h - 8;
-
-                int item_x0 = menu_x + 24;
-                int item_x1 = menu_x + menu_w - 8;
-
+                int menu_y = start_menu_y(fi);
+                int item_x0 = START_X + 24;
+                int item_x1 = START_X + START_MENU_W - 8;
                 if (mx >= item_x0 && mx < item_x1) {
                     for (int i = 0; i < MENU_ITEMS; i++) {
                         int y0 = menu_y + 8 + i * 28;
@@ -1076,10 +1477,11 @@ void gui_poll(void) {
                     }
                 }
                 if (!g_gui_enabled) return;
+                if (click) g_menu_open = 0;   /* a click elsewhere closes the menu */
             }
 
             /* the app window in front of the terminals */
-            if (click && g_front_app >= 0 && g_apps[g_front_app].contains(mx, my)) {
+            if (click && g_front_app >= 0 && app_visible(g_front_app) && g_apps[g_front_app].contains(mx, my)) {
                 g_apps[g_front_app].click(mx, my);
                 click = 0;
             }
@@ -1088,7 +1490,7 @@ void gui_poll(void) {
             for (int oi = TERM_WIN_MAX - 1; click && oi >= 0; oi--) {
                 int wi = g_term_order[oi];
                 term_win_t* w = &g_terms[wi];
-                if (!w->open) continue;
+                if (!w->open || w->minimized) continue;
 
                 int title_h = 20;
                 if (mx >= w->x && mx < w->x + w->w && my >= w->y && my < w->y + w->h) {
@@ -1096,24 +1498,25 @@ void gui_poll(void) {
                      * (gui_focused_vt() below), but must NOT retarget
                      * where terminal output is written - that's owned by
                      * this window's own shell task now, not by whichever
-                     * window was last clicked. (That retargeting used to
-                     * be exactly this line, and was the root cause of
-                     * every window showing the same running command.) */
+                     * window was last clicked. */
                     bring_term_front(wi);
                     g_front_app = -1;
 
                     int close_x = w->x + w->w - 28;
+                    int min_x = w->x + w->w - 52;
                     if (mx >= close_x && mx < close_x + 24 && my >= w->y + 2 && my < w->y + 18) {
                         /* Hide only - the vt and its shell task are kept
                          * running so a later reopen picks up right where
                          * this session left off. */
                         w->open = 0;
+                    } else if (mx >= min_x && mx < min_x + 20 && my >= w->y + 2 && my < w->y + 18) {
+                        win_minimize(WK_TERM << 8 | wi);
                     } else if (my < w->y + title_h) {
                         uint32_t now = timer_ms();
                         if (now - w->title_click_ms < 400) {          /* double-click: maximize / restore */
                             if (!w->maxed) {
                                 w->sx = w->x; w->sy = w->y; w->sw = w->w; w->sh = w->h;
-                                w->x = 0; w->y = 0; w->w = (int)fi->width; w->h = (int)fi->height - bar_h;
+                                w->x = 0; w->y = 0; w->w = (int)fi->width; w->h = (int)fi->height - BAR_H;
                                 w->maxed = 1;
                             } else {
                                 w->x = w->sx; w->y = w->sy; w->w = w->sw; w->h = w->sh;
@@ -1158,19 +1561,9 @@ void gui_poll(void) {
 
             /* desktop shortcuts */
             if (click && !g_about_open && !g_menu_open && !g_wallpaper_open) {
-                int icon_w = 132, icon_h = 38;
-                int sx = 18, sy = 22;
-                int slot = -1;
-                for (int i = 0; i < MENU_ITEMS; i++)
-                    if (mx >= sx && mx < sx + icon_w && my >= sy + (icon_h + 10) * i && my < sy + (icon_h + 10) * i + icon_h)
-                        slot = i;
-                if (slot == 0) g_about_open = 1;
-                else if (slot == 1) open_new_terminal();
-                else if (slot == 2) { explorer_open(NULL); raise_app(APP_FILES); }
-                else if (slot == 3) { browser_open(NULL); raise_app(APP_BROWSER); }
-                else if (slot == 4) { notepad_open(NULL); raise_app(APP_NOTEPAD); }
-                else if (slot == 5) open_wallpaper_app();
-                else if (slot == 6) { gui_set_enabled(0); return; }
+                int slot = icon_at(mx, my);
+                if (slot >= 0) do_action(slot);
+                if (!g_gui_enabled) return;
             }
         }
 
@@ -1208,7 +1601,7 @@ void gui_poll(void) {
                 t->selecting = 0;
             }
         }
-        for (int a = 0; a < APP_COUNT; a++) g_apps[a].mouse(mx, my, left);
+        for (int a = 0; a < APP_COUNT; a++) if (g_apps[a].is_open()) g_apps[a].mouse(mx, my, left);
 
         gui_view_t view;
         capture_view(&view, sec);
@@ -1255,13 +1648,15 @@ void gui_set_enabled(int enabled) {
     g_about_open = 0;
     g_wallpaper_open = 0;
     g_force_redraw = 1;
-    if (!enabled) for (int a = 0; a < APP_COUNT; a++) g_apps[a].close();
+    ctxmenu_close();
+    if (!enabled) for (int a = 0; a < APP_COUNT; a++) { g_apps[a].close(); g_app_min[a] = 0; }
     g_front_app = -1;
     /* Hide (don't tear down) any open windows: their vts and shell tasks
      * are permanent for the OS's lifetime (see term_win_t.vt), so a later
      * startx can bring them straight back instead of every window losing
      * its running state on every stopx. */
-    for (int i = 0; i < TERM_WIN_MAX; i++) g_terms[i].open = 0;
+    for (int i = 0; i < TERM_WIN_MAX; i++) { g_terms[i].open = 0; g_terms[i].minimized = 0; }
+    g_ntb = 0;
 
     if (gfx_available()) {
         if (g_gui_enabled) terminal_set_mode(TERMINAL_MODE_SUSPENDED);
@@ -1294,14 +1689,17 @@ int gui_focused_vt(void) {
     if (!gfx_available() || !g_gui_enabled) return 0; /* plain console owns input */
 
     /* the browser in front reads the keyboard itself (its own task) */
-    if (g_front_app == APP_BROWSER && browser_is_open()) return BROWSER_VT;
-    if (g_front_app == APP_NOTEPAD && notepad_is_open()) return NOTEPAD_VT;
+    if (g_front_app == APP_BROWSER && browser_is_open() && !g_app_min[APP_BROWSER]) return BROWSER_VT;
+    if (g_front_app == APP_NOTEPAD && notepad_is_open() && !g_app_min[APP_NOTEPAD]) return NOTEPAD_VT;
+    if (g_front_app == APP_APPWIN && appwin_any_visible()) return APPWIN_VT;
+    if ((g_front_app == APP_LAUNCHER || g_front_app == APP_TASKMGR || g_front_app == APP_FILES) && app_visible(g_front_app))
+        return APPWIN_VT + 1;          /* keys handed out by gui_poll() */
 
     /* Frontmost OPEN window, if any - g_term_order always lists every
      * slot, closed or not, so this has to skip closed ones explicitly. */
     for (int oi = TERM_WIN_MAX - 1; oi >= 0; oi--) {
         int wi = g_term_order[oi];
-        if (g_terms[wi].open) return g_terms[wi].vt;
+        if (g_terms[wi].open && !g_terms[wi].minimized) return g_terms[wi].vt;
     }
 
     /* No window open yet: fall back to the (hidden) console's vt0 rather
@@ -1321,70 +1719,61 @@ int gui_close_terminal_by_vt(int vt) {
     return 0;
 }
 
+/* a Start menu entry / desktop shortcut / desktop menu item */
+static void do_action(int act) {
+    g_menu_open = 0;
+    switch (act) {
+    case ACT_ABOUT: g_about_open = 1; break;
+    case ACT_TERMINAL: g_about_open = 0; open_new_terminal(); g_front_app = -1; break;
+    case ACT_FILES: explorer_open(NULL); g_app_min[APP_FILES] = 0; raise_app(APP_FILES); break;
+    case ACT_BROWSER: browser_open(NULL); g_app_min[APP_BROWSER] = 0; raise_app(APP_BROWSER); break;
+    case ACT_NOTEPAD: notepad_open(NULL); g_app_min[APP_NOTEPAD] = 0; raise_app(APP_NOTEPAD); break;
+    case ACT_APPS: launcher_open(); g_app_min[APP_LAUNCHER] = 0; raise_app(APP_LAUNCHER); break;
+    case ACT_TASKMGR: taskmgr_open(); g_app_min[APP_TASKMGR] = 0; raise_app(APP_TASKMGR); break;
+    case ACT_WALLPAPER: open_wallpaper_app(); break;
+    case ACT_QUIT: gui_set_enabled(0); break;
+    }
+}
+
 static void menu_activate(void) {
-    if (g_menu_sel == 0) {
-        if (gfx_available()) {
-            g_menu_open = 0;
-            g_about_open = 1;
-            return;
-        } else {
-            menu_close_redraw();
-            show_about();
-        }
-        return;
+    if (gfx_available()) { do_action(g_menu_sel); return; }
+    /* text mode: only About works without the framebuffer desktop */
+    menu_close_redraw();
+    if (g_menu_sel == ACT_ABOUT) show_about();
+    else if (g_menu_sel == ACT_QUIT) gui_set_enabled(0);
+}
+
+/* ── windows for the Task Manager ──────────────────────────────────── */
+
+int gui_windows(gui_win_info_t* out, int max) {
+    if (!g_gui_enabled) return 0;
+    sync_taskbar();
+    int front = win_front(), n = 0;
+    for (int j = 0; j < g_ntb && n < max; j++) {
+        out[n].handle = g_tb[j];
+        win_title(g_tb[j], out[n].title, sizeof(out[n].title));
+        out[n].minimized = win_minimized(g_tb[j]);
+        out[n].focused = g_tb[j] == front;
+        n++;
     }
-    if (g_menu_sel == 1) {
-        if (gfx_available()) {
-            g_menu_open = 0;
-            g_about_open = 0;
-            open_new_terminal();
-        } else {
-            menu_close_redraw();
-        }
-        return; /* "Terminal" just closes the menu */
-    }
-    if (g_menu_sel == 2) {
-        if (gfx_available()) {
-            g_menu_open = 0;
-            explorer_open(NULL);
-            raise_app(APP_FILES);
-        } else {
-            menu_close_redraw();          /* desktop only */
-        }
-        return;
-    }
-    if (g_menu_sel == 3) {
-        if (gfx_available()) {
-            g_menu_open = 0;
-            browser_open(NULL);
-            raise_app(APP_BROWSER);
-        } else {
-            menu_close_redraw();          /* desktop only */
-        }
-        return;
-    }
-    if (g_menu_sel == 4) {
-        if (gfx_available()) {
-            g_menu_open = 0;
-            notepad_open(NULL);
-            raise_app(APP_NOTEPAD);
-        } else {
-            menu_close_redraw();          /* desktop only */
-        }
-        return;
-    }
-    if (g_menu_sel == 5) {
-        if (gfx_available()) {
-            open_wallpaper_app();
-        } else {
-            menu_close_redraw();
-        }
-        return;
-    }
-    if (g_menu_sel == 6) {
-        gui_set_enabled(0);
-        return;
-    }
+    return n;
+}
+
+void gui_window_close(int handle) { if (win_exists(handle)) win_close(handle); }
+void gui_window_activate(int handle) { if (win_exists(handle)) win_activate(handle); }
+
+void gui_raise_files(void) { g_app_min[APP_FILES] = 0; raise_app(APP_FILES); }
+
+int gui_open_apps(void) {
+    if (!gfx_available() || !g_gui_enabled) return 0;
+    do_action(ACT_APPS);
+    return 1;
+}
+
+int gui_open_taskmgr(void) {
+    if (!gfx_available() || !g_gui_enabled) return 0;
+    do_action(ACT_TASKMGR);
+    return 1;
 }
 
 int gui_open_notepad(const char* path) {

@@ -12,6 +12,7 @@
 #include "gui.h"
 #include "clipboard.h"
 #include "winframe.h"
+#include "ctxmenu.h"
 #include "../net/http.h"
 #include "../web/page.h"
 #include "../web/render.h"
@@ -50,7 +51,7 @@
 #define C_ERR     0x00F08070u
 
 enum { CMD_NONE = 0, CMD_CLICK, CMD_RCLICK, CMD_GO, CMD_BACK, CMD_FWD, CMD_RELOAD, CMD_HOME,
-       CMD_NEWTAB, CMD_CLOSETAB, CMD_PASTE };
+       CMD_NEWTAB, CMD_CLOSETAB, CMD_PASTE, CMD_DOWNLOAD, CMD_SOURCE, CMD_COPY };
 
 typedef struct { int kind, x, y; } cmd_t;
 
@@ -185,9 +186,76 @@ static void cookie_set(const char* host, const char* line) {
     kstrlcpy(c->value, value, sizeof(c->value));
 }
 
+/* ══ downloads ════════════════════════════════════════════════════════
+ * A page load whose answer is not something to show (a program, an
+ * archive, a .bpk, "Content-Disposition: attachment") is saved to
+ * ~/Downloads instead; "Save link as" / "Save page as" always save. */
+
+#define DOWNLOAD_DIR "/home/banana/Downloads"
+
+typedef struct {
+    int      force;          /* save whatever comes */
+    int      active;         /* the answer turned out to be a download */
+    char     name[96];       /* from Content-Disposition */
+    uint32_t reported;       /* bytes at the last progress message */
+} dl_t;
+
+typedef struct { char* buf; uint32_t n, cap; int too_big; uint32_t limit; dl_t* dl; } body_t;
+
+static void set_status(const char* s, int err);
+
+static int displayable(const char* ct) {
+    if (!ct[0]) return 1;
+    static const char* const show[] = {
+        "text/", "image/", "application/xhtml", "application/json", "application/javascript",
+        "application/x-javascript", "application/xml", "application/rss", "application/atom", "application/ld+json",
+    };
+    for (unsigned i = 0; i < sizeof(show) / sizeof(show[0]); i++)
+        if (strncasecmp(ct, show[i], strlen(show[i])) == 0) return 1;
+    return 0;
+}
+
+/* filename="x" (or filename=x) from a Content-Disposition header, if any */
+static int disposition(const char* raw, char* name, int cap, int* attachment) {
+    *attachment = 0;
+    name[0] = 0;
+    for (const char* l = raw; l && *l; ) {
+        const char* e = strchr(l, '\n');
+        if (strncasecmp(l, "Content-Disposition:", 20) == 0) {
+            const char* v = l + 20;
+            const char* end = e ? e : v + strlen(v);
+            while (*v == ' ') v++;
+            if (strncasecmp(v, "attachment", 10) == 0) *attachment = 1;
+            for (const char* p = v; p < end; p++) {
+                if (strncasecmp(p, "filename=", 9) != 0) continue;
+                p += 9;
+                int q = *p == '"';
+                if (q) p++;
+                int n = 0;
+                while (p < end && *p != '\r' && (q ? *p != '"' : *p != ';') && n < cap - 1) name[n++] = *p++;
+                name[n] = 0;
+                break;
+            }
+            return 1;
+        }
+        l = e ? e + 1 : NULL;
+    }
+    return 0;
+}
+
 /* every response's headers (redirects included): keep its cookies */
 static void on_headers(void* ctx, const http_response_t* r, const char* raw) {
-    (void)ctx;
+    body_t* b = (body_t*)ctx;
+    if (b && b->dl && r->status >= 200 && r->status < 300) {
+        int attach;
+        char fname[96];
+        disposition(raw, fname, sizeof(fname), &attach);
+        if (b->dl->force || attach || !displayable(r->content_type)) {
+            b->dl->active = 1;
+            b->limit = FS_MAX_FILE_SIZE;
+            if (fname[0]) kstrlcpy(b->dl->name, fname, sizeof(b->dl->name));
+        }
+    }
     char host[96];
     url_host(r->final_url, host, sizeof(host));
     for (const char* l = raw; l && *l; ) {
@@ -321,7 +389,7 @@ static const char HOME_HTML[] =
     "</div>\n"
     "<div class=\"card\"><h2>Keys</h2>Ctrl+L: address bar - Ctrl+N: new tab - Ctrl+W: close tab - "
     "Backspace: back - arrows, space, PgUp, PgDn: scroll - Ctrl+R: reload - drag over text to select it, "
-    "Ctrl+C: copy - Ctrl+V or right-click: paste - right-click a link: open it in a new tab</div>\n"
+    "Ctrl+C: copy - Ctrl+V: paste - right-click: a menu (open a link in a new tab, save a link, back, reload, page source...) - files that are not web pages (apps, archives...) are saved to ~/Downloads</div>\n"
     "</div>\n"
     "<script>\n"
     "var clicks = 0;\n"
@@ -427,14 +495,18 @@ static int fetch_file(const char* path, char** data, uint32_t* len, char* ctype,
     return 0;
 }
 
-typedef struct { char* buf; uint32_t n, cap; int too_big; } body_t;
-
 static int on_body(void* ctx, const uint8_t* d, uint32_t n) {
     body_t* b = (body_t*)ctx;
-    if (b->n + n + 1 > MAX_DOC) { b->too_big = 1; return -1; }
+    if (b->n + n + 1 > b->limit) { b->too_big = 1; return -1; }
+    if (b->dl && b->dl->active && b->n + n - b->dl->reported >= (256u << 10)) {
+        char msg[96];
+        b->dl->reported = b->n + n;
+        ksnprintf(msg, sizeof(msg), "Downloading... %u.%u MB", (b->n + n) >> 20, (((b->n + n) >> 10) & 1023) * 10 / 1024);
+        set_status(msg, 0);
+    }
     if (b->n + n + 1 > b->cap) {
         uint32_t cap = (b->n + n + 1) * 2;
-        if (cap > MAX_DOC) cap = MAX_DOC;
+        if (cap > b->limit) cap = b->limit;
         char* nb = (char*)kmalloc(cap);
         if (!nb) { b->too_big = 1; return -1; }
         if (b->buf) { memcpy(nb, b->buf, b->n); kfree(b->buf); }
@@ -449,8 +521,10 @@ static int on_body(void* ctx, const uint8_t* d, uint32_t n) {
 
 /* GET (or POST with a form body) url into a kmalloc'd buffer; 0 = ok */
 /* method NULL: GET, or POST when there is a body (body_type NULL: a form) */
+/* dl: a top-level load (may turn into a download), or NULL */
 static int fetch_url(const char* url, const char* method, const char* post, uint32_t post_len, const char* body_type,
-                     char** data, uint32_t* len, char* ctype, int ccap, char* final_url, int fcap, char* err, int ecap) {
+                     char** data, uint32_t* len, char* ctype, int ccap, char* final_url, int fcap, char* err, int ecap,
+                     dl_t* dl) {
     ctype[0] = 0;
     err[0] = 0;
     kstrlcpy(final_url, url, (size_t)fcap);
@@ -473,7 +547,7 @@ static int fetch_url(const char* url, const char* method, const char* post, uint
     char msg[200];
     ksnprintf(msg, sizeof(msg), "Loading %s ...", url);
     set_status(msg, 0);
-    body_t b = { 0, 0, 0, 0 };
+    body_t b = { 0, 0, 0, 0, (dl && dl->force) ? FS_MAX_FILE_SIZE : MAX_DOC, dl };
     http_request_t req;
     memset(&req, 0, sizeof(req));
     req.method = method ? method : post ? "POST" : "GET";
@@ -494,7 +568,7 @@ static int fetch_url(const char* url, const char* method, const char* post, uint
     if (!resp) return -1;
     int rc = http_fetch(url, &req, resp, err, (uint32_t)ecap);
     if (rc != NET_OK || b.too_big) {
-        if (b.too_big) kstrlcpy(err, "the page is too big (8 MiB max)", (size_t)ecap);
+        if (b.too_big) kstrlcpy(err, b.limit > MAX_DOC ? "the file is too big (32 MiB max)" : "the page is too big (8 MiB max)", (size_t)ecap);
         if (b.buf) kfree(b.buf);
         kfree(resp);
         return -1;
@@ -516,7 +590,7 @@ static int fetch_url(const char* url, const char* method, const char* post, uint
 static int env_fetch(void* ctx, const char* url, char** data, uint32_t* len, char* ctype, int ccap,
                      char* final_url, int fcap, char* err, int ecap) {
     (void)ctx;
-    return fetch_url(url, NULL, NULL, 0, NULL, data, len, ctype, ccap, final_url, fcap, err, ecap);
+    return fetch_url(url, NULL, NULL, 0, NULL, data, len, ctype, ccap, final_url, fcap, err, ecap, NULL);
 }
 
 /* fetch() / XMLHttpRequest with a method or a body */
@@ -525,7 +599,7 @@ static int env_request(void* ctx, const char* url, const char* method, const cha
     (void)ctx;
     char fin[1024];
     return fetch_url(url, method, body ? body : "", body ? blen : 0, btype, data, len, rtype, rcap, fin, sizeof(fin),
-                     err, ecap);
+                     err, ecap, NULL);
 }
 
 static int env_decode_image(void* ctx, const uint8_t* data, uint32_t len, img_data_t* out, arena_t* A) {
@@ -652,9 +726,112 @@ static char* wrap_content(const char* url, const char* ctype, char* data, uint32
     return b.s;
 }
 
+/* a file name for a download: Content-Disposition's, else the URL's last part */
+static void download_name(const char* url, const char* hint, const char* ctype, char* out, int cap) {
+    char name[128];
+    name[0] = 0;
+    if (hint && hint[0]) {
+        const char* s = strrchr(hint, '/');
+        kstrlcpy(name, s ? s + 1 : hint, sizeof(name));
+    } else {
+        const char* p = strstr(url, "://");
+        p = p ? p + 3 : url;
+        const char* path = strchr(p, '/');
+        const char* last = path ? path : "";
+        for (const char* q = last; *q && *q != '?' && *q != '#'; q++) if (*q == '/') last = q + 1;
+        int n = 0;
+        for (const char* q = last; *q && *q != '?' && *q != '#' && n < 127; q++) {
+            if (*q == '%' && q[1] && q[2]) {
+                int hi = q[1] <= '9' ? q[1] - '0' : (q[1] | 32) - 'a' + 10;
+                int lo = q[2] <= '9' ? q[2] - '0' : (q[2] | 32) - 'a' + 10;
+                name[n++] = (char)(hi * 16 + lo);
+                q += 2;
+            } else {
+                name[n++] = *q;
+            }
+        }
+        name[n] = 0;
+        if (!name[0]) {                    /* a site's front page */
+            url_host(url, name, 100);
+            kstrlcat(name, strncasecmp(ctype, "text/html", 9) == 0 ? ".html" : "", sizeof(name));
+        }
+    }
+    for (char* c = name; *c; c++)
+        if ((unsigned char)*c < 32 || strchr("/\\:*?\"<>|", *c)) *c = '_';
+    if (!name[0]) kstrlcpy(name, "download", sizeof(name));
+    /* the filesystem keeps 31 characters: keep the extension */
+    int l = (int)strlen(name);
+    if (l >= FS_NAME_LEN) {
+        const char* dot = strrchr(name, '.');
+        int el = dot ? (int)strlen(dot) : 0;
+        if (el > 8) el = 0;
+        char t[FS_NAME_LEN];
+        int keep = FS_NAME_LEN - 1 - el;
+        memcpy(t, name, (size_t)keep);
+        if (el) memcpy(t + keep, dot, (size_t)el);
+        t[keep + el] = 0;
+        kstrlcpy(name, t, sizeof(name));
+    }
+    kstrlcpy(out, name, (size_t)cap);
+}
+
+static void save_download(const char* url, const char* hint, const char* ctype, const char* data, uint32_t len) {
+    char name[FS_NAME_LEN], path[FS_PATH_LEN], msg[160];
+    download_name(url, hint, ctype, name, sizeof(name));
+    fs_mkdir_p(DOWNLOAD_DIR);
+    ksnprintf(path, sizeof(path), "%s/%s", DOWNLOAD_DIR, name);
+    for (int n = 2; fs_find_file(path) >= 0 && n < 100; n++) {
+        /* "name (2).ext" */
+        char base[FS_NAME_LEN];
+        kstrlcpy(base, name, sizeof(base));
+        char* dot = strrchr(base, '.');
+        char ext[12] = "";
+        if (dot && strlen(dot) < sizeof(ext)) { kstrlcpy(ext, dot, sizeof(ext)); *dot = 0; }
+        base[FS_NAME_LEN - 8 - strlen(ext)] = 0;
+        ksnprintf(path, sizeof(path), "%s/%s (%d)%s", DOWNLOAD_DIR, base, n, ext);
+    }
+    const char* leaf = strrchr(path, '/') + 1;
+    if (fs_write_path(path, data, len) < 0) {
+        ksnprintf(msg, sizeof(msg), "Could not save %s (out of space?)", leaf);
+        set_status(msg, 1);
+        return;
+    }
+    const char* tail = "";
+    const char* dot = strrchr(leaf, '.');
+    if (dot && strcasecmp(dot, ".bpk") == 0) tail = " - an app: install it from Files (right-click)";
+    else if (dot && strcasecmp(dot, ".wav") == 0) tail = " - play it from Files";
+    ksnprintf(msg, sizeof(msg), "Downloaded %s (%u KB) to ~/Downloads%s", leaf, (len + 1023) / 1024, tail);
+    set_status(msg, 0);
+}
+
+/* "Save link as" / "Save page as": always a download, the page stays */
+static void download(tab_t* t, const char* url_in) {
+    char url[1024], final_url[1024], ctype[96], err[200], msg[200];
+    normalize_url(url_in, url, sizeof(url));
+    g_status_tab = t;
+    ksnprintf(msg, sizeof(msg), "Downloading %s ...", url);
+    set_status(msg, 0);
+    dl_t dl;
+    memset(&dl, 0, sizeof(dl));
+    dl.force = 1;
+    char* data = NULL;
+    uint32_t len = 0;
+    if (fetch_url(url, NULL, NULL, 0, NULL, &data, &len, ctype, sizeof(ctype), final_url, sizeof(final_url), err,
+                  sizeof(err), &dl) != 0) {
+        ksnprintf(msg, sizeof(msg), "Download failed: %s", err[0] ? err : "error");
+        set_status(msg, 1);
+    } else {
+        save_download(final_url, dl.name, ctype, data, len);
+        kfree(data);
+    }
+    g_status_tab = NULL;
+}
+
 static void load(tab_t* t, const char* url_in, const char* post, uint32_t post_len, int add_history) {
     char url[1024], final_url[1024], ctype[96], err[200];
     normalize_url(url_in, url, sizeof(url));
+    char prev_addr[1024];
+    kstrlcpy(prev_addr, t->page ? t->page->url : "", sizeof(prev_addr));
     kstrlcpy(t->addr, url, sizeof(t->addr));
     if (t == cur_tab()) { g_addr_focus = 0; g_sel_on = 0; }
     t->loading = 1;
@@ -663,7 +840,30 @@ static void load(tab_t* t, const char* url_in, const char* post, uint32_t post_l
 
     char* data = NULL;
     uint32_t len = 0;
-    if (fetch_url(url, NULL, post, post_len, NULL, &data, &len, ctype, sizeof(ctype), final_url, sizeof(final_url), err, sizeof(err)) != 0) {
+    dl_t dl;
+    memset(&dl, 0, sizeof(dl));
+    /* view-source:URL shows the page's text */
+    int vsrc = strncmp(url, "view-source:", 12) == 0;
+    int frc = fetch_url(vsrc ? url + 12 : url, NULL, post, post_len, NULL, &data, &len, ctype, sizeof(ctype), final_url,
+                        sizeof(final_url), err, sizeof(err), vsrc ? NULL : &dl);
+    if (frc == 0 && vsrc) {
+        char fin[1024];
+        ksnprintf(fin, sizeof(fin), "view-source:%s", final_url);
+        kstrlcpy(final_url, fin, sizeof(final_url));
+        kstrlcpy(ctype, "text/plain", sizeof(ctype));
+    }
+    if (frc == 0 && dl.active) {
+        /* not a page: save it, and stay on the page we were on */
+        save_download(final_url, dl.name, ctype, data, len);
+        kfree(data);
+        if (prev_addr[0]) kstrlcpy(t->addr, prev_addr, sizeof(t->addr));
+        t->loading = 0;
+        g_status_tab = NULL;
+        g_render_req = 1;
+        g_gen++;
+        return;
+    }
+    if (frc != 0) {
         data = error_page(url, err[0] ? err : "the page could not be loaded", &len);
         kstrlcpy(final_url, url, sizeof(final_url));
         kstrlcpy(ctype, "text/html", sizeof(ctype));
@@ -905,6 +1105,35 @@ static void read_keys(void) {
     }
 }
 
+/* the right-click menu: chosen in the desktop's task, carried out here */
+enum { BM_OPEN = 1, BM_NEWTAB, BM_SAVELINK, BM_COPYLINK, BM_BACK, BM_FWD, BM_RELOAD, BM_COPY, BM_PASTE,
+       BM_SAVEPAGE, BM_SOURCE, BM_DOWNLOADS };
+static char g_menu_link[1024];
+static char g_dl_url[1024];
+static int  g_rc_mx, g_rc_my;
+
+static void bmenu_cb(int id, void* arg) {
+    (void)arg;
+    tab_t* t = cur_tab();
+    switch (id) {
+    case BM_OPEN: kstrlcpy(g_go_url, g_menu_link, sizeof(g_go_url)); push_cmd(CMD_GO, 0, 0); break;
+    case BM_NEWTAB: kstrlcpy(g_go_url, g_menu_link, sizeof(g_go_url)); push_cmd(CMD_NEWTAB, 0, 0); break;
+    case BM_SAVELINK: kstrlcpy(g_dl_url, g_menu_link, sizeof(g_dl_url)); push_cmd(CMD_DOWNLOAD, 0, 0); break;
+    case BM_COPYLINK: clipboard_set(g_menu_link, (uint32_t)strlen(g_menu_link)); set_status("Link copied", 0); break;
+    case BM_BACK: push_cmd(CMD_BACK, 0, 0); break;
+    case BM_FWD: push_cmd(CMD_FWD, 0, 0); break;
+    case BM_RELOAD: push_cmd(CMD_RELOAD, 0, 0); break;
+    case BM_COPY: push_cmd(CMD_COPY, 0, 0); break;
+    case BM_PASTE: push_cmd(CMD_PASTE, 0, 0); break;
+    case BM_SAVEPAGE:
+        if (t && t->page) { kstrlcpy(g_dl_url, t->page->url, sizeof(g_dl_url)); push_cmd(CMD_DOWNLOAD, 0, 0); }
+        break;
+    case BM_SOURCE: push_cmd(CMD_SOURCE, 0, 0); break;
+    case BM_DOWNLOADS: fs_mkdir_p(DOWNLOAD_DIR); gui_open_files(DOWNLOAD_DIR); break;
+    }
+    g_gen++;
+}
+
 static void run_commands(void) {
     while (g_cmd_tail != g_cmd_head) {
         cmd_t c = g_cmds[g_cmd_tail];
@@ -920,11 +1149,47 @@ static void run_commands(void) {
             }
             break;
         case CMD_RCLICK: {
-            char url[1024];
-            if (t && t->page && !t->loading && page_link_at(t->page, c.x, c.y, url, sizeof(url))) new_tab(url);
-            else paste_now();
+            /* the right-click menu: a link's, or the page's */
+            int link = t && t->page && !t->loading && page_link_at(t->page, c.x, c.y, g_menu_link, sizeof(g_menu_link));
+            if (!link) g_menu_link[0] = 0;
+            uint32_t clip;
+            clipboard_get(&clip);
+            ctx_item_t items[CTX_MAX_ITEMS];
+            int n = 0;
+            if (link) {
+                items[n++] = (ctx_item_t){ "Open link", BM_OPEN, 0 };
+                items[n++] = (ctx_item_t){ "Open link in new tab", BM_NEWTAB, 0 };
+                items[n++] = (ctx_item_t){ "Save link as (download)", BM_SAVELINK, 0 };
+                items[n++] = (ctx_item_t){ "Copy link address", BM_COPYLINK, 0 };
+                items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
+            }
+            items[n++] = (ctx_item_t){ "Back", BM_BACK, !t || t->hist_pos <= 0 };
+            items[n++] = (ctx_item_t){ "Forward", BM_FWD, !t || t->hist_pos >= t->hist_n - 1 };
+            items[n++] = (ctx_item_t){ "Reload", BM_RELOAD, 0 };
+            items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
+            items[n++] = (ctx_item_t){ "Copy", BM_COPY, !g_sel_on };
+            items[n++] = (ctx_item_t){ "Paste", BM_PASTE, clip == 0 };
+            items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
+            items[n++] = (ctx_item_t){ "Save page as (download)", BM_SAVEPAGE, !t };
+            items[n++] = (ctx_item_t){ "View page source", BM_SOURCE, !t };
+            if (n < CTX_MAX_ITEMS) items[n++] = (ctx_item_t){ "Open Downloads folder", BM_DOWNLOADS, 0 };
+            ctxmenu_open(g_rc_mx, g_rc_my, items, n, bmenu_cb, NULL);
             break;
         }
+        case CMD_DOWNLOAD: {
+            char url[1024];
+            kstrlcpy(url, g_dl_url, sizeof(url));
+            if (t && url[0]) download(t, url);
+            break;
+        }
+        case CMD_SOURCE: {
+            char url[1024 + 16];
+            if (!t || !t->page) break;
+            ksnprintf(url, sizeof(url), "view-source:%s", t->page->url);
+            new_tab(url);
+            break;
+        }
+        case CMD_COPY: copy_selection(); break;
         case CMD_GO: {
             char url[1024];
             kstrlcpy(url, g_go_url, sizeof(url));
@@ -1026,10 +1291,12 @@ void browser_paste(void) { push_cmd(CMD_PASTE, 0, 0); }
 void browser_rclick(int mx, int my) {
     tab_t* t = cur_tab();
     int lx = mx - g_win.x, ly = my - g_win.y;
+    g_rc_mx = mx;
+    g_rc_my = my;
     if (t && inside(lx, ly, VIEW_X, VIEW_Y, view_w(), view_h()))
         push_cmd(CMD_RCLICK, lx - VIEW_X, ly - VIEW_Y + t->scroll);
     else
-        push_cmd(CMD_PASTE, 0, 0);
+        push_cmd(CMD_RCLICK, -100000, -100000);     /* outside the page: no link */
 }
 
 static void tool_button(int x, int y, int w, const char* label, int enabled) {
