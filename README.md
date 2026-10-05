@@ -12,6 +12,18 @@ Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux k
 
 ![Banana OS desktop](assets/screenshots/gui-desktop.png)
 
+## Latest additions
+
+- **Apps and a Linux SDK** - write apps in C on Linux with the SDK in [`sdk/`](sdk/README.md) (C library, windows, drawing, mouse/keyboard events, files, sound, HTTP); one `make` builds them for both kernels into a `.bpk` package. Install with `pkg install app.bpk` or a double-click in Files, run them by name or from **Apps** on the desktop. Five examples come built in (`~/Examples`)
+- **USB sticks (FAT32)** - plugged-in sticks are mounted at `/mnt/usb`, read and write, long file names included; every tool works on them (`ls`, `cp`, Files, the browser, `pkg install`...). `umount` ejects
+- **NVMe SSDs** - a polled NVMe driver: NVMe disks are install targets (and boot on UEFI), FAT32 partitions are mounted at `/mnt/nvme`
+- **Sound** - Intel HD Audio and AC'97 drivers (QEMU, VirtualBox, many real PCs) and the PC speaker: `play file.wav`, `beep`, `volume`, and sound for apps
+- **Windows-like taskbar** - a button per open window (click: focus, click again: minimize), minimize buttons, *Show the desktop*
+- **Task Manager** - windows and apps (Switch to / End task), the kernel's tasks with their CPU use, live CPU and memory graphs; from the desktop, the Start menu or a right-click on the taskbar
+- **Right-click menus everywhere** - desktop, taskbar, terminals (copy, paste, clear), Files (open, install, rename, cut/copy/paste, delete, new file/folder, eject), the browser (open/save link, back, reload, page source...), Notepad
+- **Browser downloads** - anything that is not a web page (apps, archives, programs...) is saved to `~/Downloads`; *Save link as* / *Save page as* in the right-click menu
+- **UEFI fixes** - device registers above 4 GiB (where UEFI firmware puts NVMe, GPUs...) are mapped on demand, and the desktop uses whatever resolution the firmware gives (not only 800x600)
+
 ## What's new in 0.5
 
 - **64-bit** - the kernel also builds for x86_64 (long mode, 4 GiB identity-mapped with 2 MiB pages); one ISO carries both kernels and its boot menu picks the 64-bit one when the CPU supports it, the 32-bit one otherwise
@@ -71,7 +83,19 @@ Banana-OS/
 │   ├── passwd.c        # Password hashes (PBKDF2) in /etc/shadow
 │   ├── wallpaper.c     # Wallpaper presets, user images, /etc/wallpaper
 │   ├── image.c         # Image decoding (via stb_image) + resampling
-│   ├── fs.c, fsdisk.c  # In-memory Unix-like FS + on-disk persistence
+│   ├── fs.c, fsdisk.c  # In-memory Unix-like FS (with mounts) + on-disk persistence
+│   ├── fat32.c         # FAT32 volumes (USB sticks, NVMe partitions), long file names
+│   ├── blockdev.c      # Removable drives + the automount task
+│   ├── nvme.c          # NVMe SSD driver
+│   ├── paging.c        # Maps device memory above 4 GiB (64-bit, UEFI)
+│   ├── audio.c         # Intel HD Audio, AC'97, PC speaker, WAV playback
+│   ├── app.c, appcall*.asm # App loader (PIE ELF) + the app API table
+│   ├── appwin.c        # Windows of apps
+│   ├── pkg.c           # .bpk packages (pkg install / remove / run)
+│   ├── launcher.c      # "Apps" window
+│   ├── taskmgr.c       # "Task Manager" window
+│   ├── ctxmenu.c       # Right-click menus
+│   ├── examples.c, exbin.asm # The SDK examples built into the kernel (~/Examples)
 │   └── keyboard.c ...  # PS/2 keyboard/mouse, ATA/ATAPI, RTC, USB handoff
 ├── net/
 │   ├── e1000.c         # Intel 8254x NIC driver
@@ -99,6 +123,7 @@ Banana-OS/
 │   ├── srvcmds.c       # sshd, httpd, passwd, files, browser, notepad
 │   ├── wpcmd.c         # wallpaper command
 │   └── editor.c/h      # Nano-like text editor
+├── sdk/                # The Linux SDK for apps: include/, lib/, banana.mk, tools/bpkg, examples/
 ├── third_party/        # stb_image (runtime image decoding), lodepng
 ├── iso/boot/grub/grub.cfg
 ├── Makefile
@@ -305,7 +330,9 @@ Open it from the desktop (`startx`): the **Browser** icon or Start menu entry, o
 - Addresses: `http://` and `https://` (redirects followed, cookies kept for the session), `file:///path` (files and folder listings), `about:home` (the start page). A bare name gets `http://`, a path gets `file://`
 - **<** / **>** history, **R** reload, **Hm** start page, the address bar (click it or Ctrl+L, Enter to go); scrollbar, arrow keys, space and PgUp/PgDn scroll; Backspace goes back; Ctrl+R reloads
 - **Tabs**: **+** or Ctrl+N opens one, its **x** or Ctrl+W closes it, a right-click on a link (or `target=_blank`, `window.open`) opens the link in a new tab; up to 8, each with its own page and history
-- **Copy and paste**: drag over the page's text to select it, Ctrl+C copies; Ctrl+V or a right-click pastes into the address bar or the focused text field
+- **Copy and paste**: drag over the page's text to select it, Ctrl+C copies; Ctrl+V (or Paste in the right-click menu) pastes into the address bar or the focused text field
+- **Right-click**: open a link (or in a new tab), save it, copy its address; back, forward, reload, copy, paste, save the page, view its source, open the Downloads folder
+- **Downloads**: a link to something that is not a web page (a `.bpk` app, an archive, a program, `Content-Disposition: attachment`) is saved to `~/Downloads` - the progress and the result show in the status bar, and the page stays where it was. *Save link as* / *Save page as* always save (up to 32 MiB)
 - The window resizes from its bottom-right corner (the page is laid out again for the new width); double-click the title to maximize
 - HTML: a forgiving parser (missing end tags, entities, `<script>`/`<style>`), headings, paragraphs, lists, tables, links (`#anchors` too), `<pre>`, images (PNG/JPEG/GIF/BMP), forms (text fields, textareas, checkboxes, radio buttons, selects, buttons - submitted as GET or POST)
 - CSS: `<style>`, `<link rel=stylesheet>` and `style=""`; selectors up to level 4 (`+` `~` `>` combinators, `:not()`, `:is()`, `:where()`, `:nth-child()` and friends, `:checked`, attribute operators), specificity and `!important`, custom properties (`var(--x)`), `calc()`/`min()`/`max()`/`clamp()`, `hsl()`/`rgba()`, `@media` width queries, `@supports`, `@layer`; colors, backgrounds, borders, margins/padding, widths, `margin: auto`, font size (scaled 8x8 font), bold/italic/underline, `text-align`, `display` (flex rows and floats are laid out as inline blocks), `position`, `opacity`, `visibility`, `white-space`
@@ -324,7 +351,7 @@ Banana OS 0.5 has its own USB stack: **xHCI** (USB 3.x) and **EHCI** (USB 2.0) h
 | `r8152` | **Realtek RTL8152 / RTL8152B** USB 2.0 Fast Ethernet (`0bda:8152`): **Lanberg NC-0100-01**, TP-Link UE200 and most "USB 2.0 to RJ45" dongles |
 | `cdc_ecm` | Class-compliant USB Ethernet (CDC-ECM): QEMU `usb-net`, many adapters, phone USB tethering |
 | `usbhid` | USB keyboards and mice (boot protocol) |
-| `usb-storage` | USB sticks / disks are identified (model, size) - not mounted yet |
+| `usb-storage` | USB sticks and disks (Bulk-Only, SCSI): FAT32 volumes are mounted at `/mnt/usb` (whole-disk, MBR or GPT partitioned) |
 
 A USB network adapter shows up as **`usb0`** next to the PCI card (`eth0`). When one is plugged in it becomes the active interface and gets an address by DHCP; `ifconfig eth0 up` / `ifconfig usb0 up` switch between them (Banana OS uses one interface at a time).
 
@@ -347,7 +374,62 @@ ifconfig usb0 up      # use the USB adapter
 
 > ⚠️ The RTL8152 driver was written from the chip's register documentation in OpenBSD's `ure(4)` driver; QEMU cannot emulate this chip, so it has been tested in emulation only up to the USB layer. If it does not come up, `lsusb` and the boot messages (`r8152: ...`) tell what happened.
 
-Limitations: no USB hubs (plug devices directly into a root port), no UHCI/OHCI controllers - on EHCI-only machines full/low-speed devices (most keyboards and mice) are handed to the companion controller and stay on PS/2 emulation; USB sticks are not mounted.
+Limitations: no USB hubs (plug devices directly into a root port), no UHCI/OHCI controllers - on EHCI-only machines full/low-speed devices (most keyboards and mice) are handed to the companion controller and stay on PS/2 emulation; only FAT32 sticks with 512-byte sectors are mounted (not FAT12/16, exFAT or NTFS).
+
+## USB sticks and NVMe drives
+
+A FAT32 USB stick is mounted at **`/mnt/usb`** a moment after it is plugged in (a second one at `/mnt/usb2`); FAT32 partitions on an NVMe SSD appear at **`/mnt/nvme`**. They are ordinary folders: `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, redirections (`> /mnt/usb/log.txt`), Files (its **USB** button, *Eject* in the right-click menu), the browser (`file:///mnt/usb`), `pkg install /mnt/usb/app.bpk`... Every change is written to the stick right away - long file names included - so after `umount` (or *Eject*) it can be pulled out.
+
+```
+mount                 # what is mounted
+umount                # unmount (or: umount /mnt/usb)
+mount -a              # mount unmounted sticks again
+```
+
+NVMe drives are disks like the IDE and SATA ones: `disks` lists them and `install` can put Banana OS on one (it boots from it on UEFI).
+
+QEMU:
+
+```bash
+# a FAT32 stick image (mtools)
+truncate -s 64M stick.img && mformat -F -i stick.img ::
+qemu-system-x86_64 -cdrom Banana_OS.iso -m 256 -boot order=d -device qemu-xhci \
+    -drive if=none,id=st,file=stick.img,format=raw -device usb-storage,drive=st
+# an NVMe drive
+qemu-system-x86_64 -cdrom Banana_OS.iso -m 256 -drive if=none,id=nv,file=nvme.img,format=raw \
+    -device nvme,serial=banana1,drive=nv
+```
+
+(`-boot order=d`: a FAT32 stick has a boot sector, and the BIOS would otherwise try to boot from it.)
+
+## Apps
+
+Apps are made with the **Banana OS SDK** on Linux - see [sdk/README.md](sdk/README.md). A `.bpk` package holds the app for both kernels; installing it unpacks it into `/apps/<name>/`.
+
+- **Install**: `pkg install app.bpk`, or double-click the `.bpk` in Files (from a USB stick, `~/Downloads`, `~/Examples`...)
+- **Run**: type its name in a terminal (a console app runs there; a desktop app opens its window), or click it in **Apps** (Start menu or desktop)
+- **Manage**: `pkg list`, `pkg info <name>`, `pkg remove <name>` (or right-click in Apps), `pkg ps`; End task in the Task Manager
+
+The examples are built into the system: `pkg install ~/Examples/paint.bpk ~/Examples/clock.bpk` and open them from Apps.
+
+## Sound
+
+| Driver | Devices |
+|---|---|
+| Intel HD Audio | ICH6 and newer chipsets, QEMU `-device intel-hda -device hda-output`, VirtualBox "Intel HD Audio" |
+| Intel AC'97 | ICH - ICH7, QEMU `-device AC97`, VirtualBox "ICH AC97" (its default) |
+| PC speaker | always: `beep` uses it when there is no sound card |
+
+Sound is mixed into one 48 kHz 16-bit stereo stream; WAV files (PCM, 8/16-bit, mono/stereo, any rate) are converted on the fly. `play file.wav` plays in the background (`play -s` stops), `volume 60` sets the volume, `lsaudio` shows the card. Apps get sound through the SDK (`banana_play`, `banana_tone`). In Files, double-click a `.wav` to hear it.
+
+QEMU: `-audiodev pa,id=snd0 -device intel-hda -device hda-output,audiodev=snd0` (or `-audiodev wav,id=snd0,path=out.wav` to record what Banana OS plays).
+
+## The desktop: taskbar, Task Manager, right-click
+
+- **Taskbar**: the **banana** button opens the Start menu; every open window has a button - click it to bring the window to the front, click again to minimize it (terminal windows also have a **_** button); the right side shows the network status and the clock. Right-click the taskbar for **Task Manager**, **Show the desktop** and **Restore all windows**; right-click a window's button to restore, minimize or close it.
+- **Task Manager**: *Apps & windows* (Switch to / End task, also on right-click), *Processes* (the kernel's tasks, their state and CPU use), *Performance* (CPU and memory graphs, uptime, files, network, sound). Open it from its desktop icon, the Start menu, the taskbar's right-click menu, or `taskmgr`.
+- **Right-click menus**: the desktop (open any app, wallpaper, exit), terminals (copy, paste, clear, new, minimize, close), Files (open, install app, play, set as wallpaper, edit, cut / copy / paste, rename, delete, properties, new folder / text file, terminal here, eject), the browser (open a link / in a new tab, save it, copy its address, back, forward, reload, copy, paste, save page, page source, Downloads folder), Notepad (cut, copy, paste, select all, find, open, save), Apps (open, details, uninstall).
+- Files also takes the keyboard while it is in front: arrows, Enter, Backspace (up), Delete, Ctrl+C / Ctrl+X / Ctrl+V, Ctrl+R (rename), Ctrl+N (new folder).
 
 ## Wallpapers
 
@@ -467,9 +549,23 @@ Bash-flavored extras (available in both personas, since they share one engine):
 | `shutdown [now\|-c]` | Schedule shutdown (60s), immediate shutdown, or cancel |
 | `reboot` | Immediate reboot |
 | `halt` | Hard CPU halt |
-| `install` | Install Banana OS onto a dedicated IDE or SATA hard disk - bootable, with a persistent filesystem |
-| `disks` | List the IDE and SATA (AHCI) disks and CD/DVD drives |
+| `install` | Install Banana OS onto a dedicated IDE, SATA or NVMe disk - bootable, with a persistent filesystem |
+| `disks` | List the IDE, SATA (AHCI) and NVMe disks and CD/DVD drives |
 | `sync` | Re-write the filesystem to the installed disk on demand |
+| **Storage** | |
+| `mount [-a]` | Mounted FAT32 volumes (USB sticks in `/mnt/usb`, NVMe in `/mnt/nvme`); `-a` retries unmounted ones |
+| `umount [path]` / `eject` | Unmount a volume so the stick can be pulled out |
+| **Apps** | |
+| `pkg install <file.bpk>...` | Install (or upgrade) apps built with the SDK |
+| `pkg list` / `pkg info <name\|file>` / `pkg remove <name>` | Installed apps, details, uninstall |
+| `<app> [args]` / `pkg run <app>` | Run an installed app |
+| `pkg ps` | Running apps |
+| `apps` / `taskmgr` | Open Apps / the Task Manager (desktop running) |
+| **Sound** | |
+| `play <file.wav>` / `play -s` | Play a WAV file in the background / stop |
+| `beep [hz] [ms]` | A tone (sound card, or the PC speaker) |
+| `volume [0-100]` | Show / set the volume |
+| `lsaudio` | The sound card in use |
 | **Networking** | |
 | `ifconfig [<if> <ip> [netmask m] [gw g] [dns d]]` | Show the interfaces, or configure one statically |
 | `ifconfig <if> up` | Make `eth0` or `usb0` the active interface |

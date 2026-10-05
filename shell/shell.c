@@ -786,6 +786,13 @@ static void cmd_help(void) {
         "  ifconfig <if> up   make eth0 / usb0 the active interface",
         "  lsusb              list USB controllers and devices",
         "  usb rescan         look for newly plugged / unplugged USB devices",
+        "  mount [-a]         mounted USB sticks / NVMe (FAT32: /mnt/usb, /mnt/nvme)",
+        "  umount [path]      unmount (eject) a stick so it can be removed",
+        "  pkg <cmd>          apps: install <f.bpk>, list, info, remove, run, ps",
+        "  <app> [args]       run an installed app by its name",
+        "  apps / taskmgr     open Apps / the Task Manager on the desktop",
+        "  play <f.wav>       play a sound (play -s stops); lsaudio: the sound card",
+        "  beep [hz] [ms]     a tone;  volume [0-100]: sound volume",
         "  dhcp               request a new DHCP lease",
         "  ping [-c N] <host> send ICMP echo requests (Ctrl+C stops)",
         "  nslookup <host>    resolve a hostname with DNS (alias: host)",
@@ -1191,7 +1198,9 @@ static const char* const known_cmds[] = {
     "grep", "wc", "head", "tail", "find", "time",
     /* shell/netcmds.c + shell/wpcmd.c */
     "ifconfig", "dhcp", "ping", "nslookup", "host", "netstat", "arp", "curl", "wget",
-    "cryptotest", "wallpaper", "lsusb", "usb", "httpd", "sshd", "passwd", "files", "browser", "notepad", (void*)0
+    "cryptotest", "wallpaper", "lsusb", "usb", "httpd", "sshd", "passwd", "files", "browser", "notepad",
+    /* shell/syscmds.c */
+    "mount", "umount", "eject", "pkg", "apps", "taskmgr", "play", "beep", "volume", "lsaudio", (void*)0
 };
 
 static void cmd_which(const char* args) {
