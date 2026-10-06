@@ -446,5 +446,11 @@ static const char k_prelude[] =
     "  def('permissions', { query: function(){ return Promise.resolve({ state: 'prompt', onchange: null, addEventListener: function(){} }); } });\n"
     "  def('storage', { estimate: function(){ return Promise.resolve({ quota: 0, usage: 0 }); }, persist: function(){ return Promise.resolve(false); } });\n"
     "})(W.navigator);\n"
+    "/* web views: the app's web_post(text) arrives as a \"message\" event */\n"
+    "W.__banana_deliver = function(data){\n"
+    "  var e; try { e = new MessageEvent('message', { data: data, origin: 'banana:' }); } catch (x) { e = new Event('message'); e.data = data; e.origin = 'banana:'; }\n"
+    "  if (typeof W.onmessage === 'function') { try { W.onmessage(e); } catch (x) {} }\n"
+    "  W.dispatchEvent(e);\n"
+    "};\n"
     "})();\n"
 ;

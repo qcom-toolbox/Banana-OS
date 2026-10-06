@@ -1575,10 +1575,14 @@ static value_t w_removeEventListener(interp_t* I, value_t self, int argc, value_
     return v_undef();
 }
 
-/* window.dispatchEvent(e): nothing listens on the window itself here */
+/* window.dispatchEvent(e): to the window's listeners (kept on the document) */
 static value_t w_dispatchEvent(interp_t* I, value_t self, int argc, value_t* argv) {
-    (void)I; (void)self; (void)argc; (void)argv;
-    return v_bool(1);
+    (void)self;
+    value_t e = ARG(0);
+    if (e.t != V_OBJ) return v_bool(1);
+    page_t* p = P(I);
+    const char* type = v_cstr(I, obj_get(I, e.o, "type"));
+    return v_bool(!dispatch_ev(p, p->doc, type, NULL, e.o));
 }
 
 static const host_class_t win_class = { "Window", win_get, win_set };
@@ -2209,6 +2213,23 @@ static value_t w_import(interp_t* I, value_t self, int argc, value_t* argv) {
     return pr;
 }
 
+/* banana.postMessage(text): to the app showing the page */
+static value_t w_post_app(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    page_t* p = P(I);
+    value_t a = argc ? argv[0] : v_undef();
+    const char* s;
+    if (a.t == V_OBJ) {                              /* objects go as JSON */
+        value_t json = script_get_global(I, "JSON"), r;
+        value_t st = json.t == V_OBJ ? obj_get(I, json.o, "stringify") : v_undef();
+        s = v_isfunc(st) && script_call(I, st, json, 1, &a, &r) == 0 ? v_cstr(I, r) : v_cstr(I, a);
+    } else {
+        s = v_cstr(I, a);
+    }
+    if (p->env && p->env->message) p->env->message(p->env->ctx, s);
+    return v_undef();
+}
+
 /* <script type="module">: by address (once), or inline code */
 void jsdom_module(page_t* p, const char* url, const char* code, uint32_t len) {
     if (!p->js) return;
@@ -2335,6 +2356,11 @@ void jsdom_install(page_t* p) {
     obj_set(I, ce, "whenDefined", v_native(I, "whenDefined", ce_whenDefined));
     obj_set(I, ce, "upgrade", v_native(I, "upgrade", ce_upgrade));
     script_def_global(I, "customElements", v_obj(ce));
+    if (p->env && p->env->message) {                 /* in an app's web view: the way to talk to it */
+        obj_t* bn = obj_new(I, OBJ_PLAIN);
+        obj_set(I, bn, "postMessage", v_native(I, "postMessage", w_post_app));
+        script_def_global(I, "banana", v_obj(bn));
+    }
     script_set_import(I, module_import, p);
     value_t imp = v_native(I, "import", w_import);   /* import(), import.meta */
     imp.f->statics = obj_new(I, OBJ_PLAIN);

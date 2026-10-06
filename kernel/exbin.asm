@@ -3,7 +3,7 @@
 ; ~/Examples on a fresh system. Assembled for both kernels (elf32/elf64).
 
 global ex_hello, ex_hello_end, ex_guess, ex_guess_end, ex_paint, ex_paint_end
-global ex_clock, ex_clock_end, ex_tones, ex_tones_end, ex_mandel, ex_mandel_end, ex_threads, ex_threads_end
+global ex_clock, ex_clock_end, ex_tones, ex_tones_end, ex_mandel, ex_mandel_end, ex_threads, ex_threads_end, ex_webview, ex_webview_end
 
 section .rodata
 align 16
@@ -27,3 +27,5 @@ ex_mandel_end:
 align 16
 ex_threads: incbin "sdk/examples/threads/threads.bpk"
 ex_threads_end:
+ex_webview: incbin "sdk/examples/webview/webview.bpk"
+ex_webview_end:

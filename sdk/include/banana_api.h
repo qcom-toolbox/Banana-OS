@@ -2,7 +2,7 @@
 #define BANANA_API_H
 
 /*
- * The Banana OS application interface (ABI), version 4.
+ * The Banana OS application interface (ABI), version 5.
  *
  * An app is a position-independent ELF executable (built by the SDK for
  * i686 and x86_64, both packed in one .bpk). Banana OS loads it, applies
@@ -17,7 +17,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 4u
+#define BANANA_API_VERSION 5u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -51,6 +51,12 @@
 #define BANANA_KEY_PGUP   0x107
 #define BANANA_KEY_PGDN   0x108
 #define BANANA_KEY_DELETE 0x109
+
+/* web_poll() flags */
+#define BANANA_WEB_DIRTY    1    /* a new picture: web_draw() it */
+#define BANANA_WEB_LOADING  2    /* a page is loading */
+#define BANANA_WEB_TITLE    4    /* the title or the address changed: web_info() */
+#define BANANA_WEB_MESSAGE  8    /* the page called banana.postMessage(): web_message() */
 
 /* draw_text(): a background of BANANA_TRANSPARENT leaves the pixels alone */
 #define BANANA_TRANSPARENT 0xFF000000u
@@ -181,6 +187,30 @@ typedef struct banana_api {
     int   (*wait)(volatile int* addr, int expected, int timeout_ms);
     /* wakes up to count threads waiting on addr (0: all); how many */
     int   (*wake)(volatile int* addr, int count);
+
+    /* ── version 5: web views (the system browser's engine) ── */
+    /* A web view loads and runs a page (HTML, CSS, JavaScript) in the
+     * background and keeps a w x h picture of it; the app shows it with
+     * web_draw() wherever it likes in its window and passes it the mouse
+     * and keys. Pages talk to the app with banana.postMessage(text) and
+     * get the app's web_post() as a "message" event (event.data). */
+    int   (*web_open)(int w, int h);                    /* view id, or -1 */
+    void  (*web_close)(int view);
+    int   (*web_load)(int view, const char* url);       /* http(s)://, file://, a path, about:; 0 or -1 */
+    int   (*web_load_html)(int view, const char* html, const char* base_url);
+    void  (*web_resize)(int view, int w, int h);
+    int   (*web_poll)(int view);                        /* BANANA_WEB_* since the last poll */
+    /* copies the picture to (x, y) of a buf_w x buf_h buffer (clipped) */
+    void  (*web_draw)(int view, unsigned int* px, int stride, int x, int y, int buf_w, int buf_h);
+    /* a window event in view coordinates: clicks, keys (typing, arrows/PgUp/PgDn scroll) */
+    void  (*web_event)(int view, const banana_event_t* ev);
+    void  (*web_scroll)(int view, int dy);
+    void  (*web_go)(int view, int delta);               /* -1 back, 1 forward, 0 reload */
+    int   (*web_info)(int view, char* title, int tcap, char* url, int ucap);   /* 1 while loading */
+    /* runs JavaScript in the page, waits; the value as text (objects as JSON); 0 or -1 */
+    int   (*web_eval)(int view, const char* js, char* out, int cap);
+    int   (*web_message)(int view, char* out, int cap); /* next banana.postMessage() text: its length, -1 none */
+    int   (*web_post)(int view, const char* msg);       /* a "message" event in the page */
 } banana_api_t;
 
 /* the app's entry point (the SDK's crt0 provides it) */

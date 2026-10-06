@@ -1480,6 +1480,15 @@ dom_node_t* layout_hit(layout_t* L, int x, int y) {
         if (!it->node) continue;
         if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) return it->node;
     }
+    /* nothing right under it: text counts its whole line (a few pixels above
+     * and below the glyphs), as links do in other browsers */
+    for (uint32_t i = L->n; i > 0; i--) {
+        dl_item_t* it = &L->items[i - 1];
+        if (!it->node || it->kind != DL_TEXT) continue;
+        int slop = it->h / 2 + 1;
+        if (slop > 6) slop = 6;
+        if (x >= it->x && x < it->x + it->w && y >= it->y - slop && y < it->y + it->h + slop) return it->node;
+    }
     return NULL;
 }
 

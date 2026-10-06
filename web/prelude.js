@@ -444,4 +444,10 @@ if (typeof W.DOMException === 'undefined') {
   def('permissions', { query: function(){ return Promise.resolve({ state: 'prompt', onchange: null, addEventListener: function(){} }); } });
   def('storage', { estimate: function(){ return Promise.resolve({ quota: 0, usage: 0 }); }, persist: function(){ return Promise.resolve(false); } });
 })(W.navigator);
+/* web views: the app's web_post(text) arrives as a "message" event */
+W.__banana_deliver = function(data){
+  var e; try { e = new MessageEvent('message', { data: data, origin: 'banana:' }); } catch (x) { e = new Event('message'); e.data = data; e.origin = 'banana:'; }
+  if (typeof W.onmessage === 'function') { try { W.onmessage(e); } catch (x) {} }
+  W.dispatchEvent(e);
+};
 })();

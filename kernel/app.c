@@ -18,6 +18,7 @@
 #include "../net/http.h"
 #include "../sdk/include/banana_api.h"
 #include "smp.h"
+#include "webview.h"
 
 #define APP_MAX     8
 #define APP_FD_MAX  16
@@ -577,6 +578,23 @@ static void a_win_set_title(int win, const char* t) { app_proc_t* p = cur(); if 
 static void a_win_size(int win, int* w, int* h) { app_proc_t* p = cur(); appwin_size(win, p ? p->id : -1, w, h); }
 static void a_win_set_resizable(int win, int mw, int mh) { app_proc_t* p = cur(); if (p) appwin_set_resizable(win, p->id, mw, mh); }
 
+/* web views (webview.c): each belongs to the app that opened it */
+static int  owner_id(void) { app_proc_t* p = cur(); return p ? p->id : -1; }
+static int  a_web_open(int w, int h) { int o = owner_id(); return o < 0 ? -1 : webview_open(o, w, h); }
+static void a_web_close(int v) { webview_close(owner_id(), v); }
+static int  a_web_load(int v, const char* url) { return webview_load(owner_id(), v, url); }
+static int  a_web_load_html(int v, const char* h, const char* base) { return webview_load_html(owner_id(), v, h, base); }
+static void a_web_resize(int v, int w, int h) { webview_resize(owner_id(), v, w, h); }
+static int  a_web_poll(int v) { return webview_poll(owner_id(), v); }
+static void a_web_draw(int v, unsigned int* px, int stride, int x, int y, int w, int h) { webview_draw(owner_id(), v, px, stride, x, y, w, h); }
+static void a_web_event(int v, const banana_event_t* ev) { webview_event(owner_id(), v, ev); }
+static void a_web_scroll(int v, int dy) { webview_scroll(owner_id(), v, dy); }
+static void a_web_go(int v, int d) { webview_go(owner_id(), v, d); }
+static int  a_web_info(int v, char* t, int tc, char* u, int uc) { return webview_info(owner_id(), v, t, tc, u, uc); }
+static int  a_web_eval(int v, const char* js, char* out, int cap) { return webview_eval(owner_id(), v, js, out, cap); }
+static int  a_web_message(int v, char* out, int cap) { return webview_message(owner_id(), v, out, cap); }
+static int  a_web_post(int v, const char* m) { return webview_post(owner_id(), v, m); }
+
 static void a_draw_text(unsigned int* px, int stride, int w, int h, int x, int y,
                         const char* s, unsigned int fg, unsigned int bg) {
     if (!px || !s) return;
@@ -861,6 +879,20 @@ static void api_init(void) {
     g_api.cpu_count = a_cpu_count;
     g_api.wait = a_wait;
     g_api.wake = a_wake;
+    g_api.web_open = a_web_open;
+    g_api.web_close = a_web_close;
+    g_api.web_load = a_web_load;
+    g_api.web_load_html = a_web_load_html;
+    g_api.web_resize = a_web_resize;
+    g_api.web_poll = a_web_poll;
+    g_api.web_draw = a_web_draw;
+    g_api.web_event = a_web_event;
+    g_api.web_scroll = a_web_scroll;
+    g_api.web_go = a_web_go;
+    g_api.web_info = a_web_info;
+    g_api.web_eval = a_web_eval;
+    g_api.web_message = a_web_message;
+    g_api.web_post = a_web_post;
 }
 
 /* ── the ELF loader ────────────────────────────────────────────────── */
@@ -1008,6 +1040,7 @@ static void stop_threads(app_proc_t* p) {
 static void release(app_proc_t* p) {
     stop_threads(p);
     appwin_close_owner(p->id);
+    webview_close_owner(p->id);
     while (p->blocks) {
         ablock_t* b = p->blocks;
         p->blocks = b->next;

@@ -288,3 +288,26 @@ int banana_sem_timedwait(banana_sem_t* s, int ms) {
 void banana_sem_wait(banana_sem_t* s) { banana_sem_timedwait(s, -1); }
 
 void banana_sem_post(banana_sem_t* s) { __sync_fetch_and_add(&s->count, 1); banana_wake(&s->count, 1); }
+
+/* ── web views (API version 5) ── */
+int bweb_available(void) {
+    return __banana->version >= 5 && __banana->size >= __builtin_offsetof(banana_api_t, web_post) + sizeof(void*);
+}
+int  bweb_open(int w, int h) { return bweb_available() ? __banana->web_open(w, h) : -1; }
+void bweb_close(int v) { if (bweb_available()) __banana->web_close(v); }
+int  bweb_load(int v, const char* url) { return bweb_available() ? __banana->web_load(v, url) : -1; }
+int  bweb_html(int v, const char* html, const char* base) { return bweb_available() ? __banana->web_load_html(v, html, base) : -1; }
+void bweb_resize(int v, int w, int h) { if (bweb_available()) __banana->web_resize(v, w, h); }
+int  bweb_poll(int v) { return bweb_available() ? __banana->web_poll(v) : 0; }
+void bweb_draw(int v, bwin_t* win, int x, int y) {
+    if (bweb_available() && win->px) __banana->web_draw(v, win->px, win->w, x, y, win->w, win->h);
+}
+void bweb_event(int v, const banana_event_t* ev) { if (bweb_available()) __banana->web_event(v, ev); }
+void bweb_scroll(int v, int dy) { if (bweb_available()) __banana->web_scroll(v, dy); }
+void bweb_back(int v) { if (bweb_available()) __banana->web_go(v, -1); }
+void bweb_forward(int v) { if (bweb_available()) __banana->web_go(v, 1); }
+void bweb_reload(int v) { if (bweb_available()) __banana->web_go(v, 0); }
+int  bweb_info(int v, char* t, int tc, char* u, int uc) { return bweb_available() ? __banana->web_info(v, t, tc, u, uc) : -1; }
+int  bweb_eval(int v, const char* js, char* out, int cap) { return bweb_available() ? __banana->web_eval(v, js, out, cap) : -1; }
+int  bweb_message(int v, char* out, int cap) { return bweb_available() ? __banana->web_message(v, out, cap) : -1; }
+int  bweb_post(int v, const char* text) { return bweb_available() ? __banana->web_post(v, text) : -1; }

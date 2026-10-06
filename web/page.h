@@ -29,6 +29,8 @@ typedef struct page_env {
     /* optional: document.cookie - the cookies a script may see for url ("a=1; b=2"), and one it sets */
     void (*cookie_get)(void* ctx, const char* url, char* out, int cap);
     void (*cookie_set)(void* ctx, const char* url, const char* line);
+    /* optional: banana.postMessage(text) - the page talking to the app showing it (web views) */
+    void (*message)(void* ctx, const char* text);
     void* ctx;
 } page_env_t;
 

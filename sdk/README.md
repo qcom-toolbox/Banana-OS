@@ -123,6 +123,38 @@ See `include/banana.h` for the full list and `examples/` for working code:
 Build them all with `make examples` at the top of the Banana OS tree; they are
 also built into Banana OS itself, in `~/Examples` (`pkg install ~/Examples/paint.bpk`).
 
+### Web views
+
+Since API version 5 an app can embed the system browser's engine: a web
+view loads a page (HTML, CSS and JavaScript, from `https://`, `file://` or a
+path, or HTML you pass it) in the background and keeps a picture of it that
+you draw wherever you want in your window.
+
+```c
+int v = bweb_open(win.w, win.h - 30);
+bweb_load(v, "https://example.com");          /* or bweb_html(v, "<h1>Hi</h1>", NULL) */
+for (;;) {
+    banana_event_t ev;
+    while (bwin_event(&win, &ev)) {
+        if (ev.type == BANANA_EV_CLOSE) return 0;
+        ev.y -= 30;                            /* view coordinates */
+        bweb_event(v, &ev);                    /* clicks, typing, arrows / wheel scroll */
+    }
+    if (bweb_poll(v) & BANANA_WEB_DIRTY) { bweb_draw(v, &win, 0, 30); bwin_update(&win); }
+    banana_sleep(10);
+}
+```
+
+The page and the app can talk: the page calls `banana.postMessage("text")`
+(objects are sent as JSON) and the app reads it with `bweb_message()`; the
+app's `bweb_post(v, "text")` reaches the page as a `message` event
+(`window.addEventListener("message", e => ... e.data ...)`). `bweb_eval()`
+runs a script in the page and returns its value as text. `bweb_back`,
+`bweb_forward`, `bweb_reload` and `bweb_info` (title, address, loading)
+cover the rest. `examples/webview` is a small browser built this way, with a
+start page that talks to its app. Check `bweb_available()` if your app
+should also run on older systems.
+
 ### Rules of the road
 
 - **Floating point works**: `float`, `double`, `math.h` (`sqrt`, `sin`, `cos`,

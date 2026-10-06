@@ -28,6 +28,14 @@ void browser_mouse(int mx, int my, int left);
 uint32_t browser_signature(void);
 /* Ctrl+V / right-click: the clipboard into the focused field or the address bar */
 void browser_paste(void);
+
+/* for web views (webview.c): the browser's network, cookies and image decoding */
+struct page_env;
+struct page_env* browser_env(void);
+uint32_t browser_page_mem(void);
+void     browser_cookies_save(void);
+int      browser_fetch_document(const char* url, const char* post, uint32_t post_len,
+                                char** data, uint32_t* len, char* final_url, int fcap);
 /* right-click: the menu (open / save a link, back, reload, copy, paste, save page...) */
 void browser_rclick(int mx, int my);
 

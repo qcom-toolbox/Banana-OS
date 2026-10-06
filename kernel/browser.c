@@ -435,7 +435,10 @@ static void push_cmd(int kind, int x, int y) {
     g_cmd_head = next;
 }
 
+static int g_quiet;                         /* a web view is fetching: not the browser's business */
+
 static void set_status(const char* s, int err) {
+    if (g_quiet) return;
     tab_t* t = g_status_tab ? g_status_tab : cur_tab();
     if (!t) return;
     kstrlcpy(t->status, s, sizeof(t->status));
@@ -1365,7 +1368,10 @@ static void run_commands(void) {
     }
 }
 
-static void browser_task(void) {
+static void env_setup(void) {
+    static int done;
+    if (done) return;
+    done = 1;
     cookies_load();                 /* the cookies kept from earlier sessions */
     g_env.fetch = env_fetch;
     g_env.request = env_request;
@@ -1383,6 +1389,37 @@ static void browser_task(void) {
     g_page_mem = heap / 3;
     if (g_page_mem > (384u << 20)) g_page_mem = 384u << 20;
     if (g_page_mem < (16u << 20)) g_page_mem = 16u << 20;
+}
+
+/* ── for web views (webview.c): the same network, cookies and images ── */
+
+struct page_env* browser_env(void) { env_setup(); return &g_env; }
+uint32_t    browser_page_mem(void) { env_setup(); return g_page_mem; }
+void        browser_cookies_save(void) { cookies_save(); }
+
+/* url (or a search) as a document page_load can take: the page, an
+ * error page, or a text / image / listing wrapped as HTML. *data is
+ * kmalloc'd; final_url is where it ended up after redirects */
+int browser_fetch_document(const char* url_in, const char* post, uint32_t post_len,
+                           char** data, uint32_t* len, char* final_url, int fcap) {
+    env_setup();
+    char url[URL_MAX], ctype[96], err[200];
+    normalize_url(url_in, url, sizeof(url));
+    g_quiet++;
+    int rc = fetch_url(url, NULL, post, post_len, NULL, data, len, ctype, sizeof(ctype), final_url, fcap,
+                       err, sizeof(err), NULL);
+    g_quiet--;
+    if (rc != 0) {
+        *data = error_page(url, err[0] ? err : "the page could not be loaded", len);
+        kstrlcpy(final_url, url, (size_t)fcap);
+        kstrlcpy(ctype, "text/html", sizeof(ctype));
+    }
+    if (*data) *data = wrap_content(final_url, ctype, *data, len);
+    return *data ? rc : -1;
+}
+
+static void browser_task(void) {
+    env_setup();
     for (;;) {
         if (!g_open) {
             /* closed: drop the tabs (frees their pages), wait */

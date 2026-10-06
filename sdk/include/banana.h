@@ -68,6 +68,41 @@ void bwin_button(bwin_t* win, int x, int y, int w, int h, const char* label, int
 /* copies a w*h image (0x00RRGGBB) into the window at x, y */
 void bwin_blit(bwin_t* win, int x, int y, const unsigned int* img, int w, int h);
 
+/* ── web views (Banana OS with API version 5) ──────────────────────
+ * The system browser's engine inside your app: a web view loads a page
+ * (HTML, CSS, JavaScript, http/https or local files) in the background
+ * and keeps a picture of it, w x h pixels.
+ *
+ *     int v = bweb_open(400, 300);
+ *     bweb_load(v, "https://example.com");          (or bweb_html(v, "<h1>Hi</h1>", NULL))
+ *     in the event loop:
+ *         int f = bweb_poll(v);
+ *         if (f & BANANA_WEB_DIRTY) { bweb_draw(v, &win, 0, 30); bwin_update(&win); }
+ *         bweb_event(v, &ev) for clicks / keys over the view (ev.y - 30 there)
+ *
+ * The page talks to the app with banana.postMessage("text") (bweb_message
+ * reads it) and hears the app's bweb_post("text") as a "message" event:
+ *     window.addEventListener("message", e => use(e.data));
+ * All of an app's views close when it exits. */
+int  bweb_available(void);                 /* 1 if the system has web views */
+int  bweb_open(int w, int h);              /* view id, or -1 */
+void bweb_close(int view);
+int  bweb_load(int view, const char* url); /* https://..., file:///..., /home/banana/page.html */
+int  bweb_html(int view, const char* html, const char* base_url);   /* base_url may be NULL */
+void bweb_resize(int view, int w, int h);
+int  bweb_poll(int view);                  /* BANANA_WEB_DIRTY / LOADING / TITLE / MESSAGE */
+void bweb_draw(int view, bwin_t* win, int x, int y);   /* its picture into the window at x, y */
+/* a window event for the view: give coordinates relative to where you drew it */
+void bweb_event(int view, const banana_event_t* ev);
+void bweb_scroll(int view, int dy);
+void bweb_back(int view);
+void bweb_forward(int view);
+void bweb_reload(int view);
+int  bweb_info(int view, char* title, int tcap, char* url, int ucap);   /* 1 while loading */
+int  bweb_eval(int view, const char* js, char* out, int cap);           /* 0, or -1 (out: the error) */
+int  bweb_message(int view, char* out, int cap);   /* next message's length, or -1 */
+int  bweb_post(int view, const char* text);
+
 /* ── time ─────────────────────────────────────────────────────────── */
 unsigned int banana_ticks(void);           /* milliseconds since boot */
 void banana_sleep(unsigned int ms);        /* lets everything else run meanwhile */
