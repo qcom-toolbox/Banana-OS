@@ -29,6 +29,7 @@ typedef struct {
     int      pid;
     int      desktop;      /* started from the desktop (its own task) */
     uint32_t mem;          /* bytes it allocated */
+    int      threads;      /* its main thread + the ones it started */
 } app_info_t;
 int  app_snapshot(app_info_t* out, int max);
 /* stops app id the next time it calls the system (its windows close) */

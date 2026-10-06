@@ -2,7 +2,7 @@
 #define BANANA_API_H
 
 /*
- * The Banana OS application interface (ABI), version 3.
+ * The Banana OS application interface (ABI), version 4.
  *
  * An app is a position-independent ELF executable (built by the SDK for
  * i686 and x86_64, both packed in one .bpk). Banana OS loads it, applies
@@ -17,7 +17,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 3u
+#define BANANA_API_VERSION 4u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -174,6 +174,13 @@ typedef struct banana_api {
     int   (*thread_id)(void);           /* 0 in the main thread */
     void  (*thread_exit)(int ret);      /* ends the calling thread (the main one: the app) */
     int   (*cpu_count)(void);           /* processor cores Banana OS uses */
+
+    /* ── version 4: waiting between threads ───────────────── */
+    /* sleeps while *addr == expected (until wake() or timeout_ms; -1:
+     * no timeout): 0 when the value changed / it was woken, 1 on timeout */
+    int   (*wait)(volatile int* addr, int expected, int timeout_ms);
+    /* wakes up to count threads waiting on addr (0: all); how many */
+    int   (*wake)(volatile int* addr, int count);
 } banana_api_t;
 
 /* the app's entry point (the SDK's crt0 provides it) */

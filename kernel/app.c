@@ -739,6 +739,44 @@ static void a_thread_exit(int ret) {
 
 static int a_cpu_count(void) { return cpu_count(); }
 
+/* wait / wake: a thread sleeps while *addr == expected, until another one
+ * changes it and calls wake (or the timeout passes) - what the SDK builds
+ * condition variables and semaphores on */
+#define WAITERS 64
+static struct { volatile int* addr; int pid; } g_waiters[WAITERS];
+
+static int waiter_add(volatile int* addr) {
+    for (int i = 0; i < WAITERS; i++)
+        if (!g_waiters[i].addr) { g_waiters[i].addr = addr; g_waiters[i].pid = task_current_pid(); return i; }
+    return -1;
+}
+
+static int a_wait(volatile int* addr, int expected, int timeout_ms) {
+    app_proc_t* p = cur();
+    if (!p || !addr) return -1;
+    uint32_t end = timer_ms() + (uint32_t)(timeout_ms > 0 ? timeout_ms : 0);
+    for (;;) {
+        breathe(p, 1);                      /* paints, notices Ctrl+C / End task (may not return) */
+        if (*addr != expected) return 0;
+        if (timeout_ms >= 0 && (int32_t)(timer_ms() - end) >= 0) return 1;
+        /* registered only while asleep: if the app is stopped in breathe()
+         * no stale entry is left behind; a wake in between costs <= 10 ms */
+        int slot = waiter_add(addr);
+        if (*addr == expected) task_sleep_ms(slot >= 0 ? 10 : 1);
+        if (slot >= 0) g_waiters[slot].addr = NULL;
+    }
+}
+
+static int a_wake(volatile int* addr, int count) {
+    int n = 0;
+    for (int i = 0; i < WAITERS; i++) {
+        if (g_waiters[i].addr != addr) continue;
+        task_wake(g_waiters[i].pid);
+        if (++n >= count && count > 0) break;
+    }
+    return n;
+}
+
 /* kernel/idt.c, on every hardware interrupt: if it came while an app's
  * own code was running (not inside the kernel), switching to another task
  * is safe - so a busy app or thread cannot freeze the desktop, and the
@@ -821,6 +859,8 @@ static void api_init(void) {
     g_api.thread_id = a_thread_id;
     g_api.thread_exit = a_thread_exit;
     g_api.cpu_count = a_cpu_count;
+    g_api.wait = a_wait;
+    g_api.wake = a_wake;
 }
 
 /* ── the ELF loader ────────────────────────────────────────────────── */
@@ -1158,6 +1198,8 @@ int app_snapshot(app_info_t* out, int max) {
         out[n].pid = p->pid;
         out[n].desktop = p->own_task;
         out[n].mem = 0;
+        out[n].threads = 1;
+        for (int t = 0; t < APP_THREADS; t++) if (p->threads[t].used && !p->threads[t].done) out[n].threads++;
         for (ablock_t* b = p->blocks; b; b = b->next) out[n].mem += (uint32_t)b->size;
         n++;
     }

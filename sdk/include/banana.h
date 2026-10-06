@@ -125,4 +125,28 @@ void banana_lock(banana_mutex_t* m);
 int  banana_trylock(banana_mutex_t* m);    /* 1 if it got the lock */
 void banana_unlock(banana_mutex_t* m);
 
+/* waiting for another thread (API version 4; older systems poll):
+ * a condition variable is used with a mutex held -
+ *     banana_lock(&m); while (!ready) banana_cond_wait(&c, &m); ... banana_unlock(&m);
+ * and a semaphore counts free resources (wait takes one, post gives one) */
+typedef struct { volatile int seq; } banana_cond_t;
+#define BANANA_COND_INIT { 0 }
+void banana_cond_wait(banana_cond_t* c, banana_mutex_t* m);
+int  banana_cond_timedwait(banana_cond_t* c, banana_mutex_t* m, int ms);   /* 1 on timeout */
+void banana_cond_signal(banana_cond_t* c);      /* wakes one waiter */
+void banana_cond_broadcast(banana_cond_t* c);   /* wakes all of them */
+
+typedef struct { volatile int count; } banana_sem_t;
+#define BANANA_SEM_INIT(n) { (n) }
+void banana_sem_init(banana_sem_t* s, int count);
+void banana_sem_wait(banana_sem_t* s);
+int  banana_sem_trywait(banana_sem_t* s);       /* 1 if it got one */
+int  banana_sem_timedwait(banana_sem_t* s, int ms);   /* 1 on timeout */
+void banana_sem_post(banana_sem_t* s);
+
+/* the building block: sleep while *addr == expected (-1: no timeout);
+ * 1 on timeout. banana_wake() wakes up to count waiters (0: all). */
+int  banana_wait_value(volatile int* addr, int expected, int timeout_ms);
+int  banana_wake(volatile int* addr, int count);
+
 #endif

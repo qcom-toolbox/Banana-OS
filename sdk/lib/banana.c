@@ -232,3 +232,59 @@ void banana_lock(banana_mutex_t* m) {
 }
 
 void banana_unlock(banana_mutex_t* m) { __sync_lock_release(m); }
+
+/* ── waiting between threads ──────────────────────────────────────── */
+
+static int has_wait(void) { return __banana->version >= 4 && __banana->size > (unsigned)((const char*)&__banana->wait - (const char*)__banana); }
+
+int banana_wait_value(volatile int* addr, int expected, int timeout_ms) {
+    if (has_wait()) return __banana->wait(addr, expected, timeout_ms);
+    unsigned end = __banana->ticks_ms() + (unsigned)(timeout_ms > 0 ? timeout_ms : 0);
+    while (*addr == expected) {                 /* an older system: poll */
+        if (timeout_ms >= 0 && (int)(__banana->ticks_ms() - end) >= 0) return 1;
+        __banana->sleep_ms(1);
+    }
+    return 0;
+}
+
+int banana_wake(volatile int* addr, int count) { return has_wait() ? __banana->wake(addr, count) : 0; }
+
+void banana_cond_wait(banana_cond_t* c, banana_mutex_t* m) { banana_cond_timedwait(c, m, -1); }
+
+int banana_cond_timedwait(banana_cond_t* c, banana_mutex_t* m, int ms) {
+    int seq = c->seq;
+    banana_unlock(m);
+    int r = banana_wait_value(&c->seq, seq, ms);
+    banana_lock(m);
+    return r;
+}
+
+void banana_cond_signal(banana_cond_t* c) { __sync_fetch_and_add(&c->seq, 1); banana_wake(&c->seq, 1); }
+void banana_cond_broadcast(banana_cond_t* c) { __sync_fetch_and_add(&c->seq, 1); banana_wake(&c->seq, 0); }
+
+void banana_sem_init(banana_sem_t* s, int count) { s->count = count; }
+
+int banana_sem_trywait(banana_sem_t* s) {
+    for (;;) {
+        int v = s->count;
+        if (v <= 0) return 0;
+        if (__sync_bool_compare_and_swap(&s->count, v, v - 1)) return 1;
+    }
+}
+
+int banana_sem_timedwait(banana_sem_t* s, int ms) {
+    unsigned end = __banana->ticks_ms() + (unsigned)(ms > 0 ? ms : 0);
+    for (;;) {
+        if (banana_sem_trywait(s)) return 0;
+        int left = -1;
+        if (ms >= 0) {
+            left = (int)(end - __banana->ticks_ms());
+            if (left <= 0) return 1;
+        }
+        banana_wait_value(&s->count, 0, left);
+    }
+}
+
+void banana_sem_wait(banana_sem_t* s) { banana_sem_timedwait(s, -1); }
+
+void banana_sem_post(banana_sem_t* s) { __sync_fetch_and_add(&s->count, 1); banana_wake(&s->count, 1); }

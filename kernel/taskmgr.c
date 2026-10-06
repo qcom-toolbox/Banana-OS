@@ -111,7 +111,8 @@ static void build_rows(void) {
         r->is_app = 1;
         r->handle = a[i].id;
         ksnprintf(r->text, sizeof(r->text), "%s (app)", a[i].name);
-        ksnprintf(r->info, sizeof(r->info), "%s, %u KiB", a[i].desktop ? "desktop" : "terminal", a[i].mem / 1024);
+        ksnprintf(r->info, sizeof(r->info), "%s, %u KiB, %d thread%s", a[i].desktop ? "desktop" : "terminal",
+                  a[i].mem / 1024, a[i].threads, a[i].threads == 1 ? "" : "s");
     }
     if (g_sel >= g_nrows) g_sel = g_nrows - 1;
 }

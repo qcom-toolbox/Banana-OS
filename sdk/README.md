@@ -105,6 +105,7 @@ say. Installed apps live in `/apps/<name>/` (kept on an installed disk).
   `banana_tone()` and `banana_beep()` for quick tones.
 - **Network**: `banana_http_get()` downloads `http://` and `https://` URLs.
 - **Clipboard**: `banana_copy()`, `banana_paste()`.
+- **Threads** (Banana OS API 3+): `banana_thread(fn, arg)`, `banana_join(id)`, `banana_thread_id()`, `banana_thread_exit()`, `banana_cpus()`; mutexes (`banana_lock`/`banana_trylock`/`banana_unlock`), and with API 4 condition variables (`banana_cond_wait`/`timedwait`/`signal`/`broadcast`), semaphores (`banana_sem_*`) and `banana_wait_value()`/`banana_wake()`. The timer shares the CPU between an app's threads, so a busy thread never freezes the desktop; `exit()` or a crash in any thread ends the whole app. See the `threads` and `mandel` examples.
 - **Time**: `banana_ticks()`, `banana_sleep()`, `banana_time()`, `banana_random()`.
 - **Math**: `math.h` - see below.
 

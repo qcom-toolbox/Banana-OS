@@ -1,5 +1,6 @@
 /* mandel - the Mandelbrot set: double-precision math in a resizable
- * window. Left click zooms in there, right click zooms out, r resets. */
+ * window, rendered by several threads that take rows from a shared
+ * counter. Left click zooms in there, right click zooms out, r resets. */
 #include <stdio.h>
 #include <math.h>
 #include <banana.h>
@@ -20,28 +21,67 @@ static unsigned int shade(int it, int max, double zr, double zi) {
     return BANANA_RGB(r, g, b);
 }
 
-static void render(bwin_t* w) {
-    int max = 64 + (int)(40 * log2(3.2 / span));
-    if (max > 2000) max = 2000;
-    double scale = span / w->w;
-    for (int y = 0; y < w->h; y++) {
-        double ci = cy + (y - w->h / 2) * scale;
+#define WORKERS 4
+
+typedef struct {
+    bwin_t* w;
+    int max;
+    double scale;
+} frame_t;
+
+static volatile int g_next_row;      /* the next row a thread takes */
+static volatile int g_rows_done;
+
+static int render_rows(void* arg) {
+    frame_t* f = (frame_t*)arg;
+    bwin_t* w = f->w;
+    for (;;) {
+        int y = __sync_fetch_and_add(&g_next_row, 1);
+        if (y >= w->h) break;
+        double ci = cy + (y - w->h / 2) * f->scale;
         for (int x = 0; x < w->w; x++) {
-            double cr = cx + (x - w->w / 2) * scale;
+            double cr = cx + (x - w->w / 2) * f->scale;
             double zr = 0, zi = 0;
             int it = 0;
-            while (it < max && zr * zr + zi * zi < 256) {
+            while (it < f->max && zr * zr + zi * zi < 256) {
                 double t = zr * zr - zi * zi + cr;
                 zi = 2 * zr * zi + ci;
                 zr = t;
                 it++;
             }
-            w->px[y * w->w + x] = shade(it, max, zr, zi);
+            w->px[y * w->w + x] = shade(it, f->max, zr, zi);
         }
-        if ((y & 15) == 0) { bwin_update(w); banana_yield(); }   /* show progress, stay responsive */
+        __sync_fetch_and_add(&g_rows_done, 1);
     }
-    char title[96];
-    snprintf(title, sizeof(title), "Mandelbrot  x=%.6f y=%.6f  zoom %.0fx", cx, cy, 3.2 / span);
+    return 0;
+}
+
+static void render(bwin_t* w) {
+    frame_t f;
+    f.w = w;
+    f.max = 64 + (int)(40 * log2(3.2 / span));
+    if (f.max > 2000) f.max = 2000;
+    f.scale = span / w->w;
+    g_next_row = 0;
+    g_rows_done = 0;
+    unsigned t0 = banana_ticks();
+    int ids[WORKERS], n = 0;
+    for (int i = 0; i < WORKERS; i++) {
+        ids[i] = banana_thread(render_rows, &f);
+        if (ids[i] > 0) n++;
+    }
+    if (!n) {
+        render_rows(&f);                        /* no threads (an older Banana OS) */
+    } else {
+        /* the main thread shows the progress while the workers compute */
+        while (g_rows_done < w->h) {
+            bwin_update(w);
+            banana_sleep(40);
+        }
+        for (int i = 0; i < WORKERS; i++) if (ids[i] > 0) banana_join(ids[i]);
+    }
+    char title[112];
+    snprintf(title, sizeof(title), "Mandelbrot  zoom %.0fx  %d threads, %u ms", 3.2 / span, n ? n : 1, banana_ticks() - t0);
     bwin_title(w, title);
     bwin_update(w);
 }
