@@ -1,8 +1,11 @@
 #include "layout.h"
 #include "kstring.h"
 #include "kheap.h"
+#include "font.h"
 
 #define GLYPH 8
+
+static uint32_t char_len(const char* s, uint32_t n);
 
 /* ══ display list ═════════════════════════════════════════════════════ */
 
@@ -94,6 +97,24 @@ static void borders(ctx_t* C, const style_t* st, int x, int y, int w, int h, dom
 
 /* ══ text ═════════════════════════════════════════════════════════════ */
 
+/* UTF-8 text as the fonts draw it: control characters become spaces;
+ * soft hyphens, zero-width spaces / joiners and byte order marks go */
+uint32_t text_tidy(const char* s, uint32_t n, char* out) {
+    uint32_t o = 0;
+    for (uint32_t i = 0; i < n; ) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) { out[o++] = (c < 32 && c != '\n' && c != '\t') ? ' ' : (char)c; i++; continue; }
+        uint32_t k = char_len(s + i, n - i);
+        uint32_t cp = 0;
+        if (k == 2) cp = (uint32_t)(c & 0x1F) << 6 | ((unsigned char)s[i + 1] & 0x3F);
+        else if (k == 3) cp = (uint32_t)(c & 0x0F) << 12 | ((uint32_t)((unsigned char)s[i + 1] & 0x3F) << 6) | ((unsigned char)s[i + 2] & 0x3F);
+        if (cp == 0xAD || (cp >= 0x200B && cp <= 0x200D) || cp == 0x2060 || cp == 0xFEFF) { i += k; continue; }
+        for (uint32_t j = 0; j < k; j++) out[o++] = s[i + j];
+        i += k;
+    }
+    return o;
+}
+
 uint32_t text_to_ascii(const char* s, uint32_t n, char* out) {
     uint32_t o = 0;
     for (uint32_t i = 0; i < n; i++) {
@@ -165,9 +186,37 @@ typedef struct {
     int      empty;             /* nothing placed yet at all */
     int      height;            /* total height so far */
     int      lines;
+    int      asc, desc;         /* the line's text: above / below its baseline */
 } inl_t;
 
-static int line_height(int scale) { return GLYPH * scale + 4 * scale; }
+/* ── text in the system fonts ── */
+static int st_face(const style_t* st) {
+    if (st->mono) return st->bold ? FONT_MONO_BOLD : FONT_MONO;
+    return st->bold ? FONT_SANS_BOLD : FONT_SANS;
+}
+static int st_px(const style_t* st) { return st->font_px > 0 ? st->font_px : 16; }
+static int text_w(const style_t* st, const char* s, uint32_t n) { return font_text_width(st_face(st), st_px(st), s, n); }
+
+/* ascent and descent of the style's font, each with half the leading line-height adds */
+static void st_vmetrics(const style_t* st, int* asc, int* desc, int* lh) {
+    int px = st_px(st), a, d, normal;
+    font_metrics(st_face(st), px, &a, &d, &normal);
+    int h = st->lh_pct ? px * st->lh_pct / 100 : st->lh_px ? st->lh_px : normal;
+    if (h < 4) h = 4;
+    int lead = h - (a + d);
+    if (asc) *asc = a + lead / 2;
+    if (desc) *desc = d + (lead - lead / 2);
+    if (lh) *lh = h;
+}
+
+static int line_height(int scale) { return 19 * scale; }    /* (an empty line) */
+
+/* bytes of the first character */
+static uint32_t char_len(const char* s, uint32_t n) {
+    uint32_t k = 1;
+    while (k < n && ((unsigned char)s[k] & 0xC0) == 0x80) k++;
+    return k;
+}
 
 static void finish_line(inl_t* I, int forced) {
     if (I->line_h == 0 && forced) I->line_h = line_height(1);
@@ -188,14 +237,15 @@ static void finish_line(inl_t* I, int forced) {
                 it->y = I->y + I->line_h - it->boxh - 1 + it->yoff;
                 continue;
             }
-            int pad = it->kind == DL_TEXT ? 2 * it->scale : 0;
-            it->y = I->y + I->line_h - it->h - pad;
+            if (it->kind == DL_TEXT && it->px) it->y = I->y + I->line_h - I->desc - it->asc;   /* on the baseline */
+            else it->y = I->y + I->line_h - it->h;
         }
     }
     I->y += I->line_h;
     I->height += I->line_h;
     I->cx = 0;
     I->line_h = 0;
+    I->asc = I->desc = 0;
     I->space = 0;
     I->lines++;
     if (!C->dry) I->first = C->L->n;
@@ -203,33 +253,55 @@ static void finish_line(inl_t* I, int forced) {
 
 static void need_line_h(inl_t* I, int h) { if (I->line_h < h) I->line_h = h; }
 
+/* text in this style on the line: room above and below the baseline */
+static void need_text(inl_t* I, const style_t* st) {
+    int a, d;
+    st_vmetrics(st, &a, &d, NULL);
+    if (a > I->asc) I->asc = a;
+    if (d > I->desc) I->desc = d;
+    need_line_h(I, I->asc + I->desc);
+}
+
+/* a text item's font fields */
+static void set_font(dl_item_t* t, const style_t* st) {
+    int a, d;
+    font_metrics(st_face(st), st_px(st), &a, &d, NULL);
+    t->face = (uint8_t)st_face(st);
+    t->px = (uint8_t)st_px(st);
+    t->asc = (uint8_t)(a > 255 ? 255 : a);
+    t->h = a + d;
+    t->scale = 1;
+}
+
 /* a piece of text that may not be broken */
 static void place_word(inl_t* I, const char* s, uint32_t n, const style_t* st, uint32_t bg, int has_bg,
                        dom_node_t* node) {
-    int scale = st->scale ? st->scale : 1;
-    int cw = GLYPH * scale;
-    int ww = (int)n * cw;
-    int sw = I->space && I->cx > 0 ? cw : 0;
+    int px = st_px(st), face = st_face(st);
+    int ww = font_text_width(face, px, s, n);
+    int spw = font_text_width(face, px, " ", 1);
+    int sw = I->space && I->cx > 0 ? spw : 0;
     if (I->C->max_word < ww) I->C->max_word = ww;
     if (I->cx > 0 && I->cx + sw + ww > I->w && !st->nowrap && !st->pre) {
         finish_line(I, 0);
         sw = 0;
     }
     /* a word wider than the line: split it */
-    while (ww > I->w && I->w >= cw && !st->pre) {
+    while (ww > I->w && I->w >= px && !st->pre && n > char_len(s, n)) {
         /* the room left on this line - none (or less than nothing) when
          * something wider than the line came before: then a new line */
         int room = I->w - I->cx;
-        if (room < cw) {
+        if (room < px) {
             if (I->cx > 0) { finish_line(I, 0); continue; }
             break;
         }
-        uint32_t fit = (uint32_t)(room / cw);
-        if (fit >= n) fit = n - 1;
+        uint32_t fit = font_fit(face, px, s, n, room);
+        if (fit == 0) fit = char_len(s, n);
+        if (fit >= n) { fit = n - 1; while (fit && ((unsigned char)s[fit] & 0xC0) == 0x80) fit--; }
+        if (fit == 0) break;
         place_word(I, s, fit, st, bg, has_bg, node);
         s += fit;
         n -= fit;
-        ww = (int)n * cw;
+        ww = font_text_width(face, px, s, n);
         finish_line(I, 0);
     }
     int same = !I->C->dry && sw && I->C->L->n > I->first && I->C->L->items[I->C->L->n - 1].node == node;
@@ -257,11 +329,10 @@ static void place_word(inl_t* I, const char* s, uint32_t n, const style_t* st, u
         text = u;
     }
     t->x = I->x0 + I->cx;
-    t->w = (int)len * cw;
-    t->h = cw;
+    t->w = sw + ww;
     t->text = text;
     t->len = len;
-    t->scale = (uint8_t)scale;
+    set_font(t, st);
     t->color = st->color;
     t->bold = st->bold;
     t->italic = st->italic;
@@ -273,7 +344,7 @@ static void place_word(inl_t* I, const char* s, uint32_t n, const style_t* st, u
     I->cx += sw + ww;
     I->space = 0;
     I->empty = 0;
-    need_line_h(I, line_height(scale));
+    need_text(I, st);
 }
 
 /* an atomic inline box (image, form control) of w x h */
@@ -308,9 +379,9 @@ static char* dry_buffer(uint32_t need) {
 
 static void text_run(inl_t* I, const char* s, uint32_t n, const style_t* st, uint32_t bg, int has_bg, dom_node_t* node) {
     ctx_t* C = I->C;
-    char* a = C->dry && !st->pre ? dry_buffer(n * 3 + 1) : NULL;
-    if (!a) a = (char*)arena_alloc(C->L->A, n * 3 + 1);
-    n = text_to_ascii(s, n, a);
+    char* a = C->dry && !st->pre ? dry_buffer(n + 1) : NULL;
+    if (!a) a = (char*)arena_alloc(C->L->A, n + 1);
+    n = text_tidy(s, n, a);
     if (st->pre) {
         uint32_t i = 0;
         while (i <= n) {
@@ -397,30 +468,46 @@ static int has_block_child(dom_node_t* e) {
     return 0;
 }
 
-static void form_text(ctx_t* C, int x, int y, int w, int h, const char* s, uint32_t n, uint32_t color,
-                      int scale, dom_node_t* node, int password, int center) {
-    int cw = GLYPH * scale;
-    int maxc = (w - 6) / cw;
-    if (maxc < 0) maxc = 0;
-    char* a = (char*)arena_alloc(C->L->A, n * 3 + 1);
-    n = text_to_ascii(s, n, a);
-    if (password) for (uint32_t i = 0; i < n; i++) a[i] = '*';
+/* the size controls draw their text at: 13px unless the page chose one */
+static int ctl_px(const style_t* st) { return st_px(st) == 16 ? 13 : st_px(st); }
+
+/* text inside a form control; returns its width */
+static int form_text(ctx_t* C, int x, int y, int w, int h, const char* s, uint32_t n, uint32_t color,
+                     const style_t* st, dom_node_t* node, int password, int center) {
+    int face = st_face(st), px = ctl_px(st);
+    char* a = (char*)arena_alloc(C->L->A, n + 1);
+    n = text_tidy(s, n, a);
+    if (password) {                                  /* one dot per character */
+        uint32_t chars = 0;
+        for (uint32_t i = 0; i < n; i++) if (((unsigned char)a[i] & 0xC0) != 0x80) chars++;
+        a = (char*)arena_alloc(C->L->A, chars * 3 + 1);
+        for (uint32_t i = 0; i < chars; i++) { a[i * 3] = (char)0xE2; a[i * 3 + 1] = (char)0x80; a[i * 3 + 2] = (char)0xA2; }
+        n = chars * 3;
+    }
+    int room = w - 6;
+    if (room < 0) room = 0;
     uint32_t start = 0;
-    if ((int)n > maxc) {
-        if (center) n = (uint32_t)maxc;
-        else start = n - (uint32_t)maxc;   /* show the end of long input */
+    if (font_text_width(face, px, a, n) > room) {
+        if (center) n = font_fit(face, px, a, n, room);
+        else while (start < n && font_text_width(face, px, a + start, n - start) > room)   /* the end of long input */
+            start += char_len(a + start, n - start);
     }
     dl_item_t* t = push(C, DL_TEXT);
     t->text = a + start;
     t->len = n - start;
-    t->scale = (uint8_t)scale;
+    int asc, desc;
+    font_metrics(face, px, &asc, &desc, NULL);
+    t->face = (uint8_t)face;
+    t->px = (uint8_t)px;
+    t->asc = (uint8_t)asc;
+    t->scale = 1;
     t->color = color;
-    t->w = (int)t->len * cw;
-    t->h = cw;
+    t->w = font_text_width(face, px, t->text, t->len);
+    t->h = asc + desc;
     t->x = center ? x + (w - t->w) / 2 : x + 3;
-    t->y = y + (h - cw) / 2;
+    t->y = y + (h - t->h) / 2;
     t->node = node;
-    (void)node;
+    return t->w;
 }
 
 /* form controls and images: atomic boxes */
@@ -456,8 +543,10 @@ static int str_to_px(const char* s) {
 /* form controls and images: atomic boxes */
 static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
     ctx_t* C = I->C;
-    int scale = st->scale ? st->scale : 1;
-    int cw = GLYPH * scale;
+    int cpx = ctl_px(st), casc, cdesc;
+    font_metrics(st_face(st), cpx, &casc, &cdesc, NULL);
+    int cw = font_text_width(st_face(st), cpx, "0", 1);   /* an average character */
+    if (cw < 4) cw = 4;
     const char* tag = e->tag;
     uint32_t first = C->dry ? 0 : C->L->n;
     if (strcmp(tag, "img") == 0 || strcmp(tag, "svg") == 0) {
@@ -496,7 +585,7 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
         } else {
             rect(C, x, 0, w, h, 0xC8C8C8, e);
             rect(C, x + 1, 1, w - 2, h - 2, 0xEEEEEE, e);
-            if (alt && *alt) form_text(C, x, 0, w, h, alt, (uint32_t)strlen(alt), 0x555555, 1, e, 0, 1);
+            if (alt && *alt) form_text(C, x, 0, w, h, alt, (uint32_t)strlen(alt), 0x555555, st, e, 0, 1);
         }
         mark_box(C, first, h);
         return;
@@ -505,7 +594,7 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
     if (!type) type = "text";
     int is_input = strcmp(tag, "input") == 0;
     if (is_input && strcasecmp(type, "hidden") == 0) return;
-    int h = cw + 8;
+    int h = casc + cdesc + 6;
     if (is_input && (strcasecmp(type, "checkbox") == 0 || strcasecmp(type, "radio") == 0)) {
         int x = place_box(I, 12 + 4, 12);
         rect(C, x, 0, 12, 12, 0x707070, e);
@@ -520,7 +609,8 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
         int r = rows ? str_to_px(rows) : 3, c = cols ? str_to_px(cols) : 30;
         if (r < 1) r = 1;
         if (c < 4) c = 4;
-        int w = c * cw + 8, hh = r * (cw + 4) + 6;
+        int rowh = casc + cdesc + 2;
+        int w = c * cw + 8, hh = r * rowh + 6;
         if (st->width != LEN_AUTO && st->width > 0) w = st->width;
         if (w > I->w) w = I->w;
         int x = place_box(I, w, hh);
@@ -534,7 +624,7 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
         for (int row = 0; row < r && pos < vl; row++) {
             uint32_t end = pos;
             while (end < vl && v[end] != '\n' && (int)(end - pos) < perline) end++;
-            form_text(C, x, row * (cw + 4) + 2, w, cw + 4, v + pos, end - pos, 0x000000, scale, e, 0, 0);
+            form_text(C, x, row * rowh + 3, w, rowh, v + pos, end - pos, 0x000000, st, e, 0, 0);
             pos = end;
             if (pos < vl && v[pos] == '\n') pos++;
         }
@@ -586,7 +676,7 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
      * the plain default look */
     int bw = st->border[0] > 0 ? (st->border[0] > 4 ? 4 : st->border[0]) : 0;
     int styled = st->has_bg || bw;
-    if (st->width_pct) w = I->w * st->width_pct / 100;
+    if (st->width_pct && I->w < 50000) w = I->w * st->width_pct / 100;   /* (not while measuring max-content)*/
     else if (st->width != LEN_AUTO && st->width > 0) w = st->width;
     if (st->max_width != LEN_AUTO && st->max_width > 0 && w > st->max_width) w = st->max_width;
     if (w > I->w) w = I->w;
@@ -594,7 +684,7 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
         int pad = st->padding[0] + st->padding[2];
         if (pad > 40) pad = 40;
         if (st->height != LEN_AUTO && st->height > 0) h = st->height;
-        else if (pad + 2 * bw > 8) h = cw + pad + 2 * bw;
+        else if (pad + 2 * bw > 6) h = casc + cdesc + pad + 2 * bw;
         if (h > 200) h = 200;
     }
     int x = place_box(I, w, h);
@@ -621,30 +711,33 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
     int tx = styled && !button ? x + (st->padding[3] > 3 ? (st->padding[3] > 30 ? 30 : st->padding[3]) - 3 : 0) : x;
     int tw = w - (tx - x);
     const char* ph = (!button && !is_select && !ll && C->L->focus != e) ? dom_attr(e, "placeholder") : NULL;
+    int shown_w = 0;
     if (ph && *ph)                      /* grey hint while empty and not focused */
-        form_text(C, tx, 0, tw, h, ph, (uint32_t)strlen(ph), 0x999999, scale, e, 0, 0);
+        form_text(C, tx, 0, tw, h, ph, (uint32_t)strlen(ph), 0x999999, st, e, 0, 0);
     else
-        form_text(C, tx, 0, tw, h, label, ll, text_col, scale, e,
-                  is_input && strcasecmp(type, "password") == 0, button);
+        shown_w = form_text(C, tx, 0, tw, h, label, ll, text_col, st, e,
+                            is_input && strcasecmp(type, "password") == 0, button);
     if (is_select) {
         dl_item_t* t = push(C, DL_TEXT);
-        t->text = "v";
-        t->len = 1;
-        t->scale = (uint8_t)scale;
-        t->x = x + w - cw - 4;
-        t->w = cw;
-        t->h = cw;
-        t->y = (h - cw) / 2;
+        t->text = "\xE2\x96\xBE";                     /* a small down triangle */
+        t->len = 3;
+        t->face = (uint8_t)st_face(st);
+        t->px = (uint8_t)cpx;
+        t->asc = (uint8_t)casc;
+        t->scale = 1;
+        t->w = font_text_width(st_face(st), cpx, t->text, 3);
+        t->x = x + w - t->w - 6;
+        t->h = casc + cdesc;
+        t->y = (h - t->h) / 2;
+        t->color = text_col;
         t->node = e;
     }
     if (C->L->focus == e && !button && !is_select) {
         dl_item_t* caret = push(C, DL_CARET);
-        int maxc = (tw - 6) / cw;
-        int tl = (int)ll < maxc ? (int)ll : maxc;
-        caret->x = tx + 3 + tl * cw;
+        caret->x = tx + 3 + shown_w;
         caret->w = 1;
-        caret->h = cw + 2;
-        caret->y = (h - cw) / 2 - 1;
+        caret->h = casc + cdesc;
+        caret->y = (h - caret->h) / 2;
         caret->color = text_col;
     }
     mark_box(C, first, h);
@@ -669,7 +762,7 @@ static void inline_node(inl_t* I, dom_node_t* n, uint32_t bg, int has_bg) {
     const style_t* st = n->style;
     const char* tag = n->tag;
     if (strcmp(tag, "br") == 0) {
-        need_line_h(I, line_height(st->scale));
+        need_text(I, st);
         finish_line(I, 1);
         return;
     }
@@ -681,7 +774,7 @@ static void inline_node(inl_t* I, dom_node_t* n, uint32_t bg, int has_bg) {
                    strcmp(tag, "select") == 0 || strcmp(tag, "textarea") == 0;
     if (replaced) {
         if (!st->visible) return;
-        if (I->space && I->cx > 0) { I->cx += GLYPH * st->scale; I->space = 0; }
+        if (I->space && I->cx > 0) { I->cx += text_w(st, " ", 1); I->space = 0; }
         inline_replaced(I, n, st);
         return;
     }
@@ -702,7 +795,7 @@ static void inline_node(inl_t* I, dom_node_t* n, uint32_t bg, int has_bg) {
         if (st->max_width != LEN_AUTO && st->max_width > 0 && bw > st->max_width + extra) bw = st->max_width + extra;
         if (bw < extra + 1) bw = extra + 1;
         int total = bw + ml + mr;
-        if (I->space && I->cx > 0) { I->cx += GLYPH * st->scale; I->space = 0; }
+        if (I->space && I->cx > 0) { I->cx += text_w(st, " ", 1); I->space = 0; }
         if (I->cx > 0 && I->cx + total > I->w) finish_line(I, 0);
         int x = I->x0 + I->cx;
         uint32_t first = C->dry ? 0 : C->L->n;
@@ -1221,22 +1314,22 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     }
     if (st->visible) borders(C, st, bx, by, bw, bh, e);
     if (st->display == DISP_LIST_ITEM && st->list_style != LIST_NONE && st->visible) {
-        int scale = st->scale ? st->scale : 1;
         char m[16];
         if (st->list_style == LIST_DECIMAL) ksnprintf(m, sizeof(m), "%d.", list_ordinal(e));
-        else kstrlcpy(m, st->list_style == LIST_CIRCLE ? "o" : st->list_style == LIST_SQUARE ? "#" : "*", sizeof(m));
+        else kstrlcpy(m, st->list_style == LIST_CIRCLE ? "\xE2\x97\xA6" : st->list_style == LIST_SQUARE ? "\xE2\x96\xAA" : "\xE2\x80\xA2", sizeof(m));
         uint32_t ml2 = (uint32_t)strlen(m);
         dl_item_t* t = push(C, DL_TEXT);
         char* mt2 = (char*)arena_alloc(C->L->A, ml2 + 1);
         memcpy(mt2, m, ml2);
         t->text = mt2;
         t->len = ml2;
-        t->scale = (uint8_t)scale;
+        set_font(t, st);
         t->color = st->color;
-        t->w = (int)ml2 * GLYPH * scale;
-        t->h = GLYPH * scale;
+        t->w = text_w(st, m, ml2);
         t->x = bx + bl + pl - t->w - 6;
-        t->y = content_y + line_height(scale) - t->h - 2 * scale;
+        int la, ld;
+        st_vmetrics(st, &la, &ld, NULL);
+        t->y = content_y + la - t->asc;                  /* on the first line's baseline */
         t->node = e;
     }
     e->box_x = bx;
@@ -1494,7 +1587,19 @@ dom_node_t* layout_hit(layout_t* L, int x, int y) {
 
 /* ══ text selection ═══════════════════════════════════════════════════ */
 
-static int char_w(const dl_item_t* it) { return 8 * (it->scale ? it->scale : 1); }
+static int char_w(const dl_item_t* it) { return it->px ? it->px / 2 : 8 * (it->scale ? it->scale : 1); }
+
+/* the byte offset in a text item nearest x */
+static int text_offset(const dl_item_t* it, int x) {
+    if (!it->px) { int o = (x - it->x + char_w(it) / 2) / char_w(it); return o; }
+    uint32_t fit = font_fit(it->face, it->px, it->text, it->len, x - it->x);
+    if (fit < it->len) {                             /* past the middle of the next character: after it */
+        uint32_t k = char_len(it->text + fit, it->len - fit);
+        int a = font_text_width(it->face, it->px, it->text, fit), b = font_text_width(it->face, it->px, it->text, fit + k);
+        if (x - it->x > (a + b) / 2) fit += k;
+    }
+    return (int)fit;
+}
 
 int layout_text_pos(layout_t* L, int x, int y, int* item, int* off) {
     int best = -1, best_off = 0;
@@ -1505,10 +1610,10 @@ int layout_text_pos(layout_t* L, int x, int y, int* item, int* off) {
         dl_item_t* it = &L->items[i];
         if (it->kind != DL_TEXT || !it->len) continue;
         last = (int)i;
-        int top = it->y - 2, bottom = it->y + char_w(it) + 3;
+        int top = it->y - 2, bottom = it->y + it->h + 3;
         if (y >= top && y < bottom) {
             if (x >= it->x && x < it->x + it->w) {
-                int o = (x - it->x + char_w(it) / 2) / char_w(it);
+                int o = text_offset(it, x);
                 if (o > (int)it->len) o = (int)it->len;
                 best = (int)i;
                 best_off = o;

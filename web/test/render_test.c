@@ -7,6 +7,8 @@
 #include "layout.h"
 #include "render.h"
 
+void host_fonts(void);   /* font_host.c */
+
 static int collect_styles(arena_t* A, dom_node_t* n, css_sheet_t** out, int max, int k) {
     for (dom_node_t* c = n->first; c && k < max; c = c->next) {
         if (c->type == DOM_ELEM && strcmp(c->tag, "style") == 0 && c->first)
@@ -17,6 +19,7 @@ static int collect_styles(arena_t* A, dom_node_t* n, css_sheet_t** out, int max,
 }
 
 int main(int argc, char** argv) {
+    host_fonts();
     if (argc < 3) { fprintf(stderr, "usage: render_test file.html out.ppm [width]\n"); return 2; }
     int width = argc > 3 ? atoi(argv[3]) : 680;
     FILE* f = fopen(argv[1], "rb");

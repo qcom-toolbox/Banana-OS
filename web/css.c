@@ -774,7 +774,8 @@ static const char DEFAULT_CSS[] =
     "center { text-align: center }"
     "big { font-size: 20px }"
     "small, sub, sup { font-size: 13px }"
-    "code, kbd, samp, tt { color: #333 }"
+    "code, kbd, samp, tt { color: #333; font-family: monospace }"
+    "pre, textarea { font-family: monospace }"
     "mark { background-color: #ff0 }"
     "button { padding: 2px 6px; border: 1px solid #777; background-color: #ddd }"
     "fieldset { border: 1px solid #999; padding: 4px 8px; margin: 8px 2px }"
@@ -1022,6 +1023,42 @@ static int scale_for(int px) {
     if (px <= 36) return 2;
     if (px <= 54) return 3;
     return 4;
+}
+
+/* font-family: a monospace one? */
+static int is_mono_family(const char* v) {
+    static const char* const names[] = { "monospace", "mono", "courier", "consolas", "menlo", "monaco",
+                                         "lucida console", "fixed", "ui-monospace" };
+    char b[160];
+    uint32_t n = 0;
+    for (; v[n] && n < sizeof(b) - 1; n++) b[n] = (char)(v[n] >= 'A' && v[n] <= 'Z' ? v[n] + 32 : v[n]);
+    b[n] = 0;
+    /* the first family listed decides (fallbacks after it rarely matter) */
+    char* comma = strchr(b, ',');
+    if (comma) *comma = 0;
+    for (uint32_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) if (strstr(b, names[i])) return 1;
+    return 0;
+}
+
+/* line-height: normal | 1.5 | 150% | 24px | 1.2em */
+static void set_line_height(style_t* st, const char* v) {
+    while (is_ws(*v)) v++;
+    if (strncasecmp(v, "normal", 6) == 0) { st->lh_px = 0; st->lh_pct = 0; return; }
+    const char* e = v;
+    while ((*e >= '0' && *e <= '9') || *e == '.') e++;
+    if (e == v) return;
+    if (*e == 0 || is_ws(*e) || *e == '%' || *e == ';' || *e == '!') {
+        int whole = 0, frac = 0, div = 1;
+        const char* p = v;
+        while (*p >= '0' && *p <= '9') whole = whole * 10 + (*p++ - '0');
+        if (*p == '.') { p++; while (*p >= '0' && *p <= '9' && div < 1000) { frac = frac * 10 + (*p++ - '0'); div *= 10; } }
+        int pct = whole * 100 + frac * 100 / div;
+        if (*e != '%') {} else pct = whole + frac / div;
+        if (pct > 0 && pct < 1000) { st->lh_pct = (int16_t)pct; st->lh_px = 0; }
+        return;
+    }
+    int px = parse_len(v, st->font_px, -1, NULL);
+    if (px != LEN_AUTO && px > 0 && px < 1000) { st->lh_px = (int16_t)px; st->lh_pct = 0; }
 }
 
 static void set_font_px(style_t* st, int px) {
@@ -1439,11 +1476,16 @@ static void apply_decl(style_t* st, const style_t* parent, const char* prop, con
             return;
         }
         if (strcmp(prop, "font-style") == 0) { st->italic = has_word(v, "italic") || has_word(v, "oblique"); return; }
+        if (strcmp(prop, "font-family") == 0) { st->mono = is_mono_family(v); return; }
+        if (strcmp(prop, "line-height") == 0) { set_line_height(st, v); return; }
         if (strcmp(prop, "font-size") == 0 || strcmp(prop, "font") == 0) {
             int base = parent ? parent->font_px : 16;
             if (strcmp(prop, "font") == 0) {
                 if (has_word(v, "bold")) st->bold = 1;
                 if (has_word(v, "italic")) st->italic = 1;
+                st->mono = is_mono_family(v);
+                const char* sl = strchr(v, '/');            /* 14px/1.5 */
+                if (sl) set_line_height(st, sl + 1);
                 /* the size is the token before an optional /line-height */
                 const char* p = v;
                 while (*p) {
@@ -1652,6 +1694,9 @@ static void inherit(style_t* st, const style_t* p) {
     st->visible = p->visible;
     st->font_px = p->font_px;
     st->scale = p->scale;
+    st->mono = p->mono;
+    st->lh_px = p->lh_px;
+    st->lh_pct = p->lh_pct;
     st->vars = p->vars;
 }
 

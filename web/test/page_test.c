@@ -7,6 +7,8 @@
 #include "page.h"
 #include "render.h"
 
+void host_fonts(void);   /* font_host.c */
+
 static uint32_t g_now = 1000;
 static uint32_t now_ms(void) { return g_now; }
 
@@ -57,6 +59,7 @@ static int fetch(void* ctx, const char* url, char** data, uint32_t* len, char* c
 static dom_node_t* by_id(page_t* p, const char* id) { return dom_find_id(p->doc, id); }
 
 int main(int argc, char** argv) {
+    host_fonts();
     if (argc < 3) { fprintf(stderr, "usage: page_test file.html out.ppm [actions]\n"); return 2; }
     int width = 640;
     setvbuf(stdout, NULL, _IONBF, 0);

@@ -1,7 +1,11 @@
 #ifndef FONT_H
 #define FONT_H
 
+#ifdef FONT_HOST
+#include <stdint.h>
+#else
 #include "types.h"
+#endif
 
 /*
  * The system's fonts (TrueType, ttf.c): DejaVu Sans and Sans Mono, regular

@@ -25,6 +25,8 @@ typedef struct style {
     uint8_t  align, pre, nowrap, list_style, visible;
     uint8_t  scale;                 /* font: 8x8 glyphs scaled 1..4 */
     uint8_t  has_bg;
+    uint8_t  mono;                  /* font-family: monospace (Courier, Consolas, ...) */
+    int16_t  lh_px, lh_pct;         /* line-height: px, or a factor x100 (unitless / %); 0 0: normal */
     uint32_t color, bg;
     int      margin[4];             /* top right bottom left, px */
     int      padding[4];

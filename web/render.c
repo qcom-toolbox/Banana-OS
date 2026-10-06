@@ -1,5 +1,6 @@
 #include "render.h"
 #include "font8x8.h"
+#include "font.h"
 
 typedef struct {
     uint32_t* buf;
@@ -161,6 +162,38 @@ void render_page(const layout_t* L, uint32_t* buf, int stride, int buf_w, int bu
             image(&T, it, x, y);
             break;
         case DL_TEXT: {
+            if (it->px) {                        /* the system fonts */
+                int px = it->px, base = y + it->asc;
+                if (it->has_bg) fill(&T, x, y, it->w, it->h, it->bg);
+                if (L->sel_on) {
+                    int i0 = L->sel_i0, o0 = L->sel_o0, i1 = L->sel_i1, o1 = L->sel_o1;
+                    if (i1 < i0 || (i1 == i0 && o1 < o0)) { int t = i0; i0 = i1; i1 = t; t = o0; o0 = o1; o1 = t; }
+                    int me = (int)i;
+                    if (me >= i0 && me <= i1) {
+                        int a = me == i0 ? o0 : 0, b = me == i1 ? o1 : (int)it->len;
+                        if (a > (int)it->len) a = (int)it->len;
+                        if (b > (int)it->len) b = (int)it->len;
+                        if (b > a) {
+                            int xa = font_text_width(it->face, px, it->text, (uint32_t)a);
+                            int xb = font_text_width(it->face, px, it->text, (uint32_t)b);
+                            fill(&T, x + xa, y, xb - xa, it->h, 0xB4D5FE);
+                        }
+                    }
+                }
+                font_draw(T.buf, T.stride, T.cx0, T.cy0, T.cx1, T.cy1, it->face, px, x, base,
+                          it->text, it->len, it->color, it->italic);
+                int th = px >= 20 ? px / 14 : 1;
+                if (it->underline) {
+                    int sx = x, sw = it->w;
+                    if (it->len && it->text[0] == ' ' && !it->ulspace) {   /* not under a space before the element */
+                        int spw = font_text_width(it->face, px, " ", 1);
+                        sx += spw; sw -= spw;
+                    }
+                    fill(&T, sx, base + 1 + px / 10, sw, th, it->color);
+                }
+                if (it->strike) fill(&T, x, base - px * 3 / 10, it->w, th, it->color);
+                break;
+            }
             int s = it->scale ? it->scale : 1;
             int cw = 8 * s;
             if (it->has_bg) fill(&T, x, y - s, it->w, cw + 2 * s, it->bg);

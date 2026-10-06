@@ -1,6 +1,15 @@
 #include "ttf.h"
+#ifdef FONT_HOST                     /* built for the host tests (web/test) */
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#define kmalloc(n)  malloc(n)
+#define kfree(p)    free(p)
+#define kzalloc(n)  calloc(1, (n))
+#else
 #include "kheap.h"
 #include "kstring.h"
+#endif
 
 /* the kernel builds without SSE: the rasterizer counts in x87 long doubles */
 typedef long double real;

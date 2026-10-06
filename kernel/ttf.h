@@ -1,7 +1,11 @@
 #ifndef TTF_H
 #define TTF_H
 
+#ifdef FONT_HOST
+#include <stdint.h>
+#else
 #include "types.h"
+#endif
 
 /*
  * TrueType fonts (.ttf, glyf outlines): the tables Banana OS needs - cmap

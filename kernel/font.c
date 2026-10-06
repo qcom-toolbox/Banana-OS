@@ -1,7 +1,16 @@
 #include "font.h"
 #include "ttf.h"
+#ifdef FONT_HOST                     /* built for the host tests (web/test) */
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#define kmalloc(n)  malloc(n)
+#define kfree(p)    free(p)
+#define kzalloc(n)  calloc(1, (n))
+#else
 #include "kheap.h"
 #include "kstring.h"
+#endif
 
 static ttf_t g_face[FONT_FACES];
 static int   g_ok[FONT_FACES];

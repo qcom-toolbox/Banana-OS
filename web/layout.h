@@ -35,6 +35,7 @@ typedef struct dl_item {
     int16_t  yoff, boxh;
     img_data_t* img;
     int16_t  radius;        /* DL_RECT: rounded corners (px) */
+    uint8_t  face, px, asc; /* DL_TEXT: font (font.h), size in pixels, ascent (baseline = y + asc) */
     uint8_t  ring;          /* DL_RECT: an outline this wide instead of a filled box */
     uint8_t  tile;          /* DL_IMG: drawn at tw x th from (x - ox, y - oy), repeated: bit 0 x, bit 1 y */
     int16_t  tw, th, ox, oy;
@@ -65,5 +66,6 @@ uint32_t    layout_text_range(layout_t* L, int i0, int o0, int i1, int o1, char*
 
 /* UTF-8 text in the 7-bit font: e-acute -> e, quotes -> ', dashes -> - ... */
 uint32_t    text_to_ascii(const char* s, uint32_t n, char* out);
+uint32_t    text_tidy(const char* s, uint32_t n, char* out);   /* UTF-8 kept, invisible characters dropped */
 
 #endif
