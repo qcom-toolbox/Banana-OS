@@ -155,6 +155,23 @@ cover the rest. `examples/webview` is a small browser built this way, with a
 start page that talks to its app. Check `bweb_available()` if your app
 should also run on older systems.
 
+### Fonts
+
+Since API version 6 apps can write with the system's TrueType fonts
+(DejaVu Sans and Sans Mono, regular and bold): anti-aliased, any size, UTF-8
+text (accents, Greek, Cyrillic, symbols).
+
+```c
+bwin_font(&win, 20, 20, BANANA_FONT_SANS_BOLD, 24, "Héllo, wörld!", 0x202020);
+int w = banana_font_width(BANANA_FONT_SANS, 14, "Centered");
+bwin_font(&win, (win.w - w) / 2, 60, BANANA_FONT_SANS, 14, "Centered", 0x404040);
+int ascent, descent, line_h;
+banana_font_metrics(BANANA_FONT_MONO, 13, &ascent, &descent, &line_h);
+```
+
+`(x, y)` is the top-left of the line; `bwin_font` returns the x after the
+text. On older systems these fall back to the 8x8 font.
+
 ### Rules of the road
 
 - **Floating point works**: `float`, `double`, `math.h` (`sqrt`, `sin`, `cos`,

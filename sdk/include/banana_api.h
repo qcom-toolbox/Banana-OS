@@ -2,7 +2,7 @@
 #define BANANA_API_H
 
 /*
- * The Banana OS application interface (ABI), version 5.
+ * The Banana OS application interface (ABI), version 6.
  *
  * An app is a position-independent ELF executable (built by the SDK for
  * i686 and x86_64, both packed in one .bpk). Banana OS loads it, applies
@@ -17,7 +17,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 5u
+#define BANANA_API_VERSION 6u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -57,6 +57,12 @@
 #define BANANA_WEB_LOADING  2    /* a page is loading */
 #define BANANA_WEB_TITLE    4    /* the title or the address changed: web_info() */
 #define BANANA_WEB_MESSAGE  8    /* the page called banana.postMessage(): web_message() */
+
+/* the system fonts (font_draw / font_width / font_metrics) */
+#define BANANA_FONT_SANS       0    /* DejaVu Sans */
+#define BANANA_FONT_SANS_BOLD  1
+#define BANANA_FONT_MONO       2    /* DejaVu Sans Mono */
+#define BANANA_FONT_MONO_BOLD  3
 
 /* draw_text(): a background of BANANA_TRANSPARENT leaves the pixels alone */
 #define BANANA_TRANSPARENT 0xFF000000u
@@ -211,6 +217,16 @@ typedef struct banana_api {
     int   (*web_eval)(int view, const char* js, char* out, int cap);
     int   (*web_message)(int view, char* out, int cap); /* next banana.postMessage() text: its length, -1 none */
     int   (*web_post)(int view, const char* msg);       /* a "message" event in the page */
+
+    /* ── version 6: fonts (TrueType, anti-aliased, UTF-8) ─── */
+    /* text in one of the BANANA_FONT_* faces, size pixels high (per em),
+     * into any w x h pixel buffer; (x, y) is the top-left of the line.
+     * Returns the x just after the text. */
+    int   (*font_draw)(unsigned int* px, int stride, int w, int h, int x, int y,
+                       int font, int size, const char* text, unsigned int color);
+    int   (*font_width)(int font, int size, const char* text);     /* pixels */
+    /* ascent above the baseline, descent below it, and the line height */
+    void  (*font_metrics)(int font, int size, int* ascent, int* descent, int* line_h);
 } banana_api_t;
 
 /* the app's entry point (the SDK's crt0 provides it) */

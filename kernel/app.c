@@ -19,6 +19,7 @@
 #include "../sdk/include/banana_api.h"
 #include "smp.h"
 #include "webview.h"
+#include "font.h"
 
 #define APP_MAX     8
 #define APP_FD_MAX  16
@@ -595,6 +596,22 @@ static int  a_web_eval(int v, const char* js, char* out, int cap) { return webvi
 static int  a_web_message(int v, char* out, int cap) { return webview_message(owner_id(), v, out, cap); }
 static int  a_web_post(int v, const char* m) { return webview_post(owner_id(), v, m); }
 
+/* the system fonts */
+static int clamp_size(int s) { return s < 4 ? 4 : s > 200 ? 200 : s; }
+static int a_font_draw(unsigned int* px, int stride, int w, int h, int x, int y, int font, int size, const char* text, unsigned int color) {
+    if (!px || !text || w <= 0 || h <= 0 || stride < w) return x;
+    size = clamp_size(size);
+    int asc;
+    font_metrics(font, size, &asc, NULL, NULL);
+    return font_draw(px, stride, 0, 0, w, h, font, size, x, y + asc, text, (uint32_t)strlen(text), color, 0);
+}
+static int a_font_width(int font, int size, const char* text) {
+    return text ? font_text_width(font, clamp_size(size), text, (uint32_t)strlen(text)) : 0;
+}
+static void a_font_metrics(int font, int size, int* ascent, int* descent, int* line_h) {
+    font_metrics(font, clamp_size(size), ascent, descent, line_h);
+}
+
 static void a_draw_text(unsigned int* px, int stride, int w, int h, int x, int y,
                         const char* s, unsigned int fg, unsigned int bg) {
     if (!px || !s) return;
@@ -893,6 +910,9 @@ static void api_init(void) {
     g_api.web_eval = a_web_eval;
     g_api.web_message = a_web_message;
     g_api.web_post = a_web_post;
+    g_api.font_draw = a_font_draw;
+    g_api.font_width = a_font_width;
+    g_api.font_metrics = a_font_metrics;
 }
 
 /* ── the ELF loader ────────────────────────────────────────────────── */

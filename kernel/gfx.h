@@ -15,5 +15,9 @@ void gfx_draw_text_scaled(int x, int y, int scale, const char* s, uint32_t fg, u
 /* the dotted resize grip of a window whose bottom-right corner is (right, bottom) */
 void gfx_draw_grip(int right, int bottom);
 
+/* UI text in DejaVu Sans Mono (1, the default) or the classic 8x8 bitmap font */
+void gfx_set_smooth_text(int on);
+int  gfx_smooth_text(void);
+
 #endif
 

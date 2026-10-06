@@ -1,3 +1,5 @@
+#include "font.h"
+#include "kstring.h"
 #include "gfx.h"
 #include "fb.h"
 #include "font8x8.h"
@@ -66,8 +68,44 @@ void gfx_draw_char_scaled(int x, int y, int scale, char c, uint32_t fg, uint32_t
     }
 }
 
+/* ── smooth UI text: DejaVu Sans Mono, one glyph per 8-pixel cell (so every
+ * layout made for the 8x8 font still fits), UTF-8 aware ── */
+static int g_smooth = 1;
+
+void gfx_set_smooth_text(int on) { g_smooth = on; }
+int  gfx_smooth_text(void) { return g_smooth && font_available(FONT_MONO); }
+
+/* cell: 8 * scale; the glyphs are a little taller than the cell, centered on it */
+static void smooth_text(int x, int y, int scale, const char* s, uint32_t fg, uint32_t bg) {
+    int stride, tw, th;
+    uint32_t* t = fb_target(&stride, &tw, &th);
+    if (!t) return;
+    int cell = 8 * scale, px = 13 * scale, base = y + 8 * scale;
+    const char* e = s + strlen(s);
+    int cx = x;
+    while (s < e) {
+        const char* start = s;
+        const char* line_end = s;
+        while (line_end < e && *line_end != '\n') line_end++;
+        int n = 0;
+        for (const char* q = start; q < line_end; ) { utf8_next(&q, line_end); n++; }
+        fb_fill_rect(cx, y, n * cell, cell, bg);
+        while (s < line_end) {
+            const char* g = s;
+            uint32_t cp = utf8_next(&s, line_end);
+            if (cp != ' ') {
+                int adv = font_text_width(FONT_MONO, px, g, (uint32_t)(s - g));
+                font_draw(t, stride, 0, 0, tw, th, FONT_MONO, px, cx + (cell - adv) / 2, base, g, (uint32_t)(s - g), fg, 0);
+            }
+            cx += cell;
+        }
+        if (s < e && *s == '\n') { s++; cx = x; y += cell; base += cell; }
+    }
+}
+
 void gfx_draw_text(int x, int y, const char* s, uint32_t fg, uint32_t bg) {
     if (!g_ok || !s) return;
+    if (gfx_smooth_text()) { smooth_text(x, y, 1, s, fg, bg); return; }
     int cx = x;
     for (int i = 0; s[i]; i++) {
         if (s[i] == '\n') { cx = x; y += 8; continue; }
@@ -79,6 +117,7 @@ void gfx_draw_text(int x, int y, const char* s, uint32_t fg, uint32_t bg) {
 void gfx_draw_text_scaled(int x, int y, int scale, const char* s, uint32_t fg, uint32_t bg) {
     if (!g_ok || !s) return;
     if (scale <= 1) { gfx_draw_text(x, y, s, fg, bg); return; }
+    if (gfx_smooth_text()) { smooth_text(x, y, scale, s, fg, bg); return; }
     int cx = x;
     int step = 8 * scale;
     for (int i = 0; s[i]; i++) {

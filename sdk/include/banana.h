@@ -63,6 +63,13 @@ void bwin_fill_circle(bwin_t* win, int cx, int cy, int r, unsigned int color);
 /* 8x8 text; bg BANANA_TRANSPARENT keeps what is behind; scale >= 1 */
 void bwin_text(bwin_t* win, int x, int y, const char* s, unsigned int fg, unsigned int bg);
 void bwin_text_scaled(bwin_t* win, int x, int y, int scale, const char* s, unsigned int fg, unsigned int bg);
+/* text in the system fonts (API version 6; older systems: the 8x8 font):
+ * font is BANANA_FONT_SANS / _SANS_BOLD / _MONO / _MONO_BOLD, size in
+ * pixels, (x, y) the top-left of the line, UTF-8 text; returns the x after it */
+int  bwin_font(bwin_t* win, int x, int y, int font, int size, const char* text, unsigned int color);
+int  banana_font_width(int font, int size, const char* text);
+void banana_font_metrics(int font, int size, int* ascent, int* descent, int* line_h);
+int  banana_has_fonts(void);
 /* a bevelled button-looking box with a centered label */
 void bwin_button(bwin_t* win, int x, int y, int w, int h, const char* label, int pressed);
 /* copies a w*h image (0x00RRGGBB) into the window at x, y */

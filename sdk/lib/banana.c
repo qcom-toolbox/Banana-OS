@@ -311,3 +311,30 @@ int  bweb_info(int v, char* t, int tc, char* u, int uc) { return bweb_available(
 int  bweb_eval(int v, const char* js, char* out, int cap) { return bweb_available() ? __banana->web_eval(v, js, out, cap) : -1; }
 int  bweb_message(int v, char* out, int cap) { return bweb_available() ? __banana->web_message(v, out, cap) : -1; }
 int  bweb_post(int v, const char* text) { return bweb_available() ? __banana->web_post(v, text) : -1; }
+
+/* ── fonts (API version 6) ── */
+int banana_has_fonts(void) {
+    return __banana->version >= 6 && __banana->size >= __builtin_offsetof(banana_api_t, font_metrics) + sizeof(void*);
+}
+int bwin_font(bwin_t* win, int x, int y, int font, int size, const char* text, unsigned int color) {
+    if (!win->px || !text) return x;
+    if (banana_has_fonts()) return __banana->font_draw(win->px, win->w, win->w, win->h, x, y, font, size, text, color);
+    int scale = size >= 16 ? size / 8 : 1;          /* an older system: the 8x8 font */
+    bwin_text_scaled(win, x, y, scale, text, color, BANANA_TRANSPARENT);
+    int n = 0;
+    while (text[n]) n++;
+    return x + n * 8 * scale;
+}
+int banana_font_width(int font, int size, const char* text) {
+    if (banana_has_fonts()) return __banana->font_width(font, size, text);
+    int n = 0;
+    while (text && text[n]) n++;
+    return n * 8 * (size >= 16 ? size / 8 : 1);
+}
+void banana_font_metrics(int font, int size, int* ascent, int* descent, int* line_h) {
+    if (banana_has_fonts()) { __banana->font_metrics(font, size, ascent, descent, line_h); return; }
+    int s = size >= 16 ? size / 8 : 1;
+    if (ascent) *ascent = 7 * s;
+    if (descent) *descent = 1 * s;
+    if (line_h) *line_h = 10 * s;
+}

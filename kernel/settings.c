@@ -108,9 +108,18 @@ static void save_volume(void) {
 
 /* ── pages ────────────────────────────────────────────────────────── */
 
+/* the UI font switch, right of the "Wallpaper" heading */
+#define FONT_BX(x) ((x) + 216)
+static void draw_font_switch(int x, int y) {
+    label(FONT_BX(x) - 48, y, "Font:", C_DIM);
+    button(FONT_BX(x), y - 6, 64, "Smooth", gfx_smooth_text());
+    button(FONT_BX(x) + 68, y - 6, 72, "Classic", !gfx_smooth_text());
+}
+
 static void draw_display(void) {
     int x = cx0(), y = cy0();
     label(x, y, "Wallpaper", C_HEAD);
+    draw_font_switch(x, y);
     const char* file = wallpaper_current_file();
     char line[96];
     if (file && *file) ksnprintf(line, sizeof(line), "Now: picture %s", file);
@@ -310,6 +319,13 @@ void settings_click(int mx, int my) {
 
     int x = cx0(), y = cy0();
     if (g_page == PG_DISPLAY) {
+        if (inside(mx, my, FONT_BX(x), y - 6, 64, 20) || inside(mx, my, FONT_BX(x) + 68, y - 6, 72, 20)) {
+            int smooth = mx < FONT_BX(x) + 66;
+            gfx_set_smooth_text(smooth);
+            save_setting("ui_font", smooth ? "smooth" : "classic");
+            ksnprintf(g_status, sizeof(g_status), "Font: %s", smooth ? "smooth (DejaVu Sans Mono)" : "classic (8x8)");
+            return;
+        }
         for (int i = 0; i < wallpaper_preset_count(); i++) {
             int tx, ty;
             thumb_rect(i, &tx, &ty);
@@ -392,7 +408,7 @@ uint32_t settings_signature(void) {
         if (s != g_tick_s) { g_tick_s = s; g_gen++; }
     }
     return g_gen * 2654435761u ^ (uint32_t)(g_win.x << 16 | g_win.y) ^ (uint32_t)(g_win.w << 20 | g_win.h << 4) ^
-           (uint32_t)g_page << 28 ^ (uint32_t)audio_get_volume() << 8 ^ wallpaper_generation();
+           (uint32_t)g_page << 28 ^ (uint32_t)audio_get_volume() << 8 ^ wallpaper_generation() ^ (uint32_t)gfx_smooth_text() << 27;
 }
 
 void settings_boot(void) {
@@ -402,4 +418,5 @@ void settings_boot(void) {
         if (k_parse_u32(v, &n) && n <= 100) audio_set_volume((int)n);
     }
     if (cfg_get(CFG_SETTINGS, "keyboard", v, sizeof(v))) keyboard_set_layout(v);
+    if (cfg_get(CFG_SETTINGS, "ui_font", v, sizeof(v))) gfx_set_smooth_text(strcmp(v, "classic") != 0);
 }

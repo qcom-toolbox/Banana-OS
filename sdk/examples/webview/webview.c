@@ -38,17 +38,16 @@ static void draw_bar(void) {
     int ax = 86, aw = win.w - ax - 6;
     bwin_fill_rect(&win, ax, 4, aw, 20, addr_focus ? 0xffffff : 0xe8eef6);
     bwin_rect(&win, ax, 4, aw, 20, addr_focus ? 0x3060c0 : 0x808080);
-    int maxc = (aw - 8) / 8;
-    int n = (int)strlen(addr);
-    const char* shown = n > maxc ? addr + n - maxc : addr;
-    bwin_text(&win, ax + 4, 10, shown, 0x000000, BANANA_TRANSPARENT);
+    const char* shown = addr;                   /* the end of a long address */
+    while (*shown && banana_font_width(BANANA_FONT_SANS, 12, shown) > aw - 10) shown++;
+    bwin_font(&win, ax + 5, 7, BANANA_FONT_SANS, 12, shown, 0x000000);
     if (status[0]) {
-        bwin_fill_rect(&win, 0, win.h - 14, win.w, 14, 0x2b3442);
-        bwin_text(&win, 4, win.h - 11, status, 0xe8eef6, BANANA_TRANSPARENT);
+        bwin_fill_rect(&win, 0, win.h - 16, win.w, 16, 0x2b3442);
+        bwin_font(&win, 6, win.h - 15, BANANA_FONT_SANS, 11, status, 0xe8eef6);
     }
 }
 
-static int view_h(void) { return win.h - BAR_H - (status[0] ? 14 : 0); }
+static int view_h(void) { return win.h - BAR_H - (status[0] ? 16 : 0); }
 
 static void redraw(void) {
     bweb_draw(view, &win, 0, BAR_H);
