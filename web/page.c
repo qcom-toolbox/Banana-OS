@@ -354,6 +354,55 @@ static void load_images(page_t* p, dom_node_t* n, int* count) {
     }
 }
 
+/* CSS background-image: once styles are known, each element's image is
+ * fetched (once per address: icons repeat) and decoded into the page arena */
+static img_data_t* bg_image_for(page_t* p, const char* url) {
+    for (int i = 0; i < p->nbg; i++)
+        if (strcmp(p->bgcache[i].url, url) == 0) return p->bgcache[i].img;
+    if (p->nbg >= 40) return NULL;
+    img_data_t* img = (img_data_t*)arena_alloc(&p->A, sizeof(img_data_t));
+    img->failed = 1;
+    p->bgcache[p->nbg].url = arena_strdup(&p->A, url, (uint32_t)strlen(url));
+    p->bgcache[p->nbg].img = img;
+    p->nbg++;
+    if (strncmp(url, "data:", 5) == 0) return img;          /* inline data: not decoded here */
+    char* data;
+    uint32_t len;
+    char ct[96];
+    if (fetch(p, url, &data, &len, ct, sizeof(ct)) == 0) {
+        if (len <= MAX_IMG_SIZE && svg_sniff((const uint8_t*)data, len)) {
+            if (svg_render(data, len, 0, 0, img, &p->A) == 0) img->failed = 0;
+        } else if (len <= MAX_IMG_SIZE && p->env->decode_image &&
+                   p->env->decode_image(p->env->ctx, (const uint8_t*)data, len, img, &p->A) == 0) {
+            img->failed = 0;
+        }
+        kfree(data);
+    }
+    return img;
+}
+
+static void load_bg_images(page_t* p, dom_node_t* n) {
+    for (dom_node_t* c = n->first; c; c = c->next) {
+        if (c->type != DOM_ELEM || !c->style) continue;
+        const style_t* st = c->style;
+        if (st->bg_url && st->bg_url_len && st->display != DISP_NONE) {
+            char rel[512], url[1024];
+            uint32_t l = st->bg_url_len < sizeof(rel) - 1 ? st->bg_url_len : sizeof(rel) - 1;
+            memcpy(rel, st->bg_url, l);
+            rel[l] = 0;
+            url_resolve(p->url, rel, url, sizeof(url));
+            if (!c->bg_img || !c->bg_img_url || strcmp(c->bg_img_url, url) != 0) {
+                c->bg_img = bg_image_for(p, url);
+                c->bg_img_url = c->bg_img ? p->bgcache[p->nbg - 1].url : NULL;
+                for (int i = 0; i < p->nbg; i++) if (p->bgcache[i].img == c->bg_img) c->bg_img_url = p->bgcache[i].url;
+            }
+        } else {
+            c->bg_img = NULL;
+        }
+        load_bg_images(p, c);
+    }
+}
+
 /* ══ lifecycle ════════════════════════════════════════════════════════ */
 
 page_t* page_new(page_env_t* env, uint32_t mem_limit) {
@@ -387,6 +436,7 @@ void page_update(page_t* p, int width) {
     arena_init(&p->LA, LAYOUT_MEM);
     css_viewport_w = width;                 /* @media (min-width / max-width) */
     css_style_tree(&p->LA, p->doc, p->sheets, p->nsheets);
+    if (p->env) load_bg_images(p, p->doc);
     p->layout = layout_build(&p->LA, p->doc, width, p->focus);
     p->width = width;
     p->dirty = 0;

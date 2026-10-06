@@ -34,6 +34,12 @@ typedef struct dl_item {
     uint8_t  ulspace;       /* the leading space belongs to the same element: underline it too */
     int16_t  yoff, boxh;
     img_data_t* img;
+    int16_t  radius;        /* DL_RECT: rounded corners (px) */
+    uint8_t  ring;          /* DL_RECT: an outline this wide instead of a filled box */
+    uint8_t  tile;          /* DL_IMG: drawn at tw x th from (x - ox, y - oy), repeated: bit 0 x, bit 1 y */
+    int16_t  tw, th, ox, oy;
+    uint8_t  has_clip;      /* only draw inside clip (overflow: hidden) */
+    int      cx0, cy0, cx1, cy1;
 } dl_item_t;
 
 typedef struct layout {

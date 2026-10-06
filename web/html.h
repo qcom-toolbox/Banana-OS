@@ -37,6 +37,8 @@ typedef struct dom_node {
 
     struct style* style;         /* computed (css.c) */
     struct img_data* img;        /* decoded <img> */
+    struct img_data* bg_img;     /* its CSS background-image (page.c), NULL if none */
+    const char* bg_img_url;      /* ...and where it came from */
     void*    js;                 /* cached script wrapper */
     dom_handler_t* handlers;
     char*    value;              /* form controls: current value */

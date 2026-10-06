@@ -16,6 +16,8 @@ typedef struct {
     int       cb_x, cb_y, cb_w, cb_h;
     struct { dom_node_t* n; int sx, sy; } absq[64], fixq[32];
     int       nabs, nfix;
+    /* overflow: hidden - items are clipped to this (page coordinates) */
+    int       clip_on, clip_x0, clip_y0, clip_x1, clip_y1;
 } ctx_t;
 
 static int is_out_of_flow(const dom_node_t* e) {
@@ -32,7 +34,18 @@ static void defer_abs(ctx_t* C, dom_node_t* e, int sx, int sy) {
     }
 }
 
+static dl_item_t* push_raw(ctx_t* C, int kind);
+
 static dl_item_t* push(ctx_t* C, int kind) {
+    dl_item_t* it = push_raw(C, kind);
+    if (C->clip_on && !C->dry) {
+        it->has_clip = 1;
+        it->cx0 = C->clip_x0; it->cy0 = C->clip_y0; it->cx1 = C->clip_x1; it->cy1 = C->clip_y1;
+    }
+    return it;
+}
+
+static dl_item_t* push_raw(ctx_t* C, int kind) {
     static dl_item_t dummy;
     if (C->dry) { memset(&dummy, 0, sizeof(dummy)); return &dummy; }
     layout_t* L = C->L;
@@ -59,6 +72,16 @@ static void rect(ctx_t* C, int x, int y, int w, int h, uint32_t color, dom_node_
 }
 
 static void borders(ctx_t* C, const style_t* st, int x, int y, int w, int h, dom_node_t* node) {
+    if (st->radius > 0 && st->border[0] && st->border[0] == st->border[1] && st->border[0] == st->border[2] &&
+        st->border[0] == st->border[3] && w > 0 && h > 0) {
+        dl_item_t* r = push(C, DL_RECT);
+        r->x = x; r->y = y; r->w = w; r->h = h;
+        r->color = st->border_color[0];
+        r->radius = (int16_t)(st->radius > 30000 ? 30000 : st->radius);
+        r->ring = (uint8_t)(st->border[0] > 255 ? 255 : st->border[0]);
+        r->node = node;
+        return;
+    }
     if (st->border[0]) rect(C, x, y, w, st->border[0], st->border_color[0], node);
     if (st->border[2]) rect(C, x, y + h - st->border[2], w, st->border[2], st->border_color[2], node);
     if (st->border[3]) rect(C, x, y, st->border[3], h, st->border_color[3], node);
@@ -1021,7 +1044,40 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     int bx = x + ml, by = y + mt;
     uint32_t bg_index = C->dry ? 0 : C->L->n;
     int body_like = strcmp(e->tag, "body") == 0 || strcmp(e->tag, "html") == 0;
-    if (st->has_bg && !body_like && st->visible) rect(C, bx, by, bw, 1, st->bg, e);
+    if (st->has_bg && !body_like && st->visible) {
+        rect(C, bx, by, bw, 1, st->bg, e);
+        if (!C->dry && C->L->n) C->L->items[C->L->n - 1].radius = (int16_t)(st->radius > 30000 ? 30000 : st->radius);
+    }
+    /* gradient bands and the background image: reserved now (under the
+     * content), sized once the box height is known */
+    #define GRAD_BANDS 24
+    uint32_t grad_index = 0, bgimg_index = 0;
+    int has_grad = st->bg_grad && st->visible && !C->dry;
+    int has_bgimg = e->bg_img && !e->bg_img->failed && e->bg_img->px && st->visible && !C->dry;
+    if (has_grad) {
+        grad_index = C->L->n;
+        for (int k = 0; k < GRAD_BANDS; k++) rect(C, bx, by, 1, 1, st->grad_from, e);
+    }
+    if (has_bgimg) {
+        bgimg_index = C->L->n;
+        dl_item_t* it = push(C, DL_IMG);
+        it->img = e->bg_img;
+        it->node = e;
+    }
+    /* overflow: hidden - the children stay inside the padding box */
+    int clip_saved = C->clip_on, csx0 = C->clip_x0, csy0 = C->clip_y0, csx1 = C->clip_x1, csy1 = C->clip_y1;
+    if (st->overflow_hidden && !C->dry && !body_like) {
+        int x0 = bx + bl, y0 = by + bt, x1 = bx + bw - br;
+        int y1 = st->height != LEN_AUTO && st->height > 0 ? by + bt + pt + st->height + pb : 0x3FFFFFFF;
+        if (C->clip_on) {
+            if (x0 < C->clip_x0) x0 = C->clip_x0;
+            if (y0 < C->clip_y0) y0 = C->clip_y0;
+            if (x1 > C->clip_x1) x1 = C->clip_x1;
+            if (y1 > C->clip_y1) y1 = C->clip_y1;
+        }
+        C->clip_on = 1;
+        C->clip_x0 = x0; C->clip_y0 = y0; C->clip_x1 = x1; C->clip_y1 = y1;
+    }
     int content_y = by + bt + pt;
     int positioned = !C->dry && st->position != POS_STATIC;
     int abs_from = C->nabs;
@@ -1032,6 +1088,52 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     else if (force_h > 0 && force_h - (bt + pt + pb + bb) > ch) ch = force_h - (bt + pt + pb + bb);   /* stretched */
     int bh = bt + pt + ch + pb + bb;
     if (st->has_bg && !body_like && st->visible && !C->dry) C->L->items[bg_index].h = bh;
+    C->clip_on = clip_saved; C->clip_x0 = csx0; C->clip_y0 = csy0; C->clip_x1 = csx1; C->clip_y1 = csy1;
+    if (has_grad) {
+        /* bands across the padding box, from one colour to the other */
+        int vertical = st->grad_dir == GRAD_DOWN || st->grad_dir == GRAD_UP;
+        int len = vertical ? bh : bw;
+        for (int k = 0; k < GRAD_BANDS; k++) {
+            dl_item_t* it = &C->L->items[grad_index + (uint32_t)k];
+            int a = len * k / GRAD_BANDS, b = len * (k + 1) / GRAD_BANDS;
+            int t = (k * 2 + 1) * 128 / GRAD_BANDS;            /* 0..255 */
+            if (st->grad_dir == GRAD_UP || st->grad_dir == GRAD_LEFT) t = 255 - t;
+            uint32_t f = st->grad_from, g = st->grad_to;
+            uint32_t r = (((f >> 16) & 255) * (uint32_t)(255 - t) + ((g >> 16) & 255) * (uint32_t)t) / 255;
+            uint32_t gg = (((f >> 8) & 255) * (uint32_t)(255 - t) + ((g >> 8) & 255) * (uint32_t)t) / 255;
+            uint32_t bb2 = ((f & 255) * (uint32_t)(255 - t) + (g & 255) * (uint32_t)t) / 255;
+            it->color = r << 16 | gg << 8 | bb2;
+            if (vertical) { it->x = bx; it->w = bw; it->y = by + a; it->h = b - a; }
+            else { it->x = bx + a; it->w = b - a; it->y = by; it->h = bh; }
+        }
+    }
+    if (has_bgimg) {
+        dl_item_t* it = &C->L->items[bgimg_index];
+        img_data_t* im = e->bg_img;
+        int iw = im->w, ih = im->h;
+        if (st->bg_size == BG_SIZE_COVER || st->bg_size == BG_SIZE_CONTAIN) {
+            long sx = (long)bw * 1000 / (iw ? iw : 1), sy = (long)bh * 1000 / (ih ? ih : 1);
+            long sc = st->bg_size == BG_SIZE_COVER ? (sx > sy ? sx : sy) : (sx < sy ? sx : sy);
+            iw = (int)((long)im->w * sc / 1000);
+            ih = (int)((long)im->h * sc / 1000);
+        } else if (st->bg_size == BG_SIZE_PX) {
+            int w2 = st->bg_size_w, h2 = st->bg_size_h;
+            if (w2 != LEN_AUTO && h2 == LEN_AUTO) { h2 = im->w ? im->h * w2 / im->w : w2; }
+            else if (w2 == LEN_AUTO && h2 != LEN_AUTO) { w2 = im->h ? im->w * h2 / im->h : h2; }
+            if (w2 != LEN_AUTO) iw = w2;
+            if (h2 != LEN_AUTO) ih = h2;
+        }
+        if (iw < 1) iw = 1;
+        if (ih < 1) ih = 1;
+        int px = st->bg_pos_pct & 1 ? (bw - iw) * st->bg_pos_x / 100 : st->bg_pos_x;
+        int py = st->bg_pos_pct & 2 ? (bh - ih) * st->bg_pos_y / 100 : st->bg_pos_y;
+        it->x = bx; it->y = by; it->w = bw; it->h = bh;      /* the area painted */
+        it->tw = (int16_t)(iw > 30000 ? 30000 : iw);
+        it->th = (int16_t)(ih > 30000 ? 30000 : ih);
+        it->ox = (int16_t)px;
+        it->oy = (int16_t)py;
+        it->tile = (uint8_t)(st->bg_repeat == BG_REPEAT ? 3 : st->bg_repeat == BG_REPEAT_X ? 1 : st->bg_repeat == BG_REPEAT_Y ? 2 : 0) | 4;
+    }
     if (positioned) {
         /* its absolute descendants are placed against its padding box */
         int scx = C->cb_x, scy = C->cb_y, scw = C->cb_w, sch = C->cb_h;
@@ -1042,7 +1144,11 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
             int dx = st->left != LEN_AUTO ? st->left : st->right != LEN_AUTO ? -st->right : 0;
             int dy = st->top != LEN_AUTO ? st->top : st->bottom != LEN_AUTO ? -st->bottom : 0;
             if (dx || dy)
-                for (uint32_t i = first_item; i < C->L->n; i++) { C->L->items[i].x += dx; C->L->items[i].y += dy; }
+                for (uint32_t i = first_item; i < C->L->n; i++) {
+                    dl_item_t* it = &C->L->items[i];
+                    it->x += dx; it->y += dy;
+                    if (it->has_clip) { it->cx0 += dx; it->cx1 += dx; it->cy0 += dy; it->cy1 += dy; }
+                }
         }
     }
     if (st->visible) borders(C, st, bx, by, bw, bh, e);

@@ -1113,6 +1113,106 @@ static int flex_align(const char* v) {
     return FA_AUTO;
 }
 
+/* background-image / the shorthand: url(...) and linear-gradient(...) */
+static void bg_layers(style_t* st, const char* v) {
+    const char* u = strstr(v, "url(");
+    if (u) {
+        u += 4;
+        while (is_ws(*u) || *u == '"' || *u == '\'') u++;
+        const char* e = u;
+        while (*e && *e != ')' && *e != '"' && *e != '\'') e++;
+        if (e > u) { st->bg_url = u; st->bg_url_len = (uint16_t)(e - u > 2000 ? 2000 : e - u); }
+    }
+    const char* g = strstr(v, "linear-gradient(");
+    if (!g) g = strstr(v, "repeating-linear-gradient(");
+    if (g && !u) {
+        g = strchr(g, '(') + 1;
+        st->grad_dir = GRAD_DOWN;
+        int ncol = 0;
+        /* the comma-separated parts at depth 0: a direction, then colour stops */
+        const char* p = g;
+        while (*p && *p != ')') {
+            while (is_ws(*p)) p++;
+            const char* part = p;
+            int depth = 0;
+            while (*p && !(depth == 0 && (*p == ',' || *p == ')'))) {
+                if (*p == '(') depth++;
+                else if (*p == ')') depth--;
+                p++;
+            }
+            int ok;
+            uint32_t c = css_color(part, &ok);
+            if (ok == 1) {
+                if (!ncol) st->grad_from = c;
+                st->grad_to = c;
+                ncol++;
+            } else if (!ncol) {
+                if (strncmp(part, "to right", 8) == 0) st->grad_dir = GRAD_RIGHT;
+                else if (strncmp(part, "to left", 7) == 0) st->grad_dir = GRAD_LEFT;
+                else if (strncmp(part, "to top", 6) == 0) st->grad_dir = GRAD_UP;
+                else if (part[0] >= '0' && part[0] <= '9') {
+                    int deg = 0;
+                    for (const char* q = part; *q >= '0' && *q <= '9'; q++) deg = deg * 10 + (*q - '0');
+                    deg %= 360;
+                    st->grad_dir = deg >= 45 && deg < 135 ? GRAD_RIGHT : deg >= 135 && deg < 225 ? GRAD_DOWN :
+                                   deg >= 225 && deg < 315 ? GRAD_LEFT : GRAD_UP;
+                }
+            }
+            if (*p == ',') p++;
+        }
+        if (ncol) { st->bg_grad = 1; if (!st->has_bg) { st->bg = st->grad_from; } }
+    }
+}
+
+static void bg_repeat_of(style_t* st, const char* v) {
+    if (has_word(v, "no-repeat")) st->bg_repeat = BG_NO_REPEAT;
+    else if (has_word(v, "repeat-x")) st->bg_repeat = BG_REPEAT_X;
+    else if (has_word(v, "repeat-y")) st->bg_repeat = BG_REPEAT_Y;
+    else if (has_word(v, "repeat") || has_word(v, "space") || has_word(v, "round")) st->bg_repeat = BG_REPEAT;
+}
+
+static void bg_size_of(style_t* st, const char* v) {
+    if (has_word(v, "cover")) { st->bg_size = BG_SIZE_COVER; return; }
+    if (has_word(v, "contain")) { st->bg_size = BG_SIZE_CONTAIN; return; }
+    int w = parse_len(v, st->font_px, -1, NULL);
+    if (w == LEN_AUTO) { st->bg_size = BG_SIZE_AUTO; return; }
+    const char* p = v;
+    while (*p && !is_ws(*p)) p++;
+    while (is_ws(*p)) p++;
+    st->bg_size = BG_SIZE_PX;
+    st->bg_size_w = w;
+    st->bg_size_h = *p ? parse_len(p, st->font_px, -1, NULL) : LEN_AUTO;
+}
+
+/* "center", "left top", "50% 20%", "-32px 0" */
+static void bg_pos_of(style_t* st, const char* v) {
+    int vals[2] = { 0, 0 }, pct[2] = { 0, 0 }, n = 0;
+    const char* p = v;
+    while (*p && n < 2) {
+        while (is_ws(*p)) p++;
+        if (!*p) break;
+        const char* t = p;
+        while (*p && !is_ws(*p)) p++;
+        int axis = n;
+        if (strncmp(t, "left", 4) == 0) { axis = 0; vals[0] = 0; pct[0] = 1; }
+        else if (strncmp(t, "right", 5) == 0) { axis = 0; vals[0] = 100; pct[0] = 1; }
+        else if (strncmp(t, "top", 3) == 0) { axis = 1; vals[1] = 0; pct[1] = 1; }
+        else if (strncmp(t, "bottom", 6) == 0) { axis = 1; vals[1] = 100; pct[1] = 1; }
+        else if (strncmp(t, "center", 6) == 0) { vals[axis] = 50; pct[axis] = 1; if (n == 0) { vals[1] = 50; pct[1] = 1; } }
+        else {
+            int is_pct = 0;
+            int l = (t[0] >= '0' && t[0] <= '9') || t[0] == '-' || t[0] == '.' ? parse_len(t, st->font_px, 100, &is_pct) : LEN_AUTO;
+            if (l == LEN_AUTO) continue;             /* not a position (a colour, url(), repeat, ...) */
+            vals[axis] = l;
+            pct[axis] = is_pct;
+        }
+        n++;
+    }
+    st->bg_pos_x = vals[0];
+    st->bg_pos_y = vals[1];
+    st->bg_pos_pct = (uint8_t)((pct[0] ? 1 : 0) | (pct[1] ? 2 : 0));
+}
+
 /* flexbox properties that are not keyed by the switch below; 1 if handled */
 static int flex_decl(style_t* st, const char* prop, const char* v) {
     if (strcmp(prop, "gap") == 0 || strcmp(prop, "grid-gap") == 0) {
@@ -1140,6 +1240,21 @@ static int flex_decl(style_t* st, const char* prop, const char* v) {
     if (strcmp(prop, "align-items") == 0) { int a = flex_align(v); st->align_items = a ? a : FA_STRETCH; return 1; }
     if (strcmp(prop, "align-self") == 0) { st->align_self = flex_align(v); return 1; }
     if (strcmp(prop, "place-items") == 0) { int a = flex_align(v); st->align_items = a ? a : FA_STRETCH; return 1; }
+    if (strcmp(prop, "background-image") == 0) {
+        st->bg_url = NULL;
+        st->bg_grad = 0;
+        if (!has_word(v, "none")) bg_layers(st, v);
+        return 1;
+    }
+    if (strcmp(prop, "background-repeat") == 0) { bg_repeat_of(st, v); return 1; }
+    if (strcmp(prop, "background-size") == 0) { bg_size_of(st, v); return 1; }
+    if (strcmp(prop, "background-position") == 0) { bg_pos_of(st, v); return 1; }
+    if (strcmp(prop, "border-radius") == 0) {
+        int is_pct = 0;
+        int r = parse_len(v, st->font_px, 100, &is_pct);
+        st->radius = r == LEN_AUTO || r < 0 ? 0 : is_pct ? (r >= 50 ? 100000 : r * 4) : r;
+        return 1;
+    }
     if (strcmp(prop, "top") == 0) { st->top = has_word(v, "auto") ? LEN_AUTO : parse_len(v, st->font_px, -1, NULL); return 1; }
     if (strcmp(prop, "right") == 0) { st->right = has_word(v, "auto") ? LEN_AUTO : parse_len(v, st->font_px, -1, NULL); return 1; }
     if (strcmp(prop, "bottom") == 0) { st->bottom = has_word(v, "auto") ? LEN_AUTO : parse_len(v, st->font_px, -1, NULL); return 1; }
@@ -1170,6 +1285,20 @@ static void apply_decl(style_t* st, const style_t* parent, const char* prop, con
     switch (prop[0]) {
     case 'b':
         if (strcmp(prop, "background-color") == 0 || strcmp(prop, "background") == 0) {
+            if (prop[10] == 0) {                     /* background: ... */
+                st->bg_url = NULL;
+                st->bg_grad = 0;
+                st->bg_repeat = BG_REPEAT;
+                bg_layers(st, v);
+                bg_repeat_of(st, v);
+                const char* sl = strchr(v, '/');     /* position / size */
+                if (sl && !strstr(v, "url(")) sl = NULL;
+                if (sl && st->bg_url) { const char* ue = st->bg_url + st->bg_url_len; sl = strchr(ue, '/'); }
+                if (sl) bg_size_of(st, sl + 1);
+                if (has_word(v, "center") || has_word(v, "top") || has_word(v, "left") || has_word(v, "right") || has_word(v, "bottom"))
+                    bg_pos_of(st, v);
+                if (st->bg_grad && !strchr(v, '#') && !strstr(v, "rgb")) return;   /* the colour came from the gradient */
+            }
             if (has_word(v, "none") && !strchr(v, '#') && !strstr(v, "rgb")) { st->has_bg = 0; return; }
             /* the first color-looking token of the shorthand */
             const char* p = v;
@@ -1445,6 +1574,7 @@ static void inherit(style_t* st, const style_t* p) {
     st->width = st->height = st->max_width = LEN_AUTO;
     st->left = st->top = LEN_AUTO;
     st->right = st->bottom = LEN_AUTO;
+    st->bg_size_w = st->bg_size_h = LEN_AUTO;
     st->flex_basis = LEN_AUTO;
     st->flex_shrink = 100;
     st->visible = 1;

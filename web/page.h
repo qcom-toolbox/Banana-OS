@@ -81,6 +81,9 @@ typedef struct page {
     obj_t*       win_obj;
     obj_t*       loc_obj;
     int          view_h;              /* visible height (window.innerHeight) */
+    /* CSS background images, fetched once per address */
+    struct { const char* url; struct img_data* img; } bgcache[40];
+    int          nbg;
 } page_t;
 
 page_t* page_new(page_env_t* env, uint32_t mem_limit);
