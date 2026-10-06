@@ -213,8 +213,15 @@ static void place_word(inl_t* I, const char* s, uint32_t n, const style_t* st, u
     }
     /* a word wider than the line: split it */
     while (ww > I->w && I->w >= cw && !st->pre) {
-        uint32_t fit = (uint32_t)((I->w - I->cx) / cw);
-        if (fit == 0) { finish_line(I, 0); continue; }
+        /* the room left on this line - none (or less than nothing) when
+         * something wider than the line came before: then a new line */
+        int room = I->w - I->cx;
+        if (room < cw) {
+            if (I->cx > 0) { finish_line(I, 0); continue; }
+            break;
+        }
+        uint32_t fit = (uint32_t)(room / cw);
+        if (fit >= n) fit = n - 1;
         place_word(I, s, fit, st, bg, has_bg, node);
         s += fit;
         n -= fit;
@@ -1203,10 +1210,9 @@ static int span_of(dom_node_t* cell) {
 /* content widths of a cell: max-content and the widest word */
 static void measure_cell(ctx_t* C, dom_node_t* cell, int* maxw, int* minw) {
     ctx_t M;
+    memset(&M, 0, sizeof(M));               /* every field: forced sizes, clips, queues */
     M.L = C->L;
     M.dry = 1;
-    M.max_w = 0;
-    M.max_word = 0;
     layout_children(&M, cell, 0, 0, 100000);
     const style_t* st = cell->style;
     int extra = st->padding[1] + st->padding[3] + st->border[1] + st->border[3];
@@ -1218,6 +1224,7 @@ static void measure_cell(ctx_t* C, dom_node_t* cell, int* maxw, int* minw) {
 static int layout_table(ctx_t* C, dom_node_t* t, int x, int y, int avail) {
     const style_t* st = t->style;
     dom_node_t** rows = (dom_node_t**)arena_alloc(C->L->A, MAX_ROWS * (uint32_t)sizeof(dom_node_t*));
+    if (C->L->A->oom) return 0;             /* out of layout memory: the shared fallback is no place for pointers */
     int nrows = collect_rows(t, rows, MAX_ROWS);
     int ncols = 0;
     for (int r = 0; r < nrows; r++) {

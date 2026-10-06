@@ -1,4 +1,5 @@
 #include "http.h"
+#include "../kernel/timer.h"
 #include "tcp.h"
 #include "tls.h"
 #include "kstring.h"
@@ -126,6 +127,59 @@ static void s_close(stream_t* s) {
     s->tcp = NULL;
 }
 
+/* ── keep-alive: open connections waiting for the next request ──────
+ * A page pulls dozens of style sheets, scripts and images from the same
+ * few hosts; a new TCP connection + TLS handshake for each costs far more
+ * than the request itself. Finished connections wait here (per host and
+ * port) for a while. */
+
+#define POOL_MAX     4
+#define POOL_IDLE_MS 15000
+
+static struct {
+    int       used, https;
+    char      host[256];
+    uint16_t  port;
+    stream_t* s;
+    uint32_t  since;
+} g_pool[POOL_MAX];
+
+static void pool_drop(int i) {
+    s_close(g_pool[i].s);
+    kfree(g_pool[i].s);
+    g_pool[i].used = 0;
+}
+
+static stream_t* pool_take(const url_t* u, uint32_t timeout) {
+    for (int i = 0; i < POOL_MAX; i++) {
+        if (!g_pool[i].used) continue;
+        if ((uint32_t)(timer_ms() - g_pool[i].since) > POOL_IDLE_MS) { pool_drop(i); continue; }
+        if (g_pool[i].https == u->https && g_pool[i].port == u->port && strcasecmp(g_pool[i].host, u->host) == 0) {
+            stream_t* st = g_pool[i].s;
+            g_pool[i].used = 0;
+            st->timeout_ms = timeout;
+            return st;
+        }
+    }
+    return NULL;
+}
+
+static void pool_put(const url_t* u, stream_t* st) {
+    int slot = -1;
+    for (int i = 0; i < POOL_MAX; i++) if (!g_pool[i].used) { slot = i; break; }
+    if (slot < 0) {                             /* full: the one idle longest goes */
+        slot = 0;
+        for (int i = 1; i < POOL_MAX; i++) if ((int32_t)(g_pool[i].since - g_pool[slot].since) < 0) slot = i;
+        pool_drop(slot);
+    }
+    g_pool[slot].used = 1;
+    g_pool[slot].https = u->https;
+    g_pool[slot].port = u->port;
+    kstrlcpy(g_pool[slot].host, u->host, sizeof(g_pool[slot].host));
+    g_pool[slot].s = st;
+    g_pool[slot].since = timer_ms();
+}
+
 /* ── body delivery ──────────────────────────────────────────────── */
 
 typedef struct {
@@ -213,31 +267,30 @@ static int header_is(const char* line, const char* name, const char** value) {
     return 1;
 }
 
-static int do_request(const url_t* u, const http_request_t* req, http_response_t* resp,
-                      int* redirect, char* errmsg, uint32_t errlen) {
-    const char* method = req->method ? req->method : "GET";
-    int is_head = strcmp(method, "HEAD") == 0;
-    uint32_t timeout = req->timeout_ms ? req->timeout_ms : 20000;
-
+/* a new connection (TCP, and TLS for https://) - NULL with *rc and errmsg */
+static stream_t* open_stream(const url_t* u, const http_request_t* req, http_response_t* resp, uint32_t timeout,
+                             char* errmsg, uint32_t errlen, int* rcp) {
     ip4_t ip;
     info(req, "Resolving %s...", u->host);
     int rc = dns_resolve(u->host, &ip, timeout);
     if (rc != NET_OK) {
         ksnprintf(errmsg, errlen, "could not resolve host %s (%s)", u->host, net_strerror(rc));
-        return rc;
+        *rcp = rc;
+        return NULL;
     }
     char ips[16];
     ip4_to_str(ip, ips);
     info(req, "Connecting to %s (%s):%u...", u->host, ips, u->port);
 
     stream_t* s = (stream_t*)kzalloc(sizeof(stream_t));
-    if (!s) return NET_ERR_NOMEM;
+    if (!s) { *rcp = NET_ERR_NOMEM; return NULL; }
     s->timeout_ms = timeout;
     s->tcp = tcp_connect(ip, u->port, timeout, &rc);
     if (!s->tcp) {
         ksnprintf(errmsg, errlen, "failed to connect to %s port %u: %s", u->host, u->port, net_strerror(rc));
         kfree(s);
-        return rc;
+        *rcp = rc;
+        return NULL;
     }
     info(req, "Connected to %s (%s) port %u", u->host, ips, u->port);
 
@@ -248,10 +301,30 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
             ksnprintf(errmsg, errlen, "TLS handshake with %s failed: %s", u->host, tmsg);
             tcp_abort(s->tcp);
             kfree(s);
-            return rc ? rc : NET_ERR_PROTO;
+            *rcp = rc ? rc : NET_ERR_PROTO;
+            return NULL;
         }
         kstrlcpy(resp->tls_cipher, tls_cipher_name(s->tls), sizeof(resp->tls_cipher));
         info(req, "TLS 1.3 connection using %s (certificate NOT verified)", resp->tls_cipher);
+    }
+    *rcp = NET_OK;
+    return s;
+}
+
+static int do_request(const url_t* u, const http_request_t* req, http_response_t* resp,
+                      int* redirect, char* errmsg, uint32_t errlen) {
+    const char* method = req->method ? req->method : "GET";
+    int is_head = strcmp(method, "HEAD") == 0;
+    uint32_t timeout = req->timeout_ms ? req->timeout_ms : 20000;
+    int rc;
+    stream_t* s = pool_take(u, timeout);
+    int reused = s != NULL;
+    if (reused) {
+        info(req, "Re-using the connection to %s", u->host);
+        if (u->https && s->tls) kstrlcpy(resp->tls_cipher, tls_cipher_name(s->tls), sizeof(resp->tls_cipher));
+    } else {
+        s = open_stream(u, req, resp, timeout, errmsg, errlen, &rc);
+        if (!s) return rc;
     }
 
     /* request */
@@ -272,15 +345,31 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
         "User-Agent: %s\r\n"
         "Accept: */*\r\n"
         "%s%s"
-        "Connection: close\r\n"
+        "Connection: keep-alive\r\n"
         "\r\n",
         method, u->path, host_hdr, req->user_agent ? req->user_agent : "BananaOS/0.5",
         body_hdr, req->extra_headers ? req->extra_headers : "");
     if (rqlen >= (int)rqcap) rqlen = (int)rqcap - 1;
     if (req->on_request) req->on_request(req->ctx, rq);
     rc = s_write(s, rq, (uint32_t)rqlen);
-    kfree(rq);
     if (rc >= 0 && req->body && req->body_len) rc = s_write(s, req->body, req->body_len);
+    if (rc >= 0 && reused && s->pos >= s->len) {
+        /* a pooled connection the server may have closed while it waited:
+         * the first byte of the answer tells */
+        int r = s_fill(s);
+        if (r <= 0) rc = NET_ERR_CLOSED;
+    }
+    if (rc < 0 && reused) {
+        /* it had been closed: once more, on a new connection */
+        s_close(s);
+        kfree(s);
+        s = open_stream(u, req, resp, timeout, errmsg, errlen, &rc);
+        if (!s) { kfree(rq); return rc; }
+        reused = 0;
+        rc = s_write(s, rq, (uint32_t)rqlen);
+        if (rc >= 0 && req->body && req->body_len) rc = s_write(s, req->body, req->body_len);
+    }
+    kfree(rq);
     if (rc < 0) {
         ksnprintf(errmsg, errlen, "failed to send request: %s", net_strerror(rc));
         s_close(s); kfree(s);
@@ -292,6 +381,7 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
     char* line = (char*)kmalloc(HTTP_URL_MAX + 256);  /* a Location: line can be a whole long URL */
     if (!raw || !line) { kfree(raw); kfree(line); s_close(s); kfree(s); return NET_ERR_NOMEM; }
     int chunked = 0;
+    int conn_close = 0;                         /* the server ends the connection after this answer */
     for (;;) {
         uint32_t raw_len = 0;
         raw[0] = '\0';
@@ -309,7 +399,7 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
         }
         major = line[5] - '0';
         minor = (line[6] == '.' && k_isdigit((unsigned char)line[7])) ? line[7] - '0' : 0;
-        (void)major; (void)minor;
+        conn_close = major < 1 || (major == 1 && minor == 0);   /* HTTP/1.0: no keep-alive by default */
         const char* sp = strchr(line, ' ');
         if (!sp || k_parse_u32(sp + 1, &status) != 3) {
             ksnprintf(errmsg, errlen, "malformed status line");
@@ -347,6 +437,9 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
                 if (strstr(v, "chunked") || strstr(v, "Chunked")) chunked = 1;
             } else if (header_is(line, "Location", &v)) {
                 kstrlcpy(resp->location, v, sizeof(resp->location));
+            } else if (header_is(line, "Connection", &v)) {
+                if (strstr(v, "close") || strstr(v, "Close")) conn_close = 1;
+                else if (strstr(v, "keep-alive") || strstr(v, "Keep-Alive")) conn_close = 0;
             } else if (header_is(line, "Content-Type", &v)) {
                 kstrlcpy(resp->content_type, v, sizeof(resp->content_type));
             }
@@ -379,6 +472,12 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
 done:
     kfree(raw);
     kfree(line);
+    /* a complete answer whose end we know: the connection can be used again */
+    if (rc == NET_OK && !*redirect && !conn_close && !s->eof && s->pos >= s->len &&
+        (chunked || resp->content_length >= 0 || is_head || resp->status == 204 || resp->status == 304)) {
+        pool_put(u, s);
+        return rc;
+    }
     s_close(s);
     kfree(s);
     return rc;
