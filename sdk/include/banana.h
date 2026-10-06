@@ -109,4 +109,20 @@ void banana_tone(int hz, int ms, int volume_percent);
 void banana_copy(const char* text);
 const char* banana_paste(void);            /* "" when empty */
 
+
+/* ── threads (Banana OS with API version 3) ─────────────────────────
+ * banana_thread() runs fn(arg) alongside the rest of the app; the timer
+ * shares the processor cores between the threads. A banana_mutex_t
+ * (start it at BANANA_MUTEX_INIT) guards data several threads change. */
+typedef volatile int banana_mutex_t;
+#define BANANA_MUTEX_INIT 0
+int  banana_thread(int (*fn)(void* arg), void* arg);   /* thread id (> 0), or -1 */
+int  banana_join(int id);                  /* waits for it: what fn returned */
+int  banana_thread_id(void);               /* 0 in the main thread */
+void banana_thread_exit(int ret);
+int  banana_cpus(void);                    /* processor cores in use */
+void banana_lock(banana_mutex_t* m);
+int  banana_trylock(banana_mutex_t* m);    /* 1 if it got the lock */
+void banana_unlock(banana_mutex_t* m);
+
 #endif

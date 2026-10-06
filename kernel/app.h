@@ -38,6 +38,9 @@ int  app_kill(int id);
  * running there it is stopped (this does not return), else it returns */
 void app_fault(uint32_t vector, uint32_t err, uintptr_t ip, uintptr_t addr);
 
+/* kernel/idt.c: a hardware interrupt came at ip (time-slices app code) */
+void app_preempt(uintptr_t ip);
+
 /* running apps, for `pkg ps` */
 void app_list(void);
 int  app_count(void);

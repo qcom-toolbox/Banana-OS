@@ -120,7 +120,7 @@ clean:
 
 
 # ── SDK: example apps (embedded in the kernel: ~/Examples) and the tarball ──
-EXAMPLES     = hello guess paint clock tones mandel
+EXAMPLES     = hello guess paint clock tones mandel threads
 EXAMPLE_BPKS = $(foreach e,$(EXAMPLES),sdk/examples/$(e)/$(e).bpk)
 SDK_DEPS     = $(wildcard sdk/lib/*.c sdk/include/*.h) sdk/banana.mk sdk/tools/bpkg
 

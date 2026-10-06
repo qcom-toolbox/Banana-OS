@@ -17,6 +17,7 @@
 #include "paging.h"
 #include "../net/http.h"
 #include "../sdk/include/banana_api.h"
+#include "smp.h"
 
 #define APP_MAX     8
 #define APP_FD_MAX  16
@@ -25,6 +26,7 @@
 #define STACK_CANARY 0xB4A4A5C0u      /* at the bottom of the stack: checked on every system call */
 #define APP_KEYQ    32
 #define APP_MAX_IMAGE (16u << 20)
+#define APP_THREADS 16                /* extra threads per app (api->thread_create) */
 
 /* ── per-app state ─────────────────────────────────────────────────── */
 
@@ -44,6 +46,19 @@ typedef struct {
     uint32_t pos;
     int      flags;
 } afd_t;
+
+/* a thread an app started: a task of its own running app code on its own stack */
+typedef struct {
+    int       used;
+    int       pid;             /* its task, -1 once it ended */
+    int     (*fn)(void*);
+    void*     arg;
+    uint8_t*  stack_mem;
+    uintptr_t saved_sp;        /* app_enter(): where app_leave() returns to */
+    int       running;         /* in app code (between app_enter() and its return) */
+    int       done;
+    int       ret;
+} athread_t;
 
 typedef struct {
     int       used;
@@ -75,6 +90,10 @@ typedef struct {
     char      crash_msg[192];  /* why it crashed (app_fault), printed by run() */
     int       argc;
     char**    argv;
+    uintptr_t code_lo, code_hi; /* where its code is: the timer may switch away from there */
+    athread_t threads[APP_THREADS];
+    int       exit_req;        /* a thread called exit() / crashed: every thread stops */
+    int       exit_req_code;
 } app_proc_t;
 
 static app_proc_t g_procs[APP_MAX];
@@ -83,8 +102,22 @@ static banana_api_t g_api;
 
 static app_proc_t* cur(void) {
     int pid = task_current_pid();
-    for (int i = 0; i < APP_MAX; i++)
-        if (g_procs[i].used && g_procs[i].pid == pid) return &g_procs[i];
+    for (int i = 0; i < APP_MAX; i++) {
+        app_proc_t* p = &g_procs[i];
+        if (!p->used) continue;
+        if (p->pid == pid) return p;
+        for (int t = 0; t < APP_THREADS; t++)
+            if (p->threads[t].used && p->threads[t].pid == pid) return p;
+    }
+    return NULL;
+}
+
+/* the calling thread of app p, NULL for its main thread */
+static athread_t* cur_thread(app_proc_t* p) {
+    int pid = task_current_pid();
+    if (!p || p->pid == pid) return NULL;
+    for (int t = 0; t < APP_THREADS; t++)
+        if (p->threads[t].used && p->threads[t].pid == pid) return &p->threads[t];
     return NULL;
 }
 
@@ -93,8 +126,24 @@ int  app_enter(int (*fn)(void*), void* arg, void* stack_top, uintptr_t* saved_sp
 void app_leave(uintptr_t saved_sp, int code) __attribute__((noreturn));
 
 static void __attribute__((noreturn)) leave(app_proc_t* p, int code) {
+    athread_t* t = cur_thread(p);
+    if (t) {
+        /* exit(), Ctrl+C, End task or a crash in a thread: the whole app
+         * ends - its main thread and the other threads notice exit_req */
+        if (!p->exit_req) { p->exit_req = 1; p->exit_req_code = code; }
+        t->running = 0;
+        app_leave(t->saved_sp, code);
+    }
     p->exit_code = code;
+    p->running = 0;
     app_leave(p->saved_sp, code);
+}
+
+/* a thread's return value (thread_join), or the end of the whole app */
+static void __attribute__((noreturn)) leave_thread(app_proc_t* p, athread_t* t, int ret) {
+    (void)p;
+    t->running = 0;
+    app_leave(t->saved_sp, ret);
 }
 
 static void key_push(app_proc_t* p, int c) {
@@ -121,8 +170,9 @@ static int focused(app_proc_t* p) {
 static void breathe(app_proc_t* p, int force) {
     if (!p) return;
     uint32_t now = timer_ms();
+    if (p->exit_req) leave(p, p->exit_req_code);
     /* the 32-bit kernel has no guard pages: a smashed canary stops the app */
-    if (*(volatile uint32_t*)p->stack != STACK_CANARY) {
+    if (!cur_thread(p) && *(volatile uint32_t*)p->stack != STACK_CANARY) {
         ksnprintf(p->crash_msg, sizeof(p->crash_msg), "%s: stack overflow - it used more than %u KiB of stack "
                   "(big local arrays? malloc them)", p->name, APP_STACK >> 10);
         *(volatile uint32_t*)p->stack = STACK_CANARY;
@@ -617,6 +667,97 @@ static const char* a_clip_get(unsigned long* n) {
     return s;
 }
 
+/* ── threads ───────────────────────────────────────────────────────── */
+
+static int thread_tramp(void* arg) {
+    athread_t* t = (athread_t*)arg;
+    return t->fn(t->arg);
+}
+
+static void thread_entry(void) {
+    app_proc_t* p = cur();
+    athread_t* t = cur_thread(p);
+    if (!p || !t) return;
+    if (p->has_term) terminal_vt_set_active(p->vt);
+    else task_set_background();
+    t->running = 1;
+    t->ret = app_enter(thread_tramp, t, t->stack_mem + APP_STACK, &t->saved_sp);
+    t->running = 0;
+    t->done = 1;
+}
+
+static int a_thread_create(int (*fn)(void*), void* arg) {
+    app_proc_t* p = cur();
+    if (!p || !fn || p->exit_req) return -1;
+    athread_t* t = NULL;
+    int id = -1;
+    for (int i = 0; i < APP_THREADS; i++) if (!p->threads[i].used) { t = &p->threads[i]; id = i; break; }
+    if (!t) return -1;
+    memset(t, 0, sizeof(*t));
+    t->stack_mem = (uint8_t*)kmalloc(APP_STACK + 16);
+    if (!t->stack_mem) return -1;
+    t->fn = fn;
+    t->arg = arg;
+    t->pid = -1;
+    t->used = 1;
+    char name[24];
+    ksnprintf(name, sizeof(name), "%.14s/t%d", p->name, id + 1);
+    int pid = task_create(name, thread_entry);
+    if (pid < 0) { kfree(t->stack_mem); t->used = 0; return -1; }
+    t->pid = pid;                           /* it runs once we yield (no preemption in here) */
+    return id + 1;
+}
+
+static int a_thread_join(int id) {
+    app_proc_t* p = cur();
+    if (!p || id < 1 || id > APP_THREADS) return -1;
+    athread_t* t = &p->threads[id - 1];
+    if (!t->used || t == cur_thread(p)) return -1;
+    while (!t->done) {
+        breathe(p, 1);
+        task_sleep_ms(1);
+    }
+    int r = t->ret;
+    kfree(t->stack_mem);
+    t->used = 0;
+    return r;
+}
+
+static int a_thread_id(void) {
+    app_proc_t* p = cur();
+    athread_t* t = cur_thread(p);
+    return t ? (int)(t - p->threads) + 1 : 0;
+}
+
+static void a_thread_exit(int ret) {
+    app_proc_t* p = cur();
+    athread_t* t = cur_thread(p);
+    if (t) leave_thread(p, t, ret);
+    if (p) leave(p, ret);                   /* the main thread: the app ends */
+    for (;;) task_sleep_ms(1000);
+}
+
+static int a_cpu_count(void) { return cpu_count(); }
+
+/* kernel/idt.c, on every hardware interrupt: if it came while an app's
+ * own code was running (not inside the kernel), switching to another task
+ * is safe - so a busy app or thread cannot freeze the desktop, and the
+ * threads of an app share the CPU. An app asked to stop is stopped here. */
+void app_preempt(uintptr_t ip) {
+    app_proc_t* p = cur();
+    if (!p || ip < p->code_lo || ip >= p->code_hi) return;
+    athread_t* t = cur_thread(p);
+    if (t ? !t->running : !p->running) return;
+    __asm__ volatile("sti");
+    if (p->exit_req || p->kill_req) leave(p, p->exit_req ? p->exit_req_code : 137);
+    /* what an app call does: paint the desktop (the app may run in the task
+     * that draws it), notice Ctrl+C / End task, let the other tasks run */
+    breathe(p, 0);
+    task_maybe_yield();
+    if (p->has_term) terminal_vt_set_active(p->vt);
+    __asm__ volatile("cli");
+}
+
 static void a_exit(int code) {
     app_proc_t* p = cur();
     if (p) leave(p, code);
@@ -675,6 +816,11 @@ static void api_init(void) {
     g_api.clipboard_get = a_clip_get;
     g_api.interrupted = a_interrupted;
     g_api.win_set_resizable = a_win_set_resizable;
+    g_api.thread_create = a_thread_create;
+    g_api.thread_join = a_thread_join;
+    g_api.thread_id = a_thread_id;
+    g_api.thread_exit = a_thread_exit;
+    g_api.cpu_count = a_cpu_count;
 }
 
 /* ── the ELF loader ────────────────────────────────────────────────── */
@@ -711,7 +857,7 @@ typedef struct { int32_t tag; uint32_t val; } dyn_t;
 
 
 static int load_elf(const uint8_t* f, uint32_t size, uint8_t** image_out, banana_entry_t* entry, uintptr_t* base_out,
-                    char* err, int ecap) {
+                    uintptr_t* lo_out, uintptr_t* hi_out, char* err, int ecap) {
     const ehdr_t* eh = (const ehdr_t*)f;
     if (size < sizeof(ehdr_t) || memcmp(eh->ident, "\x7f" "ELF", 4) != 0) { kstrlcpy(err, "not an ELF program", (size_t)ecap); return -1; }
     if (eh->ident[4] != ELF_CLASS || eh->machine != EM_HOST) {
@@ -792,6 +938,8 @@ static int load_elf(const uint8_t* f, uint32_t size, uint8_t** image_out, banana
     *image_out = raw;
     *entry = (banana_entry_t)(base + (uintptr_t)eh->entry);
     *base_out = base;
+    *lo_out = (uintptr_t)mem;
+    *hi_out = (uintptr_t)mem + span;
     return 0;
 }
 
@@ -802,7 +950,23 @@ static int trampoline(void* arg) {
     return p->entry(&g_api, p->argc, p->argv);
 }
 
+/* before an app's memory goes: every thread has to be out of its code */
+static void stop_threads(app_proc_t* p) {
+    p->exit_req = 1;
+    for (;;) {
+        int live = 0;
+        for (int t = 0; t < APP_THREADS; t++) if (p->threads[t].used && !p->threads[t].done) live++;
+        if (!live) break;
+        task_sleep_ms(2);                   /* a busy one is stopped by the timer (app_preempt) */
+    }
+    for (int t = 0; t < APP_THREADS; t++) {
+        if (p->threads[t].used) kfree(p->threads[t].stack_mem);
+        p->threads[t].used = 0;
+    }
+}
+
 static void release(app_proc_t* p) {
+    stop_threads(p);
     appwin_close_owner(p->id);
     while (p->blocks) {
         ablock_t* b = p->blocks;
@@ -842,8 +1006,11 @@ static int run(app_proc_t* p) {
  * rest of the system goes on. Returns only if no app is running here. */
 void app_fault(uint32_t vector, uint32_t err, uintptr_t ip, uintptr_t addr) {
     app_proc_t* p = cur();
-    if (!p || !p->running) return;
-    p->running = 0;
+    if (!p) return;
+    athread_t* ft = cur_thread(p);
+    if (ft ? !ft->running : !p->running) return;
+    if (ft) ft->running = 0;
+    else p->running = 0;
     /* We came in through an interrupt gate, so interrupts are off - and the
      * terminal output below may yield to other tasks, which must not run
      * with interrupts off (timers, sleeps and hlt would all stop): turn
@@ -869,6 +1036,12 @@ void app_fault(uint32_t vector, uint32_t err, uintptr_t ip, uintptr_t addr) {
     /* reported by run(), back on the task's own stack: this may be the
      * dedicated fault stack, which must not be in use when we yield */
     kstrlcpy(p->crash_msg, line, sizeof(p->crash_msg));
+    athread_t* t = cur_thread(p);
+    if (t) {                                /* a crash in a thread ends the whole app */
+        if (!p->exit_req) { p->exit_req = 1; p->exit_req_code = 139; }
+        t->running = 0;
+        app_leave(t->saved_sp, 139);
+    }
     app_leave(p->saved_sp, 139);
 }
 
@@ -885,7 +1058,8 @@ static app_proc_t* prepare(const char* path, int argc, char** argv, char* err, i
     p->id = id;
     fs_file_t* f = fs_get_file(fi);
     if (!f) { kstrlcpy(err, "cannot read it", (size_t)ecap); return NULL; }
-    if (load_elf((const uint8_t*)f->content, f->size, &p->image, &p->entry, &p->base, err, ecap) != 0) return NULL;
+    if (load_elf((const uint8_t*)f->content, f->size, &p->image, &p->entry, &p->base, &p->code_lo, &p->code_hi, err, ecap) != 0)
+        return NULL;
     p->stack_mem = (uint8_t*)kmalloc(APP_GUARD + APP_STACK + 4096);
     if (p->stack_mem) {
         p->guard = (uint8_t*)(((uintptr_t)p->stack_mem + 4095) & ~(uintptr_t)4095);

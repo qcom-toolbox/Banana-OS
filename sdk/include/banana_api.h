@@ -2,7 +2,7 @@
 #define BANANA_API_H
 
 /*
- * The Banana OS application interface (ABI), version 2.
+ * The Banana OS application interface (ABI), version 3.
  *
  * An app is a position-independent ELF executable (built by the SDK for
  * i686 and x86_64, both packed in one .bpk). Banana OS loads it, applies
@@ -17,7 +17,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 2u
+#define BANANA_API_VERSION 3u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -164,6 +164,16 @@ typedef struct banana_api {
      * min_w x min_h); the app gets BANANA_EV_RESIZE and must take the
      * new buffer from win_pixels() - the old one is gone after that event */
     void  (*win_set_resizable)(int win, int min_w, int min_h);
+
+    /* ── version 3: threads ───────────────────────────────── */
+    /* fn(arg) runs in a new thread (its own 1 MiB stack) alongside the
+     * others; the timer shares the CPUs between them. Returns the thread
+     * id (> 0), or -1. All of an app's threads end when it exits. */
+    int   (*thread_create)(int (*fn)(void* arg), void* arg);
+    int   (*thread_join)(int id);       /* waits for it to end: what fn returned */
+    int   (*thread_id)(void);           /* 0 in the main thread */
+    void  (*thread_exit)(int ret);      /* ends the calling thread (the main one: the app) */
+    int   (*cpu_count)(void);           /* processor cores Banana OS uses */
 } banana_api_t;
 
 /* the app's entry point (the SDK's crt0 provides it) */

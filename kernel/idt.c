@@ -298,6 +298,8 @@ void irq_handler(registers_t* regs) {
 
     if (irq >= 8) pic_outb(PIC2_CMD, 0x20);
     pic_outb(PIC1_CMD, 0x20);
+    /* app code is safe to switch away from (kernel code is not) */
+    app_preempt((uintptr_t)REG_IP(regs));
 }
 
 /* UEFI firmware hands over with the local APIC enabled and its LINT0

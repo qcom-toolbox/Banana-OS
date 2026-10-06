@@ -208,3 +208,27 @@ void banana_tone(int hz, int ms, int volume) {
 
 void banana_copy(const char* text) { __banana->clipboard_set(text, strlen(text)); }
 const char* banana_paste(void) { unsigned long n; return __banana->clipboard_get(&n); }
+
+/* ── threads ──────────────────────────────────────────────────────── */
+
+static int has_threads(void) { return __banana->version >= 3 && __banana->size > (unsigned)((const char*)&__banana->thread_create - (const char*)__banana); }
+
+int  banana_thread(int (*fn)(void*), void* arg) { return has_threads() ? __banana->thread_create(fn, arg) : -1; }
+int  banana_join(int id) { return has_threads() ? __banana->thread_join(id) : -1; }
+int  banana_thread_id(void) { return has_threads() ? __banana->thread_id() : 0; }
+void banana_thread_exit(int ret) { if (has_threads()) __banana->thread_exit(ret); __banana->exit(ret); }
+int  banana_cpus(void) { return has_threads() ? __banana->cpu_count() : 1; }
+
+int banana_trylock(banana_mutex_t* m) { return __sync_lock_test_and_set(m, 1) == 0; }
+
+void banana_lock(banana_mutex_t* m) {
+    int spins = 0;
+    while (__sync_lock_test_and_set(m, 1)) {
+        while (*m) {
+            if (++spins > 200) { __banana->yield(); spins = 0; }   /* the holder needs the CPU */
+            __asm__ volatile("pause");
+        }
+    }
+}
+
+void banana_unlock(banana_mutex_t* m) { __sync_lock_release(m); }
