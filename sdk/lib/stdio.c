@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <math.h>
 #include "banana_api.h"
 
 extern const banana_api_t* __banana;
@@ -83,6 +84,94 @@ static void out_c(out_t* o, char c) {
 
 static void out_pad(out_t* o, char c, int n) { while (n-- > 0) out_c(o, c); }
 
+/* ── floating point: %f %e %g ─────────────────────────────────────── */
+
+/* the decimal digits of the whole number w (w >= 0, < 1e308) into d[], most significant first */
+static int whole_digits(double w, char* d, int cap) {
+    char tmp[320];
+    int n = 0;
+    if (w < 1) { d[0] = '0'; return 1; }
+    while (w >= 1 && n < (int)sizeof(tmp)) {
+        double q = floor(w / 10);
+        int digit = (int)(w - q * 10);
+        if (digit < 0) digit = 0;
+        if (digit > 9) digit = 9;
+        tmp[n++] = (char)('0' + digit);
+        w = q;
+    }
+    int k = 0;
+    while (n && k < cap) d[k++] = tmp[--n];
+    return k;
+}
+
+/* v with `prec` digits after the point into s (no exponent) */
+static int fixed(char* s, int cap, double v, int prec, int alt) {
+    double scale = pow(10, prec);
+    double r = floor(v * scale + 0.5);             /* rounded, in units of 10^-prec */
+    double w = floor(r / scale);
+    double f = r - w * scale;
+    int n = whole_digits(w, s, cap - prec - 2);
+    if (prec > 0 || alt) s[n++] = '.';
+    char fd[64];
+    int fn = whole_digits(f, fd, sizeof(fd));
+    for (int i = fn; i < prec; i++) s[n++] = '0';  /* leading zeros of the fraction */
+    for (int i = 0; i < fn && fn <= prec; i++) s[n++] = fd[i];
+    return n;
+}
+
+static int fmt_double(char* s, int cap, double v, int prec, char conv, int alt, int plus, int space) {
+    int n = 0;
+    if (v < 0 || (v == 0 && 1 / v < 0)) { s[n++] = '-'; v = -v; }
+    else if (plus) s[n++] = '+';
+    else if (space) s[n++] = ' ';
+    int upper = conv == 'F' || conv == 'E' || conv == 'G';
+    if (isnan(v) || isinf(v)) {
+        const char* t = isnan(v) ? (upper ? "NAN" : "nan") : (upper ? "INF" : "inf");
+        while (*t) s[n++] = *t++;
+        return n;
+    }
+    if (prec < 0) prec = 6;
+    if (prec > 60) prec = 60;
+    char c = conv | 32;                            /* f, e or g */
+    int exp10 = 0;
+    if (v != 0) {
+        exp10 = (int)floor(log10(v));
+        /* log10 can be one off near powers of ten */
+        if (v / pow(10, exp10) >= 10) exp10++;
+        if (v / pow(10, exp10) < 1) exp10--;
+    }
+    int strip = 0;
+    if (c == 'g') {
+        int p = prec ? prec : 1;
+        /* rounding can carry into the next power of ten */
+        double rounded = floor(v / pow(10, exp10 - p + 1) + 0.5) * pow(10, exp10 - p + 1);
+        if (rounded != 0 && rounded >= pow(10, exp10 + 1)) exp10++;
+        if (exp10 < -4 || exp10 >= p) { c = 'e'; prec = p - 1; }
+        else { c = 'f'; prec = p - 1 - exp10; }
+        strip = !alt;
+    }
+    if (c == 'f') {
+        n += fixed(s + n, cap - n, v, prec, alt);
+    } else {
+        double m = v == 0 ? 0 : v / pow(10, exp10);
+        if (floor(m * pow(10, prec) + 0.5) >= 10 * pow(10, prec)) { m /= 10; exp10++; }
+        n += fixed(s + n, cap - n - 6, m, prec, alt);
+    }
+    if (strip && memchr(s, '.', (size_t)n)) {
+        while (n > 0 && s[n - 1] == '0') n--;
+        if (n > 0 && s[n - 1] == '.') n--;
+    }
+    if (c == 'e') {
+        s[n++] = upper ? 'E' : 'e';
+        s[n++] = exp10 < 0 ? '-' : '+';
+        int ex = exp10 < 0 ? -exp10 : exp10;
+        if (ex >= 100) s[n++] = (char)('0' + ex / 100);
+        s[n++] = (char)('0' + ex / 10 % 10);
+        s[n++] = (char)('0' + ex % 10);
+    }
+    return n;
+}
+
 static int vfmt(out_t* o, const char* fmt, va_list ap) {
     for (; *fmt; fmt++) {
         if (*fmt != '%') { out_c(o, *fmt); continue; }
@@ -132,8 +221,19 @@ static int vfmt(out_t* o, const char* fmt, va_list ap) {
             continue;
         }
         if (c == 'n') { int* p = va_arg(ap, int*); if (p) *p = (int)o->n; continue; }
-        if (c == 'f' || c == 'g' || c == 'e') {   /* no floating point in Banana OS apps */
-            out_c(o, '?');
+        if (c == 'f' || c == 'F' || c == 'e' || c == 'E' || c == 'g' || c == 'G') {
+            char num[400];
+            int n = fmt_double(num, sizeof(num), va_arg(ap, double), prec, c, alt, plus, space);
+            int pad = width - n;
+            if (zero && !left && pad > 0 && (num[0] == '-' || num[0] == '+' || num[0] == ' ')) {
+                out_c(o, num[0]);
+                out_pad(o, '0', pad);
+                for (int i = 1; i < n; i++) out_c(o, num[i]);
+                continue;
+            }
+            if (!left) out_pad(o, zero ? '0' : ' ', pad);
+            for (int i = 0; i < n; i++) out_c(o, num[i]);
+            if (left) out_pad(o, ' ', pad);
             continue;
         }
         /* integers */
@@ -376,6 +476,25 @@ static int vscan(in_t* in, const char* fmt, va_list ap) {
                 if (lng >= 2) *va_arg(ap, long long*) = v;
                 else if (lng == 1) *va_arg(ap, long*) = (long)v;
                 else *va_arg(ap, int*) = (int)v;
+                count++;
+            }
+        } else if (conv == 'f' || conv == 'e' || conv == 'g' || conv == 'E' || conv == 'G') {
+            char num[64];
+            int n = 0;
+            c = in_get(in);
+            while (c != EOF && n < 62 && (!width || n < width) &&
+                   (isdigit(c) || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')) {
+                num[n++] = (char)c;
+                c = in_get(in);
+            }
+            in_unget(in, c);
+            num[n] = 0;
+            char* end;
+            double v = strtod(num, &end);
+            if (end == num) return count ? count : (c == EOF ? EOF : 0);
+            if (!skip) {
+                if (lng) *va_arg(ap, double*) = v;
+                else *va_arg(ap, float*) = (float)v;
                 count++;
             }
         } else {

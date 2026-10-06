@@ -8,11 +8,11 @@ CPUs Banana OS runs on (i686 and x86_64) and packs them into a single
 sdk/
 ├── include/        banana.h (windows, drawing, events, sound, network, ...),
 │                   banana_api.h (the system call table / ABI), and a small
-│                   C library: stdio.h stdlib.h string.h ctype.h time.h unistd.h ...
+│                   C library: stdio.h stdlib.h string.h math.h ctype.h time.h unistd.h ...
 ├── lib/            crt0.c, libc.c, stdio.c, banana.c (compiled into every app)
 ├── banana.mk       build rules: include it from your app's Makefile
 ├── tools/bpkg      the packager (pack, list, extract, check)
-└── examples/       hello, guess (console), paint, clock (desktop), tones (sound)
+└── examples/       hello, guess (console), paint, clock, mandel (desktop), tones (sound)
 ```
 
 ## Requirements
@@ -106,6 +106,7 @@ say. Installed apps live in `/apps/<name>/` (kept on an installed disk).
 - **Network**: `banana_http_get()` downloads `http://` and `https://` URLs.
 - **Clipboard**: `banana_copy()`, `banana_paste()`.
 - **Time**: `banana_ticks()`, `banana_sleep()`, `banana_time()`, `banana_random()`.
+- **Math**: `math.h` - see below.
 
 See `include/banana.h` for the full list and `examples/` for working code:
 
@@ -114,26 +115,39 @@ See `include/banana.h` for the full list and `examples/` for working code:
 | `hello` | console | printf, arguments, files, malloc |
 | `guess` | console | scanf, colors, random numbers |
 | `paint` | gui | a window, mouse drawing, buttons, saving a .bmp |
-| `clock` | gui | redrawing every second, integer trigonometry |
+| `clock` | gui | math.h trigonometry, a resizable window that scales its drawing |
 | `tones` | console | synthesizing sound and playing it |
+| `mandel` | gui | double-precision math, a resizable window, mouse zoom |
 
 Build them all with `make examples` at the top of the Banana OS tree; they are
 also built into Banana OS itself, in `~/Examples` (`pkg install ~/Examples/paint.bpk`).
 
 ### Rules of the road
 
-- **No floating point.** Banana OS does not save SSE registers when it switches
-  tasks, so apps are compiled with `-mno-sse` (on x86_64 that means `float`
-  and `double` do not compile). Use integers / fixed point (see `clock.c`).
+- **Floating point works**: `float`, `double`, `math.h` (`sqrt`, `sin`, `cos`,
+  `atan2`, `exp`, `log`, `pow`, `floor`, `fmod`...), `printf("%f %e %g")`,
+  `scanf("%f")`, `strtod`/`atof`. Banana OS keeps every task's FPU/SSE
+  registers apart (x86_64 apps use SSE, i686 apps the x87).
 - **Be cooperative.** Banana OS multitasks cooperatively: a long computation
   should call `banana_yield()` (or sleep, or read events) now and then. Most
   library calls - printing, file I/O, window updates - already do.
 - **Ctrl+C** ends a console app, unless it calls `banana_interrupted()` to
   handle it itself.
 - **Everything is released** when the app exits: memory, open files, windows.
-- Apps run in ring 0 with the kernel (there is no memory protection): a wild
-  pointer can crash the system.
-- The stack is 256 KiB; use `malloc` for big buffers.
+- **A crash ends only the app**: a bad pointer, a division by zero or an invalid
+  instruction prints what happened (`segmentation fault at address ...`, with
+  the offset in the app) and the system goes on. On the 64-bit kernel a NULL
+  pointer access always faults (page 0 is unmapped).
+- **The stack is 1 MiB.** On the 64-bit kernel unmapped guard pages sit under it
+  and apps are built with `-fstack-clash-protection`, so an overflow is caught
+  and reported ("stack overflow"); the 32-bit kernel has no paging and only
+  catches small overflows. Use `malloc` for big buffers.
+- Apps still run in ring 0 with the kernel and can reach all memory: a stray
+  write through a wild (non-NULL) pointer can damage the system.
+- **Resizable windows**: call `bwin_resizable(&win, min_w, min_h)` and handle
+  `BANANA_EV_RESIZE` - `bwin_event()` has already updated `win.w`, `win.h`
+  and `win.px` then; redraw everything (see `clock.c`, `mandel.c`). Users resize
+  with the grip in the corner and maximize by double-clicking the title.
 
 ### Packaging details
 
@@ -156,7 +170,7 @@ The format: `"BPK1"`, a little-endian `uint32` file count, then per file
 ### The ABI
 
 Banana OS loads the ELF, applies its relocations, and calls
-`_banana_start(api, argc, argv)` (in `lib/crt0.c`) on a 256 KiB stack; `api`
+`_banana_start(api, argc, argv)` (in `lib/crt0.c`) on a 1 MiB stack; `api`
 points to the `banana_api_t` table in `include/banana_api.h`. The table only
 ever grows at the end, and `api->size` tells an app how much of it the running
 system has - so apps built today keep working on later Banana OS versions.

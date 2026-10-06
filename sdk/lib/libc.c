@@ -390,3 +390,40 @@ char* getcwd(char* buf, size_t size) { return __banana->getcwd(buf, (int)size) =
 int chdir(const char* path) { return __banana->chdir(path); }
 int unlink(const char* path) { return __banana->remove(path); }
 int rmdir(const char* path) { return __banana->remove(path); }
+
+/* ── floating point ───────────────────────────────────────────────── */
+
+#include <math.h>
+
+double strtod(const char* s, char** end) {
+    const char* p = s;
+    while (isspace((unsigned char)*p)) p++;
+    int neg = 0;
+    if (*p == '+' || *p == '-') neg = *p++ == '-';
+    if (strncasecmp(p, "inf", 3) == 0) { if (end) *end = (char*)p + (strncasecmp(p, "infinity", 8) == 0 ? 8 : 3); return neg ? -INFINITY : INFINITY; }
+    if (strncasecmp(p, "nan", 3) == 0) { if (end) *end = (char*)p + 3; return NAN; }
+    double m = 0;
+    int digits = 0, scale = 0;
+    while (isdigit((unsigned char)*p)) { m = m * 10 + (*p++ - '0'); digits++; }
+    if (*p == '.') {
+        p++;
+        while (isdigit((unsigned char)*p)) { m = m * 10 + (*p++ - '0'); scale--; digits++; }
+    }
+    if (!digits) { if (end) *end = (char*)s; return 0; }
+    if (*p == 'e' || *p == 'E') {
+        const char* q = p + 1;
+        int eneg = 0, ex = 0;
+        if (*q == '+' || *q == '-') eneg = *q++ == '-';
+        if (isdigit((unsigned char)*q)) {
+            while (isdigit((unsigned char)*q)) { if (ex < 10000) ex = ex * 10 + (*q - '0'); q++; }
+            scale += eneg ? -ex : ex;
+            p = q;
+        }
+    }
+    if (end) *end = (char*)p;
+    double v = scale < 0 ? m / pow(10, -scale) : m * pow(10, scale);
+    return neg ? -v : v;
+}
+
+double atof(const char* s) { return strtod(s, NULL); }
+float  strtof(const char* s, char** end) { return (float)strtod(s, end); }

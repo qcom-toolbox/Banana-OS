@@ -25,7 +25,15 @@ typedef struct {
     int       min;                 /* minimized (taskbar) */
     int       last_mx, last_my, last_left, inside_down;
     uint32_t  gen;
+    /* resizing (only for apps that asked: win_set_resizable) */
+    int       resizable, min_w, min_h;
+    int       resizing, rdx, rdy;
+    int       pending, pw, ph;     /* a new client size, applied when the app reads BANANA_EV_RESIZE */
+    int       maxed, sx, sy, sw, sh;
+    uint32_t  title_ms;
 } awin_t;
+
+#define GRIP 14
 
 static awin_t   g_w[APPWIN_MAX];
 static int      g_order[APPWIN_MAX];  /* back to front: window ids */
@@ -93,11 +101,15 @@ static awin_t* front(void) {
 
 /* ── app side ─────────────────────────────────────────────────────── */
 
+/* the biggest client area that fits on the screen above the taskbar */
+static int max_cw(void) { return scr_w() - 2 * BORDER; }
+static int max_ch(void) { return scr_h() - 28 - TITLE_H - 2 * BORDER; }
+
 int appwin_open(int owner, const char* title, int w, int h) {
     if (w < 32) w = 32;
     if (h < 16) h = 16;
-    if (w > 780) w = 780;
-    if (h > 540) h = 540;
+    if (w > max_cw()) w = max_cw();
+    if (h > max_ch()) h = max_ch();
     for (int i = 0; i < APPWIN_MAX; i++) {
         awin_t* a = &g_w[i];
         if (a->used) continue;
@@ -137,12 +149,61 @@ void appwin_update(int id, int owner) {
     if (w) { w->gen++; g_gen++; }
 }
 
+/* the pending size takes effect: a new pixel buffer, the old picture
+ * copied into its top-left corner (the app redraws on BANANA_EV_RESIZE) */
+static void apply_resize(awin_t* w) {
+    if (!w->pending) return;
+    w->pending = 0;
+    if (w->pw == w->cw && w->ph == w->ch) return;
+    uint32_t* np = (uint32_t*)kmalloc((uint32_t)w->pw * (uint32_t)w->ph * 4);
+    if (!np) return;                         /* no memory: stays as it is */
+    memset32(np, 0x00FFFFFFu, (size_t)w->pw * (size_t)w->ph);
+    int cw = w->cw < w->pw ? w->cw : w->pw, ch = w->ch < w->ph ? w->ch : w->ph;
+    for (int y = 0; y < ch; y++) memcpy(np + (size_t)y * (size_t)w->pw, w->px + (size_t)y * (size_t)w->cw, (size_t)cw * 4);
+    kfree(w->px);
+    w->px = np;
+    w->cw = w->pw;
+    w->ch = w->ph;
+    w->gen++;
+    g_gen++;
+}
+
 int appwin_event(int id, int owner, banana_event_t* ev) {
     awin_t* w = get(id, owner);
     if (!w || w->qh == w->qt) return 0;
     *ev = w->q[w->qt];
     w->qt = (w->qt + 1) % EVQ;
+    /* only now, with the app inside this call, can its buffer change */
+    if (ev->type == BANANA_EV_RESIZE) {
+        apply_resize(w);
+        ev->x = w->cw;
+        ev->y = w->ch;
+    }
     return 1;
+}
+
+/* asks the app to take a new client size */
+static void request_resize(awin_t* w, int cw, int ch) {
+    if (cw < w->min_w) cw = w->min_w;
+    if (ch < w->min_h) ch = w->min_h;
+    if (cw > max_cw()) cw = max_cw();
+    if (ch > max_ch()) ch = max_ch();
+    if (cw == w->cw && ch == w->ch && !w->pending) return;
+    int had = w->pending;
+    w->pending = 1;
+    w->pw = cw;
+    w->ph = ch;
+    if (!had) push_simple(w, BANANA_EV_RESIZE, cw, ch, 0, 0);   /* one event; the latest size wins */
+    g_gen++;
+}
+
+void appwin_set_resizable(int id, int owner, int min_w, int min_h) {
+    awin_t* w = get(id, owner);
+    if (!w) return;
+    w->resizable = 1;
+    w->min_w = min_w < 32 ? 32 : min_w;
+    w->min_h = min_h < 16 ? 16 : min_h;
+    g_gen++;
 }
 
 static void destroy(int id) {
@@ -240,7 +301,32 @@ void appwin_draw(const fb_info_t* fi) {
         gfx_draw_text(w->x + 10, w->y + 8, t, 0x00FFFFFFu, tbg);
         bevel(w->x + W - 28, w->y + 5, 20, 14, 0x00553333u, 0x00885555u, 0x00221111u);
         gfx_draw_text(w->x + W - 22, w->y + 8, "x", 0x00FFFFFFu, 0x00553333u);
+        bevel(w->x + W - 52, w->y + 5, 20, 14, 0x00303740u, 0x00535D6Eu, 0x0015191Fu);
+        gfx_draw_text(w->x + W - 46, w->y + 7, "_", 0x00FFFFFFu, 0x00303740u);
         blit(w, w->x + BORDER, w->y + TITLE_H + BORDER);
+        if (w->resizable) gfx_draw_grip(w->x + W, w->y + H);
+        if (w->resizing || w->pending) {
+            /* the size it is about to get */
+            int ow = w->pw + 2 * BORDER, oh = w->ph + TITLE_H + 2 * BORDER;
+            gfx_fill_rect(w->x, w->y, ow, 2, 0x00F4D35Eu);
+            gfx_fill_rect(w->x, w->y + oh - 2, ow, 2, 0x00F4D35Eu);
+            gfx_fill_rect(w->x, w->y, 2, oh, 0x00F4D35Eu);
+            gfx_fill_rect(w->x + ow - 2, w->y, 2, oh, 0x00F4D35Eu);
+        }
+    }
+}
+
+static void toggle_maximize(awin_t* w) {
+    if (!w->resizable) return;
+    if (!w->maxed) {
+        w->sx = w->x; w->sy = w->y; w->sw = w->cw; w->sh = w->ch;
+        w->x = 0; w->y = 0;
+        w->maxed = 1;
+        request_resize(w, max_cw(), max_ch());
+    } else {
+        w->x = w->sx; w->y = w->sy;
+        w->maxed = 0;
+        request_resize(w, w->sw, w->sh);
     }
 }
 
@@ -257,9 +343,30 @@ void appwin_click(int mx, int my) {
             push_simple(w, BANANA_EV_CLOSE, 0, 0, 0, 0);
             return;
         }
+        if (mx >= w->x + W - 52 && mx < w->x + W - 32) {   /* minimize to the taskbar */
+            w->min = 1;
+            g_gen++;
+            return;
+        }
+        uint32_t now = timer_ms();
+        if (w->resizable && now - w->title_ms < 400) {     /* double-click: maximize / restore */
+            w->title_ms = 0;
+            toggle_maximize(w);
+            return;
+        }
+        w->title_ms = now;
         w->dragging = 1;
         w->ddx = mx - w->x;
         w->ddy = my - w->y;
+        return;
+    }
+    if (w->resizable && mx >= w->x + W - GRIP && my >= w->y + outer_h(w) - GRIP) {
+        w->resizing = 1;
+        w->maxed = 0;
+        w->pw = w->cw;
+        w->ph = w->ch;
+        w->rdx = w->x + W - mx;
+        w->rdy = w->y + outer_h(w) - my;
         return;
     }
     int cx = mx - w->x - BORDER, cy = my - w->y - TITLE_H - BORDER;
@@ -294,6 +401,18 @@ void appwin_mouse(int mx, int my, int left) {
                 if (ny < 0) ny = 0;
                 if (ny > scr_h() - 50) ny = scr_h() - 50;
                 if (nx != w->x || ny != w->y) { w->x = nx; w->y = ny; g_gen++; }
+            }
+        }
+        if (w->resizing) {
+            int ncw = mx + w->rdx - w->x - 2 * BORDER, nch = my + w->rdy - w->y - TITLE_H - 2 * BORDER;
+            if (ncw < w->min_w) ncw = w->min_w;
+            if (nch < w->min_h) nch = w->min_h;
+            if (ncw > max_cw()) ncw = max_cw();
+            if (nch > max_ch()) nch = max_ch();
+            if (ncw != w->pw || nch != w->ph) { w->pw = ncw; w->ph = nch; g_gen++; }
+            if (!left) {                     /* let go: the app gets the new size */
+                w->resizing = 0;
+                request_resize(w, w->pw, w->ph);
             }
         }
         int cx = mx - w->x - BORDER, cy = my - w->y - TITLE_H - BORDER;

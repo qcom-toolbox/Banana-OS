@@ -53,7 +53,67 @@ int mmio_map(uint64_t phys, uint64_t size) {
     return 1;
 }
 
+/* the 4 KiB page table entry for addr (below 4 GiB), splitting the 2 MiB
+ * page that covers it into 512 small ones (same mapping) the first time */
+static uint64_t* small_pte(uintptr_t addr) {
+    if (addr >= (4ull << 30)) return NULL;
+    uintptr_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    uint64_t* pml4 = (uint64_t*)(cr3 & ADDR_MASK);
+    uint64_t* pdpt = (uint64_t*)(uintptr_t)(pml4[0] & ADDR_MASK);
+    uint64_t* pd = (uint64_t*)(uintptr_t)(pdpt[(addr >> 30) & 3] & ADDR_MASK);
+    uint64_t* e2 = &pd[(addr >> 21) & 511];
+    if (*e2 & P_LARGE) {
+        uint64_t* pt = new_table();
+        if (!pt) return NULL;
+        uint64_t big = *e2 & ~0x1FFFFFull & ADDR_MASK;
+        uint64_t flags = *e2 & (P_WRITE | P_PWT | P_PCD);
+        for (int i = 0; i < 512; i++) pt[i] = (big + ((uint64_t)i << 12)) | P_PRESENT | flags;
+        *e2 = (uint64_t)(uintptr_t)pt | P_PRESENT | P_WRITE;
+        __asm__ volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");   /* flush */
+    }
+    uint64_t* pt = (uint64_t*)(uintptr_t)(*e2 & ADDR_MASK);
+    return &pt[(addr >> 12) & 511];
+}
+
+int paging_guard(uintptr_t addr, uint32_t size, int guard) {
+    for (uintptr_t a = addr & ~(uintptr_t)4095; a < addr + size; a += 4096) {
+        uint64_t* pte = small_pte(a);
+        if (!pte) return 0;
+        if (guard) *pte &= ~P_PRESENT;
+        else *pte |= P_PRESENT;
+        __asm__ volatile("invlpg (%0)" :: "r"(a) : "memory");
+    }
+    return 1;
+}
+
+/* The first 2 MiB are one big page at boot; split into 4 KiB pages with
+ * page 0 left out, a NULL pointer dereference (an app's most common bug)
+ * faults instead of quietly reading or scribbling on low memory. */
+static uint64_t g_low_pt[512] __attribute__((aligned(4096)));
+
+void paging_guard_null(void) {
+    uintptr_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    uint64_t* pml4 = (uint64_t*)(cr3 & ADDR_MASK);
+    uint64_t* pdpt = (uint64_t*)(uintptr_t)(pml4[0] & ADDR_MASK);
+    uint64_t* pd = (uint64_t*)(uintptr_t)(pdpt[0] & ADDR_MASK);
+    if (!(pd[0] & P_LARGE)) return;                     /* already split */
+    for (int i = 0; i < 512; i++) g_low_pt[i] = ((uint64_t)i << 12) | P_PRESENT | P_WRITE;
+    g_low_pt[0] = 0;                                    /* 0..4095: not present */
+    pd[0] = (uint64_t)(uintptr_t)g_low_pt | P_PRESENT | P_WRITE;
+    __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");   /* flush the TLB */
+}
+
 #else
+
+void paging_guard_null(void) {}     /* no paging on the 32-bit kernel */
+
+int paging_guard(uintptr_t addr, uint32_t size, int guard) {
+    (void)addr; (void)size; (void)guard;
+    return 0;
+}
+
 
 int mmio_map(uint64_t phys, uint64_t size) {
     return phys + size <= (4ull << 30);   /* no paging: only the low 4 GiB exist */

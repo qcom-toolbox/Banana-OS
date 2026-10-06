@@ -9,9 +9,10 @@
  * sdk/include/banana_api.h. kernel/pkg.c installs them from .bpk
  * packages into /apps/<name>/.
  *
- * An app runs on its own 256 KiB stack, in ring 0 like the rest of
- * Banana OS (there is no memory protection), and everything it allocated,
- * opened or put on screen is released when it exits.
+ * An app runs on its own 1 MiB stack (with guard pages under it on the
+ * 64-bit kernel), in ring 0 like the rest of Banana OS. A CPU exception
+ * while it runs stops just the app (app_fault), and everything it
+ * allocated, opened or put on screen is released when it exits.
  */
 
 /* runs the app at path (an ELF file) in the calling task - a shell's -
@@ -32,6 +33,10 @@ typedef struct {
 int  app_snapshot(app_info_t* out, int max);
 /* stops app id the next time it calls the system (its windows close) */
 int  app_kill(int id);
+
+/* kernel/idt.c: CPU exception `vector` in the current task; if an app is
+ * running there it is stopped (this does not return), else it returns */
+void app_fault(uint32_t vector, uint32_t err, uintptr_t ip, uintptr_t addr);
 
 /* running apps, for `pkg ps` */
 void app_list(void);

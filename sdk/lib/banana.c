@@ -23,7 +23,22 @@ void bwin_close(bwin_t* win) {
 
 void bwin_title(bwin_t* win, const char* title) { if (win->id >= 0) __banana->win_set_title(win->id, title); }
 void bwin_update(bwin_t* win) { if (win->id >= 0) __banana->win_update(win->id); }
-int  bwin_event(bwin_t* win, banana_event_t* ev) { return win->id >= 0 && __banana->win_event(win->id, ev); }
+int bwin_event(bwin_t* win, banana_event_t* ev) {
+    if (win->id < 0 || !__banana->win_event(win->id, ev)) return 0;
+    if (ev->type == BANANA_EV_RESIZE) {
+        /* the system gave the window a new buffer: use it from now on */
+        __banana->win_size(win->id, &win->w, &win->h);
+        win->px = __banana->win_pixels(win->id);
+    }
+    return 1;
+}
+
+int bwin_resizable(bwin_t* win, int min_w, int min_h) {
+    /* a call of API version 2: older systems do not have it */
+    if (win->id < 0 || __banana->size < __builtin_offsetof(banana_api_t, win_set_resizable) + sizeof(void*)) return -1;
+    __banana->win_set_resizable(win->id, min_w, min_h);
+    return 0;
+}
 
 int bwin_wait_event(bwin_t* win, banana_event_t* ev, int timeout_ms) {
     unsigned int start = __banana->ticks_ms();

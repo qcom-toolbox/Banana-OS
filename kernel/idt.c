@@ -2,6 +2,8 @@
 #include "types.h"
 #include "fb.h"
 #include "serial.h"
+#include "app.h"
+#include "kstring.h"
 
 #define VGA_MEMORY ((volatile uint16_t*)0xB8000)
 
@@ -180,6 +182,13 @@ void isr_handler(registers_t* regs) {
     uint32_t n = regs->int_no;
     const char* name = (n < 32) ? exception_names[n] : "Unknown";
 
+    /* an app that crashed is stopped; only kernel faults are fatal */
+    if (n < 32 && n != 2 && n != 8 && n != 18) {
+        uintptr_t cr2;
+        __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+        app_fault(n, (uint32_t)regs->err_code, (uintptr_t)REG_IP(regs), cr2);
+    }
+
     vga_clear_rows(6, 0x4F);
     vga_puts(0, 2, "*** BANANA OS PANIC ***", 0x4F);
     vga_puts(1, 2, "Exception:", 0x4F);
@@ -307,6 +316,45 @@ static void lapic_off(void) {
     __asm__ volatile("wrmsr" : : "a"(lo), "d"(hi), "c"(0x1Bu));
 }
 
+#ifdef __x86_64__
+/* A TSS for its interrupt stack table: page faults, stack faults and double
+ * faults run on a stack of their own, so an app that ran into the guard
+ * page under its stack (kernel/app.c) gets a clean "stack overflow"
+ * instead of a fault while pushing the fault's frame (a triple fault). */
+struct tss64 {
+    uint32_t reserved0;
+    uint64_t rsp[3];
+    uint64_t reserved1;
+    uint64_t ist[7];
+    uint64_t reserved2;
+    uint16_t reserved3;
+    uint16_t iomap;
+} __attribute__((packed));
+
+static struct tss64 g_tss;
+static uint8_t g_fault_stack[16384] __attribute__((aligned(16)));
+static uint64_t g_gdt[4];                  /* null, 64-bit code (0x08), TSS (0x10, 16 bytes) */
+
+static void tss_init(void) {
+    memset(&g_tss, 0, sizeof(g_tss));
+    g_tss.ist[0] = (uint64_t)(uintptr_t)(g_fault_stack + sizeof(g_fault_stack));
+    g_tss.iomap = sizeof(g_tss);
+    uint64_t base = (uint64_t)(uintptr_t)&g_tss, limit = sizeof(g_tss) - 1;
+    g_gdt[0] = 0;
+    g_gdt[1] = 0x00AF9A000000FFFFull;      /* the same code segment as boot64.asm's */
+    g_gdt[2] = (limit & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (0x89ull << 40) | (((limit >> 16) & 0xF) << 48) |
+               (((base >> 24) & 0xFF) << 56);
+    g_gdt[3] = base >> 32;
+    struct { uint16_t limit; uint64_t base; } __attribute__((packed)) gp = { sizeof(g_gdt) - 1, (uint64_t)(uintptr_t)g_gdt };
+    __asm__ volatile("lgdt %0" :: "m"(gp));
+    /* long mode ignores the data segments, but iretq reloads SS from the
+     * interrupt frame: the old selectors must not point at the TSS slot */
+    __asm__ volatile("xor %%eax, %%eax; mov %%ax, %%ss; mov %%ax, %%ds; mov %%ax, %%es; mov %%ax, %%fs; mov %%ax, %%gs"
+                     ::: "rax", "memory");
+    __asm__ volatile("ltr %w0" :: "r"((uint16_t)0x10));
+}
+#endif
+
 void idt_init(void) {
     idtp.limit = (uint16_t)(sizeof(idt) - 1);
     idtp.base  = (uintptr_t)&idt;
@@ -317,6 +365,12 @@ void idt_init(void) {
     for (int i = 0; i < 32; i++) {
         idt_set_gate((uint8_t)i, (uintptr_t)isr_stubs[i], code_sel, 0x8E);
     }
+#ifdef __x86_64__
+    tss_init();
+    idt[8].ist = 1;                        /* double fault */
+    idt[12].ist = 1;                       /* stack fault */
+    idt[14].ist = 1;                       /* page fault */
+#endif
     for (int i = 0; i < 16; i++) {
         idt_set_gate((uint8_t)(32 + i), (uintptr_t)irq_stubs[i], code_sel, 0x8E);
     }

@@ -3,7 +3,7 @@
 ; ~/Examples on a fresh system. Assembled for both kernels (elf32/elf64).
 
 global ex_hello, ex_hello_end, ex_guess, ex_guess_end, ex_paint, ex_paint_end
-global ex_clock, ex_clock_end, ex_tones, ex_tones_end
+global ex_clock, ex_clock_end, ex_tones, ex_tones_end, ex_mandel, ex_mandel_end
 
 section .rodata
 align 16
@@ -21,3 +21,6 @@ ex_clock_end:
 align 16
 ex_tones: incbin "sdk/examples/tones/tones.bpk"
 ex_tones_end:
+align 16
+ex_mandel: incbin "sdk/examples/mandel/mandel.bpk"
+ex_mandel_end:

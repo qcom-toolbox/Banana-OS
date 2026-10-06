@@ -24,6 +24,8 @@ void      appwin_close(int id, int owner);
 void      appwin_close_owner(int owner);        /* every window of an app that ends */
 void      appwin_set_title(int id, int owner, const char* title);
 void      appwin_size(int id, int owner, int* w, int* h);
+/* the user may resize / maximize it (the app gets BANANA_EV_RESIZE) */
+void      appwin_set_resizable(int id, int owner, int min_w, int min_h);
 /* 1 once the user clicked an app window's close button twice (the app
  * did not quit on the first BANANA_EV_CLOSE): the app is stopped */
 int       appwin_kill_requested(int owner);

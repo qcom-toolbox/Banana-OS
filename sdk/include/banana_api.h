@@ -2,7 +2,7 @@
 #define BANANA_API_H
 
 /*
- * The Banana OS application interface (ABI), version 1.
+ * The Banana OS application interface (ABI), version 2.
  *
  * An app is a position-independent ELF executable (built by the SDK for
  * i686 and x86_64, both packed in one .bpk). Banana OS loads it, applies
@@ -17,7 +17,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 1u
+#define BANANA_API_VERSION 2u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -39,6 +39,8 @@
 #define BANANA_EV_MOUSE_MOVE  4    /* buttons: bit 0 left held */
 #define BANANA_EV_CLOSE       5    /* the close button: clean up and exit */
 #define BANANA_EV_FOCUS       6    /* x = 1 gained / 0 lost */
+#define BANANA_EV_RESIZE      7    /* (resizable windows) x, y = the new size: fetch
+                                      win_pixels() again and redraw */
 
 #define BANANA_KEY_UP     0x101
 #define BANANA_KEY_DOWN   0x102
@@ -156,6 +158,12 @@ typedef struct banana_api {
 
     /* ── more console ─────────────────────────────────────── */
     int   (*interrupted)(void);     /* 1 once Ctrl+C was pressed in the app's terminal */
+
+    /* ── version 2 ────────────────────────────────────────── */
+    /* lets the user resize and maximize the window (not smaller than
+     * min_w x min_h); the app gets BANANA_EV_RESIZE and must take the
+     * new buffer from win_pixels() - the old one is gone after that event */
+    void  (*win_set_resizable)(int win, int min_w, int min_h);
 } banana_api_t;
 
 /* the app's entry point (the SDK's crt0 provides it) */

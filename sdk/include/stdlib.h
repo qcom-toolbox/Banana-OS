@@ -28,4 +28,7 @@ void   srand(unsigned int seed);
 void   qsort(void* base, size_t n, size_t size, int (*cmp)(const void*, const void*));
 void*  bsearch(const void* key, const void* base, size_t n, size_t size, int (*cmp)(const void*, const void*));
 char*  getenv(const char* name);
+double strtod(const char* s, char** end);
+float  strtof(const char* s, char** end);
+double atof(const char* s);
 #endif

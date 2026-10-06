@@ -34,6 +34,7 @@ typedef struct {
     int          vt;             /* terminal output target, restored on switch-in */
     int          background;     /* daemon: never reads the keyboard (task_set_background) */
     void*        stack_mem;      /* kmalloc'd stack (task_create_stack), or NULL */
+    uint8_t      fpu[512] __attribute__((aligned(16)));   /* FPU/SSE registers while switched out */
 } task_t;
 
 static task_t  g_tasks[TASK_MAX];
@@ -60,7 +61,38 @@ static void task_exit_stub(void) {
 /* Landing pad for a freshly created task's first switch-in. task_switch()
  * reaches this via `ret`, so on entry esp already looks exactly like a
  * normal 0-argument call - no arguments need passing here. */
+/* Every task has its own FPU/SSE registers (apps compute with float and
+ * double; the browser's JavaScript uses the x87): saved when a task is
+ * switched out, restored when it comes back. fxsave when the CPU has it
+ * (it also covers SSE), the older fnsave otherwise. */
+static int g_fxsr = -1;
+
+static int have_fxsr(void) {
+    if (g_fxsr < 0) {
+        uint32_t a = 1, b, c, d;
+        __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+        g_fxsr = (d >> 24) & 1;
+    }
+    return g_fxsr;
+}
+
+static void fpu_save(uint8_t* area) {
+    if (have_fxsr()) __asm__ volatile("fxsave (%0)" :: "r"(area) : "memory");
+    else __asm__ volatile("fnsave (%0)" :: "r"(area) : "memory");
+}
+
+static void fpu_restore(uint8_t* area) {
+    if (have_fxsr()) __asm__ volatile("fxrstor (%0)" :: "r"(area) : "memory");
+    else __asm__ volatile("frstor (%0)" :: "r"(area) : "memory");
+}
+
 static void task_trampoline(void) {
+    /* a fresh task starts with clean FPU/SSE registers */
+    __asm__ volatile("fninit");
+    if (have_fxsr()) {
+        uint32_t mxcsr = 0x1F80;
+        __asm__ volatile("ldmxcsr %0" :: "m"(mxcsr));
+    }
     terminal_vt_set_active(g_current->vt);
     g_current->entry();
     g_current->state = TASK_UNUSED;
@@ -193,7 +225,9 @@ void task_yield(void) {
      * not leave its terminal selected for us */
     cur->vt = terminal_vt_get_active();
     g_current = nxt;
+    fpu_save(cur->fpu);
     task_switch(&cur->sp, nxt->sp);
+    fpu_restore(cur->fpu);
 
     /* We only get here once some other task switches back into `cur`.
      * g_current was set to `cur` by whoever scheduled us back in. */

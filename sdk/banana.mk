@@ -35,11 +35,12 @@ CC   ?= gcc
 LD   ?= ld
 PYTHON ?= python3
 
-# Freestanding position-independent code; no SSE (Banana OS does not save
-# those registers) and no red zone (interrupts share the app's stack).
-APP_CFLAGS = -ffreestanding -fno-stack-protector -fpie -fvisibility=hidden -nostdlib -nostdinc \
+# Freestanding position-independent code, no red zone (interrupts share
+# the app's stack). Floating point is fine: Banana OS saves every task's
+# FPU/SSE registers (x86_64 uses SSE, i686 the x87).
+APP_CFLAGS = -ffreestanding -fno-stack-protector -fstack-clash-protection -fpie -fvisibility=hidden -nostdlib -nostdinc \
              -fno-asynchronous-unwind-tables -fno-exceptions -fno-builtin-malloc \
-             -mno-sse -mno-sse2 -mno-mmx -mno-3dnow -O2 -Wall -Wextra \
+             -fno-math-errno -O2 -Wall -Wextra \
              -I$(BANANA_SDK)/include $(CFLAGS)
 CFLAGS_i686   = -m32 -march=i686 -mstackrealign
 CFLAGS_x86_64 = -m64 -mno-red-zone -mcmodel=small
@@ -48,7 +49,8 @@ LDFLAGS_x86_64 = -m elf_x86_64
 APP_LDFLAGS = -pie --no-dynamic-linker -z noexecstack -z norelro -z max-page-size=4096 \
               -z noseparate-code --hash-style=sysv -e _banana_start -s $(LDFLAGS)
 
-LIBC_SRCS = $(BANANA_SDK)/lib/crt0.c $(BANANA_SDK)/lib/libc.c $(BANANA_SDK)/lib/stdio.c $(BANANA_SDK)/lib/banana.c
+LIBC_SRCS = $(BANANA_SDK)/lib/crt0.c $(BANANA_SDK)/lib/libc.c $(BANANA_SDK)/lib/stdio.c $(BANANA_SDK)/lib/banana.c \
+            $(BANANA_SDK)/lib/math.c
 LIBC_i686   = $(LIBC_SRCS) $(BANANA_SDK)/lib/divdi3.c
 LIBC_x86_64 = $(LIBC_SRCS)
 

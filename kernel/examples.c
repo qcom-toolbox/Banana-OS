@@ -3,7 +3,7 @@
 #include "types.h"
 
 extern const uint8_t ex_hello[], ex_hello_end[], ex_guess[], ex_guess_end[], ex_paint[], ex_paint_end[];
-extern const uint8_t ex_clock[], ex_clock_end[], ex_tones[], ex_tones_end[];
+extern const uint8_t ex_clock[], ex_clock_end[], ex_tones[], ex_tones_end[], ex_mandel[], ex_mandel_end[];
 
 static const struct { const char* name; const uint8_t* start; const uint8_t* end; } g_examples[] = {
     { "hello.bpk", ex_hello, ex_hello_end },
@@ -11,6 +11,7 @@ static const struct { const char* name; const uint8_t* start; const uint8_t* end
     { "paint.bpk", ex_paint, ex_paint_end },
     { "clock.bpk", ex_clock, ex_clock_end },
     { "tones.bpk", ex_tones, ex_tones_end },
+    { "mandel.bpk", ex_mandel, ex_mandel_end },
 };
 
 void examples_seed(void) {

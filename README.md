@@ -14,7 +14,8 @@ Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux k
 
 ## Latest additions
 
-- **Apps and a Linux SDK** - write apps in C on Linux with the SDK in [`sdk/`](sdk/README.md) (C library, windows, drawing, mouse/keyboard events, files, sound, HTTP); one `make` builds them for both kernels into a `.bpk` package. Install with `pkg install app.bpk` or a double-click in Files, run them by name or from **Apps** on the desktop. Five examples come built in (`~/Examples`)
+- **Apps and a Linux SDK** - write apps in C on Linux with the SDK in [`sdk/`](sdk/README.md) (C library with `float`/`double` and `math.h`, windows - resizable ones too - drawing, mouse/keyboard events, files, sound, HTTP); one `make` builds them for both kernels into a `.bpk` package. Install with `pkg install app.bpk` or a double-click in Files, run them by name or from **Apps** on the desktop. Six examples come built in (`~/Examples`)
+- **Crash-safe apps** - an app that crashes (bad pointer, division by zero, stack overflow...) is stopped with a message saying what happened, and the rest of the system keeps running; on the 64-bit kernel NULL pointers and stack overflows (guard pages) always fault. Every task's FPU/SSE registers are saved, so apps compute in floating point
 - **USB sticks (FAT32)** - plugged-in sticks are mounted at `/mnt/usb`, read and write, long file names included; every tool works on them (`ls`, `cp`, Files, the browser, `pkg install`...). `umount` ejects
 - **NVMe SSDs** - a polled NVMe driver: NVMe disks are install targets (and boot on UEFI), FAT32 partitions are mounted at `/mnt/nvme`
 - **Sound** - Intel HD Audio and AC'97 drivers (QEMU, VirtualBox, many real PCs) and the PC speaker: `play file.wav`, `beep`, `volume`, and sound for apps

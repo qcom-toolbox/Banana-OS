@@ -6,8 +6,8 @@
  * events, time, sound, the network, the clipboard. The standard C parts
  * (stdio.h, stdlib.h, string.h, ...) are next to this header.
  *
- * Everything is integer-only: the system does not save SSE registers,
- * so apps are built without floating point.
+ * float and double work (math.h has the usual functions); the system
+ * keeps every app's FPU/SSE registers apart.
  */
 
 #include "banana_api.h"
@@ -45,6 +45,11 @@ void bwin_update(bwin_t* win);
 int  bwin_event(bwin_t* win, banana_event_t* ev);
 /* waits up to timeout_ms (-1: forever) for an event */
 int  bwin_wait_event(bwin_t* win, banana_event_t* ev, int timeout_ms);
+/* lets the user resize (grip in the corner) and maximize (double-click
+ * the title) the window, not below min_w x min_h. On BANANA_EV_RESIZE,
+ * bwin_event() has already updated win->w, win->h and win->px: redraw
+ * everything. 0, or -1 on a Banana OS too old for it. */
+int  bwin_resizable(bwin_t* win, int min_w, int min_h);
 
 /* drawing (clipped to the window) */
 void bwin_clear(bwin_t* win, unsigned int color);

@@ -15,4 +15,12 @@
  */
 int mmio_map(uint64_t phys, uint64_t size);
 
+/* 64-bit kernel: unmaps page 0, so NULL pointer accesses fault */
+void paging_guard_null(void);
+
+/* 64-bit kernel: makes [addr, addr + size) (4 KiB pages, below 4 GiB)
+ * fault on any access (guard = 1) or usable again (guard = 0) - guard
+ * pages under app stacks. Returns 0 where that is not possible. */
+int  paging_guard(uintptr_t addr, uint32_t size, int guard);
+
 #endif

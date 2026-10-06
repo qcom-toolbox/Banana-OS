@@ -14,12 +14,15 @@
 #include "clipboard.h"
 #include "serial.h"
 #include "font8x8.h"
+#include "paging.h"
 #include "../net/http.h"
 #include "../sdk/include/banana_api.h"
 
 #define APP_MAX     8
 #define APP_FD_MAX  16
-#define APP_STACK   (256u << 10)
+#define APP_STACK   (1u << 20)        /* 1 MiB */
+#define APP_GUARD   (16u << 10)       /* unmapped pages under it (64-bit): an overflow faults */
+#define STACK_CANARY 0xB4A4A5C0u      /* at the bottom of the stack: checked on every system call */
 #define APP_KEYQ    32
 #define APP_MAX_IMAGE (16u << 20)
 
@@ -48,9 +51,13 @@ typedef struct {
     int       pid;             /* the task it runs in */
     int       own_task;        /* started with app_spawn() */
     char      name[32];
-    uint8_t*  image;
+    uint8_t*  image;           /* the allocation */
+    uintptr_t base;            /* where the ELF was loaded (crash reports: app+offset) */
     banana_entry_t entry;
-    uint8_t*  stack;
+    uint8_t*  stack_mem;       /* the allocation: guard pages, then the stack */
+    uint8_t*  guard;           /* APP_GUARD bytes, page-aligned */
+    uint8_t*  stack;           /* APP_STACK bytes above the guard */
+    int       guarded;
     ablock_t* blocks;
     afd_t     fds[APP_FD_MAX];
     uintptr_t saved_sp;        /* the kernel stack app_enter() left: exit() returns there */
@@ -64,12 +71,15 @@ typedef struct {
     int       interrupted;
     uint32_t  last_breath;
     int       kill_req;        /* Task Manager: End task */
+    int       running;         /* between app_enter() and its return */
+    char      crash_msg[192];  /* why it crashed (app_fault), printed by run() */
     int       argc;
     char**    argv;
 } app_proc_t;
 
 static app_proc_t g_procs[APP_MAX];
 static banana_api_t g_api;
+
 
 static app_proc_t* cur(void) {
     int pid = task_current_pid();
@@ -111,6 +121,13 @@ static int focused(app_proc_t* p) {
 static void breathe(app_proc_t* p, int force) {
     if (!p) return;
     uint32_t now = timer_ms();
+    /* the 32-bit kernel has no guard pages: a smashed canary stops the app */
+    if (*(volatile uint32_t*)p->stack != STACK_CANARY) {
+        ksnprintf(p->crash_msg, sizeof(p->crash_msg), "%s: stack overflow - it used more than %u KiB of stack "
+                  "(big local arrays? malloc them)", p->name, APP_STACK >> 10);
+        *(volatile uint32_t*)p->stack = STACK_CANARY;
+        leave(p, 139);
+    }
     if (!force && now - p->last_breath < 20) return;
     p->last_breath = now;
     if (appwin_kill_requested(p->id) || p->kill_req) leave(p, 137);
@@ -508,6 +525,7 @@ static int a_win_event(int win, banana_event_t* ev) {
 static void a_win_close(int win) { app_proc_t* p = cur(); if (p) appwin_close(win, p->id); }
 static void a_win_set_title(int win, const char* t) { app_proc_t* p = cur(); if (p) appwin_set_title(win, p->id, t); }
 static void a_win_size(int win, int* w, int* h) { app_proc_t* p = cur(); appwin_size(win, p ? p->id : -1, w, h); }
+static void a_win_set_resizable(int win, int mw, int mh) { app_proc_t* p = cur(); if (p) appwin_set_resizable(win, p->id, mw, mh); }
 
 static void a_draw_text(unsigned int* px, int stride, int w, int h, int x, int y,
                         const char* s, unsigned int fg, unsigned int bg) {
@@ -656,6 +674,7 @@ static void api_init(void) {
     g_api.clipboard_set = a_clip_set;
     g_api.clipboard_get = a_clip_get;
     g_api.interrupted = a_interrupted;
+    g_api.win_set_resizable = a_win_set_resizable;
 }
 
 /* ── the ELF loader ────────────────────────────────────────────────── */
@@ -690,7 +709,9 @@ typedef struct { uint32_t type, offset, vaddr, paddr, filesz, memsz, flags, alig
 typedef struct { int32_t tag; uint32_t val; } dyn_t;
 #endif
 
-static int load_elf(const uint8_t* f, uint32_t size, uint8_t** image_out, banana_entry_t* entry, char* err, int ecap) {
+
+static int load_elf(const uint8_t* f, uint32_t size, uint8_t** image_out, banana_entry_t* entry, uintptr_t* base_out,
+                    char* err, int ecap) {
     const ehdr_t* eh = (const ehdr_t*)f;
     if (size < sizeof(ehdr_t) || memcmp(eh->ident, "\x7f" "ELF", 4) != 0) { kstrlcpy(err, "not an ELF program", (size_t)ecap); return -1; }
     if (eh->ident[4] != ELF_CLASS || eh->machine != EM_HOST) {
@@ -770,6 +791,7 @@ static int load_elf(const uint8_t* f, uint32_t size, uint8_t** image_out, banana
     }
     *image_out = raw;
     *entry = (banana_entry_t)(base + (uintptr_t)eh->entry);
+    *base_out = base;
     return 0;
 }
 
@@ -789,14 +811,65 @@ static void release(app_proc_t* p) {
         kfree(b);
     }
     kfree(p->image);
-    kfree(p->stack);
+    if (p->guarded) paging_guard((uintptr_t)p->guard, APP_GUARD, 0);
+    kfree(p->stack_mem);
     kfree(p->argv);
     p->used = 0;
 }
 
+
 static int run(app_proc_t* p) {
+    *(volatile uint32_t*)p->stack = STACK_CANARY;      /* the bottom of the stack: overflow check */
+    p->guarded = paging_guard((uintptr_t)p->guard, APP_GUARD, 1);
+    p->running = 1;
     p->exit_code = app_enter(trampoline, p, p->stack + APP_STACK, &p->saved_sp);
+    p->running = 0;
+    if (p->crash_msg[0]) {                              /* it crashed (app_fault) */
+        klog("app crashed: %s\n", p->crash_msg);
+        if (p->has_term) {
+            terminal_vt_set_active(p->vt);
+            terminal_write_color(p->crash_msg, VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            terminal_putchar('\n');
+        }
+    }
+    if (*(volatile uint32_t*)p->stack != STACK_CANARY)
+        klog("app %s: its stack overflowed (256 KiB) - memory may be damaged\n", p->name);
     return p->exit_code;
+}
+
+/* A CPU exception (kernel/idt.c) while an app runs - in its own code, or
+ * in a system call it made with a bad pointer: the app is stopped, the
+ * rest of the system goes on. Returns only if no app is running here. */
+void app_fault(uint32_t vector, uint32_t err, uintptr_t ip, uintptr_t addr) {
+    app_proc_t* p = cur();
+    if (!p || !p->running) return;
+    p->running = 0;
+    /* We came in through an interrupt gate, so interrupts are off - and the
+     * terminal output below may yield to other tasks, which must not run
+     * with interrupts off (timers, sleeps and hlt would all stop): turn
+     * them on first. This exception handler is never returned from. */
+    __asm__ volatile("sti");
+    static const char* const what[20] = {
+        "division by zero", "debug trap", "NMI", "breakpoint", "overflow", "bound range",
+        "invalid instruction", "no FPU", "double fault", "", "invalid TSS", "segment not present",
+        "stack fault", "general protection fault", "segmentation fault (bad memory access)", "",
+        "floating point error", "alignment check", "machine check", "SIMD floating point error",
+    };
+    const char* w = vector < 20 && what[vector][0] ? what[vector] : "CPU exception";
+    uintptr_t base = p->base;
+    char line[160];
+    if (vector == 14 && p->guarded && addr >= (uintptr_t)p->guard && addr < (uintptr_t)p->guard + APP_GUARD)
+        ksnprintf(line, sizeof(line), "%s: stack overflow - it used more than %u KiB of stack (big local arrays? malloc them)",
+                  p->name, APP_STACK >> 10);
+    else if (vector == 14)
+        ksnprintf(line, sizeof(line), "%s: %s at address %p (ip %p, app+%x, error %x)", p->name, w, (void*)addr,
+                  (void*)ip, (uint32_t)(ip - base), err);
+    else
+        ksnprintf(line, sizeof(line), "%s: %s (ip %p, app+%x)", p->name, w, (void*)ip, (uint32_t)(ip - base));
+    /* reported by run(), back on the task's own stack: this may be the
+     * dedicated fault stack, which must not be in use when we yield */
+    kstrlcpy(p->crash_msg, line, sizeof(p->crash_msg));
+    app_leave(p->saved_sp, 139);
 }
 
 /* reads, loads and prepares an app (slot claimed, not started) */
@@ -812,14 +885,18 @@ static app_proc_t* prepare(const char* path, int argc, char** argv, char* err, i
     p->id = id;
     fs_file_t* f = fs_get_file(fi);
     if (!f) { kstrlcpy(err, "cannot read it", (size_t)ecap); return NULL; }
-    if (load_elf((const uint8_t*)f->content, f->size, &p->image, &p->entry, err, ecap) != 0) return NULL;
-    p->stack = (uint8_t*)kmalloc(APP_STACK + 16);
+    if (load_elf((const uint8_t*)f->content, f->size, &p->image, &p->entry, &p->base, err, ecap) != 0) return NULL;
+    p->stack_mem = (uint8_t*)kmalloc(APP_GUARD + APP_STACK + 4096);
+    if (p->stack_mem) {
+        p->guard = (uint8_t*)(((uintptr_t)p->stack_mem + 4095) & ~(uintptr_t)4095);
+        p->stack = p->guard + APP_GUARD;
+    }
     /* argv: the pointers and the strings in one block */
     uint32_t need = (uint32_t)(argc + 1) * sizeof(char*);
     for (int i = 0; i < argc; i++) need += (uint32_t)strlen(argv[i]) + 1;
     p->argv = (char**)kmalloc(need);
-    if (!p->stack || !p->argv) {
-        kfree(p->image); kfree(p->stack); kfree(p->argv);
+    if (!p->stack_mem || !p->argv) {
+        kfree(p->image); kfree(p->stack_mem); kfree(p->argv);
         kstrlcpy(err, "out of memory", (size_t)ecap);
         return NULL;
     }
@@ -837,6 +914,7 @@ static app_proc_t* prepare(const char* path, int argc, char** argv, char* err, i
     p->used = 1;
     return p;
 }
+
 
 int app_exec(const char* path, int argc, char** argv, char* err, int ecap) {
     app_proc_t* p = prepare(path, argc, argv, err, ecap);

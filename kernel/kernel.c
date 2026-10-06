@@ -20,6 +20,7 @@
 #include "blockdev.h"
 #include "audio.h"
 #include "nvme.h"
+#include "paging.h"
 #include "../shell/shell.h"
 
 #define MULTIBOOT2_MAGIC 0x36D76289
@@ -35,6 +36,18 @@ static void fpu_init(void) {
     cr0 |= (uintptr_t)1 << 1 | (uintptr_t)1 << 5;      /* MP, NE */
     __asm__ volatile("mov %0, %%cr0" :: "r"(cr0));
     __asm__ volatile("fninit");
+    /* SSE for apps (the kernel itself is built without it): the scheduler
+     * saves every task's FPU/SSE registers with fxsave (kernel/task.c) */
+    uint32_t a = 1, b, c, d;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+    if ((d & (1u << 24)) && (d & (1u << 25))) {          /* FXSR + SSE */
+        uintptr_t cr4;
+        __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+        cr4 |= (uintptr_t)1 << 9 | (uintptr_t)1 << 10;  /* OSFXSR, OSXMMEXCPT */
+        __asm__ volatile("mov %0, %%cr4" :: "r"(cr4));
+        uint32_t mxcsr = 0x1F80;                        /* all SSE exceptions masked */
+        __asm__ volatile("ldmxcsr %0" :: "m"(mxcsr));
+    }
 }
 
 void kernel_main(uint32_t magic, uint32_t mb_info) {
@@ -57,6 +70,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     /* After every Multiboot2 consumer above: the heap may reuse that memory. */
     kheap_init(magic == MULTIBOOT2_MAGIC ? mb_info : 0);
     klog("heap: %u KiB free\n", kheap_total_bytes() / 1024u);
+    paging_guard_null();      /* NULL pointers fault (64-bit), after every Multiboot2 reader */
 
     terminal_init();
     timer_init();
