@@ -1,4 +1,5 @@
 #include "gui.h"
+#include "serial.h"
 #include "terminal.h"
 #include "timer.h"
 #include "sysinfo.h"
@@ -96,6 +97,11 @@ static void raise_app(int a) {
 }
 
 /* the topmost app window at a point, -1 if none (with_front: also the one above the terminals) */
+/* the mouse wheel, per app window (NULL: it does not scroll) */
+static void (*const g_app_wheel[APP_COUNT])(int mx, int my, int dz) = {
+    explorer_wheel, browser_wheel, notepad_wheel, NULL, NULL, NULL, appwin_wheel,
+};
+
 static int app_at(int mx, int my, int with_front) {
     for (int i = APP_COUNT - 1; i >= 0; i--) {
         int a = g_app_order[i];
@@ -1478,6 +1484,11 @@ void gui_poll(void) {
         mouse_state_t ms = mouse_read();
         mx += ms.dx;
         my -= ms.dy;
+        if (ms.dz) {
+            /* the wheel scrolls the window under the mouse */
+            int a = (g_front_app >= 0 && app_visible(g_front_app) && g_apps[g_front_app].contains(mx, my)) ? g_front_app : app_at(mx, my, 0);
+            if (a >= 0 && g_app_wheel[a]) g_app_wheel[a](mx, my, ms.dz);
+        }
         if (mx < 0) mx = 0;
         if (my < 0) my = 0;
         if (mx > (int)fi->width - 1) mx = (int)fi->width - 1;

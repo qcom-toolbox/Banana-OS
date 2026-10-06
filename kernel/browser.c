@@ -1396,6 +1396,7 @@ void browser_close(void) {
 }
 
 int browser_is_open(void) { return g_open; }
+void browser_wheel(int mx, int my, int dz) { (void)mx; (void)my; scroll_by(dz * 48); }
 int browser_busy(void) { tab_t* t = cur_tab(); return g_open && t && t->loading; }
 
 int browser_contains(int mx, int my) {

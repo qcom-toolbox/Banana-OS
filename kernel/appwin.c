@@ -460,6 +460,15 @@ void appwin_focus(int focused) {
     g_gen++;
 }
 
+/* the wheel over an app's window: arrow keys, three per notch */
+void appwin_wheel(int mx, int my, int dz) {
+    int id = win_at(mx, my);
+    if (id < 0 || !dz) return;
+    int n = (dz < 0 ? -dz : dz) * 3;
+    if (n > 30) n = 30;
+    for (int i = 0; i < n; i++) push_simple(&g_w[id], BANANA_EV_KEY, 0, 0, 0, dz > 0 ? BANANA_KEY_DOWN : BANANA_KEY_UP);
+}
+
 void appwin_key(char c) {
     awin_t* w = front();
     if (!w) return;

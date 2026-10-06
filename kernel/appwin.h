@@ -34,7 +34,8 @@ int       appwin_kill_requested(int owner);
 int      appwin_is_open(void);
 void     appwin_draw(const fb_info_t* fi);
 int      appwin_contains(int mx, int my);
-int      appwin_resize_cursor(int mx, int my);   /* the mouse shows the resize arrows */
+int      appwin_resize_cursor(int mx, int my);
+void     appwin_wheel(int mx, int my, int dz);   /* as arrow keys to the window under it */   /* the mouse shows the resize arrows */
 void     appwin_click(int mx, int my);
 void     appwin_mouse(int mx, int my, int left);
 uint32_t appwin_signature(void);

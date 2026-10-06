@@ -197,6 +197,14 @@ void explorer_open(const char* path) {
     go(path && path[0] ? path : "/home/banana");
 }
 
+void explorer_wheel(int mx, int my, int dz) {
+    (void)mx; (void)my;
+    g_scroll += dz * 3;
+    if (g_scroll > g_count - ROWS) g_scroll = g_count - ROWS;
+    if (g_scroll < 0) g_scroll = 0;
+    g_gen++;
+}
+
 void explorer_close(void) {
     g_open = 0;
     g_win.dragging = g_win.resizing = 0;

@@ -176,6 +176,8 @@ static void hid_poll(usb_device_t* d) {
             } else if (!h->is_kbd && h->xfer.actual >= 3) {
                 int dx = (int8_t)h->xfer.buf[1], dy = (int8_t)h->xfer.buf[2];
                 mouse_inject(dx, -dy, h->xfer.buf[0] & 7);   /* USB: +y is down */
+                if (h->xfer.actual >= 4 && h->xfer.buf[3])
+                    mouse_inject_wheel(-(int8_t)h->xfer.buf[3]);   /* USB: + is away from the user */
             }
         }
         usb_submit(&h->xfer);

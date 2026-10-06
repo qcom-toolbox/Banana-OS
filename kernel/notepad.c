@@ -118,6 +118,15 @@ static void follow_cursor(void) {
     if (g_left < 0) g_left = 0;
 }
 
+static void clamp_scroll(void);
+
+void notepad_wheel(int mx, int my, int dz) {
+    (void)mx; (void)my;
+    g_top += dz * 3;
+    clamp_scroll();
+    g_gen++;
+}
+
 static void clamp_scroll(void) {
     int max_top = g_tb.n - vis_rows();
     if (g_top > max_top) g_top = max_top;

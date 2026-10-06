@@ -27,4 +27,6 @@ uint32_t explorer_signature(void);
 /* provided by gui.c: open a terminal window and run `cmd` in it */
 void gui_terminal_run(const char* cmd);
 
+void explorer_wheel(int mx, int my, int dz);  /* scrolls the file list (+ = down) */
+
 #endif

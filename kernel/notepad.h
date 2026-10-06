@@ -26,4 +26,6 @@ uint32_t notepad_signature(void);
 void notepad_key(char c);           /* a keystroke (ESC sequences come byte by byte) */
 void notepad_paste(void);
 
+void notepad_wheel(int mx, int my, int dz);   /* scrolls the text (+ = down) */
+
 #endif

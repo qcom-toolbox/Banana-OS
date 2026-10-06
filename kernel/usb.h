@@ -30,12 +30,14 @@ typedef struct {
     int btn_left;
     int btn_right;
     int btn_middle;
+    int dz;                 /* wheel notches since the last read: + = toward the user (scroll down) */
 } mouse_state_t;
 
 void         mouse_init(void);
 mouse_state_t mouse_read(void);   /* non-blocking, returns last known state */
 /* USB mice report here (dy positive = up, buttons bit0 left/1 right/2 middle) */
 void         mouse_inject(int dx, int dy, int buttons);
+void         mouse_inject_wheel(int dz);      /* + = scroll down */
 int          mouse_is_touchpad(void); /* 1 if a Synaptics PS/2 touchpad was detected */
 
 /* For other drivers that consume AUX bytes (e.g. keyboard polling) */

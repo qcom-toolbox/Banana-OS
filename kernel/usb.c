@@ -371,6 +371,17 @@ void mouse_init(void) {
         /* Standard PS/2 mouse: set defaults before enabling. */
         ps2_mouse_cmd0(0xF6);
         mouse_pkt_size = 3;
+        /* IntelliMouse knock: sample rates 200, 100, 80 - a wheel mouse
+         * then reports ID 3 (or 4) and sends 4-byte packets */
+        ps2_mouse_cmd1(0xF3, 200);
+        ps2_mouse_cmd1(0xF3, 100);
+        ps2_mouse_cmd1(0xF3, 80);
+        ps2_mouse_write(0xF2);
+        ps2_mouse_read();                  /* ACK */
+        uint8_t id = ps2_mouse_read();
+        if (id == 3 || id == 4) mouse_pkt_size = 4;
+        klog("mouse: PS/2 id %u, %d-byte packets\n", id, mouse_pkt_size);
+        ps2_mouse_cmd1(0xF3, 100);         /* back to a normal rate */
     }
 
     ps2_mouse_cmd0(0xF4); /* enable data reporting */
@@ -382,7 +393,7 @@ int mouse_is_touchpad(void) {
     return syn_detected;
 }
 
-static mouse_state_t last_mouse = {0,0,0,0,0};
+static mouse_state_t last_mouse = {0,0,0,0,0,0};
 
 /* Synaptics absolute-stroke tracking, converted to the same relative
  * dx/dy the rest of the OS already consumes, plus software tap-to-click
@@ -506,6 +517,11 @@ static void mouse_consume_ready(void) {
 
     last_mouse.dx = (int)b1 - ((b0 & 0x10) ? 256 : 0);
     last_mouse.dy = (int)b2 - ((b0 & 0x20) ? 256 : 0);
+    if (mouse_pkt_size == 4) {
+        int z = mouse_pkt[3] & 0x0F;                /* 4-bit signed (the high bits are buttons 4/5 on ID 4) */
+        if (z & 8) z -= 16;
+        last_mouse.dz = z;
+    }
 
     mouse_pkt_i = 0;
 }
@@ -517,7 +533,9 @@ static void mouse_consume_ready(void) {
  */
 /* USB mice (usb/usbhid.c) add their motion here; it's merged into the
  * next mouse_read(). dy follows the PS/2 convention (positive = up). */
-static int g_usb_dx, g_usb_dy, g_usb_buttons = -1;
+static int g_usb_dx, g_usb_dy, g_usb_buttons = -1, g_usb_dz;
+
+void mouse_inject_wheel(int dz) { g_usb_dz += dz; }
 
 void mouse_inject(int dx, int dy, int buttons) {
     g_usb_dx += dx;
@@ -526,10 +544,12 @@ void mouse_inject(int dx, int dy, int buttons) {
 }
 
 mouse_state_t mouse_read(void) {
-    if (g_usb_dx || g_usb_dy || g_usb_buttons >= 0) {
+    if (g_usb_dx || g_usb_dy || g_usb_buttons >= 0 || g_usb_dz) {
         mouse_state_t m = last_mouse;
         m.dx = g_usb_dx;
         m.dy = g_usb_dy;
+        m.dz = g_usb_dz;
+        g_usb_dz = 0;
         if (g_usb_buttons >= 0) {
             m.btn_left = g_usb_buttons & 1;
             m.btn_right = (g_usb_buttons >> 1) & 1;
@@ -547,6 +567,7 @@ mouse_state_t mouse_read(void) {
     /* If no new packet arrives, deltas must be 0 (avoid cursor drift). */
     last_mouse.dx = 0;
     last_mouse.dy = 0;
+    last_mouse.dz = 0;
 
     /* Drain the AUX bytes waiting in the controller (status: bit 0 =
      * data available, bit 5 = from the mouse) into the packet queue */
@@ -559,18 +580,21 @@ mouse_state_t mouse_read(void) {
     /* Motion of all queued packets adds up; a button change ends the
      * batch, so every press and release is seen by some mouse_read()
      * (a double-click is two separate presses, however quick). */
-    int sdx = 0, sdy = 0;
+    int sdx = 0, sdy = 0, sdz = 0;
     while (mouse_pkt_ready()) {
         int bl = last_mouse.btn_left, br = last_mouse.btn_right, bm = last_mouse.btn_middle;
         mouse_pop();
         last_mouse.dx = 0;            /* a touchpad packet may carry no motion */
         last_mouse.dy = 0;
+        last_mouse.dz = 0;
         mouse_consume_ready();
         sdx += last_mouse.dx;
         sdy += last_mouse.dy;
+        sdz += last_mouse.dz;
         if (last_mouse.btn_left != bl || last_mouse.btn_right != br || last_mouse.btn_middle != bm) break;
     }
     last_mouse.dx = sdx;
     last_mouse.dy = sdy;
+    last_mouse.dz = sdz;
     return last_mouse;
 }
