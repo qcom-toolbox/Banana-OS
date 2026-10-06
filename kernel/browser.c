@@ -1339,7 +1339,8 @@ static void browser_task(void) {
     g_env.request = env_request;
     g_env.decode_image = env_decode_image;
     g_env.now_ms = timer_ms;
-    g_env.yield = task_yield;           /* a long script must not freeze the desktop */
+    g_env.yield = task_maybe_yield;     /* a long script must not freeze the desktop */
+    web_yield_hook = task_maybe_yield;  /* nor parsing, styling and layout */
     g_env.log = env_log;
     g_env.ctx = NULL;
     /* a page may use a share of the heap (big pages, images, script-heavy
@@ -1395,6 +1396,7 @@ void browser_close(void) {
 }
 
 int browser_is_open(void) { return g_open; }
+int browser_busy(void) { tab_t* t = cur_tab(); return g_open && t && t->loading; }
 
 int browser_contains(int mx, int my) {
     return g_open && inside(mx, my, g_win.x, g_win.y, g_win.w, g_win.h);

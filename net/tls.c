@@ -6,6 +6,7 @@
 #include "kheap.h"
 #include "random.h"
 #include "serial.h"
+#include "task.h"
 
 /* TLS 1.3 client - see tls.h for scope (notably: no certificate
  * validation). Section numbers refer to RFC 8446. */
@@ -165,6 +166,7 @@ static int send_record(tls_conn_t* t, uint8_t type, const uint8_t* data, uint32_
  * t->rec + 5, length in *len. ChangeCipherSpec records are skipped. */
 static int read_record(tls_conn_t* t, uint32_t* len) {
     for (;;) {
+        task_maybe_yield();                         /* decrypting a big download takes a while */
         int r = tcp_read_exact(t, t->rec, 5);
         if (r != NET_OK) return r;
         uint8_t type = t->rec[0];
@@ -389,7 +391,9 @@ bad:
 static int handshake(tls_conn_t* t, const char* host) {
     uint8_t priv[32], pub[32], server_pub[32], shared[32];
     random_bytes(priv, 32);
+    task_maybe_yield();
     x25519_base(pub, priv);
+    task_maybe_yield();
 
     uint8_t* ch = (uint8_t*)kmalloc(1024);
     if (!ch) return NET_ERR_NOMEM;
@@ -413,6 +417,7 @@ static int handshake(tls_conn_t* t, const char* host) {
 
     /* handshake secrets */
     x25519(shared, priv, server_pub);
+    task_maybe_yield();
     memset(priv, 0, sizeof(priv));
     uint8_t zeros[32], empty_hash[32], early[32], derived[32], hs_secret[32], th[32];
     uint8_t c_hs[32], s_hs[32], master[32];

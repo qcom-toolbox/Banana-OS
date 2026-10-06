@@ -317,3 +317,7 @@ void task_set_background(void) {
 int task_is_background(void) {
     return g_current ? g_current->background : 0;
 }
+
+void task_maybe_yield(void) {
+    if (g_current && (uint32_t)(timer_ms() - g_current->run_start_tick) >= TASK_SLICE_MS) task_yield();
+}

@@ -254,6 +254,15 @@ static int win_at(int mx, int my) {
 
 int appwin_contains(int mx, int my) { return win_at(mx, my) >= 0; }
 
+/* over the resize grip of the app window under the mouse, or resizing one */
+int appwin_resize_cursor(int mx, int my) {
+    for (int i = 0; i < g_norder; i++) if (g_w[g_order[i]].resizing) return 1;
+    int id = win_at(mx, my);
+    if (id < 0) return 0;
+    awin_t* w = &g_w[id];
+    return w->resizable && mx >= w->x + outer_w(w) - GRIP && my >= w->y + outer_h(w) - GRIP;
+}
+
 uint32_t appwin_signature(void) {
     uint32_t s = g_gen * 2654435761u ^ (uint32_t)g_focused * 97u;
     for (int i = 0; i < APPWIN_MAX; i++)

@@ -554,6 +554,7 @@ static int media_alt(const char* q, uint32_t n, int* mn, int* mx) {
 static void parse_block_list(arena_t* A, css_sheet_t* sh, const char* s, uint32_t n, int mmin, int mmax) {
     uint32_t i = 0;
     while (i < n) {
+        WEB_TICK();
         while (i < n && is_ws(s[i])) i++;
         if (i + 1 < n && s[i] == '/' && s[i + 1] == '*') {
             i += 2;
@@ -1582,6 +1583,7 @@ static void style_element(cascade_t* K, dom_node_t* e, const style_t* parent, cs
 }
 
 static void style_rec(cascade_t* K, dom_node_t* n, const style_t* parent, css_sheet_t** sheets, int nsheets) {
+    WEB_TICK();
     for (dom_node_t* c = n->first; c; c = c->next) {
         if (c->type != DOM_ELEM) continue;
         style_element(K, c, parent, sheets, nsheets);

@@ -77,3 +77,4 @@ void arena_free_all(arena_t* a) {
     a->total = 0;
     a->oom = 0;
 }
+void (*web_yield_hook)(void);

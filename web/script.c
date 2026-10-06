@@ -2076,6 +2076,7 @@ static node_t* parse_alt_body(parser_t* P, const char* endkw) {
 }
 
 static node_t* parse_stmt(parser_t* P) {
+    WEB_TICK();
     tok_t* t = pk(P);
     node_t* n;
     if (P->err) return NULL;
@@ -2476,7 +2477,7 @@ static var_t* env_define(interp_t* I, env_t* e, str_t* name, value_t v) {
 
 static int step(interp_t* I) {
     if (I->ctl == CTL_THROW) return 0;
-    if ((++I->steps & 0xFFFF) == 0 && I->yield_fn) I->yield_fn();
+    if ((++I->steps & 0x3FF) == 0 && I->yield_fn) I->yield_fn();   /* cheap: yields only after a time slice */
     if (I->steps > I->step_limit) {
         script_throw(I, "InternalError: script took too long (endless loop?)");
         return 0;

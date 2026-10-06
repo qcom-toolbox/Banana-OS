@@ -82,7 +82,8 @@ void      script_set_log(interp_t* I, script_out_fn log, void* ctx);
 void      script_set_host(interp_t* I, void* host);
 void*     script_host(interp_t* I);
 void      script_set_limits(interp_t* I, uint32_t steps, uint32_t depth);
-/* fn() runs every 64K steps of a long script (lets the desktop run) */
+/* fn() runs every 1K steps of a long script (lets the desktop run; should
+ * only actually yield after a time slice, like task_maybe_yield) */
 void      script_set_yield(interp_t* I, void (*fn)(void));
 void      script_set_php_ext(interp_t* I, script_ext_fn fn);
 

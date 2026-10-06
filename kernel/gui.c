@@ -859,15 +859,100 @@ static void blit_wallpaper_cache(void) {
 /* ── mouse cursor ──────────────────────────────────────────────────
  * Drawn straight onto the framebuffer over the presented frame, so when
  * only the mouse moves, restoring the old spot from the backbuffer and
- * drawing the arrow elsewhere is all it takes - no full repaint. */
-#define CURSOR_W 6
-#define CURSOR_H 10
+ * drawing the cursor elsewhere is all it takes - no full repaint.
+ * Shapes: the arrow, the arrow with an hourglass (the browser is loading)
+ * and a diagonal double arrow (resizing a window). */
+#define CURSOR_X0 (-8)                /* the area any shape covers, around the hot spot */
+#define CURSOR_Y0 (-8)
+#define CURSOR_W  30
+#define CURSOR_H  32
+enum { CUR_ARROW, CUR_BUSY, CUR_RESIZE };
+
+static const char* const CUR_ARROW_BITS[] = {
+    "B...........",
+    "BB..........",
+    "BWB.........",
+    "BWWB........",
+    "BWWWB.......",
+    "BWWWWB......",
+    "BWWWWWB.....",
+    "BWWWWWWB....",
+    "BWWWWWWWB...",
+    "BWWWWWWWWB..",
+    "BWWWWWWWWWB.",
+    "BWWWWWWBBBBB",
+    "BWWWBWWB....",
+    "BWWBBWWB....",
+    "BWB..BWWB...",
+    "BB...BWWB...",
+    "B.....BWWB..",
+    "......BWWB..",
+    ".......BB...",
+};
+static const char* const CUR_HOURGLASS_BITS[] = {
+    "BBBBBBBBB",
+    "BWWWWWWWB",
+    ".BWWWWWB.",
+    "..BWWWB..",
+    "...BWB...",
+    "...BWB...",
+    "..BW.WB..",
+    ".BW...WB.",
+    "BWWWWWWWB",
+    "BBBBBBBBB",
+};
+
+static void cursor_bits(int x, int y, const char* const* rows, int n) {
+    for (int r = 0; r < n; r++)
+        for (int c = 0; rows[r][c]; c++) {
+            char ch = rows[r][c];
+            if (ch == 'B') fb_putpixel_direct(x + c, y + r, 0x00000000u);
+            else if (ch == 'W') fb_putpixel_direct(x + c, y + r, 0x00FFFFFFu);
+        }
+}
+
+/* a diagonal double arrow, 15x15 around the hot spot */
+static int resize_white(int x, int y) {
+    if (x < 0 || y < 0 || x > 14 || y > 14) return 0;
+    int d = x - y;
+    return x + y <= 6 || (14 - x) + (14 - y) <= 6 || (d >= -1 && d <= 1);
+}
+
+static void draw_cursor_shape(int mx, int my, int shape) {
+    if (shape == CUR_RESIZE) {
+        for (int y = -1; y <= 15; y++)
+            for (int x = -1; x <= 15; x++) {
+                if (resize_white(x, y)) { fb_putpixel_direct(mx - 7 + x, my - 7 + y, 0x00FFFFFFu); continue; }
+                int edge = 0;
+                for (int dy = -1; dy <= 1 && !edge; dy++)
+                    for (int dx = -1; dx <= 1; dx++) if (resize_white(x + dx, y + dy)) { edge = 1; break; }
+                if (edge) fb_putpixel_direct(mx - 7 + x, my - 7 + y, 0x00000000u);
+            }
+        return;
+    }
+    cursor_bits(mx, my, CUR_ARROW_BITS, (int)(sizeof(CUR_ARROW_BITS) / sizeof(CUR_ARROW_BITS[0])));
+    if (shape == CUR_BUSY)
+        cursor_bits(mx + 12, my + 14, CUR_HOURGLASS_BITS, (int)(sizeof(CUR_HOURGLASS_BITS) / sizeof(CUR_HOURGLASS_BITS[0])));
+}
+
+static int cursor_shape(int mx, int my);
+static int g_drawn_shape;
 
 static void draw_cursor(int mx, int my) {
-    for (int cy = 0; cy < CURSOR_H; cy++)
-        for (int cx = 0; cx < CURSOR_W; cx++)
-            if (cx == 0 || cy == 0 || cx == cy / 2)
-                fb_putpixel_direct(mx + cx, my + cy, 0x00FFFFFFu);
+    g_drawn_shape = cursor_shape(mx, my);
+    draw_cursor_shape(mx, my, g_drawn_shape);
+}
+
+static int cursor_shape(int mx, int my) {
+    for (int i = 0; i < TERM_WIN_MAX; i++) {
+        term_win_t* w = &g_terms[i];
+        if (!w->open || w->minimized) continue;
+        if (w->resizing || (mx >= w->x + w->w - GRIP && mx < w->x + w->w && my >= w->y + w->h - GRIP && my < w->y + w->h))
+            return CUR_RESIZE;
+    }
+    if (appwin_resize_cursor(mx, my)) return CUR_RESIZE;
+    if (browser_busy() && browser_contains(mx, my)) return CUR_BUSY;
+    return CUR_ARROW;
 }
 
 /* ── windows on the taskbar ────────────────────────────────────────
@@ -1608,9 +1693,9 @@ void gui_poll(void) {
         int changed = g_force_redraw || memcmp(&view, &g_last_view, sizeof(view)) != 0;
 
         if (!changed) {
-            /* only the mouse moved: restore its old spot, draw it anew */
-            if (mx != drawn_mx || my != drawn_my) {
-                fb_present_rect(drawn_mx, drawn_my, CURSOR_W, CURSOR_H);
+            /* only the mouse moved (or its shape changed): restore its old spot, draw it anew */
+            if (mx != drawn_mx || my != drawn_my || cursor_shape(mx, my) != g_drawn_shape) {
+                fb_present_rect(drawn_mx + CURSOR_X0, drawn_my + CURSOR_Y0, CURSOR_W, CURSOR_H);
                 draw_cursor(mx, my);
                 drawn_mx = mx;
                 drawn_my = my;

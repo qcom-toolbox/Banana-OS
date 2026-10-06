@@ -144,7 +144,7 @@ struct interp {
     int       throw_line, throw_col;   /* where the exception was thrown */
     obj_t*    oom_err;       /* thrown when the arena is exhausted */
     uint32_t  steps, step_limit;
-    void    (*yield_fn)(void);  /* called every 64K steps: other (cooperative) tasks keep running */
+    void    (*yield_fn)(void);  /* called every 1K steps: other (cooperative) tasks keep running */
     uint32_t  depth, depth_limit;
     char      err[200];
     const char* src_name;

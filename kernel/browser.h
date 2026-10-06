@@ -20,6 +20,8 @@ int  browser_is_open(void);
 
 void browser_draw(const fb_info_t* fi);
 int  browser_contains(int mx, int my);
+/* the current tab is loading (the desktop shows a busy cursor over it) */
+int  browser_busy(void);
 void browser_click(int mx, int my);
 void browser_mouse(int mx, int my, int left);
 uint32_t browser_signature(void);

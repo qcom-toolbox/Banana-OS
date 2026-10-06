@@ -27,4 +27,10 @@ void* arena_alloc(arena_t* a, uint32_t n);
 char* arena_strdup(arena_t* a, const char* s, uint32_t n);
 void  arena_free_all(arena_t* a);
 
+/* long web work (parsing, styling, layout, scripts) calls WEB_TICK() as it
+ * goes; the kernel points the hook at task_maybe_yield so the desktop keeps
+ * running (cooperative tasks). NULL in host tests. */
+extern void (*web_yield_hook)(void);
+#define WEB_TICK() do { if (web_yield_hook) web_yield_hook(); } while (0)
+
 #endif

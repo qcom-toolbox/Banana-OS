@@ -48,6 +48,12 @@ int  task_create_stack(const char* name, void (*entry)(void), uint32_t stack_byt
  * If nothing else is READY, returns to the caller immediately. */
 void task_yield(void);
 
+/* Long CPU work (page layout, scripts, TLS) calls this often: it gives up
+ * the CPU only once the task has run for TASK_SLICE_MS, so it is cheap to
+ * call in loops and keeps the desktop responsive. */
+#define TASK_SLICE_MS 8
+void task_maybe_yield(void);
+
 /* Real sleep: marks the calling task SLEEPING and does not resume it
  * until at least `ms` milliseconds have passed (or task_wake()). */
 void task_sleep_ms(uint32_t ms);

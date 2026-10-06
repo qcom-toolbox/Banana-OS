@@ -659,6 +659,7 @@ static int layout_children(ctx_t* C, dom_node_t* parent, int x, int y, int w) {
 }
 
 static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
+    WEB_TICK();
     const style_t* st = e->style;
     if (!st || st->display == DISP_NONE || out_of_sight(st)) return 0;
     if (st->display == DISP_TABLE) return layout_table(C, e, x, y, avail);

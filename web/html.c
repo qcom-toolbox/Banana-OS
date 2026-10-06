@@ -381,6 +381,7 @@ static void add_text(hp_t* P, const char* s, uint32_t n) {
 static int is_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'; }
 
 static void parse_tag(hp_t* P) {
+    WEB_TICK();
     const char* s = P->s;
     uint32_t n = P->n, i = P->pos + 1;
     int end = 0;
