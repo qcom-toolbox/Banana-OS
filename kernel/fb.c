@@ -152,6 +152,12 @@ void fb_scroll_up(int top, int height, int dy, uint32_t fill) {
     fb_fill_rect(0, top + height - dy, tw, dy, fill);
 }
 
+void fb_reconfigure(uint32_t width, uint32_t height, uint32_t pitch) {
+    g_fb.width = width;
+    g_fb.height = height;
+    g_fb.pitch = pitch;
+}
+
 void fb_set_backbuffer(uint32_t* buf, uint32_t buf_width, uint32_t buf_height) {
     g_bb = buf;
     g_bb_w = buf_width;

@@ -631,6 +631,11 @@ void terminal_write_at(const char* str, uint8_t fg, uint8_t bg, size_t row, size
     }
 }
 
+void terminal_screen_changed(void) {
+    fb_recompute_grid();
+    if (term_mode == TERMINAL_MODE_FRAMEBUFFER && gfx_available()) fb_redraw_all();
+}
+
 void terminal_set_mode(terminal_mode_t mode) {
     term_mode = mode;
     if (term_mode == TERMINAL_MODE_FRAMEBUFFER && gfx_available()) {

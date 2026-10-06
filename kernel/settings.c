@@ -1,5 +1,6 @@
 #include "settings.h"
 #include "gfx.h"
+#include "display.h"
 #include "kstring.h"
 #include "kheap.h"
 #include "timer.h"
@@ -29,8 +30,8 @@
 #define C_ACCENT 0x003A7BD5u
 #define C_SEL    0x002C3E5Cu
 
-enum { PG_DISPLAY = 0, PG_SOUND, PG_KEYBOARD, PG_NETWORK, PG_TIME, PG_ABOUT, PG_COUNT };
-static const char* const PAGE_NAMES[PG_COUNT] = { "Display", "Sound", "Keyboard", "Network", "Date & time", "About" };
+enum { PG_DISPLAY = 0, PG_SCREEN, PG_SOUND, PG_KEYBOARD, PG_NETWORK, PG_TIME, PG_ABOUT, PG_COUNT };
+static const char* const PAGE_NAMES[PG_COUNT] = { "Display", "Screen", "Sound", "Keyboard", "Network", "Date & time", "About" };
 
 static const char* const LAYOUTS[] = { "EN (Default)", "fr_CH", "FR", "DE", "de_CH", "BEPO" };
 #define NLAYOUTS ((int)(sizeof(LAYOUTS) / sizeof(LAYOUTS[0])))
@@ -188,6 +189,29 @@ static void draw_keyboard(void) {
     }
 }
 
+/* Screen: the resolution */
+static void draw_screen(void) {
+    int x = cx0(), y = cy0();
+    label(x, y, "Screen resolution", C_HEAD);
+    const fb_info_t* fi = fb_info();
+    char line[96];
+    ksnprintf(line, sizeof(line), "Now: %u x %u", fi ? fi->width : 0, fi ? fi->height : 0);
+    label(x, y + 18, line, C_DIM);
+    display_mode_t modes[16];
+    int n = display_modes(modes, 16);
+    for (int i = 0; i < n; i++) {
+        int ry = y + 44 + i * ITEM_H;
+        int on = fi && modes[i].w == (int)fi->width && modes[i].h == (int)fi->height;
+        char nm[32];
+        ksnprintf(nm, sizeof(nm), "%d x %d", modes[i].w, modes[i].h);
+        bevel(x, ry, 14, 14, 0x00141920u, 0x0010141Cu, 0x00404B5Cu);
+        if (on) gfx_fill_rect(x + 4, ry + 4, 6, 6, C_ACCENT);
+        label(x + 24, ry + 3, nm, on ? C_HEAD : C_TEXT);
+    }
+    if (!display_can_change())
+        label(x, y + 44 + n * ITEM_H + 8, "This display keeps the mode set at boot (changing it needs QEMU, Bochs or VirtualBox graphics).", C_DIM);
+}
+
 static void draw_network(void) {
     int x = cx0(), y = cy0();
     label(x, y, "Network", C_HEAD);
@@ -286,6 +310,7 @@ void settings_draw(const fb_info_t* fi) {
 
     switch (g_page) {
     case PG_DISPLAY:  draw_display(); break;
+    case PG_SCREEN:   draw_screen(); break;
     case PG_SOUND:    draw_sound(); break;
     case PG_KEYBOARD: draw_keyboard(); break;
     case PG_NETWORK:  draw_network(); break;
@@ -348,6 +373,24 @@ void settings_click(int mx, int my) {
             return;
         }
         if (inside(mx, my, x + 112, sy + 36, 120, 20)) { audio_beep(880, 150); return; }
+    } else if (g_page == PG_SCREEN) {
+        display_mode_t modes[16];
+        int n = display_modes(modes, 16);
+        for (int i = 0; i < n; i++) {
+            int ry = y + 44 + i * ITEM_H;
+            if (inside(mx, my, x, ry - 4, cw(), ITEM_H - 2)) {
+                char v[32];
+                ksnprintf(v, sizeof(v), "%dx%d", modes[i].w, modes[i].h);
+                if (display_set_mode(modes[i].w, modes[i].h) == 0) {
+                    save_setting("resolution", v);
+                    win_clamp(&g_win);
+                    ksnprintf(g_status, sizeof(g_status), "Resolution: %d x %d", modes[i].w, modes[i].h);
+                } else {
+                    ksnprintf(g_status, sizeof(g_status), "%d x %d: this display cannot show it", modes[i].w, modes[i].h);
+                }
+                return;
+            }
+        }
     } else if (g_page == PG_KEYBOARD) {
         for (int i = 0; i < NLAYOUTS; i++) {
             int ry = y + 44 + i * ITEM_H;
@@ -382,6 +425,11 @@ void settings_mouse(int mx, int my, int left) {
 }
 
 void settings_rclick(int mx, int my) { (void)mx; (void)my; }
+
+void settings_open_page(int page) {
+    settings_open();
+    if (page >= 0 && page < PG_COUNT) g_page = page;
+}
 
 void settings_open(void) {
     g_open = 1;
@@ -419,4 +467,9 @@ void settings_boot(void) {
     }
     if (cfg_get(CFG_SETTINGS, "keyboard", v, sizeof(v))) keyboard_set_layout(v);
     if (cfg_get(CFG_SETTINGS, "ui_font", v, sizeof(v))) gfx_set_smooth_text(strcmp(v, "classic") != 0);
+    if (cfg_get(CFG_SETTINGS, "resolution", v, sizeof(v))) {       /* "1024x768" */
+        uint32_t w = 0, h = 0;
+        const char* xp = strchr(v, 'x');
+        if (xp && k_parse_u32(v, &w) && k_parse_u32(xp + 1, &h)) display_set_mode((int)w, (int)h);
+    }
 }

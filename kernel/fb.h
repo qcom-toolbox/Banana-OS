@@ -15,6 +15,8 @@ typedef struct {
 int  fb_init_multiboot2(uint32_t mb2_info_addr);
 int  fb_available(void);
 const fb_info_t* fb_info(void);
+/* a new mode on the same framebuffer (kernel/display.c) */
+void fb_reconfigure(uint32_t width, uint32_t height, uint32_t pitch);
 
 void fb_putpixel(int x, int y, uint32_t rgb);
 void fb_fill_rect(int x, int y, int w, int h, uint32_t rgb);

@@ -33,13 +33,14 @@
 #define TASKBAR_ROW (VGA_HEIGHT - 1)
 
 /* the Start menu and the desktop shortcuts: the same entries */
-enum { ACT_ABOUT = 0, ACT_TERMINAL, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_SETTINGS, ACT_WALLPAPER, ACT_QUIT };
-#define MENU_ITEMS 10
+/* (About and Wallpaper live in Settings now: past MENU_ITEMS, reached from the desktop's menu) */
+enum { ACT_TERMINAL = 0, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_SETTINGS, ACT_QUIT, ACT_ABOUT, ACT_WALLPAPER };
+#define MENU_ITEMS 8
 static const char* const MENU_LABELS[MENU_ITEMS] = {
-    "About", "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Wallpaper", "Exit to shell",
+    "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Exit to shell",
 };
 static const char* const ICON_LABELS[MENU_ITEMS] = {
-    "About", "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Wallpaper", "Quit GUI",
+    "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Quit GUI",
 };
 #define START_MENU_W 236
 #define START_MENU_H (16 + MENU_ITEMS * 28)
@@ -112,19 +113,6 @@ static int app_at(int mx, int my, int with_front) {
 }
 static uint32_t g_last_clock_sec = (uint32_t)-1;
 static int g_gui_enabled = 0; /* like startx: default off */
-static int g_about_open = 0;
-static int g_wallpaper_open = 0;
-
-/* Wallpaper app: user pictures found in ~/Pictures (file indexes), a
- * picture waiting to be decoded on the next frame (so "Loading..." gets
- * painted first), and a one-line status/error message. */
-#define WP_PICS_MAX 6
-static int  g_wp_pics[WP_PICS_MAX];
-static int  g_wp_pic_count = 0;       /* shown (<= WP_PICS_MAX) */
-static int  g_wp_pic_total = 0;       /* found */
-static int  g_wp_pending = -1;        /* file index to load next frame */
-static char g_wp_status[96];
-
 typedef struct {
     int open;
     int vt;   /* 0 until this slot's window has been opened for the first
@@ -199,18 +187,6 @@ static void draw_icon_terminal(int x, int y, uint32_t bg) {
     gfx_draw_text(x + 2, y + 2, ">", 0x00E8EEF6u, 0x00161D28u);
 }
 
-static void draw_icon_info(int x, int y, uint32_t bg) {
-    (void)bg;
-    draw_bevel_box(x, y, 12, 12, 0x00323C52u, 0x0060708Bu, 0x00101520u);
-    gfx_draw_text(x + 4, y + 2, "i", 0x00FFFFFFu, 0x00323C52u);
-}
-
-static void draw_icon_wallpaper(int x, int y, uint32_t bg) {
-    (void)bg;
-    draw_bevel_box(x, y, 14, 12, 0x00342F25u, 0x0061573Fu, 0x0018110Au);
-    gfx_fill_rect(x + 2, y + 7, 10, 3, 0x00384F70u);
-}
-
 static void draw_icon_files(int x, int y, uint32_t bg) {
     (void)bg;
     gfx_fill_rect(x, y + 1, 6, 2, 0x00F4D35Eu);
@@ -277,13 +253,6 @@ static void draw_icon_power(int x, int y, uint32_t bg) {
 }
 
 /* a tiny "photo" glyph: sky, sun, hill */
-static void draw_icon_picture(int x, int y) {
-    draw_bevel_box(x, y, 16, 16, 0x003A6EA5u, 0x006F9BCCu, 0x00182C44u);
-    gfx_fill_rect(x + 10, y + 3, 3, 3, 0x00F4D35Eu);
-    gfx_fill_rect(x + 2, y + 10, 12, 4, 0x003C8D4Fu);
-    gfx_fill_rect(x + 5, y + 8, 5, 2, 0x003C8D4Fu);
-}
-
 static void clamp_win(const fb_info_t* fi, term_win_t* w) {
     if (!fi) return;
     if (!w) return;
@@ -502,10 +471,6 @@ static void draw_terminal_window(const fb_info_t* fi, const term_win_t* win) {
     }
 }
 
-static void k_memset(char* p, char v, int n) {
-    for (int i = 0; i < n; i++) p[i] = v;
-}
-
 static void u32_to_2dig(uint32_t v, char out[2]) {
     out[0] = (char)('0' + ((v / 10u) % 10u));
     out[1] = (char)('0' + (v % 10u));
@@ -610,204 +575,6 @@ static void menu_close_redraw(void) {
     draw_taskbar();
 }
 
-/* ── Wallpaper app ─────────────────────────────────────────────────── */
-
-#define WP_W 560
-#define WP_H 430
-
-static void wp_scan_pictures(void) {
-    int idx[64];
-    int n = fs_list_files(WALLPAPER_DIR, idx, 64);
-    g_wp_pic_count = 0;
-    g_wp_pic_total = 0;
-    for (int i = 0; i < n && i < 64; i++) {
-        fs_file_t* f = fs_file_info(idx[i]);
-        if (!wallpaper_is_image_name(f->name)) continue;
-        if (g_wp_pic_count < WP_PICS_MAX) g_wp_pics[g_wp_pic_count++] = idx[i];
-        g_wp_pic_total++;
-    }
-}
-
-static void open_wallpaper_app(void) {
-    g_menu_open = 0;
-    g_about_open = 0;
-    g_wallpaper_open = 1;
-    g_wp_pending = -1;
-    g_wp_status[0] = '\0';
-    wp_scan_pictures();
-}
-
-/* geometry shared by drawing and hit testing: kind 0 = preset, 1 = picture */
-static void wp_item_rect(const fb_info_t* fi, int kind, int i, int* x, int* y, int* w, int* h) {
-    int wx0 = ((int)fi->width - WP_W) / 2;
-    int wy0 = ((int)fi->height - WP_H) / 2;
-    int col_w = (WP_W - 36) / 2;
-    int top = (kind == 0) ? wy0 + 50 : wy0 + 248;
-    *x = wx0 + 12 + (i & 1) * col_w;
-    *y = top + (i >> 1) * 32;
-    *w = col_w - 12;
-    *h = 28;
-}
-
-static void draw_wallpaper_app(const fb_info_t* fi) {
-    int wx0 = ((int)fi->width - WP_W) / 2;
-    int wy0 = ((int)fi->height - WP_H) / 2;
-    const uint32_t panel = 0x001D232Cu;
-    draw_bevel_box(wx0, wy0, WP_W, WP_H, panel, 0x00505D72u, 0x0010141Cu);
-    draw_bevel_box(wx0 + 3, wy0 + 3, WP_W - 6, 19, 0x00384562u, 0x00647692u, 0x00111923u);
-    gfx_draw_text(wx0 + 10, wy0 + 7, "Wallpaper", 0x00FFFFFFu, 0x00384562u);
-
-    gfx_draw_text(wx0 + 14, wy0 + 32, "Built-in:", 0x00E8EEF6u, panel);
-    int cur = wallpaper_current_preset();
-    for (int i = 0; i < wallpaper_preset_count(); i++) {
-        int x, y, w, h;
-        wp_item_rect(fi, 0, i, &x, &y, &w, &h);
-        uint32_t bg = (i == cur) ? 0x003A4A66u : panel;
-        draw_bevel_box(x, y, w, h, bg, 0x0056667Fu, 0x0010151Fu);
-        gfx_fill_rect(x + 6, y + 6, 16, 16, wallpaper_preset(i)->base);
-        gfx_draw_text(x + 28, y + 10, wallpaper_preset(i)->name, 0x00E8EEF6u, bg);
-    }
-
-    gfx_draw_text(wx0 + 14, wy0 + 230, "Your pictures (~/Pictures):", 0x00E8EEF6u, panel);
-    if (g_wp_pic_count == 0) {
-        gfx_draw_text(wx0 + 24, wy0 + 256, "No pictures yet. In a terminal, download one:", 0x00AAB6C6u, panel);
-        gfx_draw_text(wx0 + 24, wy0 + 272, "wget -O ~/Pictures/wall.jpg https://...", 0x00F4D35Eu, panel);
-        gfx_draw_text(wx0 + 24, wy0 + 288, "then pick it here, or run: wallpaper ~/Pictures/wall.jpg",
-                      0x00AAB6C6u, panel);
-    }
-    const char* current_file = wallpaper_current_file();
-    for (int i = 0; i < g_wp_pic_count; i++) {
-        int x, y, w, h;
-        wp_item_rect(fi, 1, i, &x, &y, &w, &h);
-        char path[FS_PATH_LEN];
-        fs_file_path(g_wp_pics[i], path, sizeof(path));
-        uint32_t bg = (current_file[0] && strcmp(path, current_file) == 0) ? 0x003A4A66u : panel;
-        draw_bevel_box(x, y, w, h, bg, 0x0056667Fu, 0x0010151Fu);
-        draw_icon_picture(x + 6, y + 6);
-        char name[29];
-        kstrlcpy(name, fs_file_info(g_wp_pics[i])->name, sizeof(name));
-        gfx_draw_text(x + 28, y + 10, name, 0x00E8EEF6u, bg);
-    }
-    if (g_wp_pic_total > g_wp_pic_count) {
-        char more[64];
-        ksnprintf(more, sizeof(more), "+%d more - use the `wallpaper` command", g_wp_pic_total - g_wp_pic_count);
-        gfx_draw_text(wx0 + 24, wy0 + 348, more, 0x00AAB6C6u, panel);
-    }
-
-    /* status: what's happening, or what's in use */
-    char line[96];
-    if (g_wp_status[0]) kstrlcpy(line, g_wp_status, sizeof(line));
-    else if (current_file[0]) ksnprintf(line, sizeof(line), "Current: %s (%s)", current_file,
-                                        image_mode_name(wallpaper_current_mode()));
-    else ksnprintf(line, sizeof(line), "Current: %s (built-in)", wallpaper_preset(cur)->name);
-    line[(WP_W - 28) / 8] = '\0';
-    gfx_draw_text(wx0 + 14, wy0 + WP_H - 42, line, 0x00A9B7C8u, panel);
-    gfx_draw_text(wx0 + 14, wy0 + WP_H - 22, "Click an item to apply, click outside to close",
-                  0x00AAAAAAu, panel);
-}
-
-/* returns 1 if the click landed inside the app window */
-static int wallpaper_app_click(const fb_info_t* fi, int mx, int my) {
-    int wx0 = ((int)fi->width - WP_W) / 2;
-    int wy0 = ((int)fi->height - WP_H) / 2;
-    if (!(mx >= wx0 && mx < wx0 + WP_W && my >= wy0 && my < wy0 + WP_H)) {
-        g_wallpaper_open = 0;
-        return 1;   /* consumed: clicking outside just closes the app */
-    }
-    for (int i = 0; i < wallpaper_preset_count(); i++) {
-        int x, y, w, h;
-        wp_item_rect(fi, 0, i, &x, &y, &w, &h);
-        if (mx >= x && mx < x + w && my >= y && my < y + h) {
-            wallpaper_set_preset(i);
-            g_wp_status[0] = '\0';
-            return 1;
-        }
-    }
-    for (int i = 0; i < g_wp_pic_count; i++) {
-        int x, y, w, h;
-        wp_item_rect(fi, 1, i, &x, &y, &w, &h);
-        if (mx >= x && mx < x + w && my >= y && my < y + h) {
-            /* decode on the next frame, after "Loading..." is on screen */
-            g_wp_pending = g_wp_pics[i];
-            ksnprintf(g_wp_status, sizeof(g_wp_status), "Loading %s...", fs_file_info(g_wp_pics[i])->name);
-            return 1;
-        }
-    }
-    return 1;
-}
-
-static void wallpaper_app_do_pending(void) {
-    if (g_wp_pending < 0) return;
-    char path[FS_PATH_LEN], err[96];
-    fs_file_path(g_wp_pending, path, sizeof(path));
-    g_wp_pending = -1;
-    if (wallpaper_set_file(path, IMAGE_FILL, err, sizeof(err)) == 0) g_wp_status[0] = '\0';
-    else ksnprintf(g_wp_status, sizeof(g_wp_status), "Error: %s", err);
-}
-
-/* ── About ─────────────────────────────────────────────────────────── */
-
-static void show_about(void) {
-    size_t saved_r, saved_c;
-    terminal_get_cursor(&saved_r, &saved_c);
-
-    terminal_clear();
-
-    const sysinfo_t* si = sysinfo_get();
-    terminal_write_color("Banana OS 0.5 - About app\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    terminal_writeln("----------------------------------------");
-    terminal_write_color("Version: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln("0.5");
-    terminal_write_color("Display: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln("VGA text 80x25 + basic GUI taskbar");
-    terminal_write_color("CPU: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln(si->cpu_brand[0] ? si->cpu_brand : "Unknown");
-    terminal_write_color("Network: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    {
-        char net[40];
-        format_net_status(net, sizeof(net));
-        terminal_writeln(net);
-    }
-
-    terminal_write_color("Uptime: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    {
-        uint32_t sec = timer_ticks() / 100u;
-        uint32_t h = sec / 3600u;
-        uint32_t m = (sec % 3600u) / 60u;
-        uint32_t s = sec % 60u;
-        char b[32];
-        k_memset(b, 0, (int)sizeof(b));
-        /* simple formatting without stdlib */
-        b[0] = (char)('0' + ((h / 10u) % 10u));
-        b[1] = (char)('0' + (h % 10u));
-        b[2] = 'h';
-        b[3] = ' ';
-        b[4] = (char)('0' + ((m / 10u) % 10u));
-        b[5] = (char)('0' + (m % 10u));
-        b[6] = 'm';
-        b[7] = ' ';
-        b[8] = (char)('0' + ((s / 10u) % 10u));
-        b[9] = (char)('0' + (s % 10u));
-        b[10] = 's';
-        b[11] = '\0';
-        terminal_writeln(b);
-    }
-
-    terminal_writeln("");
-    terminal_write_color("Press any key to return...\n", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-
-    /* wait for a key, keep clock updating */
-    while (1) {
-        gui_poll();
-        char c = keyboard_try_getchar();
-        if (c) break;
-        timer_sleep_ms(10);
-    }
-
-    terminal_clear();
-    terminal_set_cursor(saved_r, saved_c);
-    draw_taskbar();
-}
 
 void gui_init(void) {
     if (gfx_available()) {
@@ -845,6 +612,7 @@ static uint32_t g_wallpaper_cache_gen = 0;
 static void size_desktop(const fb_info_t* fi) {
     uint32_t w = fi->width > DESK_MAX_W ? DESK_MAX_W : fi->width;
     uint32_t h = fi->height > DESK_MAX_H ? DESK_MAX_H : fi->height;
+    if (w != g_desk_w || h != g_desk_h) g_wallpaper_cache_gen = (uint32_t)-1;   /* (a new size: redrawn at it) */
     if (w <= 800 && h <= 600) { g_desk_w = w; g_desk_h = h; return; }
     if (g_desktop_backbuf != g_desk_static && w == g_desk_w && h == g_desk_h) return;
     uint32_t* bb = (uint32_t*)kmalloc(w * h * 4);
@@ -1163,20 +931,17 @@ static void draw_taskbar_fb(const fb_info_t* fi) {
  * second changed - the desktop used to be fully repainted ~33 times a
  * second even when nothing at all was happening. */
 typedef struct {
-    int menu_open, menu_sel, about_open, wallpaper_open;
+    int menu_open, menu_sel;
     int term_open[TERM_WIN_MAX], term_x[TERM_WIN_MAX], term_y[TERM_WIN_MAX], term_order[TERM_WIN_MAX];
     int term_w[TERM_WIN_MAX], term_h[TERM_WIN_MAX], term_sel[TERM_WIN_MAX], term_min[TERM_WIN_MAX];
-    int pic_count, pending, front_app, app_order[APP_COUNT], app_min[APP_COUNT];
+    int front_app, app_order[APP_COUNT], app_min[APP_COUNT];
     uint32_t sec, term_gen, wp_gen, net_state, app_sig[APP_COUNT], ctx_sig, tb_gen;
-    char status[96];
 } gui_view_t;
 
 static void capture_view(gui_view_t* v, uint32_t sec) {
     memset(v, 0, sizeof(*v));
     v->menu_open = g_menu_open;
     v->menu_sel = g_menu_sel;
-    v->about_open = g_about_open;
-    v->wallpaper_open = g_wallpaper_open;
     for (int i = 0; i < TERM_WIN_MAX; i++) {
         v->term_open[i] = g_terms[i].open;
         v->term_x[i] = g_terms[i].x;
@@ -1187,8 +952,6 @@ static void capture_view(gui_view_t* v, uint32_t sec) {
         v->term_min[i] = g_terms[i].minimized;
         v->term_sel[i] = g_terms[i].sel ? g_terms[i].s_r0 * 7919 + g_terms[i].s_c0 * 31 + g_terms[i].s_r1 * 131 + g_terms[i].s_c1 + 1 : 0;
     }
-    v->pic_count = g_wp_pic_count;
-    v->pending = g_wp_pending;
     v->sec = sec;
     v->term_gen = terminal_generation();
     v->wp_gen = wallpaper_generation();
@@ -1201,15 +964,14 @@ static void capture_view(gui_view_t* v, uint32_t sec) {
     }
     v->ctx_sig = ctxmenu_signature();
     v->tb_gen = g_tb_gen;
-    kstrlcpy(v->status, g_wp_status, sizeof(v->status));
 }
 
 static gui_view_t g_last_view;
 static int        g_force_redraw = 1;
 
 static void (*const g_menu_icons[MENU_ITEMS])(int, int, uint32_t) = {
-    draw_icon_info, draw_icon_terminal, draw_icon_files, draw_icon_browser, draw_icon_notepad,
-    draw_icon_apps, draw_icon_taskmgr, draw_icon_settings, draw_icon_wallpaper, draw_icon_power,
+    draw_icon_terminal, draw_icon_files, draw_icon_browser, draw_icon_notepad,
+    draw_icon_apps, draw_icon_taskmgr, draw_icon_settings, draw_icon_power,
 };
 
 static int start_menu_y(const fb_info_t* fi) { return (int)fi->height - BAR_H - START_MENU_H - 4; }
@@ -1225,24 +987,6 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
         g_menu_icons[i](ICON_X + 8, iy + 12, 0x0029313Du);
         gfx_draw_text(ICON_X + 30, iy + 13, ICON_LABELS[i], 0x00F0F6FFu, 0x0029313Du);
     }
-
-    if (g_about_open) {
-        int mw = 420, mh = 160;
-        int mx0 = ((int)fi->width - mw) / 2;
-        int my0 = ((int)fi->height - mh) / 2;
-        char net[48], line[64];
-        format_net_status(net, sizeof(net));
-        ksnprintf(line, sizeof(line), "Network: %s", net);
-        draw_bevel_box(mx0, my0, mw, mh, 0x001D232Cu, 0x00505D72u, 0x0010141Cu);
-        draw_bevel_box(mx0 + 3, my0 + 3, mw - 6, 19, 0x00384562u, 0x00647692u, 0x00111923u);
-        gfx_draw_text(mx0 + 10, my0 + 7, "About Banana OS 0.5", 0x00FFFFFFu, 0x00384562u);
-        gfx_draw_text(mx0 + 16, my0 + 40, "Banana OS 0.5", 0x00FFFFFFu, 0x001D232Cu);
-        gfx_draw_text(mx0 + 16, my0 + 56, "Theme: Fluxbox-inspired toolbar/menu", 0x00FFFFFFu, 0x001D232Cu);
-        gfx_draw_text(mx0 + 16, my0 + 72, line, 0x00FFFFFFu, 0x001D232Cu);
-        gfx_draw_text(mx0 + 16, my0 + 96, "Click anywhere to close", 0x00AAAAAAu, 0x001D232Cu);
-    }
-
-    if (g_wallpaper_open) draw_wallpaper_app(fi);
 
     /* windows back to front: the app windows behind the terminals, the
      * terminals, then the app window in front of them (if any) */
@@ -1524,16 +1268,12 @@ void gui_poll(void) {
                 bring_term_front(wi - 1);
                 g_front_app = -1;
                 open_term_menu(wi - 1, mx, my);
-            } else if (!g_wallpaper_open && !g_about_open) {
+            } else {
                 int slot = icon_at(mx, my);
                 if (slot >= 0) open_icon_menu(slot, mx, my);
                 else open_desktop_menu(mx, my);
             }
         }
-
-        /* the picture picked earlier is decoded once a frame showing its
-         * "Loading..." status has actually been painted */
-        if (g_wp_pending >= 0 && g_last_view.pending == g_wp_pending) wallpaper_app_do_pending();
 
         if (click && ctxmenu_is_open()) {
             ctxmenu_click(mx, my);        /* an item, or a click outside that just closes it */
@@ -1542,13 +1282,6 @@ void gui_poll(void) {
         }
 
         if (click) {
-            if (g_about_open) {
-                g_about_open = 0;
-            }
-            if (g_wallpaper_open) {
-                if (wallpaper_app_click(fi, mx, my)) click = 0;
-            }
-
             /* the taskbar: Start, a window's button */
             if (click && my >= bar_y) {
                 if (mx >= START_X && mx < START_X + START_W) {
@@ -1669,7 +1402,7 @@ void gui_poll(void) {
             }
 
             /* desktop shortcuts */
-            if (click && !g_about_open && !g_menu_open && !g_wallpaper_open) {
+            if (click && !g_menu_open) {
                 int slot = icon_at(mx, my);
                 if (slot >= 0) do_action(slot);
                 if (!g_gui_enabled) return;
@@ -1754,8 +1487,6 @@ void gui_poll(void) {
 void gui_set_enabled(int enabled) {
     g_gui_enabled = enabled ? 1 : 0;
     g_menu_open = 0;
-    g_about_open = 0;
-    g_wallpaper_open = 0;
     g_force_redraw = 1;
     ctxmenu_close();
     if (!enabled) for (int a = 0; a < APP_COUNT; a++) { g_apps[a].close(); g_app_min[a] = 0; }
@@ -1832,25 +1563,24 @@ int gui_close_terminal_by_vt(int vt) {
 static void do_action(int act) {
     g_menu_open = 0;
     switch (act) {
-    case ACT_ABOUT: g_about_open = 1; break;
-    case ACT_TERMINAL: g_about_open = 0; open_new_terminal(); g_front_app = -1; break;
+    case ACT_ABOUT: settings_open_page(SETTINGS_PAGE_ABOUT); g_app_min[APP_SETTINGS] = 0; raise_app(APP_SETTINGS); break;
+    case ACT_TERMINAL: open_new_terminal(); g_front_app = -1; break;
     case ACT_FILES: explorer_open(NULL); g_app_min[APP_FILES] = 0; raise_app(APP_FILES); break;
     case ACT_BROWSER: browser_open(NULL); g_app_min[APP_BROWSER] = 0; raise_app(APP_BROWSER); break;
     case ACT_NOTEPAD: notepad_open(NULL); g_app_min[APP_NOTEPAD] = 0; raise_app(APP_NOTEPAD); break;
     case ACT_APPS: launcher_open(); g_app_min[APP_LAUNCHER] = 0; raise_app(APP_LAUNCHER); break;
     case ACT_TASKMGR: taskmgr_open(); g_app_min[APP_TASKMGR] = 0; raise_app(APP_TASKMGR); break;
     case ACT_SETTINGS: settings_open(); g_app_min[APP_SETTINGS] = 0; raise_app(APP_SETTINGS); break;
-    case ACT_WALLPAPER: open_wallpaper_app(); break;
+    case ACT_WALLPAPER: settings_open_page(SETTINGS_PAGE_DISPLAY); g_app_min[APP_SETTINGS] = 0; raise_app(APP_SETTINGS); break;
     case ACT_QUIT: gui_set_enabled(0); break;
     }
 }
 
 static void menu_activate(void) {
     if (gfx_available()) { do_action(g_menu_sel); return; }
-    /* text mode: only About works without the framebuffer desktop */
+    /* text mode: the desktop's apps need the framebuffer */
     menu_close_redraw();
-    if (g_menu_sel == ACT_ABOUT) show_about();
-    else if (g_menu_sel == ACT_QUIT) gui_set_enabled(0);
+    if (g_menu_sel == ACT_QUIT) gui_set_enabled(0);
 }
 
 /* ── windows for the Task Manager ──────────────────────────────────── */
@@ -1873,6 +1603,12 @@ void gui_window_close(int handle) { if (win_exists(handle)) win_close(handle); }
 void gui_window_activate(int handle) { if (win_exists(handle)) win_activate(handle); }
 
 void gui_raise_files(void) { g_app_min[APP_FILES] = 0; raise_app(APP_FILES); }
+
+/* a new resolution: the desktop's buffers and every window follow at the next frame */
+void gui_screen_changed(void) {
+    if (g_backbuf_active) { fb_clear_backbuffer(); g_backbuf_active = 0; }
+    g_force_redraw = 1;
+}
 
 int gui_open_apps(void) {
     if (!gfx_available() || !g_gui_enabled) return 0;

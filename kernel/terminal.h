@@ -47,6 +47,7 @@ typedef enum {
 } terminal_mode_t;
 
 void terminal_set_mode(terminal_mode_t mode);
+void terminal_screen_changed(void);   /* a new resolution: the grid follows */
 terminal_mode_t terminal_get_mode(void);
 
 /* Framebuffer-console scaling (bigger scale = fewer columns/rows on screen) */
