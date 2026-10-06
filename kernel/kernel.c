@@ -22,6 +22,7 @@
 #include "nvme.h"
 #include "paging.h"
 #include "../shell/shell.h"
+#include "font.h"
 
 #define MULTIBOOT2_MAGIC 0x36D76289
 
@@ -77,6 +78,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     __asm__ volatile("sti");  /* timer IRQ from here on */
     rtc_init();
     web_init();       /* clock for JavaScript Date / PHP date() */
+    fonts_init();     /* the built-in TrueType fonts (DejaVu) */
     task_init("banana-sh");   /* boot stack becomes the shell's real thread */
     task_start_sysmon();      /* real background stats-sampling thread */
     usb_init();       /* xHCI legacy handoff → USB keyboards work via PS/2 */
