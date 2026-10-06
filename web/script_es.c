@@ -124,6 +124,8 @@ int es_instanceof(interp_t* I, value_t v, value_t ctor) {
         if (strcmp(n, "Object") == 0) return v.t == V_OBJ || v.t == V_FUNC;
         if (strcmp(n, "Function") == 0) return v.t == V_FUNC;
         if (v.t != V_OBJ) return 0;
+        int tr = typed_instanceof(v, n);             /* typed arrays, ArrayBuffer, DataView */
+        if (tr >= 0) return tr;
         if (strcmp(n, "Array") == 0) return v.o->kind == OBJ_ARRAY;
         if (strcmp(n, "Date") == 0) return has_proto(v.o, I->proto_date);
         if (strcmp(n, "RegExp") == 0) return has_proto(v.o, I->proto_regexp);
@@ -1295,6 +1297,7 @@ static value_t js_structuredClone(interp_t* I, value_t s, int argc, value_t* arg
 /* ══ init ═════════════════════════════════════════════════════════════ */
 
 void es_init(interp_t* I) {
+    typed_init(I);                                   /* script_typed.c */
     /* RegExp */
     I->proto_regexp = obj_new(I, OBJ_PLAIN);
     method(I, I->proto_regexp, "exec", re_exec);

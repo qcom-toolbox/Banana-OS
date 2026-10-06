@@ -140,4 +140,121 @@ if (typeof CSSStyleSheet === 'undefined') W.CSSStyleSheet = class CSSStyleSheet 
 };
 if (typeof queueMicrotask !== 'function') W.queueMicrotask = function(f){ Promise.resolve().then(f); };
 if (!String.raw) String.raw = function(s){ var r = s.raw, out = ''; for (var i = 0; i < r.length; i++) { out += r[i]; if (i + 1 < arguments.length && i + 1 < r.length) out += arguments[i + 1]; } return out; };
+/* iterators over arrays and array-likes (for-of on arrays is native, but
+ * code also calls a[Symbol.iterator]() / .values() / .entries() itself) */
+var mkIt = function(a, kind){ var i = 0; var it = { next: function(){
+    if (i >= a.length) return {value: undefined, done: true};
+    var k = i++; return {value: kind === 1 ? k : kind === 2 ? [k, a[k]] : a[k], done: false}; } };
+  it[Symbol.iterator] = function(){ return it; }; return it; };
+var AP = Array.prototype;
+if (!AP[Symbol.iterator]) AP[Symbol.iterator] = function(){ return mkIt(this, 0); };
+if (!AP.values) AP.values = function(){ return mkIt(this, 0); };
+if (!AP.keys) AP.keys = function(){ return mkIt(this, 1); };
+if (!AP.entries) AP.entries = function(){ return mkIt(this, 2); };
+/* typed arrays: the methods that take callbacks (the rest are native, script_typed.c) */
+var TP = W.__TypedArrayProto;
+if (TP) {
+  var mk = function(t, n){ return new t.constructor(n); };
+  TP.forEach = function(f, th){ for (var i = 0; i < this.length; i++) f.call(th, this[i], i, this); };
+  TP.map = function(f, th){ var r = mk(this, this.length); for (var i = 0; i < this.length; i++) r[i] = f.call(th, this[i], i, this); return r; };
+  TP.filter = function(f, th){ var a = []; for (var i = 0; i < this.length; i++) if (f.call(th, this[i], i, this)) a.push(this[i]); return new this.constructor(a); };
+  TP.reduce = function(f, acc){ var i = 0; if (arguments.length < 2) acc = this[i++]; for (; i < this.length; i++) acc = f(acc, this[i], i, this); return acc; };
+  TP.reduceRight = function(f, acc){ var i = this.length - 1; if (arguments.length < 2) acc = this[i--]; for (; i >= 0; i--) acc = f(acc, this[i], i, this); return acc; };
+  TP.every = function(f, th){ for (var i = 0; i < this.length; i++) if (!f.call(th, this[i], i, this)) return false; return true; };
+  TP.some = function(f, th){ for (var i = 0; i < this.length; i++) if (f.call(th, this[i], i, this)) return true; return false; };
+  TP.find = function(f, th){ for (var i = 0; i < this.length; i++) if (f.call(th, this[i], i, this)) return this[i]; };
+  TP.findIndex = function(f, th){ for (var i = 0; i < this.length; i++) if (f.call(th, this[i], i, this)) return i; return -1; };
+  TP.findLast = function(f, th){ for (var i = this.length - 1; i >= 0; i--) if (f.call(th, this[i], i, this)) return this[i]; };
+  TP.findLastIndex = function(f, th){ for (var i = this.length - 1; i >= 0; i--) if (f.call(th, this[i], i, this)) return i; return -1; };
+  TP.at = function(i){ i = Math.trunc(i) || 0; if (i < 0) i += this.length; return this[i]; };
+  TP.sort = function(f){ var a = []; for (var i = 0; i < this.length; i++) a.push(this[i]);
+    a.sort(f || function(x, y){ return x - y; }); for (var j = 0; j < a.length; j++) this[j] = a[j]; return this; };
+  TP.toString = function(){ return this.join(','); };
+  TP.toLocaleString = TP.toString;
+  TP.keys = function(){ return mkIt(this, 1); };
+  TP.values = function(){ return mkIt(this, 0); };
+  TP.entries = function(){ return mkIt(this, 2); };
+  TP[Symbol.iterator] = TP.values;
+}
+if (typeof TextEncoder === 'undefined') W.TextEncoder = class TextEncoder {
+  get encoding(){ return 'utf-8'; }
+  encode(s){ return __utf8_encode(s === undefined ? '' : String(s)); }
+  encodeInto(s, dst){ var b = __utf8_encode(String(s)), n = Math.min(b.length, dst.length); dst.set(b.subarray(0, n)); return {read: s.length, written: n}; }
+};
+if (typeof TextDecoder === 'undefined') W.TextDecoder = class TextDecoder {
+  constructor(l){ this.encoding = (l || 'utf-8').toLowerCase(); }
+  decode(b){ return b === undefined ? '' : __utf8_decode(b); }
+};
+if (typeof Reflect === 'undefined') W.Reflect = {
+  apply: function(f, t, a){ return f.apply(t, a || []); },
+  construct: function(C, a){ var A = a || []; switch (A.length) { case 0: return new C(); case 1: return new C(A[0]);
+    case 2: return new C(A[0], A[1]); case 3: return new C(A[0], A[1], A[2]); default: return new C(A[0], A[1], A[2], A[3]); } },
+  get: function(o, k){ return o[k]; },
+  set: function(o, k, v){ o[k] = v; return true; },
+  has: function(o, k){ return k in o; },
+  ownKeys: function(o){ return Object.getOwnPropertyNames(o); },
+  defineProperty: function(o, k, d){ try { Object.defineProperty(o, k, d); return true; } catch (e) { return false; } },
+  deleteProperty: function(o, k){ return delete o[k]; },
+  getPrototypeOf: function(o){ return Object.getPrototypeOf(o); },
+  setPrototypeOf: function(o, p){ Object.setPrototypeOf(o, p); return true; },
+  getOwnPropertyDescriptor: function(o, k){ return Object.getOwnPropertyDescriptor(o, k); },
+  isExtensible: function(){ return true; }, preventExtensions: function(){ return true; }
+};
+if (typeof escape !== 'function') {
+  W.escape = function(s){ s = String(s); var r = ''; for (var i = 0; i < s.length; i++) { var c = s.charCodeAt(i), ch = s.charAt(i);
+    if (/[A-Za-z0-9@*_+\-.\/]/.test(ch)) r += ch; else r += '%' + (c < 16 ? '0' : '') + c.toString(16).toUpperCase(); } return r; };
+  W.unescape = function(s){ return String(s).replace(/%([0-9A-Fa-f]{2})/g, function(m, h){ return String.fromCharCode(parseInt(h, 16)); }); };
+}
+var M = Math;
+if (!M.log1p) M.log1p = function(x){ return M.log(1 + x); };
+if (!M.expm1) M.expm1 = function(x){ return M.exp(x) - 1; };
+if (!M.sinh) M.sinh = function(x){ return (M.exp(x) - M.exp(-x)) / 2; };
+if (!M.cosh) M.cosh = function(x){ return (M.exp(x) + M.exp(-x)) / 2; };
+if (!M.tanh) M.tanh = function(x){ if (x > 20) return 1; if (x < -20) return -1; var a = M.exp(2 * x); return (a - 1) / (a + 1); };
+var O = Object, OP = Object.prototype;
+if (!O.isExtensible) O.isExtensible = function(){ return true; };
+if (!O.getOwnPropertySymbols) O.getOwnPropertySymbols = function(){ return []; };
+if (!O.getOwnPropertyDescriptors) O.getOwnPropertyDescriptors = function(o){ var r = {}; O.getOwnPropertyNames(o).forEach(function(k){ r[k] = O.getOwnPropertyDescriptor(o, k); }); return r; };
+if (!OP.isPrototypeOf) OP.isPrototypeOf = function(o){ while (o != null) { o = O.getPrototypeOf(o); if (o === this) return true; } return false; };
+if (!OP.propertyIsEnumerable) OP.propertyIsEnumerable = function(k){ return O.prototype.hasOwnProperty.call(this, k); };
+if (!OP.valueOf) OP.valueOf = function(){ return this; };
+if (!OP.toLocaleString) OP.toLocaleString = function(){ return this.toString(); };
+var NP = Number.prototype;
+if (!NP.toPrecision) NP.toPrecision = function(p){ if (p === undefined) return String(this); var x = Number(this);
+  if (x === 0) return x.toFixed(p - 1); var e = Math.floor(Math.log10(Math.abs(x))); return (e < -6 || e >= p) ? x.toExponential(p - 1) : x.toFixed(Math.max(0, p - 1 - e)); };
+if (!NP.toExponential) NP.toExponential = function(d){ var x = Number(this); if (x === 0) return (d ? (0).toFixed(d) : '0') + 'e+0';
+  var e = Math.floor(Math.log10(Math.abs(x))), m = x / Math.pow(10, e); if (d === undefined) d = Math.max(0, String(m).replace('-', '').length - 2);
+  var ms = m.toFixed(d); if (Math.abs(parseFloat(ms)) >= 10) { e++; ms = (m / 10).toFixed(d); } return ms + 'e' + (e < 0 ? '-' : '+') + Math.abs(e); };
+if (!NP.toLocaleString) NP.toLocaleString = function(){ var p = String(this).split('.'); p[0] = p[0].replace(/\B(?=(\d{3})+(?!\d))/g, ','); return p.join('.'); };
+var SP = String.prototype;
+if (!SP.toLocaleLowerCase) SP.toLocaleLowerCase = SP.toLowerCase;
+if (!SP.toLocaleUpperCase) SP.toLocaleUpperCase = SP.toUpperCase;
+if (!Array.prototype.copyWithin) Array.prototype.copyWithin = function(t, s, e){ var n = this.length, c = this.slice(s, e === undefined ? n : e);
+  for (var i = 0; i < c.length && t + i < n; i++) this[t + i] = c[i]; return this; };
+if (!Function.prototype.toString) Function.prototype.toString = function(){ return 'function ' + (this.name || '') + '() { [native code] }'; };
+if (typeof WeakRef === 'undefined') W.WeakRef = class WeakRef { constructor(t){ this._t = t; } deref(){ return this._t; } };
+if (typeof Headers === 'undefined') W.Headers = class Headers {
+  constructor(i){ this._h = {}; if (i) { if (i._h) i = i._h; for (var k in i) this._h[k.toLowerCase()] = String(i[k]); } }
+  get(k){ var v = this._h[String(k).toLowerCase()]; return v === undefined ? null : v; }
+  set(k, v){ this._h[String(k).toLowerCase()] = String(v); } append(k, v){ var o = this.get(k); this.set(k, o === null ? v : o + ', ' + v); }
+  has(k){ return this.get(k) !== null; } delete(k){ delete this._h[String(k).toLowerCase()]; }
+  forEach(f, t){ for (var k in this._h) f.call(t, this._h[k], k, this); }
+  entries(){ var a = []; for (var k in this._h) a.push([k, this._h[k]]); return a[Symbol.iterator](); }
+  [Symbol.iterator](){ return this.entries(); }
+};
+if (typeof FormData === 'undefined') W.FormData = class FormData {
+  constructor(){ this._l = []; } append(k, v){ this._l.push([k, String(v)]); } set(k, v){ this.delete(k); this.append(k, v); }
+  get(k){ for (var p of this._l) if (p[0] === k) return p[1]; return null; } getAll(k){ return this._l.filter(function(p){ return p[0] === k; }).map(function(p){ return p[1]; }); }
+  has(k){ return this.get(k) !== null; } delete(k){ this._l = this._l.filter(function(p){ return p[0] !== k; }); }
+  entries(){ return this._l.slice()[Symbol.iterator](); } [Symbol.iterator](){ return this.entries(); }
+};
+if (typeof Blob === 'undefined') W.Blob = class Blob {
+  constructor(parts, o){ this._s = (parts || []).map(function(p){ return p && p.byteLength !== undefined && typeof p !== 'string' ? __utf8_decode(p) : String(p); }).join('');
+    this.type = (o && o.type) || ''; }
+  get size(){ return this._s.length; }
+  text(){ return Promise.resolve(this._s); }
+  arrayBuffer(){ return Promise.resolve(__utf8_encode(this._s).buffer); }
+  slice(a, b, t){ var r = new Blob([this._s.slice(a, b)]); r.type = t || ''; return r; }
+};
+if (W.crypto && crypto.getRandomValues) crypto.getRandomValues = function(a){ for (var i = 0; i < a.length; i++) a[i] = Math.floor(Math.random() * 4294967296); return a; };
 })();

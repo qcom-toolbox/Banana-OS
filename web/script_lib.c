@@ -852,13 +852,14 @@ static value_t s_toString(interp_t* I, value_t self, int argc, value_t* argv) { 
 
 static value_t js_fromCharCode(interp_t* I, value_t self, int argc, value_t* argv) {
     (void)self;
-    char* b = (char*)arena_alloc(I->A, (uint32_t)argc * 3 + 1);
+    char* b = (char*)arena_alloc(I->A, (uint32_t)argc * 4 + 1);
     uint32_t n = 0;
     for (int i = 0; i < argc; i++) {
         int c = (int)v_tonum(I, argv[i]);
         if (c < 0x80) b[n++] = (char)c;
         else if (c < 0x800) { b[n++] = (char)(0xC0 | (c >> 6)); b[n++] = (char)(0x80 | (c & 63)); }
-        else { b[n++] = (char)(0xE0 | ((c >> 12) & 15)); b[n++] = (char)(0x80 | ((c >> 6) & 63)); b[n++] = (char)(0x80 | (c & 63)); }
+        else if (c < 0x10000) { b[n++] = (char)(0xE0 | ((c >> 12) & 15)); b[n++] = (char)(0x80 | ((c >> 6) & 63)); b[n++] = (char)(0x80 | (c & 63)); }
+        else { b[n++] = (char)(0xF0 | ((c >> 18) & 7)); b[n++] = (char)(0x80 | ((c >> 12) & 63)); b[n++] = (char)(0x80 | ((c >> 6) & 63)); b[n++] = (char)(0x80 | (c & 63)); }
     }
     return ret_str(I, b, n);
 }
@@ -1287,6 +1288,7 @@ void lib_init(interp_t* I) {
     script_def_global(I, "Date", date);
     obj_t* sp = obj_new(I, OBJ_PLAIN);
     obj_set(I, sp, "fromCharCode", v_native(I, "fromCharCode", js_fromCharCode));
+    obj_set(I, sp, "fromCodePoint", v_native(I, "fromCodePoint", js_fromCharCode));   /* strings are UTF-8 here */
     obj_t* ap = obj_new(I, OBJ_PLAIN);
     obj_set(I, ap, "isArray", v_native(I, "isArray", js_isArray));
     obj_t* op = obj_new(I, OBJ_PLAIN);
