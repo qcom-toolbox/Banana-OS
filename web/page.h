@@ -26,6 +26,9 @@ typedef struct page_env {
     uint32_t (*now_ms)(void);
     void (*yield)(void);             /* optional: let other tasks run during a long script */
     void (*log)(void* ctx, const char* line);
+    /* optional: document.cookie - the cookies a script may see for url ("a=1; b=2"), and one it sets */
+    void (*cookie_get)(void* ctx, const char* url, char* out, int cap);
+    void (*cookie_set)(void* ctx, const char* url, const char* line);
     void* ctx;
 } page_env_t;
 

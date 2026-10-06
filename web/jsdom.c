@@ -507,6 +507,12 @@ static value_t doc_get(interp_t* I, page_t* p, dom_node_t* d, const char* key, i
     if (K("head")) return wrap(p, dom_find_tag(d, "head"));
     if (K("documentElement")) return wrap(p, dom_find_tag(d, "html"));
     if (K("title")) return v_str(I, p->title);
+    if (K("cookie")) {
+        static char jar[4096];
+        jar[0] = 0;
+        if (p->env && p->env->cookie_get) p->env->cookie_get(p->env->ctx, p->url, jar, sizeof(jar));
+        return v_str(I, jar);
+    }
     if (K("URL") || K("documentURI")) return v_str(I, p->url);
     if (K("location")) return v_obj(p->loc_obj);
     if (K("readyState")) return v_str(I, "complete");
@@ -703,6 +709,10 @@ static int elem_set(interp_t* I, obj_t* self, const char* key, value_t v) {
             return 1;
         }
         if (K("location")) { url_resolve(p->url, v_cstr(I, v), p->nav, sizeof(p->nav)); p->nav_pending = 1; return 1; }
+        if (K("cookie")) {                               /* one cookie: "name=value; path=/; max-age=..." */
+            if (p->env && p->env->cookie_set) p->env->cookie_set(p->env->ctx, p->url, v_cstr(I, v));
+            return 1;
+        }
         return 0;
     }
     if (n->type != DOM_ELEM) {
@@ -2242,7 +2252,6 @@ void jsdom_install(page_t* p) {
     p->loc_obj->hc = &loc_class;
 
     value_t doc = wrap(p, p->doc);
-    obj_set(I, doc.o, "cookie", v_str(I, ""));
 
     obj_t* win = obj_new(I, OBJ_HOST);
     win->hc = &win_class;
@@ -2263,7 +2272,7 @@ void jsdom_install(page_t* p) {
     obj_set(I, nav, "platform", v_str(I, "Banana OS"));
     obj_set(I, nav, "language", v_str(I, "en-US"));
     obj_set(I, nav, "onLine", v_bool(1));
-    obj_set(I, nav, "cookieEnabled", v_bool(0));
+    obj_set(I, nav, "cookieEnabled", v_bool(p->env && p->env->cookie_set != NULL));
     script_def_global(I, "navigator", v_obj(nav));
 
     obj_t* scr = obj_new(I, OBJ_PLAIN);

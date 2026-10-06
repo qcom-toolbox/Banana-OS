@@ -111,7 +111,7 @@ static tab_t* cur_tab(void) { return g_ntabs ? g_tabs[g_cur] : NULL; }
 
 #define COOKIES     128
 #define COOKIE_FILE "/home/banana/.config/browser/cookies"
-typedef struct { char domain[96]; char name[64]; char value[1024]; int persist; } cookie_t;
+typedef struct { char domain[96]; char name[64]; char value[1024]; int persist; int httponly; } cookie_t;
 static cookie_t g_cookies[COOKIES];
 static int g_ncookies;
 static int g_cookies_dirty, g_cookies_loaded;
@@ -178,8 +178,9 @@ static int expires_past(const char* s) {
     return a < b;
 }
 
-static void cookie_set(const char* host, const char* line) {
-    /* name=value; Domain=x; Path=/; Expires=...; Max-Age=... */
+/* from_js: document.cookie - it can neither make nor change an HttpOnly cookie */
+static void cookie_set(const char* host, const char* line, int from_js) {
+    /* name=value; Domain=x; Path=/; Expires=...; Max-Age=...; HttpOnly */
     char name[64], value[1024], domain[96];
     int n = 0;
     while (line[n] && line[n] != '=' && line[n] != ';' && n < 63) { name[n] = line[n]; n++; }
@@ -191,11 +192,12 @@ static void cookie_set(const char* host, const char* line) {
     while (v[vn] && v[vn] != ';' && vn < (int)sizeof(value) - 1) { value[vn] = v[vn]; vn++; }
     value[vn] = 0;
     kstrlcpy(domain, host, sizeof(domain));
-    int expired = 0, persist = 0;
+    int expired = 0, persist = 0, httponly = 0;
     for (const char* a = strchr(line, ';'); a; a = strchr(a + 1, ';')) {
         const char* s = a + 1;
         while (*s == ' ') s++;
-        if (strncasecmp(s, "domain=", 7) == 0) {
+        if (strncasecmp(s, "httponly", 8) == 0 && !from_js) httponly = 1;
+        else if (strncasecmp(s, "domain=", 7) == 0) {
             s += 7;
             if (*s == '.') s++;
             int k = 0;
@@ -213,9 +215,11 @@ static void cookie_set(const char* host, const char* line) {
     g_cookies_dirty = 1;
     for (int i = 0; i < g_ncookies; i++) {
         if (strcmp(g_cookies[i].name, name) == 0 && strcmp(g_cookies[i].domain, domain) == 0) {
+            if (from_js && g_cookies[i].httponly) return;
             if (expired) { g_cookies[i] = g_cookies[--g_ncookies]; return; }
             kstrlcpy(g_cookies[i].value, value, sizeof(g_cookies[i].value));
             g_cookies[i].persist = persist;
+            g_cookies[i].httponly = httponly;
             return;
         }
     }
@@ -226,6 +230,29 @@ static void cookie_set(const char* host, const char* line) {
     kstrlcpy(c->name, name, sizeof(c->name));
     kstrlcpy(c->value, value, sizeof(c->value));
     c->persist = persist;
+    c->httponly = httponly;
+}
+
+/* document.cookie: what the page's scripts may read */
+static void env_cookie_get(void* ctx, const char* url, char* out, int cap) {
+    (void)ctx;
+    char host[96];
+    url_host(url, host, sizeof(host));
+    out[0] = 0;
+    for (int i = 0; i < g_ncookies; i++) {
+        if (g_cookies[i].httponly || !domain_match(host, g_cookies[i].domain)) continue;
+        if (out[0]) kstrlcat(out, "; ", (size_t)cap);
+        kstrlcat(out, g_cookies[i].name, (size_t)cap);
+        kstrlcat(out, "=", (size_t)cap);
+        kstrlcat(out, g_cookies[i].value, (size_t)cap);
+    }
+}
+
+static void env_cookie_set(void* ctx, const char* url, const char* line) {
+    (void)ctx;
+    char host[96];
+    url_host(url, host, sizeof(host));
+    if (host[0]) cookie_set(host, line, 1);
 }
 
 /* the persistent cookies, one per line: domain TAB name TAB value */
@@ -233,13 +260,14 @@ static void cookies_save(void) {
     if (!g_cookies_dirty) return;
     g_cookies_dirty = 0;
     uint32_t cap = 256, n = 0;
-    for (int i = 0; i < g_ncookies; i++) cap += (uint32_t)(strlen(g_cookies[i].domain) + strlen(g_cookies[i].name) + strlen(g_cookies[i].value) + 4);
+    for (int i = 0; i < g_ncookies; i++) cap += (uint32_t)(strlen(g_cookies[i].domain) + strlen(g_cookies[i].name) + strlen(g_cookies[i].value) + 14);
     char* buf = (char*)kmalloc(cap);
     if (!buf) return;
     buf[0] = 0;
     for (int i = 0; i < g_ncookies; i++) {
         if (!g_cookies[i].persist) continue;
-        n += (uint32_t)ksnprintf(buf + n, cap - n, "%s\t%s\t%s\n", g_cookies[i].domain, g_cookies[i].name, g_cookies[i].value);
+        n += (uint32_t)ksnprintf(buf + n, cap - n, "%s%s\t%s\t%s\n", g_cookies[i].httponly ? "#HttpOnly_" : "",
+                                 g_cookies[i].domain, g_cookies[i].name, g_cookies[i].value);
     }
     fs_mkdir_p("/home/banana/.config/browser");
     fs_write_path(COOKIE_FILE, buf, n);
@@ -275,6 +303,10 @@ static void cookies_load(void) {
             memcpy(c->name, t1 + 1, (size_t)nl);
             memcpy(c->value, t2 + 1, (size_t)vl);
             c->persist = 1;
+            if (strncmp(c->domain, "#HttpOnly_", 10) == 0) {
+                memmove(c->domain, c->domain + 10, strlen(c->domain + 10) + 1);
+                c->httponly = 1;
+            }
         }
         p = *e ? e + 1 : e;
     }
@@ -361,7 +393,7 @@ static void on_headers(void* ctx, const http_response_t* r, const char* raw) {
             int n = 0;
             while (v + n < (e ? e : v + strlen(v)) && v[n] != '\r' && n < 2047) { line[n] = v[n]; n++; }
             line[n] = 0;
-            cookie_set(host, line);
+            cookie_set(host, line, 0);
         }
         l = e ? e + 1 : NULL;
     }
@@ -1342,6 +1374,8 @@ static void browser_task(void) {
     g_env.yield = task_maybe_yield;     /* a long script must not freeze the desktop */
     web_yield_hook = task_maybe_yield;  /* nor parsing, styling and layout */
     g_env.log = env_log;
+    g_env.cookie_get = env_cookie_get;
+    g_env.cookie_set = env_cookie_set;
     g_env.ctx = NULL;
     /* a page may use a share of the heap (big pages, images, script-heavy
      * sites like GitHub need ~200 MB), within reason */

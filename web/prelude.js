@@ -427,4 +427,21 @@ if (typeof W.DOMException === 'undefined') {
   };
   for (var dk in DE_CODES) W.DOMException[dk.replace(/([a-z])([A-Z])/g, '$1_$2').toUpperCase().replace(/_ERROR$/, '_ERR')] = DE_CODES[dk];
 }
+(function(N){
+  if (!N) return;
+  var def = function(k, v){ if (N[k] === undefined) N[k] = v; };
+  def('languages', [N.language || 'en-US', 'en']);
+  def('hardwareConcurrency', 1); def('maxTouchPoints', 0); def('deviceMemory', 4);
+  def('vendor', ''); def('product', 'Gecko'); def('appCodeName', 'Mozilla'); def('appVersion', '5.0 (Banana OS)');
+  def('doNotTrack', null); def('webdriver', false); def('pdfViewerEnabled', false);
+  def('plugins', []); def('mimeTypes', []);
+  def('connection', { effectiveType: '4g', downlink: 10, rtt: 50, saveData: false, addEventListener: function(){}, removeEventListener: function(){} });
+  def('sendBeacon', function(){ return true; });
+  def('vibrate', function(){ return false; });
+  def('javaEnabled', function(){ return false; });
+  def('clipboard', { writeText: function(){ return Promise.resolve(); }, readText: function(){ return Promise.resolve(''); },
+                     write: function(){ return Promise.resolve(); }, read: function(){ return Promise.resolve([]); } });
+  def('permissions', { query: function(){ return Promise.resolve({ state: 'prompt', onchange: null, addEventListener: function(){} }); } });
+  def('storage', { estimate: function(){ return Promise.resolve({ quota: 0, usage: 0 }); }, persist: function(){ return Promise.resolve(false); } });
+})(W.navigator);
 })();
