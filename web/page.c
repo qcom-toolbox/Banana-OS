@@ -1,6 +1,7 @@
 #include "page.h"
 #include "kstring.h"
 #include "kheap.h"
+#include "svg.h"
 
 #ifndef PAGE_JS_STEPS
 #define PAGE_JS_STEPS 400000000u     /* per script or event handler */
@@ -315,19 +316,34 @@ static void run_scripts(page_t* p) {
 static void load_images(page_t* p, dom_node_t* n, int* count) {
     for (dom_node_t* c = n->first; c && *count < MAX_IMAGES; c = c->next) {
         if (c->type != DOM_ELEM) continue;
+        if (strcmp(c->tag, "svg") == 0) {
+            /* inline SVG: drawn as an image of its own markup */
+            if (!c->img) {
+                img_data_t* img = (img_data_t*)arena_alloc(&p->A, sizeof(img_data_t));
+                img->failed = 1;
+                c->img = img;
+                char* src = dom_html(&p->A, c, 1);
+                if (src && svg_render(src, (uint32_t)strlen(src), 0, 0, img, &p->A) == 0) img->failed = 0;
+                (*count)++;
+            }
+            continue;
+        }
         if (strcmp(c->tag, "img") == 0 && !c->img) {
             const char* src = dom_attr(c, "src");
             img_data_t* img = (img_data_t*)arena_alloc(&p->A, sizeof(img_data_t));
             img->failed = 1;
             c->img = img;
-            if (src && *src && p->env && p->env->decode_image) {
+            if (src && *src && p->env) {                 /* SVG needs no decoder; other formats do */
                 char url[1024], ct[96];
                 url_resolve(p->url, src, url, sizeof(url));
                 char* data;
                 uint32_t len;
                 (*count)++;
                 if (fetch(p, url, &data, &len, ct, sizeof(ct)) == 0) {
-                    if (len <= MAX_IMG_SIZE && p->env->decode_image(p->env->ctx, (const uint8_t*)data, len, img, &p->A) == 0)
+                    if (len <= MAX_IMG_SIZE && svg_sniff((const uint8_t*)data, len)) {
+                        if (svg_render(data, len, 0, 0, img, &p->A) == 0) img->failed = 0;
+                    } else if (len <= MAX_IMG_SIZE && p->env->decode_image &&
+                               p->env->decode_image(p->env->ctx, (const uint8_t*)data, len, img, &p->A) == 0)
                         img->failed = 0;
                     kfree(data);
                 }

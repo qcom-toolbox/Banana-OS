@@ -380,6 +380,17 @@ static void mark_box(ctx_t* C, uint32_t from, int h) {
     }
 }
 
+/* width="24" / "24px" / "1.5em" (an SVG's); "100%" and the like: 0 (unknown) */
+static int attr_px(const char* s, const style_t* st) {
+    int v = 0, frac = 0, div = 1;
+    while (*s == ' ') s++;
+    while (*s >= '0' && *s <= '9') v = v * 10 + (*s++ - '0');
+    if (*s == '.') { s++; while (*s >= '0' && *s <= '9' && div < 1000) { frac = frac * 10 + (*s++ - '0'); div *= 10; } }
+    if (*s == '%') return 0;
+    if (s[0] == 'e' && s[1] == 'm') return (v * div + frac) * (st && st->font_px ? st->font_px : 16) / div;
+    return v;
+}
+
 static int str_to_px(const char* s) {
     int v = 0;
     while (*s == ' ') s++;
@@ -394,10 +405,11 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
     int cw = GLYPH * scale;
     const char* tag = e->tag;
     uint32_t first = C->dry ? 0 : C->L->n;
-    if (strcmp(tag, "img") == 0) {
+    if (strcmp(tag, "img") == 0 || strcmp(tag, "svg") == 0) {
         const char* aw = dom_attr(e, "width");
         const char* ah = dom_attr(e, "height");
-        int w = aw ? str_to_px(aw) : 0, h = ah ? str_to_px(ah) : 0;
+        int w = aw ? attr_px(aw, st) : 0, h = ah ? attr_px(ah, st) : 0;
+        if (tag[0] == 's' && ((aw && w == 0 && aw[0] == '0') || (ah && h == 0 && ah[0] == '0'))) return;   /* a hidden sprite sheet */
         if (st->width != LEN_AUTO && st->width > 0) w = st->width;
         if (st->height != LEN_AUTO && st->height > 0) h = st->height;
         img_data_t* img = e->img;
@@ -578,7 +590,7 @@ static void inline_node(inl_t* I, dom_node_t* n, uint32_t bg, int has_bg) {
     if (st->position == POS_ABSOLUTE || st->position == POS_FIXED) { defer_abs(C, n, I->x0 + I->cx, I->y); return; }
     n->box_x = I->x0 + I->cx;
     n->box_y = I->y;
-    int replaced = strcmp(tag, "img") == 0 || strcmp(tag, "input") == 0 || strcmp(tag, "button") == 0 ||
+    int replaced = strcmp(tag, "img") == 0 || strcmp(tag, "svg") == 0 || strcmp(tag, "input") == 0 || strcmp(tag, "button") == 0 ||
                    strcmp(tag, "select") == 0 || strcmp(tag, "textarea") == 0;
     if (replaced) {
         if (!st->visible) return;
@@ -714,7 +726,7 @@ static int is_blank_text(const dom_node_t* t) {
  * they are laid out by the inline code (as one atomic run) */
 static int flex_is_inline(const dom_node_t* e) {
     const char* t = e->tag;
-    if (strcmp(t, "img") == 0 || strcmp(t, "input") == 0 || strcmp(t, "button") == 0 ||
+    if (strcmp(t, "img") == 0 || strcmp(t, "svg") == 0 || strcmp(t, "input") == 0 || strcmp(t, "button") == 0 ||
         strcmp(t, "select") == 0 || strcmp(t, "textarea") == 0) return 1;
     return e->style->display == DISP_INLINE && !has_block_child((dom_node_t*)e);
 }
@@ -987,7 +999,7 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     {
         const char* t = e->tag;
         if (strcmp(t, "select") == 0 || strcmp(t, "input") == 0 || strcmp(t, "button") == 0 ||
-            strcmp(t, "textarea") == 0 || strcmp(t, "img") == 0)
+            strcmp(t, "textarea") == 0 || strcmp(t, "img") == 0 || strcmp(t, "svg") == 0)
             return flex_inline_item(C, e, x + st->margin[3], y + st->margin[0], avail - st->margin[1] - st->margin[3]) +
                    st->margin[0] + st->margin[2];
     }

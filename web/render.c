@@ -43,7 +43,22 @@ static void image(target_t* T, const dl_item_t* it, int x, int y) {
         int sy = (yy - y) * im->h / it->h;
         const uint32_t* src = im->px + sy * im->w;
         uint32_t* p = T->buf + yy * T->stride;
-        for (int xx = x0; xx < x1; xx++) p[xx] = src[(xx - x) * im->w / it->w];
+        if (!im->alpha) {
+            for (int xx = x0; xx < x1; xx++) p[xx] = src[(xx - x) * im->w / it->w];
+            continue;
+        }
+        const uint8_t* as = im->alpha + sy * im->w;
+        for (int xx = x0; xx < x1; xx++) {
+            int sx = (xx - x) * im->w / it->w;
+            uint32_t a = as[sx];
+            if (!a) continue;
+            if (a == 255) { p[xx] = src[sx]; continue; }
+            uint32_t s = src[sx], d = p[xx];
+            uint32_t r = (((s >> 16) & 255) * a + ((d >> 16) & 255) * (255 - a)) / 255;
+            uint32_t g = (((s >> 8) & 255) * a + ((d >> 8) & 255) * (255 - a)) / 255;
+            uint32_t b = ((s & 255) * a + (d & 255) * (255 - a)) / 255;
+            p[xx] = r << 16 | g << 8 | b;
+        }
     }
 }
 

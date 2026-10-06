@@ -15,6 +15,7 @@
 
 typedef struct img_data {
     uint32_t* px;           /* XRGB, natural size */
+    uint8_t*  alpha;        /* per-pixel coverage 0..255 (SVG), NULL: opaque */
     int       w, h;
     int       failed;       /* could not load: draw a placeholder */
 } img_data_t;
