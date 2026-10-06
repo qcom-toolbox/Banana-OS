@@ -25,9 +25,12 @@ static int is_out_of_flow(const dom_node_t* e) {
     return e->type == DOM_ELEM && e->style && (e->style->position == POS_ABSOLUTE || e->style->position == POS_FIXED);
 }
 
+static int out_of_sight(const style_t* st);
+
 /* an absolute/fixed box met at its static position (sx, sy): placed later */
 static void defer_abs(ctx_t* C, dom_node_t* e, int sx, int sy) {
     if (C->dry) return;                         /* out of the flow: no size to measure */
+    if (out_of_sight(e->style)) return;         /* visually hidden (flex containers come here directly) */
     if (e->style->position == POS_FIXED) {
         if (C->nfix < 32) { C->fixq[C->nfix].n = e; C->fixq[C->nfix].sx = sx; C->fixq[C->nfix].sy = sy; C->nfix++; }
     } else if (C->nabs < 64) {

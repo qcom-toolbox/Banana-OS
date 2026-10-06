@@ -61,6 +61,7 @@ enum {
     N_VARHOIST,     /* a = list of `var` names to declare (undefined) on entry */
     N_IMPORT,       /* import ... from s (see parse_import) */
     N_EXPORT,       /* export a / export { b } */
+    N_YIELD,        /* yield a; op '*': yield* a */
 };
 
 /* binary/unary operator codes (op field) */
@@ -87,6 +88,8 @@ typedef struct node {
 
 #define NF_CHECKED   1          /* N_FUNC flags */
 #define NF_ARGUMENTS 2          /* its body may use `arguments` (or eval) */
+#define NF_NAMED     4          /* a named function expression: its name is bound inside it */
+#define NF_GEN       8          /* function*: calling it makes a generator */
 
 /* ── run time ────────────────────────────────────────────────────── */
 
@@ -110,6 +113,8 @@ struct func {
     native_fn  nf;
     node_t*    decl;         /* N_FUNC */
     env_t*     closure;
+    const char* module_url;  /* the ES module it was defined in (import() resolves against it) */
+    const char* src_name;    /* ...and the file (errors name where they happened) */
     const char* name;
     value_t    bound_this;   /* arrow functions keep the outer `this` */
     int        has_bound;
@@ -142,6 +147,7 @@ struct interp {
     int       line;          /* line being run (errors) */
     int       col;
     int       throw_line, throw_col;   /* where the exception was thrown */
+    const char* throw_src;             /* ...in which file */
     obj_t*    oom_err;       /* thrown when the arena is exhausted */
     uint32_t  steps, step_limit;
     void    (*yield_fn)(void);  /* called every 1K steps: other (cooperative) tasks keep running */
@@ -174,6 +180,9 @@ struct interp {
     uint32_t  icap, icount;
     obj_t*    module_ns;     /* the module running: its exports */
     const char* module_url;  /* ...and its address (relative imports) */
+    obj_t*    gen_out;       /* a generator body running: what it yields (an array) */
+    int       gen_force;     /* call_value: run a generator function's body, not make a generator */
+    obj_t*    proto_gen;     /* generator objects: next / return / throw */
     script_import_fn import_fn;
     void*     import_ctx;
 };
@@ -204,6 +213,9 @@ int     es_promise_state(interp_t* I, value_t p, value_t* out);   /* 0 pending, 
 void    es_run_jobs(interp_t* I);
 obj_t*  es_to_array(interp_t* I, value_t v);   /* an iterable/array-like as an array (NULL: not iterable) */
 int     es_instanceof(interp_t* I, value_t v, value_t ctor);
+obj_t*  es_proxy_target(obj_t* o);
+value_t es_generator_new(interp_t* I, value_t fn, value_t self, int argc, value_t* argv);
+int     es_proxy_has(interp_t* I, obj_t* o, const char* key);
 value_t accessor_get(interp_t* I, value_t acc, value_t self);
 num_t   num_floor(num_t x);
 void    lib_init(interp_t* I);          /* script_lib.c: built-in globals */

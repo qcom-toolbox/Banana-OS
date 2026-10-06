@@ -1919,7 +1919,8 @@ static obj_t* module_load(page_t* p, const char* url) {
         p->mods_cap = nc;
     }
     obj_t* ns = obj_new(I, OBJ_PLAIN);
-    p->mods[p->nmods].url = arena_strdup(&p->A, url, (uint32_t)strlen(url));
+    char* kept = arena_strdup(&p->A, url, (uint32_t)strlen(url));   /* outlives the caller: functions keep it as their module address */
+    p->mods[p->nmods].url = kept;
     p->mods[p->nmods].ns = ns;
     p->nmods++;
     char* data;
@@ -1933,7 +1934,7 @@ static obj_t* module_load(page_t* p, const char* url) {
     const char* slash = strrchr(url, '/');
     const char* nm0 = slash ? slash + 1 : url;
     const char* name = arena_strdup(&p->A, nm0, (uint32_t)(strlen(nm0) > 80 ? 80 : strlen(nm0)));
-    if (script_run_module(I, data, len, name, url, ns) != 0) {
+    if (script_run_module(I, data, len, name, kept, ns) != 0) {
         kstrlcpy(p->status, script_error(I), sizeof(p->status));
         mod_log(p, "js: ", p->status);
     }
@@ -1978,6 +1979,7 @@ void jsdom_module(page_t* p, const char* url, const char* code, uint32_t len) {
     if (!p->js) return;
     if (!code) { module_load(p, url); return; }
     obj_t* ns = obj_new(p->js, OBJ_PLAIN);
+    url = arena_strdup(&p->A, url, (uint32_t)strlen(url));   /* kept by its functions (pushState may change p->url) */
     if (script_run_module(p->js, code, len, "inline module", url, ns) != 0) {
         kstrlcpy(p->status, script_error(p->js), sizeof(p->status));
         mod_log(p, "js: ", p->status);
@@ -2049,7 +2051,12 @@ void jsdom_install(page_t* p) {
 
     /* events, network, observers and the other everyday APIs */
     const char* const evs[] = { "Event", "CustomEvent", "KeyboardEvent", "MouseEvent", "FocusEvent", "InputEvent", "UIEvent" };
-    for (uint32_t i = 0; i < sizeof(evs) / sizeof(evs[0]); i++) script_def_global(I, evs[i], v_native(I, evs[i], js_Event));
+    for (uint32_t i = 0; i < sizeof(evs) / sizeof(evs[0]); i++) {
+        value_t c = v_native(I, evs[i], js_Event);
+        c.f->statics = obj_new(I, OBJ_PLAIN);       /* Event.prototype: feature tests ("submitter" in Event.prototype) */
+        obj_set(I, c.f->statics, "prototype", v_obj(event_proto(p)));
+        script_def_global(I, evs[i], c);
+    }
     const char* const classes[] = { "Node", "Element", "HTMLElement", "EventTarget", "HTMLDocument", "Document",
                                     "Text", "Window", "HTMLInputElement", "HTMLAnchorElement", "HTMLImageElement",
                                     "HTMLFormElement", "HTMLDivElement", "SVGElement", "DocumentFragment", "ShadowRoot",

@@ -703,6 +703,8 @@ static dom_node_t* find_svg(dom_node_t* n) {
     return NULL;
 }
 
+uint32_t svg_current_color;
+
 int svg_render(const char* src, uint32_t len, int want_w, int want_h, img_data_t* out, arena_t* A) {
     dom_node_t* doc = html_parse(A, src, len);
     dom_node_t* svg = doc ? find_svg(doc) : NULL;
@@ -752,7 +754,7 @@ int svg_render(const char* src, uint32_t len, int want_w, int want_h, img_data_t
     ps.stroke_none = 1;
     ps.stroke_w = 1;
     ps.opacity = ps.fill_op = ps.stroke_op = 1;
-    ps.color = 0x000000;
+    ps.color = svg_current_color;
     paint_of(R, svg, &ps);
     draw_children(R, svg, &ps, 0);
     out->px = R->rgb;

@@ -12,5 +12,6 @@ int svg_sniff(const uint8_t* data, uint32_t len);
 /* draws the SVG into out (pixels + alpha in the arena), at want_w x want_h
  * (0: its own size); 0, or -1 if it is not usable SVG */
 int svg_render(const char* src, uint32_t len, int want_w, int want_h, img_data_t* out, arena_t* A);
+extern uint32_t svg_current_color;   /* currentColor for svg_render (inline SVG: its text colour) */
 
 #endif

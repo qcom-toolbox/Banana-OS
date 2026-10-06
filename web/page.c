@@ -171,12 +171,20 @@ static void init_forms_text(page_t* p, dom_node_t* n) {
     }
 }
 
+static uint32_t url_hash(const char* s) {
+    uint32_t h = 2166136261u;
+    while (*s) h = (h ^ (uint8_t)*s++) * 16777619u;
+    return h ? h : 1;
+}
+
 static void collect_sheets(page_t* p, dom_node_t* n) {
-    for (dom_node_t* c = n->first; c && p->nsheets < 24; c = c->next) {
+    for (dom_node_t* c = n->first; c && p->nsheets < PAGE_MAX_SHEETS; c = c->next) {
         if (c->type != DOM_ELEM) continue;
         if (strcmp(c->tag, "style") == 0) {
-            if (c->first && c->first->type == DOM_TEXT)
+            if (c->first && c->first->type == DOM_TEXT) {
+                p->sheet_hash[p->nsheets] = 0;
                 p->sheets[p->nsheets++] = css_parse(&p->A, c->first->text, c->first->text_len, 1);
+            }
             continue;
         }
         if (strcmp(c->tag, "link") == 0) {
@@ -185,11 +193,18 @@ static void collect_sheets(page_t* p, dom_node_t* n) {
             if (rel && href && strcasecmp(rel, "stylesheet") == 0) {
                 char url[1024], ct[96];
                 url_resolve(p->url, href, url, sizeof(url));
+                const char* media = dom_attr(c, "media");
+                if (media && strstr(media, "print") && !strstr(media, "screen") && !strstr(media, "all")) continue;
+                uint32_t h = url_hash(url);
+                int seen = 0;
+                for (int i = 0; i < p->nsheets; i++) if (p->sheet_hash[i] == h) seen = 1;
+                if (seen) continue;                     /* the same sheet linked again (CSS-module bundles) */
                 char* data;
                 uint32_t len;
                 if (fetch(p, url, &data, &len, ct, sizeof(ct)) == 0) {
                     char* copy = arena_strdup(&p->A, data, len);
                     kfree(data);
+                    p->sheet_hash[p->nsheets] = h;
                     p->sheets[p->nsheets++] = css_parse(&p->A, copy, len, 1);
                 }
             }
@@ -316,18 +331,7 @@ static void run_scripts(page_t* p) {
 static void load_images(page_t* p, dom_node_t* n, int* count) {
     for (dom_node_t* c = n->first; c && *count < MAX_IMAGES; c = c->next) {
         if (c->type != DOM_ELEM) continue;
-        if (strcmp(c->tag, "svg") == 0) {
-            /* inline SVG: drawn as an image of its own markup */
-            if (!c->img) {
-                img_data_t* img = (img_data_t*)arena_alloc(&p->A, sizeof(img_data_t));
-                img->failed = 1;
-                c->img = img;
-                char* src = dom_html(&p->A, c, 1);
-                if (src && svg_render(src, (uint32_t)strlen(src), 0, 0, img, &p->A) == 0) img->failed = 0;
-                (*count)++;
-            }
-            continue;
-        }
+        if (strcmp(c->tag, "svg") == 0) continue;   /* inline SVG: load_inline_svgs, once styled */
         if (strcmp(c->tag, "img") == 0 && !c->img) {
             const char* src = dom_attr(c, "src");
             img_data_t* img = (img_data_t*)arena_alloc(&p->A, sizeof(img_data_t));
@@ -379,6 +383,30 @@ static img_data_t* bg_image_for(page_t* p, const char* url) {
         kfree(data);
     }
     return img;
+}
+
+/* inline SVG, drawn as an image of its own markup in its text colour
+ * (currentColor): after styling, and again if that colour changes */
+#define MAX_INLINE_SVG 512
+static void load_inline_svgs(page_t* p, dom_node_t* n, int* count) {
+    for (dom_node_t* c = n->first; c; c = c->next) {
+        if (c->type != DOM_ELEM || !c->style || c->style->display == DISP_NONE) continue;
+        if (strcmp(c->tag, "svg") == 0) {
+            uint32_t col = c->style->color & 0xFFFFFFu;
+            if ((c->img && c->svg_color == col) || *count >= MAX_INLINE_SVG) continue;
+            (*count)++;
+            img_data_t* img = (img_data_t*)arena_alloc(&p->A, sizeof(img_data_t));
+            img->failed = 1;
+            char* src = dom_html(&p->A, c, 1);
+            svg_current_color = col;
+            if (src && svg_render(src, (uint32_t)strlen(src), 0, 0, img, &p->A) == 0) img->failed = 0;
+            svg_current_color = 0;
+            c->img = img;
+            c->svg_color = col;
+            continue;
+        }
+        load_inline_svgs(p, c, count);
+    }
 }
 
 static void load_bg_images(page_t* p, dom_node_t* n) {
@@ -437,6 +465,8 @@ void page_update(page_t* p, int width) {
     css_viewport_w = width;                 /* @media (min-width / max-width) */
     css_style_tree(&p->LA, p->doc, p->sheets, p->nsheets);
     if (p->env) load_bg_images(p, p->doc);
+    int svgs = 0;
+    load_inline_svgs(p, p->doc, &svgs);
     p->layout = layout_build(&p->LA, p->doc, width, p->focus);
     p->width = width;
     p->dirty = 0;
@@ -458,6 +488,7 @@ void page_load(page_t* p, const char* url, const char* html, uint32_t len, int w
         run_scripts(p);
     }
     p->sheets[0] = css_default_sheet(&p->A);
+    p->sheet_hash[0] = 0;
     p->nsheets = 1;
     collect_sheets(p, p->doc);
     set_title(p);

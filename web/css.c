@@ -517,6 +517,35 @@ static int media_len(const char* s) {
     return px;
 }
 
+/* range syntax: (width >= 768px), (width<1012px), (400px <= width <= 800px) */
+static void media_range(const char* buf, int* mn, int* mx) {
+    char c[256];
+    int n = 0;
+    for (const char* t = buf; *t && n < 255; t++) if (*t != ' ') c[n++] = *t;
+    c[n] = 0;
+    for (char* k = strstr(c, "width"); k; k = strstr(k + 5, "width")) {
+        if (k > c && (k[-1] == '-' || (k[-1] >= 'a' && k[-1] <= 'z'))) continue;   /* min-width, device-width */
+        const char* a = k + 5;                      /* width >= V */
+        if (*a == '<' || *a == '>') {
+            int eq = a[1] == '=';
+            int v = media_len(a + 1 + eq);
+            if (*a == '>') *mn = eq ? v : v + 1;
+            else *mx = eq ? v : v - 1;
+        }
+        if (k > c && (k[-1] == '<' || k[-1] == '>' || k[-1] == '=')) {    /* V <= width */
+            const char* o = k - 1;
+            int eq = 0;
+            if (*o == '=' && o > c && (o[-1] == '<' || o[-1] == '>')) { eq = 1; o--; }
+            if (*o != '<' && *o != '>') continue;
+            const char* v0 = o;
+            while (v0 > c && v0[-1] != '(' && v0[-1] != ':' && v0[-1] != ',') v0--;
+            int v = media_len(v0);
+            if (*o == '<') *mn = eq ? v : v + 1;
+            else *mx = eq ? v : v - 1;
+        }
+    }
+}
+
 /* one "screen and (min-width: 40em)" alternative: 1 if it can apply, with its width range */
 static int media_alt(const char* q, uint32_t n, int* mn, int* mx) {
     char buf[256];
@@ -538,10 +567,7 @@ static int media_alt(const char* q, uint32_t n, int* mn, int* mx) {
     const char* p;
     if ((p = strstr(buf, "min-width"))) { p = strchr(p, ':'); if (p) *mn = media_len(p + 1); }
     if ((p = strstr(buf, "max-width"))) { p = strchr(p, ':'); if (p) *mx = media_len(p + 1); }
-    if ((p = strstr(buf, "width >="))) *mn = media_len(p + 8);
-    if ((p = strstr(buf, "width <="))) *mx = media_len(p + 8);
-    if ((p = strstr(buf, "width <"))) if (!*mx) *mx = media_len(p + 7) - 1;
-    if ((p = strstr(buf, "width >"))) if (!*mn) *mn = media_len(p + 7) + 1;
+    media_range(buf, mn, mx);
     if (neg) {
         /* "not all and (max-width: X)" = min-width X+1 */
         if (*mx && !*mn) { *mn = *mx + 1; *mx = 0; return ok; }

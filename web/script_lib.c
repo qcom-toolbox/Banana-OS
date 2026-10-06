@@ -206,6 +206,7 @@ static value_t obj_keys_values(interp_t* I, value_t v, int what) {
     obj_t* r = obj_new(I, OBJ_ARRAY);
     if (v.t != V_OBJ) return v_obj(r);
     obj_t* o = v.o;
+    while (es_proxy_target(o)) o = es_proxy_target(o);   /* a proxy: its target's keys */
     if (o->kind == OBJ_ARRAY) {
         for (uint32_t i = 0; i < o->len; i++) {
             char b[16];

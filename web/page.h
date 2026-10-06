@@ -44,7 +44,9 @@ typedef struct page {
     page_env_t*  env;
     char         url[PAGE_URL_MAX];
     dom_node_t*  doc;
-    css_sheet_t* sheets[24];
+#define PAGE_MAX_SHEETS 64
+    css_sheet_t* sheets[PAGE_MAX_SHEETS];
+    uint32_t     sheet_hash[PAGE_MAX_SHEETS];   /* address of each linked sheet (0: inline): loaded once */
     int          nsheets;
     layout_t*    layout;
     int          width;

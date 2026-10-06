@@ -53,7 +53,109 @@ static int has_proto(obj_t* o, obj_t* proto) {
     return 0;
 }
 
+/* ── generators. A tree walker has no continuations, so the body runs
+ * to its end on the first next(), collecting what it yields, and next()
+ * hands the values out. Right for the usual finite generator; `yield`
+ * itself evaluates to undefined, and an endless generator is stopped
+ * after 10000 values. ───────────────────────────────────────────────── */
+typedef struct { value_t fn, self; obj_t* args; obj_t* vals; uint32_t pos; value_t ret; int state; } gen_t;
+
+value_t es_generator_new(interp_t* I, value_t fn, value_t self, int argc, value_t* argv) {
+    gen_t* g = (gen_t*)arena_alloc(I->A, sizeof(gen_t));
+    g->fn = fn;
+    g->self = self;
+    g->args = obj_new(I, OBJ_ARRAY);
+    for (int i = 0; i < argc; i++) arr_push(I, g->args, argv[i]);
+    obj_t* o = obj_new(I, OBJ_PLAIN);
+    o->proto = I->proto_gen;
+    o->host = g;
+    return v_obj(o);
+}
+
+static gen_t* gen_of(interp_t* I, value_t v) {
+    if (v.t != V_OBJ || !I->proto_gen || v.o->proto != I->proto_gen) return NULL;
+    return (gen_t*)v.o->host;
+}
+
+/* state: 0 not started, 1 values ready, 2 finished */
+static void gen_run(interp_t* I, gen_t* g) {
+    obj_t* saved = I->gen_out;
+    g->vals = obj_new(I, OBJ_ARRAY);
+    I->gen_out = g->vals;
+    I->gen_force = 1;
+    g->ret = call_value(I, g->fn, g->self, (int)g->args->len, g->args->items);
+    I->gen_force = 0;
+    I->gen_out = saved;
+    if (g->fn.f->is_async) g->ret = v_undef();      /* (that was a promise of it) */
+    g->state = 1;
+}
+
+static value_t iter_result(interp_t* I, value_t v, int done) {
+    obj_t* r = obj_new(I, OBJ_PLAIN);
+    obj_set(I, r, "value", v);
+    obj_set(I, r, "done", v_bool(done));
+    return v_obj(r);
+}
+
+/* async generators answer with promises */
+static value_t gen_answer(interp_t* I, gen_t* g, value_t r) {
+    if (!g->fn.f->is_async) return r;
+    value_t p = es_promise_new(I);
+    if (I->ctl == CTL_THROW) {
+        value_t e = I->ret;
+        I->ctl = CTL_NONE;
+        es_promise_settle(I, p, 1, e);
+    } else {
+        es_promise_settle(I, p, 0, r);
+    }
+    return p;
+}
+
+static value_t gen_next(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)argc; (void)argv;
+    gen_t* g = gen_of(I, self);
+    if (!g) { script_throw(I, "TypeError: next method called on a non-generator"); return v_undef(); }
+    if (g->state == 0) gen_run(I, g);
+    value_t r;
+    if (I->ctl == CTL_THROW) { g->state = 2; r = v_undef(); }
+    else if (g->state == 1 && g->pos < g->vals->len) r = iter_result(I, g->vals->items[g->pos++], 0);
+    else if (g->state == 1) { g->state = 2; r = iter_result(I, g->ret, 1); }
+    else r = iter_result(I, v_undef(), 1);
+    return gen_answer(I, g, r);
+}
+
+static value_t gen_return(interp_t* I, value_t self, int argc, value_t* argv) {
+    gen_t* g = gen_of(I, self);
+    if (!g) { script_throw(I, "TypeError: return method called on a non-generator"); return v_undef(); }
+    g->state = 2;
+    return gen_answer(I, g, iter_result(I, argc ? argv[0] : v_undef(), 1));
+}
+
+static value_t gen_throw(interp_t* I, value_t self, int argc, value_t* argv) {
+    gen_t* g = gen_of(I, self);
+    if (!g) { script_throw(I, "TypeError: throw method called on a non-generator"); return v_undef(); }
+    g->state = 2;
+    I->ret = argc ? argv[0] : v_undef();
+    I->ctl = CTL_THROW;
+    I->throw_line = I->line; I->throw_col = I->col; I->throw_src = I->src_name;
+    return gen_answer(I, g, v_undef());
+}
+
+static value_t gen_self(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)I; (void)argc; (void)argv;
+    return self;
+}
+
 obj_t* es_to_array(interp_t* I, value_t v) {
+    gen_t* g = gen_of(I, v);
+    if (g) {                                         /* for-of / spread over a generator: what is left of it */
+        if (g->state == 0) gen_run(I, g);
+        obj_t* a = obj_new(I, OBJ_ARRAY);
+        if (g->state == 1 && !I->ctl)
+            for (; g->pos < g->vals->len; g->pos++) arr_push(I, a, g->vals->items[g->pos]);
+        g->state = 2;
+        return a;
+    }
     if (v.t == V_STR) {
         obj_t* a = obj_new(I, OBJ_ARRAY);
         const unsigned char* s = (const unsigned char*)v.s->s;
@@ -114,6 +216,90 @@ obj_t* es_to_array(interp_t* I, value_t v) {
         return a;
     }
     return NULL;
+}
+
+/* ── Proxy: a host object that forwards to its target, through the
+ * handler's get / set / has traps when it has them ─────────────────── */
+typedef struct { obj_t* target; obj_t* handler; } proxy_t;
+static value_t proxy_hget(interp_t* I, obj_t* self, const char* key, int* found);
+static int proxy_hset(interp_t* I, obj_t* self, const char* key, value_t v);
+static const host_class_t proxy_class = { "Proxy", proxy_hget, proxy_hset };
+
+static value_t proxy_trap(interp_t* I, proxy_t* px, const char* name) {
+    value_t t = obj_get(I, px->handler, name);
+    return t.t == V_FUNC ? t : v_undef();
+}
+
+static value_t proxy_hget(interp_t* I, obj_t* self, const char* key, int* found) {
+    proxy_t* px = (proxy_t*)self->host;
+    if (strcmp(key, "__tostring") == 0) return v_undef();     /* the engine's own hook, not a property */
+    *found = 1;
+    value_t tr = proxy_trap(I, px, "get");
+    if (tr.t == V_FUNC) {
+        value_t a[3] = { v_obj(px->target), v_str(I, key), v_obj(self) };
+        return call_value(I, tr, v_obj(px->handler), 3, a);
+    }
+    return obj_get(I, px->target, key);
+}
+
+static int proxy_hset(interp_t* I, obj_t* self, const char* key, value_t v) {
+    proxy_t* px = (proxy_t*)self->host;
+    value_t tr = proxy_trap(I, px, "set");
+    if (tr.t == V_FUNC) {
+        value_t a[4] = { v_obj(px->target), v_str(I, key), v, v_obj(self) };
+        call_value(I, tr, v_obj(px->handler), 4, a);
+    } else {
+        obj_set(I, px->target, key, v);
+    }
+    return 1;
+}
+
+/* the object a proxy stands for (NULL if o is not a proxy) */
+obj_t* es_proxy_target(obj_t* o) {
+    return (o->kind == OBJ_HOST && o->hc == &proxy_class) ? ((proxy_t*)o->host)->target : NULL;
+}
+
+/* key in proxy */
+int es_proxy_has(interp_t* I, obj_t* o, const char* key) {
+    proxy_t* px = (proxy_t*)o->host;
+    value_t tr = proxy_trap(I, px, "has");
+    if (tr.t == V_FUNC) {
+        value_t a[2] = { v_obj(px->target), v_str(I, key) };
+        return v_truthy(I, call_value(I, tr, v_obj(px->handler), 2, a));
+    }
+    if (obj_get(I, px->target, key).t != V_UNDEF) return 1;
+    for (obj_t* p = px->target; p; p = p->proto) { int f = 0; prop_get_raw(p, key, &f); if (f) return 1; }
+    return 0;
+}
+
+static value_t js_Proxy(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    if (argc < 2 || argv[1].t != V_OBJ || (argv[0].t != V_OBJ && argv[0].t != V_FUNC)) {
+        script_throw(I, "TypeError: Cannot create proxy with a non-object as target or handler");
+        return v_undef();
+    }
+    if (argv[0].t == V_FUNC) return argv[0];        /* function targets: no call traps, the function itself */
+    proxy_t* px = (proxy_t*)arena_alloc(I->A, sizeof(proxy_t));
+    px->target = argv[0].o;
+    px->handler = argv[1].o;
+    obj_t* o = obj_new(I, OBJ_HOST);
+    o->hc = &proxy_class;
+    o->host = px;
+    return v_obj(o);
+}
+
+static value_t proxy_revoke(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)I; (void)self; (void)argc; (void)argv;
+    return v_undef();
+}
+
+static value_t js_Proxy_revocable(interp_t* I, value_t self, int argc, value_t* argv) {
+    value_t p = js_Proxy(I, self, argc, argv);
+    if (I->ctl) return v_undef();
+    obj_t* r = obj_new(I, OBJ_PLAIN);
+    obj_set(I, r, "proxy", p);
+    obj_set(I, r, "revoke", v_native(I, "revoke", proxy_revoke));
+    return v_obj(r);
 }
 
 int es_instanceof(interp_t* I, value_t v, value_t ctor) {
@@ -1384,6 +1570,17 @@ void es_init(interp_t* I) {
     obj_set(I, ss, "toPrimitive", v_str(I, "@@toPrimitive"));
     method(I, ss, "for", sym_for);
     script_def_global(I, "Symbol", sym);
+
+    value_t prx = v_native(I, "Proxy", js_Proxy);
+    method(I, statics_of(I, prx), "revocable", js_Proxy_revocable);
+    script_def_global(I, "Proxy", prx);
+
+    I->proto_gen = obj_new(I, OBJ_PLAIN);
+    method(I, I->proto_gen, "next", gen_next);
+    method(I, I->proto_gen, "return", gen_return);
+    method(I, I->proto_gen, "throw", gen_throw);
+    method(I, I->proto_gen, "@@iterator", gen_self);
+    method(I, I->proto_gen, "@@asyncIterator", gen_self);
 
     /* Function.prototype.bind */
     if (I->proto_func) method(I, I->proto_func, "bind", f_bind);

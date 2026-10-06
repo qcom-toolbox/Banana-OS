@@ -554,7 +554,7 @@ void script_throw(interp_t* I, const char* msg) {
     if (I->A->oom && I->oom_err) {
         I->ret = v_obj(I->oom_err);
         I->ctl = CTL_THROW;
-        I->throw_line = I->line; I->throw_col = I->col;
+        I->throw_line = I->line; I->throw_col = I->col; I->throw_src = I->src_name;
         return;
     }
     obj_t* e = obj_new(I, OBJ_PLAIN);
@@ -568,7 +568,7 @@ void script_throw(interp_t* I, const char* msg) {
     }
     I->ret = v_obj(e);
     I->ctl = CTL_THROW;
-    I->throw_line = I->line; I->throw_col = I->col;
+    I->throw_line = I->line; I->throw_col = I->col; I->throw_src = I->src_name;
 }
 
 static void throwf(interp_t* I, const char* fmt, const char* a) {
@@ -1360,7 +1360,7 @@ static node_t* parse_object_lit(parser_t* P) {
             else pr->op = (uint8_t)pk(P)->p[0];             /* 'g' / 's' */
             nx(P);
         }
-        accept(P, "*");
+        int gen_m = accept(P, "*");
         tok_t* t = pk(P);
         if (t->t == T_ID || t->t == T_STR) {
             pr->s = t->s;
@@ -1385,6 +1385,7 @@ static node_t* parse_object_lit(parser_t* P) {
             f->a = parse_params(P);
             f->b = parse_fn_body(P);
             if (async) f->n = 1;
+            if (gen_m) f->flags |= NF_GEN;
             pr->b = f;
         } else {                                     /* {a} shorthand */
             node_t* id = mk(P, N_IDENT);
@@ -1430,7 +1431,7 @@ static node_t* parse_class(parser_t* P) {
             }
         }
         if (kw(P, "async") && !tok_is(pkn(P, 1), T_OP, "(") && !tok_is(pkn(P, 1), T_OP, "=")) { nx(P); async = 1; }
-        accept(P, "*");
+        int gen_m = accept(P, "*");
         if ((kw(P, "get") || kw(P, "set")) && !tok_is(pkn(P, 1), T_OP, "(") && !tok_is(pkn(P, 1), T_OP, "=") &&
             !tok_is(pkn(P, 1), T_OP, ";") && !tok_is(pkn(P, 1), T_OP, "}")) {
             m->op = (uint8_t)pk(P)->p[0];
@@ -1447,6 +1448,7 @@ static node_t* parse_class(parser_t* P) {
             f->a = parse_params(P);
             f->b = parse_fn_body(P);
             if (async) f->n = 1;
+            if (gen_m) f->flags |= NF_GEN;
             m->b = f;
         } else {
             if (m->op == 'm') m->op = 'f';                   /* a field */
@@ -1485,12 +1487,22 @@ static node_t* parse_primary(parser_t* P) {
         if (!P->php) {
             if (is_kw(P, t, "undefined")) { nx(P); P->depth--; return mk(P, N_UNDEF); }
             if (is_kw(P, t, "this")) { nx(P); P->depth--; return mk(P, N_THIS); }
-            if (is_kw(P, t, "function")) { nx(P); accept(P, "*"); n = parse_function(P, 0); P->depth--; return n; }
+            if (is_kw(P, t, "function")) {
+                nx(P);
+                int gen = accept(P, "*");
+                n = parse_function(P, 0);
+                if (n->s) n->flags |= NF_NAMED;
+                if (gen) n->flags |= NF_GEN;
+                P->depth--;
+                return n;
+            }
             if (is_kw(P, t, "async") && is_kw(P, pkn(P, 1), "function")) {
                 nx(P); nx(P);
-                accept(P, "*");
+                int gen = accept(P, "*");
                 n = parse_function(P, 0);
                 n->n = 1;
+                if (n->s) n->flags |= NF_NAMED;
+                if (gen) n->flags |= NF_GEN;
                 P->depth--;
                 return n;
             }
@@ -1800,7 +1812,16 @@ static node_t* parse_assign(parser_t* P) {
         if (arrow_ahead(P)) { node_t* f = parse_arrow(P); f->n = 1; return f; }
         P->i = save;
     }
-    if (!P->php && kw(P, "yield")) { nx(P); accept(P, "*"); return parse_assign(P); }   /* generators: not really */
+    if (!P->php && kw(P, "yield")) {
+        tok_t* y = nx(P);
+        node_t* n = mk(P, N_YIELD);
+        if (accept(P, "*")) n->op = '*';
+        tok_t* t = pk(P);
+        int bare = t->t == T_EOF || t->line != y->line || tok_is(t, T_OP, ")") || tok_is(t, T_OP, "]") ||
+                   tok_is(t, T_OP, "}") || tok_is(t, T_OP, ",") || tok_is(t, T_OP, ";") || tok_is(t, T_OP, ":");
+        if (n->op || !bare) n->a = parse_assign(P);
+        return n;
+    }
     node_t* left = parse_cond(P);
     for (uint32_t i = 0; i < sizeof(ASSIGN_OPS) / sizeof(ASSIGN_OPS[0]); i++) {
         if (is_op(P, ASSIGN_OPS[i])) {
@@ -2105,17 +2126,19 @@ static node_t* parse_stmt(parser_t* P) {
         }
         if (kw(P, "function") && (pkn(P, 1)->t == T_ID || tok_is(pkn(P, 1), T_OP, "*"))) {
             nx(P);
-            accept(P, "*");
+            int gen = accept(P, "*");
             n = mk(P, N_FUNCDECL);
             n->a = parse_function(P, 1);
+            if (gen) n->a->flags |= NF_GEN;
             return n;
         }
         if (!P->php && kw(P, "async") && is_kw(P, pkn(P, 1), "function")) {
             nx(P); nx(P);
-            accept(P, "*");
+            int gen = accept(P, "*");
             n = mk(P, N_FUNCDECL);
             n->a = parse_function(P, 1);
             n->a->n = 1;
+            if (gen) n->a->flags |= NF_GEN;
             return n;
         }
         if (!P->php && kw(P, "class") && pkn(P, 1)->t == T_ID) {
@@ -2499,6 +2522,8 @@ static value_t make_func(interp_t* I, node_t* f) {
     fn->decl = f;
     fn->closure = I->cur;
     env_capture(I->cur);
+    fn->module_url = I->module_url;
+    fn->src_name = I->src_name;
     fn->name = f->s ? f->s->s : "anonymous";
     if (f->c == (node_t*)1) { fn->has_bound = 1; fn->bound_this = I->this_v; }
     fn->is_async = f->n == 1;
@@ -2534,6 +2559,10 @@ value_t call_value(interp_t* I, value_t fnv, value_t self, int argc, value_t* ar
         return r;
     }
     node_t* d = fn->decl;
+    if ((d->flags & NF_GEN) && I->lang == LANG_JS) {
+        if (I->gen_force) I->gen_force = 0;              /* the generator running its body */
+        else { I->depth--; return es_generator_new(I, fnv, self, argc, argv); }
+    }
     env_t* saved_env = I->cur;
     env_t* saved_fn = I->fn_env;
     value_t saved_this = I->this_v;
@@ -2548,8 +2577,18 @@ value_t call_value(interp_t* I, value_t fnv, value_t self, int argc, value_t* ar
     if (I->lang == LANG_JS && !fn->has_bound && (self.t == V_UNDEF || self.t == V_NULL))
         I->this_v = script_get_global(I, "globalThis");
     func_t* saved_cur_fn = I->cur_fn;
+    const char* saved_module_url = I->module_url;
+    if (fn->module_url) I->module_url = fn->module_url;   /* run later (timers, promises): still in its module */
+    const char* saved_src = I->src_name;
+    if (fn->src_name) I->src_name = fn->src_name;
     I->cur_fn = fn;
     int i = 0;
+    if ((d->flags & NF_NAMED) && I->lang == LANG_JS) {    /* (function f(){ ... f() ... }) sees itself as f */
+        value_t me = v_undef();
+        me.t = V_FUNC;
+        me.f = fn;
+        env_define(I, e, d->s, me);
+    }
     if (I->lang == LANG_JS && !fn->has_bound) {
         /* the arguments object, only for functions that can see it */
         if (!(d->flags & NF_CHECKED)) d->flags |= NF_CHECKED | (mentions_arguments(d->b, 0) ? NF_ARGUMENTS : 0);
@@ -2598,6 +2637,8 @@ value_t call_value(interp_t* I, value_t fnv, value_t self, int argc, value_t* ar
     I->fn_env = saved_fn;
     I->this_v = saved_this;
     I->cur_fn = saved_cur_fn;
+    I->module_url = saved_module_url;
+    I->src_name = saved_src;
     I->depth--;
     if (fn->is_async) {
         /* an async function returns a promise of its result (or of its exception) */
@@ -2607,7 +2648,7 @@ value_t call_value(interp_t* I, value_t fnv, value_t self, int argc, value_t* ar
             I->ctl = CTL_NONE;
             if (!(ex.t == V_STR && strcmp(ex.s->s, "__exit__") == 0)) { es_promise_settle(I, p, 1, ex); return p; }
             I->ctl = CTL_THROW;
-            I->throw_line = I->line; I->throw_col = I->col;
+            I->throw_line = I->line; I->throw_col = I->col; I->throw_src = I->src_name;
             I->ret = ex;
             return p;
         }
@@ -2930,6 +2971,7 @@ static value_t binary(interp_t* I, int op, value_t a, value_t b) {
             if (key_index(k->s, &idx)) return v_bool(idx < o->len);
             if (strcmp(k->s, "length") == 0) return v_bool(1);
         }
+        if (es_proxy_target(o)) return v_bool(es_proxy_has(I, o, k->s));
         if (o->kind == OBJ_HOST && o->hc && o->hc->get) { int f = 0; o->hc->get(I, o, k->s, &f); if (f) return v_bool(1); }
         for (obj_t* p = o; p; p = p->proto) { int f = 0; prop_get_raw(p, k->s, &f); if (f) return v_bool(1); }
         int f = 0;
@@ -3331,7 +3373,11 @@ static value_t eval(interp_t* I, node_t* n) {
             if (p->k == N_SPREAD) {                             /* {...other} */
                 value_t sv = eval(I, p->a);
                 if (I->ctl) return v_undef();
-                if (sv.t == V_OBJ) {
+                obj_t* pt = sv.t == V_OBJ ? es_proxy_target(sv.o) : NULL;
+                if (pt) {
+                    while (es_proxy_target(pt)) pt = es_proxy_target(pt);
+                    for (uint32_t k = 0; k < pt->n; k++) prop_set_raw(I, o, pt->props[k].key, obj_get(I, sv.o, pt->props[k].key->s));
+                } else if (sv.t == V_OBJ) {
                     if (sv.o->kind == OBJ_ARRAY)
                         for (uint32_t k = 0; k < sv.o->len; k++) { char b[16]; ksnprintf(b, sizeof(b), "%u", k); obj_set(I, o, b, sv.o->items[k]); }
                     for (uint32_t k = 0; k < sv.o->n; k++) {
@@ -3386,6 +3432,20 @@ static value_t eval(interp_t* I, node_t* n) {
         return v_undef();
     }
     case N_SUPERMEMBER: return super_lookup(I, n);
+    case N_YIELD: {
+        value_t v = n->a ? eval(I, n->a) : v_undef();
+        if (I->ctl || !I->gen_out) return v_undef();
+        if (n->op == '*') {
+            obj_t* a = es_to_array(I, v);
+            if (I->ctl) return v_undef();
+            if (!a) { script_throw(I, "TypeError: yield* of a value that is not iterable"); return v_undef(); }
+            for (uint32_t i = 0; i < a->len; i++) arr_push(I, I->gen_out, a->items[i]);
+        } else {
+            arr_push(I, I->gen_out, v);
+        }
+        if (I->gen_out->len >= 10000) { I->ret = v_undef(); I->ctl = CTL_RETURN; }   /* endless generator: stop it */
+        return v_undef();
+    }
     case N_AWAIT: {
         value_t v = eval(I, n->a);
         if (I->ctl) return v_undef();
@@ -3393,7 +3453,7 @@ static value_t eval(interp_t* I, node_t* n) {
         int st = es_promise_state(I, v, &r);
         if (st < 0) return v;                                 /* not a promise */
         if (st == 0) { es_run_jobs(I); st = es_promise_state(I, v, &r); }
-        if (st == 2) { I->ret = r; I->ctl = CTL_THROW; I->throw_line = I->line; I->throw_col = I->col; return v_undef(); }
+        if (st == 2) { I->ret = r; I->ctl = CTL_THROW; I->throw_line = I->line; I->throw_col = I->col; I->throw_src = I->src_name; return v_undef(); }
         return st == 1 ? r : v_undef();                       /* still pending: cannot wait here */
     }
     case N_FUNC: return make_func(I, n);
@@ -3701,6 +3761,9 @@ static void exec(interp_t* I, node_t* n) {
         if (n->c) { destructure(I, n->c, v, n->op); return; }
         env_t* target = (n->op == 'v') ? I->fn_env : I->cur;
         if (!target) target = I->global;
+        /* `var x;` with no value leaves x alone (bundles declare at the end
+         * of a scope what they assigned higher up) */
+        if (n->op == 'v' && !n->a && env_find_local(target, n->s->s)) return;
         var_t* x = env_define(I, target, n->s, v);
         x->is_const = (n->op == 'c');
         return;
@@ -3781,6 +3844,7 @@ static void exec(interp_t* I, node_t* n) {
         int stop = 0;
         if (it.t == V_OBJ) {
             obj_t* o = it.o;
+            if (n->op == 'i') while (es_proxy_target(o)) o = es_proxy_target(o);
             obj_t* iter = (n->op == 'o' && o->kind != OBJ_ARRAY) ? es_to_array(I, it) : NULL;
             if (iter) {
                 for (uint32_t i = 0; i < iter->len && !stop; i++) foreach_body(I, n, v_num(i), iter->items[i], &stop);
@@ -3849,7 +3913,7 @@ static void exec(interp_t* I, node_t* n) {
         if (I->ctl) return;
         I->ret = v;
         I->ctl = CTL_THROW;
-        I->throw_line = I->line; I->throw_col = I->col;
+        I->throw_line = I->line; I->throw_col = I->col; I->throw_src = I->src_name;
         return;
     }
     case N_TRY: {
@@ -3966,15 +4030,16 @@ static int is_exit(interp_t* I) {
 static void set_uncaught(interp_t* I) {
     if (is_exit(I)) { I->err[0] = 0; return; }
     str_t* s = v_tostr(I, I->ret);
+    const char* where = I->throw_src ? I->throw_src : I->src_name ? I->src_name : "script";
     if (I->lang == LANG_PHP)
         ksnprintf(I->err, sizeof(I->err), "Fatal error: Uncaught %s in %s on line %d", s->s,
                   I->src_name ? I->src_name : "script", I->line);
     else if (I->throw_col > 1)                             /* minified code: where on the line */
         ksnprintf(I->err, sizeof(I->err), "Uncaught %s (%s, line %d:%d)", s->s,
-                  I->src_name ? I->src_name : "script", I->throw_line, I->throw_col);
+                  where, I->throw_line, I->throw_col);
     else
         ksnprintf(I->err, sizeof(I->err), "Uncaught %s (%s, line %d)", s->s,
-                  I->src_name ? I->src_name : "script", I->throw_line);
+                  where, I->throw_line);
 }
 
 /* script_run/script_call may be re-entered from a native (a DOM method
