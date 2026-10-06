@@ -597,6 +597,51 @@ DATE_GETTER(d_getMilliseconds, f.ms)
 
 static value_t d_getTime(interp_t* I, value_t self, int argc, value_t* argv) { (void)argc; (void)argv; return v_num((num_t)date_ms(I, self)); }
 
+/* setters: d.setSeconds(d.getSeconds() + 30) etc. (the time is kept in
+ * UTC, so the UTC variants are the same); out-of-range values carry over */
+static value_t date_set(interp_t* I, value_t self, int argc, value_t* argv, int field) {
+    if (self.t != V_OBJ) return v_undef();
+    tm_fields_t f;
+    ms_to_fields(date_ms(I, self), &f);
+    int64_t y = f.y, mo = f.mo - 1, d = f.d, h = f.h, mi = f.mi, s = f.s, ms = f.ms;
+    int64_t* slot[] = { &ms, &s, &mi, &h, &d, &mo, &y };
+    /* setHours(h, m, s, ms), setMinutes(m, s, ms)...: the later arguments set the smaller fields */
+    for (int i = 0; i < argc && field - i >= 0; i++) {
+        num_t v = v_tonum(I, argv[i]);
+        if (v != v) { obj_set(I, self.o, "__t", v_num(v)); return v_num(v); }
+        *slot[field - i] = (int64_t)v;
+    }
+    y += mo >= 0 ? mo / 12 : -((11 - mo) / 12);
+    mo = ((mo % 12) + 12) % 12;
+    int64_t t = days_from_civil(y, (int)mo + 1, 1) * 86400000 + (d - 1) * 86400000 + h * 3600000 + mi * 60000 + s * 1000 + ms;
+    obj_set(I, self.o, "__t", v_num((num_t)t));
+    return v_num((num_t)t);
+}
+#define DATE_SETTER(nm, field) \
+    static value_t nm(interp_t* I, value_t self, int argc, value_t* argv) { return date_set(I, self, argc, argv, field); }
+DATE_SETTER(d_setMilliseconds, 0)
+DATE_SETTER(d_setSeconds, 1)
+DATE_SETTER(d_setMinutes, 2)
+DATE_SETTER(d_setHours, 3)
+DATE_SETTER(d_setDate, 4)
+DATE_SETTER(d_setMonth, 5)
+DATE_SETTER(d_setFullYear, 6)
+static value_t d_setTime(interp_t* I, value_t self, int argc, value_t* argv) {
+    if (self.t != V_OBJ) return v_undef();
+    value_t t = v_num(v_tonum(I, ARG(0)));
+    obj_set(I, self.o, "__t", t);
+    return t;
+}
+static value_t d_getTimezoneOffset(interp_t* I, value_t self, int argc, value_t* argv) { (void)I; (void)self; (void)argc; (void)argv; return v_num(0); }
+static value_t d_toUTCString(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)argc; (void)argv;
+    tm_fields_t f;
+    ms_to_fields(date_ms(I, self), &f);
+    char b[64];
+    ksnprintf(b, sizeof(b), "%.3s, %02d %.3s %d %02d:%02d:%02d GMT", DAY_NAMES[f.wd], f.d, MONTH_NAMES[f.mo - 1], f.y, f.h, f.mi, f.s);
+    return v_str(I, b);
+}
+
 static value_t d_fmt(interp_t* I, value_t self, int which) {
     tm_fields_t f;
     ms_to_fields(date_ms(I, self), &f);
@@ -1016,7 +1061,14 @@ static void sort_values(interp_t* I, value_t* v, uint32_t n, value_t fn) {
 
 static value_t a_sort(interp_t* I, value_t self, int argc, value_t* argv) {
     SELF_ARR;
-    sort_values(I, A->items, A->len, ARG(0));
+    /* on a copy: the compare function may change the array */
+    uint32_t len = A->len;
+    if (!len) return self;
+    value_t* tmp = (value_t*)arena_alloc(I->A, len * (uint32_t)sizeof(value_t));
+    if (I->A->oom) return self;
+    memcpy(tmp, A->items, len * sizeof(value_t));
+    sort_values(I, tmp, len, ARG(0));
+    for (uint32_t i = 0; i < len; i++) arr_set(I, A, i, tmp[i]);
     return self;
 }
 
@@ -1079,11 +1131,23 @@ static value_t f_call(interp_t* I, value_t self, int argc, value_t* argv) {
     return call_value(I, self, ARG(0), argc > 0 ? argc - 1 : 0, argv + 1);
 }
 static value_t f_apply(interp_t* I, value_t self, int argc, value_t* argv) {
-    value_t args[16];
-    int n = 0;
-    if (argc > 1 && argv[1].t == V_OBJ && argv[1].o->kind == OBJ_ARRAY)
-        for (uint32_t i = 0; i < argv[1].o->len && n < 16; i++) args[n++] = argv[1].o->items[i];
-    return call_value(I, self, ARG(0), n, args);
+    /* f.apply(t, array or array-like): String.fromCharCode.apply(null, bytes)
+     * passes thousands; copied, so the callee may change the array */
+    value_t small[16];
+    value_t* args = small;
+    uint32_t n = 0;
+    if (argc > 1 && argv[1].t == V_OBJ) {
+        obj_t* a = argv[1].o;
+        uint32_t len = a->kind == OBJ_ARRAY ? a->len : (uint32_t)v_tonum(I, obj_get(I, a, "length"));
+        if (len > 1000000u) len = 1000000u;
+        if (len > 16) args = (value_t*)arena_alloc(I->A, len * (uint32_t)sizeof(value_t));
+        if (I->A->oom) return v_undef();
+        for (uint32_t i = 0; i < len; i++) {
+            if (a->kind == OBJ_ARRAY) args[n++] = i < a->len ? a->items[i] : v_undef();
+            else { char k[16]; ksnprintf(k, sizeof(k), "%u", i); args[n++] = obj_get(I, a, k); }
+        }
+    }
+    return call_value(I, self, ARG(0), (int)n, args);
 }
 
 /* ══ tables ═══════════════════════════════════════════════════════════ */
@@ -1127,6 +1191,15 @@ static const fn_entry_t DATE_METHODS[] = {
     { "getMilliseconds", d_getMilliseconds }, { "getTime", d_getTime }, { "valueOf", d_getTime },
     { "toLocaleTimeString", d_toLocaleTimeString }, { "toLocaleDateString", d_toLocaleDateString },
     { "toISOString", d_toISOString }, { "toString", d_toString }, { "toLocaleString", d_toString },
+    { "setMilliseconds", d_setMilliseconds }, { "setSeconds", d_setSeconds }, { "setMinutes", d_setMinutes },
+    { "setHours", d_setHours }, { "setDate", d_setDate }, { "setMonth", d_setMonth }, { "setFullYear", d_setFullYear },
+    { "setUTCMilliseconds", d_setMilliseconds }, { "setUTCSeconds", d_setSeconds }, { "setUTCMinutes", d_setMinutes },
+    { "setUTCHours", d_setHours }, { "setUTCDate", d_setDate }, { "setUTCMonth", d_setMonth }, { "setUTCFullYear", d_setFullYear },
+    { "setTime", d_setTime }, { "getTimezoneOffset", d_getTimezoneOffset }, { "toUTCString", d_toUTCString },
+    { "toGMTString", d_toUTCString }, { "toJSON", d_toISOString },
+    { "getUTCFullYear", d_getFullYear }, { "getUTCMonth", d_getMonth }, { "getUTCDate", d_getDate }, { "getUTCDay", d_getDay },
+    { "getUTCHours", d_getHours }, { "getUTCMinutes", d_getMinutes }, { "getUTCSeconds", d_getSeconds },
+    { "getUTCMilliseconds", d_getMilliseconds },
 };
 static const fn_entry_t FUNC_METHODS[] = { { "call", f_call }, { "apply", f_apply } };
 static const fn_entry_t MATH_FUNCS[] = {
@@ -1152,7 +1225,17 @@ value_t lib_member(interp_t* I, value_t ov, const char* key, int* found) {
     default: break;
     }
     if (!t) { *found = 0; return v_undef(); }
-    return prop_get_raw(t, key, found);
+    value_t r = prop_get_raw(t, key, found);
+    if (!*found && strcmp(key, "constructor") == 0) {
+        /* ({}).constructor === Object, [].constructor === Array, ... */
+        const char* g = ov.t == V_STR ? "String" : ov.t == V_NUM ? "Number" : ov.t == V_BOOL ? "Boolean" : "Object";
+        if (ov.t == V_OBJ && ov.o->kind == OBJ_ARRAY) g = "Array";
+        else if (ov.t == V_OBJ && I->proto_date && ov.o->proto == I->proto_date) g = "Date";
+        else if (ov.t == V_OBJ && I->proto_regexp && ov.o->proto == I->proto_regexp) g = "RegExp";
+        r = script_get_global(I, g);
+        *found = r.t != V_UNDEF;
+    }
+    return r;
 }
 
 void lib_init(interp_t* I) {

@@ -61,7 +61,7 @@ static void resolve_location(const url_t* base, const char* loc, char* out, uint
     } else if (loc[0] == '/') {                      /* absolute path */
         ksnprintf(out, cap, "%s%s", origin, loc);
     } else {                                         /* relative to the current directory */
-        char dir[1024];
+        static char dir[HTTP_URL_MAX];               /* no yield here: one is enough (small task stacks) */
         kstrlcpy(dir, base->path, sizeof(dir));
         char* q = strchr(dir, '?');
         if (q) *q = '\0';
@@ -259,7 +259,7 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
     int default_port = (u->https && u->port == 443) || (!u->https && u->port == 80);
     if (default_port) kstrlcpy(host_hdr, u->host, sizeof(host_hdr));
     else ksnprintf(host_hdr, sizeof(host_hdr), "%s:%u", u->host, u->port);
-    uint32_t rqcap = 2048 + (req->extra_headers ? (uint32_t)strlen(req->extra_headers) : 0);
+    uint32_t rqcap = 2048 + (uint32_t)strlen(u->path) + (req->extra_headers ? (uint32_t)strlen(req->extra_headers) : 0);
     char* rq = (char*)kmalloc(rqcap);
     if (!rq) { s_close(s); kfree(s); return NET_ERR_NOMEM; }
     char body_hdr[160] = "";
@@ -289,13 +289,13 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
 
     /* status line + headers (skipping any 1xx interim responses) */
     char* raw = (char*)kmalloc(16384);
-    char* line = (char*)kmalloc(4096);
+    char* line = (char*)kmalloc(HTTP_URL_MAX + 256);  /* a Location: line can be a whole long URL */
     if (!raw || !line) { kfree(raw); kfree(line); s_close(s); kfree(s); return NET_ERR_NOMEM; }
     int chunked = 0;
     for (;;) {
         uint32_t raw_len = 0;
         raw[0] = '\0';
-        rc = s_readline(s, line, 4096);
+        rc = s_readline(s, line, HTTP_URL_MAX + 256);
         if (rc < 0) {
             ksnprintf(errmsg, errlen, "no response from server (%s)", net_strerror(rc));
             goto fail;
@@ -327,7 +327,7 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
         chunked = 0;
 
         for (;;) {
-            rc = s_readline(s, line, 4096);
+            rc = s_readline(s, line, HTTP_URL_MAX + 256);
             if (rc < 0) {
                 ksnprintf(errmsg, errlen, "connection closed while reading headers");
                 goto fail;
@@ -396,26 +396,29 @@ int http_fetch(const char* url, const http_request_t* req, http_response_t* resp
                char* errmsg, uint32_t errmsg_len) {
     memset(resp, 0, sizeof(*resp));
     errmsg[0] = '\0';
-    char cur[1024];
-    kstrlcpy(cur, url, sizeof(cur));
+    /* URLs can be HTTP_URL_MAX long: off the (small) task stack */
+    struct { url_t u; char cur[HTTP_URL_MAX]; } *w = kmalloc(sizeof(*w));
+    if (!w) { ksnprintf(errmsg, errmsg_len, "out of memory"); return NET_ERR_NOMEM; }
+    kstrlcpy(w->cur, url, sizeof(w->cur));
     int max = req->max_redirects ? req->max_redirects : 10;
     http_request_t cur_req = *req;          /* a 303 (or 301/302 after POST) turns into a GET */
     req = &cur_req;
+    int rc = NET_ERR_PROTO;
 
     for (int hop = 0; hop <= max; hop++) {
-        url_t u;
-        if (!url_parse(cur, &u)) {
-            ksnprintf(errmsg, errmsg_len, "unsupported or malformed URL: %s", cur);
-            return NET_ERR_PROTO;
+        if (!url_parse(w->cur, &w->u)) {
+            ksnprintf(errmsg, errmsg_len, "unsupported or malformed URL: %s", w->cur);
+            rc = NET_ERR_PROTO;
+            goto out;
         }
-        kstrlcpy(resp->final_url, cur, sizeof(resp->final_url));
+        kstrlcpy(resp->final_url, w->cur, sizeof(resp->final_url));
+        /* cookies are per host - and the previous hop may have set one */
+        if (cur_req.headers_for) cur_req.extra_headers = cur_req.headers_for(cur_req.ctx, w->cur);
         int redirect = 0;
-        int rc = do_request(&u, req, resp, &redirect, errmsg, errmsg_len);
-        if (rc != NET_OK || !redirect) return rc;
-        char next[1024];
-        resolve_location(&u, resp->location, next, sizeof(next));
-        info(req, "Redirected (%d) to %s", resp->status, next);
-        kstrlcpy(cur, next, sizeof(cur));
+        rc = do_request(&w->u, req, resp, &redirect, errmsg, errmsg_len);
+        if (rc != NET_OK || !redirect) goto out;
+        resolve_location(&w->u, resp->location, w->cur, sizeof(w->cur));
+        info(req, "Redirected (%d) to %s", resp->status, w->cur);
         resp->body_bytes = 0;
         if (cur_req.body && (resp->status == 303 || resp->status == 301 || resp->status == 302)) {
             cur_req.method = "GET";
@@ -424,5 +427,8 @@ int http_fetch(const char* url, const http_request_t* req, http_response_t* resp
         }
     }
     ksnprintf(errmsg, errmsg_len, "too many redirects");
-    return NET_ERR_PROTO;
+    rc = NET_ERR_PROTO;
+out:
+    kfree(w);
+    return rc;
 }

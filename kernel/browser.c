@@ -42,6 +42,7 @@
 
 #define HOME_URL  "about:home"
 #define HIST_MAX  24
+#define URL_MAX   HTTP_URL_MAX        /* addresses can carry kilobytes (challenge tokens) */
 #define MAX_DOC   (8u << 20)
 
 #define C_PANEL   0x001D232Cu
@@ -57,13 +58,13 @@ typedef struct { int kind, x, y; } cmd_t;
 
 typedef struct {
     page_t*  page;
-    char     addr[1024];               /* the address bar's text for this tab */
+    char     addr[URL_MAX];               /* the address bar's text for this tab */
     char     title[128];
     char     status[160];
     int      status_err;
     int      loading;
     int      scroll, page_h;
-    char     hist[HIST_MAX][512];
+    char     hist[HIST_MAX][URL_MAX];
     int      hist_n, hist_pos;
 } tab_t;
 
@@ -82,7 +83,7 @@ static int        g_ntabs, g_cur;
 static tab_t*     g_status_tab;          /* the tab a load reports to */
 
 static int        g_addr_focus, g_addr_all;  /* address bar focused; its text all selected */
-static char       g_go_url[1024];        /* CMD_GO / CMD_NEWTAB target */
+static char       g_go_url[URL_MAX];        /* CMD_GO / CMD_NEWTAB target */
 static char       g_alert[256];
 
 /* page text selection, in page coordinates (the task maps it to text) */
@@ -102,13 +103,18 @@ static int addr_w(void) { return g_win.w - ADDR_X - 52; }
 static tab_t* cur_tab(void) { return g_ntabs ? g_tabs[g_cur] : NULL; }
 
 /* ══ cookies ══════════════════════════════════════════════════════════
- * A small jar: name=value per host (or per Domain=), sent back to that
- * host and its subdomains. Session cookies only - nothing is saved. */
+ * A jar of name=value per host (or per Domain=), sent back to that host
+ * and its subdomains. Cookies with Expires / Max-Age (a site's "remember
+ * me", Google's consent choice...) are kept in ~/.config/browser/cookies,
+ * so they survive a reboot on an installed system; session cookies are
+ * forgotten when the browser closes. */
 
-#define COOKIES 96
-typedef struct { char domain[96]; char name[64]; char value[256]; } cookie_t;
+#define COOKIES     128
+#define COOKIE_FILE "/home/banana/.config/browser/cookies"
+typedef struct { char domain[96]; char name[64]; char value[1024]; int persist; } cookie_t;
 static cookie_t g_cookies[COOKIES];
 static int g_ncookies;
+static int g_cookies_dirty, g_cookies_loaded;
 
 static void url_host(const char* url, char* host, int cap) {
     const char* p = strstr(url, "://");
@@ -143,9 +149,38 @@ static void cookie_header(const char* url, char* out, int cap) {
     if (any) kstrlcat(out, "\r\n", (size_t)cap);
 }
 
+/* http.c asks for every request of a redirect chain: a consent page that
+ * sets a cookie and redirects back must see it sent on the next hop */
+static char g_cookie_hdr[8192];
+static const char* headers_for(void* ctx, const char* url) {
+    (void)ctx;
+    cookie_header(url, g_cookie_hdr, sizeof(g_cookie_hdr));
+    return g_cookie_hdr[0] ? g_cookie_hdr : NULL;
+}
+
+/* "Wed, 21 Oct 2015 07:28:00 GMT": 1 if that is before now (rough: the
+ * RTC keeps local time, a day either way is fine for cookies) */
+static int expires_past(const char* s) {
+    static const char* const mon[12] = { "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" };
+    while (*s && !k_isdigit(*s)) s++;
+    uint32_t day = 0, year = 0;
+    s += k_parse_u32(s, &day);
+    while (*s == ' ' || *s == '-') s++;
+    int m = -1;
+    for (int i = 0; i < 12; i++) if (strncasecmp(s, mon[i], 3) == 0) m = i;
+    while (*s && !k_isdigit(*s)) s++;
+    k_parse_u32(s, &year);
+    if (year < 100) year += 2000;
+    if (m < 0 || !year) return 0;
+    rtc_datetime_t now;
+    if (rtc_read_datetime(&now) != 0) return 0;
+    uint32_t a = year * 400 + (uint32_t)m * 32 + day, b = now.year * 400u + (now.month - 1u) * 32u + now.day;
+    return a < b;
+}
+
 static void cookie_set(const char* host, const char* line) {
-    /* name=value; Domain=x; Path=/; ... */
-    char name[64], value[256], domain[96];
+    /* name=value; Domain=x; Path=/; Expires=...; Max-Age=... */
+    char name[64], value[1024], domain[96];
     int n = 0;
     while (line[n] && line[n] != '=' && line[n] != ';' && n < 63) { name[n] = line[n]; n++; }
     name[n] = 0;
@@ -153,10 +188,10 @@ static void cookie_set(const char* host, const char* line) {
     if (line[n] != '=' || !name[0]) return;
     const char* v = strchr(line, '=') + 1;
     int vn = 0;
-    while (v[vn] && v[vn] != ';' && vn < 255) { value[vn] = v[vn]; vn++; }
+    while (v[vn] && v[vn] != ';' && vn < (int)sizeof(value) - 1) { value[vn] = v[vn]; vn++; }
     value[vn] = 0;
     kstrlcpy(domain, host, sizeof(domain));
-    int expired = 0;
+    int expired = 0, persist = 0;
     for (const char* a = strchr(line, ';'); a; a = strchr(a + 1, ';')) {
         const char* s = a + 1;
         while (*s == ' ') s++;
@@ -167,14 +202,20 @@ static void cookie_set(const char* host, const char* line) {
             while (s[k] && s[k] != ';' && k < 95) { domain[k] = (char)(s[k] >= 'A' && s[k] <= 'Z' ? s[k] + 32 : s[k]); k++; }
             domain[k] = 0;
             if (!domain_match(host, domain)) return;          /* not for another site */
-        } else if (strncasecmp(s, "max-age=0", 9) == 0 || strncasecmp(s, "max-age=-", 9) == 0) {
-            expired = 1;
+        } else if (strncasecmp(s, "max-age=", 8) == 0) {
+            if (s[8] == '0' || s[8] == '-') expired = 1;
+            else persist = 1;
+        } else if (strncasecmp(s, "expires=", 8) == 0) {
+            if (expires_past(s + 8)) expired = 1;
+            else persist = 1;
         }
     }
+    g_cookies_dirty = 1;
     for (int i = 0; i < g_ncookies; i++) {
         if (strcmp(g_cookies[i].name, name) == 0 && strcmp(g_cookies[i].domain, domain) == 0) {
             if (expired) { g_cookies[i] = g_cookies[--g_ncookies]; return; }
             kstrlcpy(g_cookies[i].value, value, sizeof(g_cookies[i].value));
+            g_cookies[i].persist = persist;
             return;
         }
     }
@@ -184,6 +225,59 @@ static void cookie_set(const char* host, const char* line) {
     kstrlcpy(c->domain, domain, sizeof(c->domain));
     kstrlcpy(c->name, name, sizeof(c->name));
     kstrlcpy(c->value, value, sizeof(c->value));
+    c->persist = persist;
+}
+
+/* the persistent cookies, one per line: domain TAB name TAB value */
+static void cookies_save(void) {
+    if (!g_cookies_dirty) return;
+    g_cookies_dirty = 0;
+    uint32_t cap = 256, n = 0;
+    for (int i = 0; i < g_ncookies; i++) cap += (uint32_t)(strlen(g_cookies[i].domain) + strlen(g_cookies[i].name) + strlen(g_cookies[i].value) + 4);
+    char* buf = (char*)kmalloc(cap);
+    if (!buf) return;
+    buf[0] = 0;
+    for (int i = 0; i < g_ncookies; i++) {
+        if (!g_cookies[i].persist) continue;
+        n += (uint32_t)ksnprintf(buf + n, cap - n, "%s\t%s\t%s\n", g_cookies[i].domain, g_cookies[i].name, g_cookies[i].value);
+    }
+    fs_mkdir_p("/home/banana/.config/browser");
+    fs_write_path(COOKIE_FILE, buf, n);
+    kfree(buf);
+}
+
+static const char* tab_in(const char* s, char c, size_t n) {
+    for (size_t i = 0; i < n; i++) if (s[i] == c) return s + i;
+    return NULL;
+}
+
+static void cookies_load(void) {
+    if (g_cookies_loaded) return;
+    g_cookies_loaded = 1;
+    int fi = fs_find_file(COOKIE_FILE);
+    if (fi < 0) return;
+    fs_file_t* f = fs_get_file(fi);
+    if (!f) return;
+    const char* p = f->content;
+    while (*p && g_ncookies < COOKIES) {
+        const char* e = strchr(p, '\n');
+        if (!e) e = p + strlen(p);
+        const char* t1 = tab_in(p, '\t', (size_t)(e - p));
+        const char* t2 = t1 ? tab_in(t1 + 1, '\t', (size_t)(e - t1 - 1)) : NULL;
+        if (t1 && t2) {
+            cookie_t* c = &g_cookies[g_ncookies++];
+            memset(c, 0, sizeof(*c));
+            int dl = (int)(t1 - p), nl = (int)(t2 - t1 - 1), vl = (int)(e - t2 - 1);
+            if (dl > 95) dl = 95;
+            if (nl > 63) nl = 63;
+            if (vl > 1023) vl = 1023;
+            memcpy(c->domain, p, (size_t)dl);
+            memcpy(c->name, t1 + 1, (size_t)nl);
+            memcpy(c->value, t2 + 1, (size_t)vl);
+            c->persist = 1;
+        }
+        p = *e ? e + 1 : e;
+    }
 }
 
 /* ══ downloads ════════════════════════════════════════════════════════
@@ -261,11 +355,11 @@ static void on_headers(void* ctx, const http_response_t* r, const char* raw) {
     for (const char* l = raw; l && *l; ) {
         const char* e = strchr(l, '\n');
         if (strncasecmp(l, "Set-Cookie:", 11) == 0) {
-            char line[512];
+            char line[2048];
             const char* v = l + 11;
             while (*v == ' ') v++;
             int n = 0;
-            while (v + n < (e ? e : v + strlen(v)) && v[n] != '\r' && n < 511) { line[n] = v[n]; n++; }
+            while (v + n < (e ? e : v + strlen(v)) && v[n] != '\r' && n < 2047) { line[n] = v[n]; n++; }
             line[n] = 0;
             cookie_set(host, line);
         }
@@ -554,9 +648,7 @@ static int fetch_url(const char* url, const char* method, const char* post, uint
     req.body = post;
     req.body_len = post_len;
     if (post) req.content_type = body_type ? body_type : "application/x-www-form-urlencoded";
-    char cookies[1024];
-    cookie_header(url, cookies, sizeof(cookies));
-    req.extra_headers = cookies[0] ? cookies : NULL;
+    req.headers_for = headers_for;              /* cookies, recomputed for every redirect hop */
     req.on_headers = on_headers;
     req.follow_redirects = 1;
     req.max_redirects = 10;
@@ -597,7 +689,7 @@ static int env_fetch(void* ctx, const char* url, char** data, uint32_t* len, cha
 static int env_request(void* ctx, const char* url, const char* method, const char* body, uint32_t blen,
                        const char* btype, char** data, uint32_t* len, char* rtype, int rcap, char* err, int ecap) {
     (void)ctx;
-    char fin[1024];
+    char fin[URL_MAX];
     return fetch_url(url, method, body ? body : "", body ? blen : 0, btype, data, len, rtype, rcap, fin, sizeof(fin),
                      err, ecap, NULL);
 }
@@ -690,8 +782,32 @@ static void copy_selection(void) {
     set_status("Copied", 0);
 }
 
+/* words typed in the address bar (not an address) are searched for:
+ * DuckDuckGo's HTML version works without scripts (Google's results page
+ * now needs its anti-bot script to pass, which this browser does not) */
+#define SEARCH_URL "https://html.duckduckgo.com/html/?q="
+static int looks_like_address(const char* s) {
+    if (strchr(s, ' ')) return 0;
+    if (strncasecmp(s, "localhost", 9) == 0) return 1;
+    const char* dot = strchr(s, '.');
+    return dot && dot != s && dot[1] && dot[1] != '/';
+}
+
 static void normalize_url(const char* in, char* out, int cap) {
     while (*in == ' ') in++;
+    if (!strstr(in, "://") && strncasecmp(in, "about:", 6) != 0 && in[0] != '/' && in[0] && !looks_like_address(in)) {
+        static const char hx[] = "0123456789ABCDEF";
+        kstrlcpy(out, SEARCH_URL, (size_t)cap);
+        int n = (int)strlen(out);
+        for (const unsigned char* s = (const unsigned char*)in; *s && n < cap - 4; s++) {
+            if ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9') || *s == '-' || *s == '.' || *s == '_') out[n++] = (char)*s;
+            else if (*s == ' ') out[n++] = '+';
+            else { out[n++] = '%'; out[n++] = hx[*s >> 4]; out[n++] = hx[*s & 15]; }
+        }
+        while (n > 0 && out[n - 1] == '+') n--;
+        out[n] = 0;
+        return;
+    }
     if (strstr(in, "://") || strncasecmp(in, "about:", 6) == 0) kstrlcpy(out, in, (size_t)cap);
     else if (in[0] == '/') ksnprintf(out, (size_t)cap, "file://%s", in);
     else ksnprintf(out, (size_t)cap, "http://%s", in);
@@ -806,7 +922,7 @@ static void save_download(const char* url, const char* hint, const char* ctype, 
 
 /* "Save link as" / "Save page as": always a download, the page stays */
 static void download(tab_t* t, const char* url_in) {
-    char url[1024], final_url[1024], ctype[96], err[200], msg[200];
+    char url[URL_MAX], final_url[URL_MAX], ctype[96], err[200], msg[200];
     normalize_url(url_in, url, sizeof(url));
     g_status_tab = t;
     ksnprintf(msg, sizeof(msg), "Downloading %s ...", url);
@@ -828,9 +944,9 @@ static void download(tab_t* t, const char* url_in) {
 }
 
 static void load(tab_t* t, const char* url_in, const char* post, uint32_t post_len, int add_history) {
-    char url[1024], final_url[1024], ctype[96], err[200];
+    char url[URL_MAX], final_url[URL_MAX], ctype[96], err[200];
     normalize_url(url_in, url, sizeof(url));
-    char prev_addr[1024];
+    char prev_addr[URL_MAX];
     kstrlcpy(prev_addr, t->page ? t->page->url : "", sizeof(prev_addr));
     kstrlcpy(t->addr, url, sizeof(t->addr));
     if (t == cur_tab()) { g_addr_focus = 0; g_sel_on = 0; }
@@ -847,7 +963,7 @@ static void load(tab_t* t, const char* url_in, const char* post, uint32_t post_l
     int frc = fetch_url(vsrc ? url + 12 : url, NULL, post, post_len, NULL, &data, &len, ctype, sizeof(ctype), final_url,
                         sizeof(final_url), err, sizeof(err), vsrc ? NULL : &dl);
     if (frc == 0 && vsrc) {
-        char fin[1024];
+        char fin[URL_MAX];
         ksnprintf(fin, sizeof(fin), "view-source:%s", final_url);
         kstrlcpy(final_url, fin, sizeof(final_url));
         kstrlcpy(ctype, "text/plain", sizeof(ctype));
@@ -963,7 +1079,7 @@ static void after_page_event(tab_t* t) {
     }
     if (p->nav_pending) {
         p->nav_pending = 0;
-        char nav[1024];
+        char nav[URL_MAX];
         kstrlcpy(nav, p->nav, sizeof(nav));
         if (p->nav_newtab) { p->nav_newtab = 0; new_tab(nav); return; }
         if (p->nav_post) {
@@ -1005,7 +1121,7 @@ static void history_go(int delta) {
     int np = t->hist_pos + delta;
     if (np < 0 || np >= t->hist_n) return;
     t->hist_pos = np;
-    char url[512];
+    char url[URL_MAX];
     kstrlcpy(url, t->hist[np], sizeof(url));
     load(t, url, NULL, 0, 0);
 }
@@ -1108,8 +1224,8 @@ static void read_keys(void) {
 /* the right-click menu: chosen in the desktop's task, carried out here */
 enum { BM_OPEN = 1, BM_NEWTAB, BM_SAVELINK, BM_COPYLINK, BM_BACK, BM_FWD, BM_RELOAD, BM_COPY, BM_PASTE,
        BM_SAVEPAGE, BM_SOURCE, BM_DOWNLOADS };
-static char g_menu_link[1024];
-static char g_dl_url[1024];
+static char g_menu_link[URL_MAX];
+static char g_dl_url[URL_MAX];
 static int  g_rc_mx, g_rc_my;
 
 static void bmenu_cb(int id, void* arg) {
@@ -1177,13 +1293,13 @@ static void run_commands(void) {
             break;
         }
         case CMD_DOWNLOAD: {
-            char url[1024];
+            char url[URL_MAX];
             kstrlcpy(url, g_dl_url, sizeof(url));
             if (t && url[0]) download(t, url);
             break;
         }
         case CMD_SOURCE: {
-            char url[1024 + 16];
+            char url[URL_MAX + 16];
             if (!t || !t->page) break;
             ksnprintf(url, sizeof(url), "view-source:%s", t->page->url);
             new_tab(url);
@@ -1191,14 +1307,14 @@ static void run_commands(void) {
         }
         case CMD_COPY: copy_selection(); break;
         case CMD_GO: {
-            char url[1024];
+            char url[URL_MAX];
             kstrlcpy(url, g_go_url, sizeof(url));
             if (t) load(t, url, NULL, 0, 1);
             else new_tab(url);
             break;
         }
         case CMD_NEWTAB: {
-            char url[1024];
+            char url[URL_MAX];
             kstrlcpy(url, g_go_url, sizeof(url));
             g_go_url[0] = 0;
             new_tab(url);
@@ -1208,7 +1324,7 @@ static void run_commands(void) {
         case CMD_BACK: history_go(-1); break;
         case CMD_FWD: history_go(1); break;
         case CMD_RELOAD:
-            if (t && t->hist_pos >= 0) { char url[512]; kstrlcpy(url, t->hist[t->hist_pos], sizeof(url)); load(t, url, NULL, 0, 0); }
+            if (t && t->hist_pos >= 0) { char url[URL_MAX]; kstrlcpy(url, t->hist[t->hist_pos], sizeof(url)); load(t, url, NULL, 0, 0); }
             else if (t) load(t, HOME_URL, NULL, 0, 1);
             break;
         case CMD_HOME: if (t) load(t, HOME_URL, NULL, 0, 1); break;
@@ -1218,16 +1334,19 @@ static void run_commands(void) {
 }
 
 static void browser_task(void) {
+    cookies_load();                 /* the cookies kept from earlier sessions */
     g_env.fetch = env_fetch;
     g_env.request = env_request;
     g_env.decode_image = env_decode_image;
     g_env.now_ms = timer_ms;
+    g_env.yield = task_yield;           /* a long script must not freeze the desktop */
     g_env.log = env_log;
     g_env.ctx = NULL;
-    /* a page may use a share of the heap (big pages, images), within reason */
+    /* a page may use a share of the heap (big pages, images, script-heavy
+     * sites like Google need ~100 MB), within reason */
     uint32_t heap = kheap_total_bytes();
-    g_page_mem = heap / 5;
-    if (g_page_mem > (96u << 20)) g_page_mem = 96u << 20;
+    g_page_mem = heap / 4;
+    if (g_page_mem > (192u << 20)) g_page_mem = 192u << 20;
     if (g_page_mem < (16u << 20)) g_page_mem = 16u << 20;
     for (;;) {
         if (!g_open) {
@@ -1249,6 +1368,7 @@ static void browser_task(void) {
             if (t->page->dirty || t->page->nav_pending || t->page->alert_pending || t->page->status[0])
                 after_page_event(t);
         }
+        cookies_save();                 /* new long-lived cookies (no-op otherwise) */
         if (g_render_req) render_view();
         task_sleep_ms(10);
     }

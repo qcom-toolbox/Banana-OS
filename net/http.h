@@ -3,6 +3,9 @@
 
 #include "net.h"
 
+/* longest URL handled: anti-bot challenges put kilobytes of token in the query */
+#define HTTP_URL_MAX 8192
+
 /* HTTP/1.1 client (GET/HEAD) over TCP, or TLS for https:// URLs, used by
  * curl and wget. Handles Content-Length, chunked transfer encoding and
  * read-until-close bodies, and (optionally) follows redirects. */
@@ -11,7 +14,7 @@ typedef struct {
     int      https;
     char     host[256];
     uint16_t port;
-    char     path[1024];      /* includes the query string, always starts with '/' */
+    char     path[HTTP_URL_MAX]; /* includes the query string, always starts with '/' */
 } url_t;
 
 /* Parses http://host[:port]/path and https://...; a missing scheme means
@@ -23,9 +26,9 @@ typedef struct {
     char     reason[64];       /* e.g. "OK" */
     char     content_type[96];
     int32_t  content_length;   /* -1 when not given */
-    char     location[1024];   /* redirect target, if any */
+    char     location[HTTP_URL_MAX]; /* redirect target, if any */
     uint32_t body_bytes;       /* body bytes delivered */
-    char     final_url[1024];  /* URL of the last request (after redirects) */
+    char     final_url[HTTP_URL_MAX]; /* URL of the last request (after redirects) */
     char     tls_cipher[48];   /* "" for plain http */
 } http_response_t;
 
@@ -42,6 +45,11 @@ typedef struct {
     /* optional extra header lines, each ending in "
 " (cookies, SOAPAction, ...) */
     const char* extra_headers;
+    /* optional: the extra header lines for each request of a redirect
+     * chain (cookies differ per host, and a redirect may have just set
+     * one); replaces extra_headers when given. The string must stay valid
+     * until the next call. */
+    const char* (*headers_for)(void* ctx, const char* url);
     int      tls_ciphers;      /* TLS_CIPHERS_* (tls.h), 0 = offer all */
 
     /* all optional */

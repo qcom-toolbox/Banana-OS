@@ -882,10 +882,12 @@ static value_t f_bind(interp_t* I, value_t self, int argc, value_t* argv) {
 
 /* ══ Object / Array / String / Number / Math additions ═══════════════ */
 
+static value_t o_defineProperties(interp_t* I, value_t self, int argc, value_t* argv);
 static value_t o_create(interp_t* I, value_t self, int argc, value_t* argv) {
-    (void)self;
     obj_t* o = obj_new(I, OBJ_PLAIN);
     if (ARG(0).t == V_OBJ) o->proto = ARG(0).o;
+    /* Object.create(proto, { name: descriptor, ... }) */
+    if (ARG(1).t == V_OBJ) { value_t a[2] = { v_obj(o), ARG(1) }; o_defineProperties(I, self, 2, a); }
     return v_obj(o);
 }
 static value_t o_getPrototypeOf(interp_t* I, value_t self, int argc, value_t* argv) {

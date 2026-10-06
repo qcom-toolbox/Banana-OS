@@ -320,6 +320,32 @@ obj_t* obj_new(interp_t* I, int kind) {
     return o;
 }
 
+/* buffers an array or object outgrew are reused (by power-of-two capacity)
+ * instead of being left in the arena: a script growing many arrays would
+ * otherwise waste as much again as it uses */
+static int pow2_class(uint32_t cap) {
+    if (cap < 4 || (cap & (cap - 1))) return -1;
+    int b = 0;
+    while ((1u << b) < cap) b++;
+    return b < 24 ? b : -1;
+}
+static void* buf_get(interp_t* I, void** lists, uint32_t cap, uint32_t size) {
+    int b = pow2_class(cap);
+    if (b >= 0 && lists[b]) {
+        void* p = lists[b];
+        lists[b] = *(void**)p;
+        memset(p, 0, (size_t)cap * size);
+        return p;
+    }
+    return arena_alloc(I->A, cap * size);
+}
+static void buf_put(interp_t* I, void** lists, void* p, uint32_t cap) {
+    int b = pow2_class(cap);
+    if (!p || b < 0 || I->A->oom) return;           /* after oom buffers may be the shared fallback */
+    *(void**)p = lists[b];
+    lists[b] = p;
+}
+
 value_t prop_get_raw(obj_t* o, const char* key, int* found) {
     for (uint32_t i = 0; i < o->n; i++)
         if (strcmp(o->props[i].key->s, key) == 0) { *found = 1; return o->props[i].v; }
@@ -334,10 +360,11 @@ void prop_set_raw(interp_t* I, obj_t* o, str_t* key, value_t v) {
             return;
         }
     if (o->n == o->cap) {
-        uint32_t nc = o->cap ? o->cap * 2 : 8;
-        prop_t* np = (prop_t*)arena_alloc(I->A, nc * (uint32_t)sizeof(prop_t));
+        uint32_t nc = o->cap ? o->cap * 2 : 4;   /* most objects are small */
+        prop_t* np = (prop_t*)buf_get(I, I->free_props, nc, (uint32_t)sizeof(prop_t));
         if (I->A->oom) return;
         if (o->n) memcpy(np, o->props, o->n * sizeof(prop_t));
+        buf_put(I, I->free_props, o->props, o->cap);
         o->props = np;
         o->cap = nc;
     }
@@ -363,11 +390,12 @@ value_t arr_get(obj_t* a, uint32_t i) {
 void arr_set(interp_t* I, obj_t* a, uint32_t i, value_t v) {
     if (i > 10000000u) return;
     if (i >= a->acap) {
-        uint32_t nc = a->acap ? a->acap : 8;
+        uint32_t nc = a->acap ? a->acap : 4;
         while (nc <= i) nc *= 2;
-        value_t* ni = (value_t*)arena_alloc(I->A, nc * (uint32_t)sizeof(value_t));
+        value_t* ni = (value_t*)buf_get(I, I->free_items, nc, (uint32_t)sizeof(value_t));
         if (I->A->oom) return;
         if (a->len) memcpy(ni, a->items, a->len * sizeof(value_t));
+        buf_put(I, I->free_items, a->items, a->acap);
         a->items = ni;
         a->acap = nc;
     }
@@ -1831,6 +1859,22 @@ static node_t* parse_block(parser_t* P) {
     }
     expect(P, "}");
     P->no_in = saved_no_in;
+    /* a JS block declaring nothing block-scoped (let/const/class/function)
+     * runs without a scope of its own: no allocation each time a loop
+     * body or if branch runs */
+    if (!P->php) {
+        int scoped = 0;
+        for (node_t* s = blk->a; s && !scoped; s = s->next) {
+            if (s->k == N_FUNCDECL || s->k == N_CLASS) scoped = 1;
+            else if (s->k == N_BLOCK && s->op == 1) {
+                for (node_t* v = s->a; v; v = v->next) if (v->k != N_VAR || v->op != 'v') scoped = 1;
+            } else if (s->k == N_VAR && s->op != 'v') scoped = 1;
+            else if (s->k != N_EXPR && s->k != N_IF && s->k != N_RETURN && s->k != N_BLOCK && s->k != N_FOR &&
+                     s->k != N_WHILE && s->k != N_DOWHILE && s->k != N_BREAK && s->k != N_CONTINUE &&
+                     s->k != N_THROW && s->k != N_TRY && s->k != N_EMPTY && s->k != N_FOREACH && s->k != N_SWITCH) scoped = 1;
+        }
+        if (!scoped) blk->op = 1;
+    }
     return blk;
 }
 
@@ -2352,11 +2396,48 @@ static void init_fields(interp_t* I, func_t* cls);
 static void super_call(interp_t* I, func_t* cls, int argc, value_t* argv);
 static value_t key_of(interp_t* I, value_t k, char* buf, int cap, const char** out);
 
+/* The arena frees nothing until the page goes, so a script making millions
+ * of calls would fill it with dead scopes. A scope no closure captured is
+ * dead once its call or block ends: its env and variables are kept on free
+ * lists and reused. */
 static env_t* env_new(interp_t* I, env_t* parent, int is_func) {
-    env_t* e = (env_t*)arena_alloc(I->A, sizeof(env_t));
+    env_t* e = I->free_envs;
+    if (e) { I->free_envs = e->parent; memset(e, 0, sizeof(*e)); }
+    else e = (env_t*)arena_alloc(I->A, sizeof(env_t));
     e->parent = parent;
     e->is_func = is_func;
     return e;
+}
+
+/* may code under n use `arguments`? (eval could too) */
+static int mentions_arguments(node_t* n, int depth) {
+    if ((uintptr_t)n < 4096) return 0;              /* NULL, or a marker (arrow, implicit constructor) */
+    for (; n; n = n->next) {
+        if (depth > 300) return 1;
+        if (n->s && n->k != N_STR && (strcmp(n->s->s, "arguments") == 0 || strcmp(n->s->s, "eval") == 0)) return 1;
+        if (mentions_arguments(n->a, depth + 1) || mentions_arguments(n->b, depth + 1) ||
+            mentions_arguments(n->c, depth + 1) || mentions_arguments(n->d, depth + 1)) return 1;
+    }
+    return 0;
+}
+
+/* a closure made in scope e keeps it and every scope around it */
+static void env_capture(env_t* e) {
+    for (; e && !e->captured; e = e->parent) e->captured = 1;
+}
+
+static void env_release(interp_t* I, env_t* e) {
+    if (!e || e->captured || I->lang != LANG_JS || e == I->global) return;
+    var_t* v = e->vars;
+    while (v) {
+        var_t* nx = v->next;
+        v->next = I->free_vars;
+        I->free_vars = v;
+        v = nx;
+    }
+    e->vars = NULL;
+    e->parent = I->free_envs;
+    I->free_envs = e;
 }
 
 static var_t* env_find_local(env_t* e, const char* name) {
@@ -2382,7 +2463,9 @@ static var_t* env_define(interp_t* I, env_t* e, str_t* name, value_t v) {
         x->v = v;
         return x;
     }
-    x = (var_t*)arena_alloc(I->A, sizeof(var_t));
+    x = I->free_vars;
+    if (x) { I->free_vars = x->next; memset(x, 0, sizeof(*x)); }
+    else x = (var_t*)arena_alloc(I->A, sizeof(var_t));
     x->name = name;
     x->v = v;
     x->next = e->vars;
@@ -2393,7 +2476,8 @@ static var_t* env_define(interp_t* I, env_t* e, str_t* name, value_t v) {
 
 static int step(interp_t* I) {
     if (I->ctl == CTL_THROW) return 0;
-    if (++I->steps > I->step_limit) {
+    if ((++I->steps & 0xFFFF) == 0 && I->yield_fn) I->yield_fn();
+    if (I->steps > I->step_limit) {
         script_throw(I, "InternalError: script took too long (endless loop?)");
         return 0;
     }
@@ -2408,6 +2492,7 @@ static value_t make_func(interp_t* I, node_t* f) {
     func_t* fn = (func_t*)arena_alloc(I->A, sizeof(func_t));
     fn->decl = f;
     fn->closure = I->cur;
+    env_capture(I->cur);
     fn->name = f->s ? f->s->s : "anonymous";
     if (f->c == (node_t*)1) { fn->has_bound = 1; fn->bound_this = I->this_v; }
     fn->is_async = f->n == 1;
@@ -2452,13 +2537,22 @@ value_t call_value(interp_t* I, value_t fnv, value_t self, int argc, value_t* ar
     I->cur = e;
     I->fn_env = e;
     I->this_v = fn->has_bound ? fn->bound_this : self;
+    /* sloppy-mode JS: a plain call f() runs with this = the global object
+     * (`this.x = ...`, `var g = this || self` in bundled scripts) */
+    if (I->lang == LANG_JS && !fn->has_bound && (self.t == V_UNDEF || self.t == V_NULL))
+        I->this_v = script_get_global(I, "globalThis");
     func_t* saved_cur_fn = I->cur_fn;
     I->cur_fn = fn;
     int i = 0;
     if (I->lang == LANG_JS && !fn->has_bound) {
-        obj_t* args = obj_new(I, OBJ_ARRAY);
-        for (int k = 0; k < argc; k++) arr_push(I, args, argv[k]);
-        env_define(I, e, str_new(I, "arguments", 9), v_obj(args));
+        /* the arguments object, only for functions that can see it */
+        if (!(d->flags & NF_CHECKED)) d->flags |= NF_CHECKED | (mentions_arguments(d->b, 0) ? NF_ARGUMENTS : 0);
+        if (d->flags & NF_ARGUMENTS) {
+            obj_t* args = obj_new(I, OBJ_ARRAY);
+            for (int k = 0; k < argc; k++) arr_push(I, args, argv[k]);
+            if (!I->s_arguments) I->s_arguments = str_new(I, "arguments", 9);
+            env_define(I, e, I->s_arguments, v_obj(args));
+        }
     }
     for (node_t* p = d->a; p && !I->ctl; p = p->next, i++) {
         value_t v;
@@ -2493,6 +2587,7 @@ value_t call_value(interp_t* I, value_t fnv, value_t self, int argc, value_t* ar
         else if (I->ctl == CTL_BREAK || I->ctl == CTL_CONTINUE) { I->ctl = CTL_NONE; I->label = NULL; }
     }
     if (I->ctl != CTL_THROW && d->op == 1) r = I->ctl ? v_undef() : r;
+    env_release(I, e);
     I->cur = saved_env;
     I->fn_env = saved_fn;
     I->this_v = saved_this;
@@ -2593,6 +2688,7 @@ value_t obj_getv(interp_t* I, value_t ov, const char* key) {
         if (strcmp(key, "prototype") == 0 && !ov.f->native) {   /* created on first use */
             if (!ov.f->statics) ov.f->statics = obj_new(I, OBJ_PLAIN);
             value_t p = v_obj(obj_new(I, OBJ_PLAIN));
+            obj_set(I, p.o, "constructor", ov);           /* F.prototype.constructor === F */
             obj_set(I, ov.f->statics, "prototype", p);
             return p;
         }
@@ -2601,6 +2697,7 @@ value_t obj_getv(interp_t* I, value_t ov, const char* key) {
             if (f) return m;
         }
         if (strcmp(key, "name") == 0) return v_str(I, ov.f->name ? ov.f->name : "");
+        if (strcmp(key, "constructor") == 0) return script_get_global(I, "Function");
         return v_undef();
     }
     return lib_member(I, ov, key, &found);
@@ -3091,6 +3188,7 @@ static value_t eval_class(interp_t* I, node_t* n) {
     I->cur = env_new(I, saved, 0);
     if (n->s) env_define(I, I->cur, n->s, F);
     fn->closure = I->cur;
+    env_capture(I->cur);
     func_t* saved_fn = I->cur_fn;
     value_t saved_this = I->this_v;
     node_t* fields = NULL;
@@ -3488,6 +3586,18 @@ static void out_str(interp_t* I, str_t* s) {
 
 /* after a loop body ran: 1 = leave the loop (break, a labelled break/continue for an
  * outer loop, return, throw), 0 = go on (ctl cleared) */
+/* does code under n make closures (which could capture a loop variable)? */
+static int makes_closure(node_t* n, int depth) {
+    if ((uintptr_t)n < 4096) return 0;
+    for (; n; n = n->next) {
+        if (n->k == N_FUNC || n->k == N_FUNCDECL || n->k == N_CLASS) return 1;
+        if (depth > 200) return 1;
+        if (makes_closure(n->a, depth + 1) || makes_closure(n->b, depth + 1) ||
+            makes_closure(n->c, depth + 1) || makes_closure(n->d, depth + 1)) return 1;
+    }
+    return 0;
+}
+
 static int loop_exit(interp_t* I, node_t* loop) {
     if (I->ctl == CTL_BREAK || I->ctl == CTL_CONTINUE) {
         int mine = !I->label || (loop->s && strcmp(loop->s->s, I->label->s) == 0);
@@ -3591,6 +3701,7 @@ static void exec(interp_t* I, node_t* n) {
         I->cur = env_new(I, saved, 0);
         hoist(I, n->a, I->cur);
         exec_list(I, n->a);
+        env_release(I, I->cur);
         I->cur = saved;
         return;
     }
@@ -3619,12 +3730,17 @@ static void exec(interp_t* I, node_t* n) {
         env_t* saved = I->cur;
         if (I->lang == LANG_JS) I->cur = env_new(I, saved, 0);
         if (n->a) exec(I, n->a);
+        /* op bit 1: checked, bit 2: the body makes closures. Only then does
+         * each iteration need its own copy of the let variables - copying
+         * them every time would fill the page's memory in a long loop */
+        if (I->lang == LANG_JS && !(n->op & 1)) n->op |= (uint8_t)(1 | (makes_closure(n->d, 0) ? 2 : 0));
+        int per_iter = I->lang == LANG_JS && (n->op & 2) && I->cur->vars;
         while (!I->ctl) {
             if (n->b) {
                 value_t c = eval(I, n->b);
                 if (I->ctl || !v_truthy(I, c)) break;
             }
-            if (I->lang == LANG_JS) {
+            if (per_iter) {
                 /* a fresh copy of the loop variables per iteration (closures) */
                 env_t* it = env_new(I, I->cur, 0);
                 for (var_t* v = I->cur->vars; v; v = v->next) env_define(I, it, v->name, v->v);
@@ -3635,6 +3751,7 @@ static void exec(interp_t* I, node_t* n) {
                     var_t* o = env_find_local(outer, v->name->s);
                     if (o) o->v = v->v;
                 }
+                env_release(I, it);
                 I->cur = outer;
             } else {
                 exec(I, n->d);
@@ -3642,6 +3759,7 @@ static void exec(interp_t* I, node_t* n) {
             if (loop_exit(I, n)) break;
             if (n->c) exec(I, n->c);
         }
+        if (I->cur != saved) env_release(I, I->cur);
         I->cur = saved;
         return;
     }
@@ -3695,6 +3813,7 @@ static void exec(interp_t* I, node_t* n) {
         } else if (I->lang == LANG_JS && n->op == 'o') {
             script_throw(I, "TypeError: value is not iterable");
         }
+        if (I->cur != saved) env_release(I, I->cur);
         I->cur = saved;
         return;
     }
@@ -3732,6 +3851,7 @@ static void exec(interp_t* I, node_t* n) {
             I->cur = env_new(I, saved, 0);
             if (n->s) env_define(I, I->cur, n->s, ex);
             exec(I, n->b);
+            env_release(I, I->cur);
             I->cur = saved;
         }
         if (n->c) {
@@ -3808,6 +3928,7 @@ interp_t* script_new(arena_t* A, int lang) {
 void script_set_output(interp_t* I, script_out_fn out, void* ctx) { I->out = out; I->out_ctx = ctx; }
 void script_set_log(interp_t* I, script_out_fn log, void* ctx) { I->log = log; I->log_ctx = ctx; }
 void script_set_host(interp_t* I, void* host) { I->host = host; }
+void script_set_yield(interp_t* I, void (*fn)(void)) { I->yield_fn = fn; }
 void* script_host(interp_t* I) { return I->host; }
 void script_set_php_ext(interp_t* I, script_ext_fn fn) { I->php_ext = fn; }
 void script_set_limits(interp_t* I, uint32_t steps, uint32_t depth) {
@@ -3954,7 +4075,8 @@ static int run_program(interp_t* I, const char* src, uint32_t len, const char* n
         I->cur = I->global;
         I->fn_env = I->global;
     }
-    I->this_v = v_undef();
+    /* top-level `this` is the global object (window) in a script, undefined in a module */
+    I->this_v = (I->lang == LANG_JS && !ns) ? script_get_global(I, "globalThis") : v_undef();
     I->ctl = CTL_NONE;
     hoist(I, prog->a, I->cur);
     if (ns) export_pass(I, prog->a);                 /* functions, for modules importing this one back */

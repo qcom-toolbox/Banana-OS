@@ -2,6 +2,10 @@
 #include "kstring.h"
 #include "kheap.h"
 
+#ifndef PAGE_JS_STEPS
+#define PAGE_JS_STEPS 400000000u     /* per script or event handler */
+#endif
+
 #define MAX_IMAGES   48
 #define MAX_IMG_SIZE (6u << 20)
 #define LAYOUT_MEM   (48u << 20)
@@ -65,7 +69,7 @@ static void normalize(char* url) {
 void url_resolve(const char* base, const char* rel, char* out, int cap) {
     while (*rel == ' ' || *rel == '\n' || *rel == '\t') rel++;
     if (has_scheme(rel)) { kstrlcpy(out, rel, (size_t)cap); return; }
-    char b[1024];
+    static char b[PAGE_URL_MAX];         /* never yields: one buffer is enough, off the stack */
     kstrlcpy(b, base, sizeof(b));
     if (rel[0] == '#') {
         char* h = strchr(b, '#');
@@ -380,7 +384,10 @@ void page_load(page_t* p, const char* url, const char* html, uint32_t len, int w
     init_forms_text(p, p->doc);
     if (!p->js_disabled) {
         p->js = script_new(&p->A, LANG_JS);
-        script_set_limits(p->js, 5000000, 120);
+        /* long enough for big apps and challenge scripts; the env's yield
+         * keeps the desktop responsive meanwhile */
+        script_set_limits(p->js, PAGE_JS_STEPS, 120);
+        if (p->env && p->env->yield) script_set_yield(p->js, p->env->yield);
         jsdom_install(p);
         run_scripts(p);
     }

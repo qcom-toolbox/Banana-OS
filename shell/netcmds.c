@@ -434,7 +434,7 @@ static void curl_progress(void* ctx, uint32_t got, int32_t total) {
 }
 
 static const char* url_basename(const char* url, char* out, uint32_t cap) {
-    url_t u;
+    static url_t u;                     /* big (long URLs); nothing here yields */
     if (!url_parse(url, &u)) { kstrlcpy(out, "index.html", cap); return out; }
     char path[1024];
     kstrlcpy(path, u.path, sizeof(path));

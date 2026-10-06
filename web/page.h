@@ -24,11 +24,13 @@ typedef struct page_env {
     /* decode an image into out (pixels in the arena); 0 = ok */
     int  (*decode_image)(void* ctx, const uint8_t* data, uint32_t len, img_data_t* out, arena_t* A);
     uint32_t (*now_ms)(void);
+    void (*yield)(void);             /* optional: let other tasks run during a long script */
     void (*log)(void* ctx, const char* line);
     void* ctx;
 } page_env_t;
 
 #define PAGE_TIMERS 32
+#define PAGE_URL_MAX 8192           /* challenge pages navigate with kilobytes of token */
 
 typedef struct page_timer {
     int      id;
@@ -40,7 +42,7 @@ typedef struct page_timer {
 typedef struct page {
     arena_t      A;
     page_env_t*  env;
-    char         url[1024];
+    char         url[PAGE_URL_MAX];
     dom_node_t*  doc;
     css_sheet_t* sheets[24];
     int          nsheets;
@@ -55,7 +57,7 @@ typedef struct page {
     char         status[200];         /* last script error, for the status bar */
     char         alert[256];          /* alert() text waiting to be shown */
     int          alert_pending;
-    char         nav[1024];           /* navigation requested (link, location.href, form) */
+    char         nav[PAGE_URL_MAX];   /* navigation requested (link, location.href, form) */
     int          nav_pending;
     int          nav_newtab;          /* ...in a new tab (target=_blank, window.open) */
     char*        nav_post;            /* ...as a POST with this form body (NULL: GET) */

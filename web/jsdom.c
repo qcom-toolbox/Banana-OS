@@ -1347,6 +1347,20 @@ static value_t w_addEventListener(interp_t* I, value_t self, int argc, value_t* 
     return v_undef();
 }
 
+static value_t w_removeEventListener(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    page_t* p = P(I);
+    value_t fn = ARG(1);
+    remove_handler(p->doc, arg_str(I, argc, argv, 0), &fn);
+    return v_undef();
+}
+
+/* window.dispatchEvent(e): nothing listens on the window itself here */
+static value_t w_dispatchEvent(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)I; (void)self; (void)argc; (void)argv;
+    return v_bool(1);
+}
+
 static const host_class_t win_class = { "Window", win_get, win_set };
 
 /* ══ location ═════════════════════════════════════════════════════════ */
@@ -1835,6 +1849,7 @@ static const method_t WIN_FUNCS[] = {
     { "requestAnimationFrame", w_requestAnimationFrame }, { "cancelAnimationFrame", w_clearTimer },
     { "scrollTo", w_scrollTo }, { "scroll", w_scrollTo }, { "getComputedStyle", w_getComputedStyle },
     { "addEventListener", w_addEventListener }, { "open", w_open },
+    { "removeEventListener", w_removeEventListener }, { "dispatchEvent", w_dispatchEvent },
 };
 
 static const method_t STORAGE_METHODS[] = {

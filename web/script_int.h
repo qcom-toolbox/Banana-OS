@@ -77,12 +77,16 @@ typedef struct node {
     uint8_t  k;
     uint8_t  op;
     uint16_t col;            /* column, capped (errors in minified code) */
-    int      line;
+    int      line : 24;
+    unsigned flags : 8;      /* N_FUNC: NF_* (worked out on first call) */
     struct node *a, *b, *c, *d;
     struct node* next;       /* lists */
     str_t*   s;
     num_t    n;
 } node_t;
+
+#define NF_CHECKED   1          /* N_FUNC flags */
+#define NF_ARGUMENTS 2          /* its body may use `arguments` (or eval) */
 
 /* ── run time ────────────────────────────────────────────────────── */
 
@@ -98,6 +102,7 @@ typedef struct env {
     var_t*      vars;
     struct env* parent;
     int         is_func;     /* function (or global) scope: `var` lives here */
+    int         captured;    /* a closure holds it: it must outlive its call */
 } env_t;
 
 struct func {
@@ -126,6 +131,11 @@ struct interp {
     env_t*    global;
     env_t*    fn_env;        /* scope of the running function */
     env_t*    cur;           /* current lexical scope */
+    env_t*    free_envs;     /* scopes of finished calls nothing captured, for reuse */
+    var_t*    free_vars;
+    str_t*    s_arguments;   /* "arguments", made once */
+    void*     free_items[24]; /* outgrown array / property buffers, by log2(capacity) */
+    void*     free_props[24];
     value_t   this_v;
     int       ctl;
     value_t   ret;           /* return value / thrown value */
@@ -134,6 +144,7 @@ struct interp {
     int       throw_line, throw_col;   /* where the exception was thrown */
     obj_t*    oom_err;       /* thrown when the arena is exhausted */
     uint32_t  steps, step_limit;
+    void    (*yield_fn)(void);  /* called every 64K steps: other (cooperative) tasks keep running */
     uint32_t  depth, depth_limit;
     char      err[200];
     const char* src_name;

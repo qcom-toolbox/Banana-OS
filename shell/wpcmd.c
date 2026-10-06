@@ -111,7 +111,7 @@ static void dl_progress(void* ctx, uint32_t got, int32_t total) {
 
 static void cmd_url(const char* url, image_mode_t mode) {
     if (!net_if()->dev) { fail("no network card"); return; }
-    url_t u;
+    static url_t u;                     /* big (long URLs); only used before anything yields */
     if (!url_parse(url, &u)) { fail("malformed URL"); return; }
 
     /* ~/Pictures/<last path segment>, keeping an image extension */
