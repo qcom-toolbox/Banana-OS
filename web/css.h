@@ -50,6 +50,7 @@ typedef struct style {
     int      flex_basis;            /* px or LEN_AUTO */
     uint8_t  floated;
     int      left, top;             /* px or LEN_AUTO (position offsets) */
+    int      right, bottom;
     struct css_var* vars;           /* custom properties (--x), inherited */
 } style_t;
 

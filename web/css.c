@@ -1140,6 +1140,9 @@ static int flex_decl(style_t* st, const char* prop, const char* v) {
     if (strcmp(prop, "align-items") == 0) { int a = flex_align(v); st->align_items = a ? a : FA_STRETCH; return 1; }
     if (strcmp(prop, "align-self") == 0) { st->align_self = flex_align(v); return 1; }
     if (strcmp(prop, "place-items") == 0) { int a = flex_align(v); st->align_items = a ? a : FA_STRETCH; return 1; }
+    if (strcmp(prop, "top") == 0) { st->top = has_word(v, "auto") ? LEN_AUTO : parse_len(v, st->font_px, -1, NULL); return 1; }
+    if (strcmp(prop, "right") == 0) { st->right = has_word(v, "auto") ? LEN_AUTO : parse_len(v, st->font_px, -1, NULL); return 1; }
+    if (strcmp(prop, "bottom") == 0) { st->bottom = has_word(v, "auto") ? LEN_AUTO : parse_len(v, st->font_px, -1, NULL); return 1; }
     return 0;
 }
 
@@ -1331,6 +1334,8 @@ static void apply_decl(style_t* st, const style_t* parent, const char* prop, con
             int sides[4] = { 0, 0, 0, 0 };
             four(v, st->font_px, sides, NULL);
             st->top = sides[0];
+            st->right = sides[1];
+            st->bottom = sides[2];
             st->left = sides[3];
         }
         return;
@@ -1439,6 +1444,7 @@ static void inherit(style_t* st, const style_t* p) {
     st->display = DISP_INLINE;
     st->width = st->height = st->max_width = LEN_AUTO;
     st->left = st->top = LEN_AUTO;
+    st->right = st->bottom = LEN_AUTO;
     st->flex_basis = LEN_AUTO;
     st->flex_shrink = 100;
     st->visible = 1;

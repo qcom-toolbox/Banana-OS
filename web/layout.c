@@ -11,7 +11,26 @@ typedef struct {
     int       max_w;            /* widest line seen (measuring) */
     int       max_word;         /* widest unbreakable piece (measuring) */
     int       force_w, force_h; /* a flex container's size for the next layout_box (border box, px) */
+    /* position: absolute boxes wait until their containing block (the
+     * nearest positioned ancestor) has its size; fixed ones until the end */
+    int       cb_x, cb_y, cb_w, cb_h;
+    struct { dom_node_t* n; int sx, sy; } absq[64], fixq[32];
+    int       nabs, nfix;
 } ctx_t;
+
+static int is_out_of_flow(const dom_node_t* e) {
+    return e->type == DOM_ELEM && e->style && (e->style->position == POS_ABSOLUTE || e->style->position == POS_FIXED);
+}
+
+/* an absolute/fixed box met at its static position (sx, sy): placed later */
+static void defer_abs(ctx_t* C, dom_node_t* e, int sx, int sy) {
+    if (C->dry) return;                         /* out of the flow: no size to measure */
+    if (e->style->position == POS_FIXED) {
+        if (C->nfix < 32) { C->fixq[C->nfix].n = e; C->fixq[C->nfix].sx = sx; C->fixq[C->nfix].sy = sy; C->nfix++; }
+    } else if (C->nabs < 64) {
+        C->absq[C->nabs].n = e; C->absq[C->nabs].sx = sx; C->absq[C->nabs].sy = sy; C->nabs++;
+    }
+}
 
 static dl_item_t* push(ctx_t* C, int kind) {
     static dl_item_t dummy;
@@ -556,6 +575,7 @@ static void inline_node(inl_t* I, dom_node_t* n, uint32_t bg, int has_bg) {
         return;
     }
     if (out_of_sight(st)) return;
+    if (st->position == POS_ABSOLUTE || st->position == POS_FIXED) { defer_abs(C, n, I->x0 + I->cx, I->y); return; }
     n->box_x = I->x0 + I->cx;
     n->box_y = I->y;
     int replaced = strcmp(tag, "img") == 0 || strcmp(tag, "input") == 0 || strcmp(tag, "button") == 0 ||
@@ -648,6 +668,11 @@ static int layout_children(ctx_t* C, dom_node_t* parent, int x, int y, int w) {
     int prev_mb = 0;
     dom_node_t* c = parent->first;
     while (c) {
+        if (is_out_of_flow(c) && c->style->display != DISP_NONE && (is_block_level(c) || has_block_child(c))) {
+            if (!out_of_sight(c->style)) defer_abs(C, c, x, cy);
+            c = c->next;
+            continue;
+        }
         if (is_block_level(c) || (c->type == DOM_ELEM && c->style && c->style->display == DISP_INLINE && has_block_child(c))) {
             if (c->style->display == DISP_NONE) { c = c->next; continue; }
             int mt = c->style->margin[0];
@@ -912,8 +937,43 @@ static int layout_flex(ctx_t* C, dom_node_t* e, int x, int y, int w, int hgiven)
         total = cy - y - (n ? gap_main + spacing : 0);
         if (hgiven > total) total = hgiven;
     }
-    for (int i = 0; i < nout; i++) layout_box(C, outside[i], x, y, w);
+    for (int i = 0; i < nout; i++) defer_abs(C, outside[i], x, y);
     return total < 0 ? 0 : total;
+}
+
+/* ══ positioning ═══════════════════════════════════════════════════════ */
+
+static void layout_abs(ctx_t* C, dom_node_t* e, int sx, int sy, int cbx, int cby, int cbw, int cbh) {
+    const style_t* s = e->style;
+    int ml = s->margin[3], mr = s->margin[1], mt = s->margin[0], mb = s->margin[2];
+    int L = s->left, R = s->right, T = s->top, B = s->bottom;
+    int bw;
+    if (s->width_pct) bw = cbw * s->width_pct / 100;
+    else if (s->width != LEN_AUTO && s->width > 0) bw = s->width + box_extra_w(s);
+    else if (L != LEN_AUTO && R != LEN_AUTO) bw = cbw - L - R - ml - mr;
+    else {                                      /* shrink to fit */
+        int maxw, minw;
+        measure(C, e, &maxw, &minw);
+        bw = maxw;
+        if (bw > cbw - ml - mr) bw = cbw - ml - mr;
+        if (bw < minw) bw = minw;
+    }
+    if (bw < 1) bw = 1;
+    int x = L != LEN_AUTO ? cbx + L : R != LEN_AUTO ? cbx + cbw - R - bw - ml - mr : sx;
+    int y;
+    if (T != LEN_AUTO) y = cby + T;
+    else if (B != LEN_AUTO) y = cby + cbh - B - flex_measure_h(C, e, bw);
+    else y = sy;
+    if (T != LEN_AUTO && B != LEN_AUTO && s->height == LEN_AUTO) C->force_h = cbh - T - B - mt - mb;
+    C->force_w = bw;
+    layout_box(C, e, x, y, bw + ml + mr);
+}
+
+/* the absolute boxes queued since `from`, inside the current containing block */
+static void place_abs(ctx_t* C, int from) {
+    for (int i = from; i < C->nabs; i++)
+        layout_abs(C, C->absq[i].n, C->absq[i].sx, C->absq[i].sy, C->cb_x, C->cb_y, C->cb_w, C->cb_h);
+    C->nabs = from;
 }
 
 static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
@@ -951,12 +1011,28 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     int body_like = strcmp(e->tag, "body") == 0 || strcmp(e->tag, "html") == 0;
     if (st->has_bg && !body_like && st->visible) rect(C, bx, by, bw, 1, st->bg, e);
     int content_y = by + bt + pt;
+    int positioned = !C->dry && st->position != POS_STATIC;
+    int abs_from = C->nabs;
+    uint32_t first_item = C->dry ? 0 : C->L->n;
     int hgiven = st->height != LEN_AUTO && st->height > 0 ? st->height : force_h > 0 ? force_h - (bt + pt + pb + bb) : 0;
     int ch = st->flex ? layout_flex(C, e, bx + bl + pl, content_y, cw, hgiven) : layout_children(C, e, bx + bl + pl, content_y, cw);
     if (st->height != LEN_AUTO && st->height > 0) ch = st->height;
     else if (force_h > 0 && force_h - (bt + pt + pb + bb) > ch) ch = force_h - (bt + pt + pb + bb);   /* stretched */
     int bh = bt + pt + ch + pb + bb;
     if (st->has_bg && !body_like && st->visible && !C->dry) C->L->items[bg_index].h = bh;
+    if (positioned) {
+        /* its absolute descendants are placed against its padding box */
+        int scx = C->cb_x, scy = C->cb_y, scw = C->cb_w, sch = C->cb_h;
+        C->cb_x = bx + bl; C->cb_y = by + bt; C->cb_w = bw - bl - br; C->cb_h = bh - bt - bb;
+        place_abs(C, abs_from);
+        C->cb_x = scx; C->cb_y = scy; C->cb_w = scw; C->cb_h = sch;
+        if (st->position == POS_RELATIVE || st->position == POS_STICKY) {
+            int dx = st->left != LEN_AUTO ? st->left : st->right != LEN_AUTO ? -st->right : 0;
+            int dy = st->top != LEN_AUTO ? st->top : st->bottom != LEN_AUTO ? -st->bottom : 0;
+            if (dx || dy)
+                for (uint32_t i = first_item; i < C->L->n; i++) { C->L->items[i].x += dx; C->L->items[i].y += dy; }
+        }
+    }
     if (st->visible) borders(C, st, bx, by, bw, bh, e);
     if (st->display == DISP_LIST_ITEM && st->list_style != LIST_NONE && st->visible) {
         int scale = st->scale ? st->scale : 1;
@@ -1170,6 +1246,23 @@ static void inline_boxes(layout_t* L) {
     }
 }
 
+/* position: relative on inline elements (spans, links): their pieces move
+ * once the lines are done (block boxes move in layout_box) */
+static void inline_relative(layout_t* L) {
+    for (uint32_t i = 0; i < L->n; i++) {
+        dl_item_t* it = &L->items[i];
+        int dx = 0, dy = 0;
+        for (dom_node_t* e = it->node; e && e->type == DOM_ELEM && e->style && e->style->display == DISP_INLINE; e = e->parent) {
+            const style_t* st = e->style;
+            if (st->position != POS_RELATIVE && st->position != POS_STICKY) continue;
+            dx += st->left != LEN_AUTO ? st->left : st->right != LEN_AUTO ? -st->right : 0;
+            dy += st->top != LEN_AUTO ? st->top : st->bottom != LEN_AUTO ? -st->bottom : 0;
+        }
+        it->x += dx;
+        it->y += dy;
+    }
+}
+
 layout_t* layout_build(arena_t* A, dom_node_t* doc, int width, dom_node_t* focus) {
     g_layout_gen++;
     layout_t* L = (layout_t*)arena_alloc(A, sizeof(layout_t));
@@ -1186,7 +1279,12 @@ layout_t* layout_build(arena_t* A, dom_node_t* doc, int width, dom_node_t* focus
     C.L = L;
     int h = 0;
     if (html && html->style) h = layout_box(&C, html, 0, 0, width);
+    C.cb_x = 0; C.cb_y = 0; C.cb_w = width; C.cb_h = h > 480 ? h : 480;
+    place_abs(&C, 0);
+    for (int i = 0; i < C.nfix; i++)
+        layout_abs(&C, C.fixq[i].n, C.fixq[i].sx, C.fixq[i].sy, 0, 0, width, h > 480 ? h : 480);
     L->height = h;
+    inline_relative(L);
     inline_boxes(L);
     return L;
 }
