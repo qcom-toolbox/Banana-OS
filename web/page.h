@@ -14,6 +14,15 @@
  * code runs in the kernel (network, image decoder) and in host tests.
  */
 
+/* <audio>: what a media stream is doing (page_env_t media_status) */
+typedef struct {
+    int      state;                 /* 0 none, 1 loading, 2 ready, 3 error */
+    int      playing, ended;
+    uint32_t pos_ms, dur_ms, seq;   /* seq: bumps when a seek lands or it loops */
+    char     error[96];
+} page_media_status_t;
+enum { PAGE_MEDIA_PLAY = 1, PAGE_MEDIA_PAUSE, PAGE_MEDIA_SEEK, PAGE_MEDIA_SET, PAGE_MEDIA_CLOSE };
+
 typedef struct page_env {
     /* GET url into a kmalloc'd buffer (caller kfree()s); 0 = ok */
     int  (*fetch)(void* ctx, const char* url, char** data, uint32_t* len,
@@ -31,6 +40,10 @@ typedef struct page_env {
     void (*cookie_set)(void* ctx, const char* url, const char* line);
     /* optional: banana.postMessage(text) - the page talking to the app showing it (web views) */
     void (*message)(void* ctx, const char* text);
+    /* optional: sound for <audio> / new Audio(): open (owner: the page) -> id; commands; status */
+    int  (*media_open)(void* ctx, void* owner, const char* url);
+    void (*media_cmd)(void* ctx, int id, int cmd, int a, int b, int c);   /* SET: volume %, muted, loop */
+    int  (*media_status)(void* ctx, int id, page_media_status_t* out);
     void* ctx;
 } page_env_t;
 
@@ -90,6 +103,8 @@ typedef struct page {
     obj_t*       win_obj;
     obj_t*       loc_obj;
     int          view_h;              /* visible height (window.innerHeight) */
+    int          media[16];           /* its <audio> streams (closed with the page) */
+    int          nmedia;
     /* CSS background images, fetched once per address */
     struct { const char* url; struct img_data* img; } bgcache[40];
     int          nbg;

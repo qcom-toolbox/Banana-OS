@@ -450,4 +450,115 @@ W.__banana_deliver = function(data){
   if (typeof W.onmessage === 'function') { try { W.onmessage(e); } catch (x) {} }
   W.dispatchEvent(e);
 };
+/* <audio> / <video> / new Audio(): sound through the system's media streams
+ * (__media_*: kernel/media.c). The element's state lives in el.__ms; a timer
+ * polls the stream and fires the usual events. */
+(function(){
+  if (typeof __media_open !== 'function') { W.Audio = W.Audio || function(src){ var a = document.createElement('audio'); if (src !== undefined) a.setAttribute('src', src); return a; }; return; }
+  var PLAY = 1, PAUSE = 2, SEEK = 3, SET = 4, CLOSE = 5;
+  function isMedia(el){ var t = el && el.tagName; return t === 'AUDIO' || t === 'VIDEO'; }
+  function st(el){
+    return el.__ms || (el.__ms = { id: -1, url: '', vol: 1, muted: false, loop: false, paused: true, ended: false,
+                                   pos: 0, dur: NaN, ready: 0, seq: 0, rate: 1, err: null, seeking: false, playing: false });
+  }
+  function srcOf(el){
+    var s = el.getAttribute('src');
+    if (!s) { var so = el.querySelector('source[src]'); if (so) s = so.getAttribute('src'); }
+    if (!s) return '';
+    try { return new URL(s, location.href).href; } catch (x) { return s; }
+  }
+  function fire(el, type){ try { el.dispatchEvent(new Event(type)); } catch (x) {} }
+  var active = [], timer = 0;
+  function track(el){ if (active.indexOf(el) < 0) active.push(el); if (!timer) timer = setInterval(poll, 250); }
+  function pushSet(el){ var m = st(el); if (m.id >= 0) __media_cmd(m.id, SET, Math.round(m.vol * 100), m.muted ? 1 : 0, (m.loop || el.hasAttribute('loop')) ? 1 : 0); }
+  function ensure(el){
+    var m = st(el), u = srcOf(el);
+    if (u && u !== m.url) {
+      if (m.id >= 0) __media_cmd(m.id, CLOSE);
+      m.url = u; m.id = __media_open(u); m.ready = 0; m.dur = NaN; m.pos = 0; m.ended = false; m.err = null;
+      pushSet(el);
+      fire(el, 'loadstart');
+      track(el);
+    }
+    return m;
+  }
+  function poll(){
+    for (var i = 0; i < active.length; i++) {
+      var el = active[i], m = st(el);
+      if (m.id < 0) continue;
+      var s = __media_status(m.id);
+      if (!s) continue;
+      if (s.state === 2 && m.ready < 4) {
+        m.ready = 4; m.dur = s.dur;
+        fire(el, 'durationchange'); fire(el, 'loadedmetadata'); fire(el, 'loadeddata'); fire(el, 'canplay'); fire(el, 'canplaythrough');
+        if (m.paused && el.hasAttribute('autoplay')) el.play();
+      }
+      if (s.state === 3 && !m.err) { m.err = { code: 4, message: s.error, MEDIA_ERR_SRC_NOT_SUPPORTED: 4 }; m.paused = true; fire(el, 'error'); }
+      if (s.playing && !m.playing) { m.playing = true; fire(el, 'playing'); }
+      if (!s.playing) m.playing = false;
+      if (s.pos !== m.pos && !m.seeking) { m.pos = s.pos; fire(el, 'timeupdate'); }
+      if (s.seq !== m.seq) { m.seq = s.seq; if (m.seeking) { m.seeking = false; m.pos = s.pos; fire(el, 'seeked'); fire(el, 'timeupdate'); } }
+      if (s.ended && !m.ended && !m.paused) { m.ended = true; m.paused = true; m.pos = m.dur; fire(el, 'timeupdate'); fire(el, 'pause'); fire(el, 'ended'); }
+    }
+  }
+  EPR.play = function(){
+    if (!isMedia(this)) return Promise.resolve();
+    var m = ensure(this);
+    if (m.id < 0) return Promise.reject(new DOMException('The element has no supported sources.', 'NotSupportedError'));
+    if (m.paused) { m.paused = false; m.ended = false; __media_cmd(m.id, PLAY); fire(this, 'play'); }
+    return Promise.resolve();
+  };
+  EPR.pause = function(){
+    if (!isMedia(this)) return;
+    var m = st(this);
+    if (m.paused) return;
+    m.paused = true;
+    if (m.id >= 0) __media_cmd(m.id, PAUSE);
+    fire(this, 'pause');
+  };
+  EPR.load = function(){ if (!isMedia(this)) return; var m = st(this); m.url = ''; m.paused = true; ensure(this); };
+  EPR.canPlayType = function(t){
+    t = String(t || '').toLowerCase();
+    return /audio\/(mpeg|mp3|mpeg3|x-mpeg|wav|wave|x-wav|flac|x-flac)/.test(t) ? 'probably' : '';
+  };
+  EPR.fastSeek = function(t){ this.currentTime = t; };
+  function prop(name, get, set){
+    Object.defineProperty(EPR, name, { configurable: true,
+      get: function(){ return isMedia(this) ? get.call(this, st(this)) : this['__' + name]; },
+      set: function(v){ if (isMedia(this) && set) set.call(this, st(this), v); else this['__' + name] = v; } });
+  }
+  prop('currentTime', function(m){ return m.pos; }, function(m, v){
+    v = +v || 0; if (v < 0) v = 0;
+    var mm = ensure(this); m.pos = v; m.seeking = true; m.ended = false;
+    fire(this, 'seeking');
+    if (mm.id >= 0) __media_cmd(mm.id, SEEK, Math.round(v * 1000));
+  });
+  prop('duration', function(m){ return m.dur; });
+  prop('paused', function(m){ return m.paused; });
+  prop('ended', function(m){ return m.ended; });
+  prop('volume', function(m){ return m.vol; }, function(m, v){ m.vol = Math.max(0, Math.min(1, +v || 0)); pushSet(this); fire(this, 'volumechange'); });
+  prop('muted', function(m){ return m.muted; }, function(m, v){ m.muted = !!v; pushSet(this); fire(this, 'volumechange'); });
+  prop('loop', function(m){ return m.loop || this.hasAttribute('loop'); }, function(m, v){ m.loop = !!v; pushSet(this); });
+  prop('autoplay', function(m){ return this.hasAttribute('autoplay'); }, function(m, v){ if (v) this.setAttribute('autoplay', ''); else this.removeAttribute('autoplay'); });
+  prop('readyState', function(m){ return m.ready; });
+  prop('networkState', function(m){ return m.id < 0 ? 0 : m.ready ? 1 : 2; });
+  prop('error', function(m){ return m.err; });
+  prop('seeking', function(m){ return m.seeking; });
+  prop('playbackRate', function(m){ return m.rate; }, function(m, v){ m.rate = +v || 1; });
+  prop('defaultPlaybackRate', function(m){ return 1; }, function(m, v){});
+  prop('currentSrc', function(m){ return m.url; });
+  prop('preload', function(m){ return this.getAttribute('preload') || 'auto'; }, function(m, v){ this.setAttribute('preload', v); });
+  prop('buffered', function(m){ var d = m.ready ? m.dur : 0, n = m.ready ? 1 : 0;
+    return { length: n, start: function(){ return 0; }, end: function(){ return d; } }; });
+  prop('played', function(m){ return { length: 0, start: function(){ return 0; }, end: function(){ return 0; } }; });
+  prop('seekable', function(m){ var d = m.ready ? m.dur : 0, n = m.ready ? 1 : 0;
+    return { length: n, start: function(){ return 0; }, end: function(){ return d; } }; });
+  /* src: an attribute; a new one loads when it plays (or now, with autoplay / preload) */
+  W.Audio = function(src){ var a = document.createElement('audio'); if (src !== undefined) a.setAttribute('src', src); return a; };
+  W.Audio.prototype = EPR;
+  if (W.HTMLMediaElement) { W.HTMLMediaElement.HAVE_NOTHING = 0; W.HTMLMediaElement.HAVE_METADATA = 1; W.HTMLMediaElement.HAVE_ENOUGH_DATA = 4; }
+  if (typeof W.HTMLAudioElement === 'undefined') W.HTMLAudioElement = W.Audio;
+  if (typeof W.MediaMetadata === 'undefined') W.MediaMetadata = function(o){ o = o || {}; this.title = o.title || ''; this.artist = o.artist || ''; this.album = o.album || ''; this.artwork = o.artwork || []; };
+  if (W.navigator && !W.navigator.mediaSession) W.navigator.mediaSession = { metadata: null, playbackState: 'none', setActionHandler: function(){}, setPositionState: function(){} };
+})();
 })();

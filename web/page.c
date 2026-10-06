@@ -445,6 +445,8 @@ page_t* page_new(page_env_t* env, uint32_t mem_limit) {
 }
 
 void page_free(page_t* p) {
+    if (p && p->env && p->env->media_cmd)            /* its sounds stop with it */
+        for (int i = 0; i < p->nmedia; i++) p->env->media_cmd(p->env->ctx, p->media[i], PAGE_MEDIA_CLOSE, 0, 0, 0);
     if (!p) return;
     arena_free_all(&p->LA);
     arena_free_all(&p->A);

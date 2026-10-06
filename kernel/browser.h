@@ -34,6 +34,7 @@ struct page_env;
 struct page_env* browser_env(void);
 uint32_t browser_page_mem(void);
 void     browser_cookies_save(void);
+int      browser_fetch_media(const char* url, char** data, uint32_t* len, char* err, int ecap);
 int      browser_fetch_document(const char* url, const char* post, uint32_t post_len,
                                 char** data, uint32_t* len, char* final_url, int fcap);
 /* right-click: the menu (open / save a link, back, reload, copy, paste, save page...) */

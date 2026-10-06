@@ -16,6 +16,7 @@
 #include "../net/http.h"
 #include "../web/page.h"
 #include "../web/render.h"
+#include "media.h"
 
 /*
  * The web browser window. Everything that touches a page (loading,
@@ -1368,6 +1369,10 @@ static void run_commands(void) {
     }
 }
 
+static int  env_media_open(void* ctx, void* owner, const char* url);
+static void env_media_cmd(void* ctx, int id, int cmd, int a, int b, int c);
+static int  env_media_status(void* ctx, int id, page_media_status_t* out);
+
 static void env_setup(void) {
     static int done;
     if (done) return;
@@ -1382,6 +1387,9 @@ static void env_setup(void) {
     g_env.log = env_log;
     g_env.cookie_get = env_cookie_get;
     g_env.cookie_set = env_cookie_set;
+    g_env.media_open = env_media_open;
+    g_env.media_cmd = env_media_cmd;
+    g_env.media_status = env_media_status;
     g_env.ctx = NULL;
     /* a page may use a share of the heap (big pages, images, script-heavy
      * sites like GitHub need ~200 MB), within reason */
@@ -1400,6 +1408,46 @@ void        browser_cookies_save(void) { cookies_save(); }
 /* url (or a search) as a document page_load can take: the page, an
  * error page, or a text / image / listing wrapped as HTML. *data is
  * kmalloc'd; final_url is where it ended up after redirects */
+/* a sound file (up to 32 MiB), with the browser's cookies; 0, or -1 with err */
+int browser_fetch_media(const char* url_in, char** data, uint32_t* len, char* err, int ecap) {
+    env_setup();
+    char url[URL_MAX], ctype[96], fin[URL_MAX];
+    normalize_url(url_in, url, sizeof(url));
+    dl_t dl;
+    memset(&dl, 0, sizeof(dl));
+    dl.force = 1;                                    /* (the big limit) */
+    g_quiet++;
+    int rc = fetch_url(url, NULL, NULL, 0, NULL, data, len, ctype, sizeof(ctype), fin, sizeof(fin), err, ecap, &dl);
+    g_quiet--;
+    return rc;
+}
+
+/* <audio> in pages: the media streams (media.c) */
+static int env_media_open(void* ctx, void* owner, const char* url) { (void)ctx; return media_open(owner, url); }
+static void env_media_cmd(void* ctx, int id, int cmd, int a, int b, int c) {
+    (void)ctx;
+    switch (cmd) {
+    case PAGE_MEDIA_PLAY:  media_play(id); break;
+    case PAGE_MEDIA_PAUSE: media_pause(id); break;
+    case PAGE_MEDIA_SEEK:  media_seek(id, (uint32_t)(a < 0 ? 0 : a)); break;
+    case PAGE_MEDIA_SET:   media_set(id, a, b, c); break;
+    case PAGE_MEDIA_CLOSE: media_close(id); break;
+    }
+}
+static int env_media_status(void* ctx, int id, page_media_status_t* out) {
+    (void)ctx;
+    media_status_t st;
+    if (media_status(id, &st) != 0) return -1;
+    out->state = st.state;
+    out->playing = st.playing;
+    out->ended = st.ended;
+    out->pos_ms = st.pos_ms;
+    out->dur_ms = st.dur_ms;
+    out->seq = st.seq;
+    kstrlcpy(out->error, st.error, sizeof(out->error));
+    return 0;
+}
+
 int browser_fetch_document(const char* url_in, const char* post, uint32_t post_len,
                            char** data, uint32_t* len, char* final_url, int fcap) {
     env_setup();

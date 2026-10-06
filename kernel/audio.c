@@ -446,6 +446,13 @@ int audio_play(const void* pcm, uint32_t bytes, int rate, int channels, int bits
     return 0;
 }
 
+/* how long until what is queued (and in the card's ring) has played */
+uint32_t audio_queued_ms(void) {
+    if (!g_card) return 0;
+    uint64_t pending = g_qcount + (g_data_end > g_hw_abs ? g_data_end - g_hw_abs : 0);
+    return (uint32_t)(pending / FRAME * 1000 / RATE);
+}
+
 int audio_busy(void) {
     return g_card && (g_qcount > 0 || g_hw_abs < g_data_end);
 }

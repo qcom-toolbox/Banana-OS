@@ -8,7 +8,7 @@
 
 CC      = gcc
 WARN    = -Wall -Wextra
-INCS    = -I kernel -I shell -I net -I crypto -I usb -I web
+INCS    = -I kernel -I shell -I net -I crypto -I usb -I web -I media
 COMMON  = -ffreestanding -fno-stack-protector -fno-pic -nostdlib -nostdinc \
           -fno-asynchronous-unwind-tables $(WARN) -O2 \
           -mno-sse -mno-sse2 -mno-mmx -mno-3dnow $(INCS)
@@ -28,7 +28,7 @@ LIBGCC   := $(shell $(CC) -m32 -print-libgcc-file-name)
 LIBGCC64 := $(shell $(CC) -m64 -print-libgcc-file-name)
 
 C_SRCS   = $(wildcard kernel/*.c) $(wildcard shell/*.c) $(wildcard net/*.c) \
-           $(wildcard crypto/*.c) $(wildcard usb/*.c) $(wildcard web/*.c) \
+           $(wildcard crypto/*.c) $(wildcard usb/*.c) $(wildcard web/*.c) $(wildcard media/*.c) \
            third_party/stb/stb_image_impl.c
 ASM_SRCS   = boot/boot.asm kernel/isr.asm kernel/task_switch.asm kernel/appcall.asm kernel/exbin.asm kernel/fontbin.asm
 ASM_SRCS64 = boot/boot64.asm kernel/isr64.asm kernel/task_switch64.asm kernel/appcall64.asm kernel/exbin.asm kernel/fontbin.asm

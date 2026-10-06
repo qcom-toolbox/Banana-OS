@@ -2213,6 +2213,46 @@ static value_t w_import(interp_t* I, value_t self, int argc, value_t* argv) {
     return pr;
 }
 
+/* __media_open(url) -> id | -1; __media_cmd(id, cmd, a, b, c); __media_status(id) -> {...} */
+static value_t w_media_open(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    page_t* p = P(I);
+    if (!p->env || !p->env->media_open || p->nmedia >= 16) return v_num(-1);
+    char url[1024];
+    url_resolve(p->url, arg_str(I, argc, argv, 0), url, sizeof(url));
+    int id = p->env->media_open(p->env->ctx, p, url);
+    if (id >= 0) p->media[p->nmedia++] = id;
+    return v_num(id);
+}
+
+static value_t w_media_cmd(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    page_t* p = P(I);
+    if (!p->env || !p->env->media_cmd || argc < 2) return v_undef();
+    int id = (int)v_tonum(I, argv[0]), cmd = (int)v_tonum(I, argv[1]);
+    int a = argc > 2 ? (int)v_tonum(I, argv[2]) : 0, b = argc > 3 ? (int)v_tonum(I, argv[3]) : 0, c = argc > 4 ? (int)v_tonum(I, argv[4]) : 0;
+    p->env->media_cmd(p->env->ctx, id, cmd, a, b, c);
+    if (cmd == PAGE_MEDIA_CLOSE)
+        for (int i = 0; i < p->nmedia; i++) if (p->media[i] == id) { p->media[i] = p->media[--p->nmedia]; break; }
+    return v_undef();
+}
+
+static value_t w_media_status(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    page_t* p = P(I);
+    page_media_status_t st;
+    if (!p->env || !p->env->media_status || !argc || p->env->media_status(p->env->ctx, (int)v_tonum(I, argv[0]), &st) != 0) return v_null();
+    obj_t* o = obj_new(I, OBJ_PLAIN);
+    obj_set(I, o, "state", v_num(st.state));
+    obj_set(I, o, "playing", v_bool(st.playing));
+    obj_set(I, o, "ended", v_bool(st.ended));
+    obj_set(I, o, "pos", v_num((num_t)st.pos_ms / 1000));
+    obj_set(I, o, "dur", st.dur_ms ? v_num((num_t)st.dur_ms / 1000) : v_num((num_t)0 / (num_t)0));
+    obj_set(I, o, "seq", v_num(st.seq));
+    obj_set(I, o, "error", v_str(I, st.error));
+    return v_obj(o);
+}
+
 /* banana.postMessage(text): to the app showing the page */
 static value_t w_post_app(interp_t* I, value_t self, int argc, value_t* argv) {
     (void)self;
@@ -2356,6 +2396,11 @@ void jsdom_install(page_t* p) {
     obj_set(I, ce, "whenDefined", v_native(I, "whenDefined", ce_whenDefined));
     obj_set(I, ce, "upgrade", v_native(I, "upgrade", ce_upgrade));
     script_def_global(I, "customElements", v_obj(ce));
+    if (p->env && p->env->media_open) {              /* sound: the prelude builds <audio> on these */
+        script_def_global(I, "__media_open", v_native(I, "__media_open", w_media_open));
+        script_def_global(I, "__media_cmd", v_native(I, "__media_cmd", w_media_cmd));
+        script_def_global(I, "__media_status", v_native(I, "__media_status", w_media_status));
+    }
     if (p->env && p->env->message) {                 /* in an app's web view: the way to talk to it */
         obj_t* bn = obj_new(I, OBJ_PLAIN);
         obj_set(I, bn, "postMessage", v_native(I, "postMessage", w_post_app));

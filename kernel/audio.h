@@ -23,6 +23,7 @@ const char* audio_device_name(void);           /* "Intel HD Audio (QEMU)", "none
  * without a card. */
 int  audio_play(const void* pcm, uint32_t bytes, int rate, int channels, int bits);
 int  audio_busy(void);                        /* 1 while queued sound plays */
+uint32_t audio_queued_ms(void);               /* queued sound not yet played */
 void audio_stop(void);                        /* drop what is queued */
 void audio_wait(void);                        /* until the queue has played */
 
