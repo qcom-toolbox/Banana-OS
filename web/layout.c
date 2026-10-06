@@ -10,6 +10,7 @@ typedef struct {
     int       dry;              /* measuring only: emit nothing */
     int       max_w;            /* widest line seen (measuring) */
     int       max_word;         /* widest unbreakable piece (measuring) */
+    int       force_w, force_h; /* a flex container's size for the next layout_box (border box, px) */
 } ctx_t;
 
 static dl_item_t* push(ctx_t* C, int kind) {
@@ -280,6 +281,7 @@ static void text_run(inl_t* I, const char* s, uint32_t n, const style_t* st, uin
 
 static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail);
 static int layout_children(ctx_t* C, dom_node_t* parent, int x, int y, int w);
+static int layout_flex(ctx_t* C, dom_node_t* e, int x, int y, int w, int hgiven);
 static void measure_cell(ctx_t* C, dom_node_t* cell, int* maxw, int* minw);
 
 static uint32_t g_layout_gen = 1;
@@ -467,7 +469,15 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
             if (o->type == DOM_ELEM && strcmp(o->tag, "option") == 0) {
                 if (!*label || dom_attr(o, "selected")) label = dom_text(C->L->A, o);
             }
-        if (e->value) label = e->value;
+        if (e->value) {
+            /* the text of the option holding that value (values are often codes, or "") */
+            label = e->value;
+            for (dom_node_t* o = e->first; o; o = o->next) {
+                if (o->type != DOM_ELEM || strcmp(o->tag, "option") != 0) continue;
+                const char* ov = dom_attr(o, "value");
+                if (ov ? strcmp(ov, e->value) == 0 : strcmp(dom_text(C->L->A, o), e->value) == 0) { label = dom_text(C->L->A, o); break; }
+            }
+        }
     } else {
         label = e->form_init ? (e->value ? e->value : "") : (dom_attr(e, "value") ? dom_attr(e, "value") : "");
     }
@@ -658,10 +668,269 @@ static int layout_children(ctx_t* C, dom_node_t* parent, int x, int y, int w) {
     return cy - y;
 }
 
+/* ══ flexbox ═══════════════════════════════════════════════════════════
+ * display: flex - the items are measured (max-content, or flex-basis /
+ * width), put on lines (flex-wrap), grown or shrunk to fill each line
+ * (flex-grow / flex-shrink), spaced (justify-content, gap) and aligned
+ * across (align-items / align-self, stretch by default). Rows and columns,
+ * both also reversed. */
+
+#define FLEX_MAX 96
+
+static int is_blank_text(const dom_node_t* t) {
+    for (uint32_t i = 0; i < t->text_len; i++) {
+        char c = t->text[i];
+        if (c != ' ' && c != '\n' && c != '\t' && c != '\r') return 0;
+    }
+    return 1;
+}
+
+/* form controls, images and plain inline elements are flex items too, but
+ * they are laid out by the inline code (as one atomic run) */
+static int flex_is_inline(const dom_node_t* e) {
+    const char* t = e->tag;
+    if (strcmp(t, "img") == 0 || strcmp(t, "input") == 0 || strcmp(t, "button") == 0 ||
+        strcmp(t, "select") == 0 || strcmp(t, "textarea") == 0) return 1;
+    return e->style->display == DISP_INLINE && !has_block_child((dom_node_t*)e);
+}
+
+static int flex_inline_item(ctx_t* C, dom_node_t* it, int x, int y, int w) {
+    inl_t I;
+    memset(&I, 0, sizeof(I));
+    I.C = C;
+    I.x0 = x;
+    I.w = w;
+    I.y = y;
+    I.align = ALIGN_LEFT;
+    I.empty = 1;
+    I.first = C->dry ? 0 : C->L->n;
+    inline_node(&I, it, 0, 0);
+    finish_line(&I, 0);
+    return I.height;
+}
+
+/* its width (as one line, at most avail) and height, measuring only */
+static void flex_inline_size(ctx_t* C, dom_node_t* it, int avail, int* w, int* h) {
+    int saved = C->dry, saved_w = C->max_w;
+    C->dry = 1;
+    C->max_w = 0;
+    *h = flex_inline_item(C, it, 0, 0, avail);
+    *w = C->max_w > avail ? avail : C->max_w;
+    C->dry = saved;
+    C->max_w = saved_w;
+}
+
+/* an item's outer height laid out at border-box width bw (measuring only) */
+static int flex_measure_h(ctx_t* C, dom_node_t* it, int bw) {
+    const style_t* s = it->style;
+    int saved = C->dry;
+    C->dry = 1;
+    C->force_w = bw;
+    int h = layout_box(C, it, 0, 0, bw + s->margin[1] + s->margin[3]);
+    C->dry = saved;
+    return h;
+}
+
+static int box_extra_w(const style_t* s) { return s->padding[1] + s->padding[3] + s->border[1] + s->border[3]; }
+static int box_extra_h(const style_t* s) { return s->padding[0] + s->padding[2] + s->border[0] + s->border[2]; }
+
+/* main-axis start and spacing for justify-content */
+static void flex_justify(int mode, int free, int n, int* start, int* spacing) {
+    *start = 0;
+    *spacing = 0;
+    if (free <= 0 || n <= 0) return;
+    switch (mode) {
+    case JUSTIFY_CENTER:  *start = free / 2; break;
+    case JUSTIFY_END:     *start = free; break;
+    case JUSTIFY_BETWEEN: *spacing = n > 1 ? free / (n - 1) : 0; break;
+    case JUSTIFY_AROUND:  *spacing = free / n; *start = *spacing / 2; break;
+    case JUSTIFY_EVENLY:  *spacing = free / (n + 1); *start = *spacing; break;
+    default: break;
+    }
+}
+
+static int layout_flex(ctx_t* C, dom_node_t* e, int x, int y, int w, int hgiven) {
+    const style_t* st = e->style;
+    dom_node_t* items[FLEX_MAX];
+    dom_node_t* outside[16];
+    int n = 0, nout = 0;
+    for (dom_node_t* c = e->first; c; c = c->next) {
+        if (c->type == DOM_TEXT) {
+            if (!is_blank_text(c)) return layout_children(C, e, x, y, w);   /* loose text: normal flow */
+            continue;
+        }
+        if (c->type != DOM_ELEM || !c->style || c->style->display == DISP_NONE || out_of_sight(c->style)) continue;
+        if (c->style->position == POS_ABSOLUTE || c->style->position == POS_FIXED) {
+            if (nout < 16) outside[nout++] = c;      /* out of the flow: drawn at the top left */
+            continue;
+        }
+        if (n < FLEX_MAX) items[n++] = c;
+    }
+    int col = st->flex_dir == FLEX_COL || st->flex_dir == FLEX_COL_REV;
+    int rev = st->flex_dir == FLEX_ROW_REV || st->flex_dir == FLEX_COL_REV;
+    int gap_main = col ? st->gap_row : st->gap_col, gap_cross = col ? st->gap_col : st->gap_row;
+    int total = 0;
+
+    int mainsz[FLEX_MAX], crossz[FLEX_MAX], basez[FLEX_MAX], minz[FLEX_MAX];   /* per call: flex boxes nest */
+    uint8_t inl[FLEX_MAX];
+    for (int i = 0; i < n; i++) inl[i] = (uint8_t)flex_is_inline(items[i]);
+    if (!col) {
+        /* rows: base widths (border boxes) */
+        for (int i = 0; i < n; i++) {
+            const style_t* s = items[i]->style;
+            if (inl[i]) {
+                int iw, ih;
+                flex_inline_size(C, items[i], w, &iw, &ih);
+                basez[i] = minz[i] = iw;
+                continue;
+            }
+            int maxw, minw;
+            measure(C, items[i], &maxw, &minw);
+            int b;
+            if (s->flex_basis != LEN_AUTO && s->flex_basis >= 0) b = s->flex_basis + box_extra_w(s);
+            else if (s->width_pct) b = w * s->width_pct / 100;
+            else if (s->width != LEN_AUTO && s->width > 0) b = s->width + box_extra_w(s);
+            else b = maxw;
+            if (s->max_width != LEN_AUTO && s->max_width > 0 && b > s->max_width + box_extra_w(s)) b = s->max_width + box_extra_w(s);
+            basez[i] = b < 0 ? 0 : b;
+            minz[i] = (s->width != LEN_AUTO && s->width > 0) ? basez[i] : minw;
+            if (minz[i] > basez[i] && s->flex_basis != LEN_AUTO) minz[i] = basez[i];
+        }
+        int start = 0, cy = y;
+        while (start < n) {
+            int end = start, sum = 0;
+            while (end < n) {
+                const style_t* s = items[end]->style;
+                int add = basez[end] + s->margin[1] + s->margin[3] + (end > start ? gap_main : 0);
+                if (st->flex_wrap && end > start && sum + add > w) break;
+                sum += add;
+                end++;
+            }
+            int cnt = end - start;
+            int free = w - sum;
+            int grow = 0;
+            long shrink = 0;
+            for (int i = start; i < end; i++) { grow += items[i]->style->flex_grow; shrink += (long)items[i]->style->flex_shrink * basez[i]; }
+            for (int i = start; i < end; i++) {
+                const style_t* s = items[i]->style;
+                int m = basez[i];
+                if (free > 0 && grow > 0) m += (int)((long)free * s->flex_grow / grow);
+                else if (free < 0 && shrink > 0) {
+                    m -= (int)((long)(-free) * s->flex_shrink * basez[i] / shrink);
+                    if (m < minz[i]) m = minz[i];
+                }
+                mainsz[i] = m < 1 ? 1 : m;
+                if (inl[i]) { int iw; flex_inline_size(C, items[i], mainsz[i], &iw, &crossz[i]); }
+                else crossz[i] = flex_measure_h(C, items[i], mainsz[i]);
+            }
+            int line = 0;
+            for (int i = start; i < end; i++) if (crossz[i] > line) line = crossz[i];
+            if (!st->flex_wrap && hgiven > line) line = hgiven;
+            int used = 0;
+            for (int i = start; i < end; i++) used += mainsz[i] + items[i]->style->margin[1] + items[i]->style->margin[3];
+            used += gap_main * (cnt - 1);
+            int off, spacing;
+            flex_justify(st->justify, w - used, cnt, &off, &spacing);
+            /* row-reverse: the main axis starts at the right edge */
+            int pos = rev ? x + w - off : x + off;
+            for (int k = 0; k < cnt; k++) {
+                int i = start + k;
+                const style_t* s = items[i]->style;
+                int al = s->align_self ? s->align_self : st->align_items ? st->align_items : FA_STRETCH;
+                int iy = cy;
+                if (al == FA_CENTER) iy += (line - crossz[i]) / 2;
+                else if (al == FA_END) iy += line - crossz[i];
+                if (al == FA_STRETCH && s->height == LEN_AUTO && !inl[i]) C->force_h = line - s->margin[0] - s->margin[2];
+                int outer = mainsz[i] + s->margin[1] + s->margin[3];
+                if (rev) pos -= outer;
+                if (inl[i]) flex_inline_item(C, items[i], pos, iy, outer);
+                else {
+                    C->force_w = mainsz[i];
+                    layout_box(C, items[i], pos, iy, outer);
+                }
+                if (rev) pos -= gap_main + spacing;
+                else pos += outer + gap_main + spacing;
+            }
+            cy += line + gap_cross;
+            start = end;
+        }
+        total = cy - y - (n ? gap_cross : 0);
+    } else {
+        /* columns: widths across, natural heights down */
+        int sum = 0;
+        for (int i = 0; i < n; i++) {
+            const style_t* s = items[i]->style;
+            int al = s->align_self ? s->align_self : st->align_items ? st->align_items : FA_STRETCH;
+            int bw;
+            if (inl[i]) {
+                int ih;
+                flex_inline_size(C, items[i], w, &crossz[i], &ih);
+                mainsz[i] = ih;
+                sum += ih + (i ? gap_main : 0);
+                continue;
+            }
+            if (s->width_pct) bw = w * s->width_pct / 100;
+            else if (s->width != LEN_AUTO && s->width > 0) bw = s->width + box_extra_w(s);
+            else if (al == FA_STRETCH) bw = w - s->margin[1] - s->margin[3];
+            else { int maxw, minw; measure(C, items[i], &maxw, &minw); bw = maxw < w ? maxw : w; }
+            if (bw < 1) bw = 1;
+            crossz[i] = bw;
+            int h = flex_measure_h(C, items[i], bw);
+            if (s->flex_basis != LEN_AUTO && s->flex_basis >= 0) {
+                int bh = s->flex_basis + box_extra_h(s) + s->margin[0] + s->margin[2];
+                if (bh > h) h = bh;
+            }
+            mainsz[i] = h;
+            sum += h + (i ? gap_main : 0);
+        }
+        int free = hgiven > 0 ? hgiven - sum : 0;
+        int grow = 0;
+        for (int i = 0; i < n; i++) grow += items[i]->style->flex_grow;
+        if (free > 0 && grow > 0) {
+            for (int i = 0; i < n; i++) mainsz[i] += (int)((long)free * items[i]->style->flex_grow / grow);
+            free = 0;
+        }
+        int off, spacing;
+        flex_justify(st->justify, free, n, &off, &spacing);
+        int cy = y + off;
+        for (int k = 0; k < n; k++) {
+            int i = rev ? n - 1 - k : k;
+            const style_t* s = items[i]->style;
+            int al = s->align_self ? s->align_self : st->align_items ? st->align_items : FA_STRETCH;
+            int outer = crossz[i] + s->margin[1] + s->margin[3];
+            int ix = x;
+            if (al == FA_CENTER) ix += (w - outer) / 2;
+            else if (al == FA_END) ix += w - outer;
+            if (inl[i]) flex_inline_item(C, items[i], ix, cy, outer > w ? w : outer);
+            else {
+                C->force_w = crossz[i];
+                if (s->height == LEN_AUTO) C->force_h = mainsz[i] - s->margin[0] - s->margin[2];
+                layout_box(C, items[i], ix, cy, outer);
+            }
+            cy += mainsz[i] + gap_main + spacing;
+        }
+        total = cy - y - (n ? gap_main + spacing : 0);
+        if (hgiven > total) total = hgiven;
+    }
+    for (int i = 0; i < nout; i++) layout_box(C, outside[i], x, y, w);
+    return total < 0 ? 0 : total;
+}
+
 static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     WEB_TICK();
+    int force_w = C->force_w, force_h = C->force_h;   /* set by a flex container for this box only */
+    C->force_w = C->force_h = 0;
     const style_t* st = e->style;
     if (!st || st->display == DISP_NONE || out_of_sight(st)) return 0;
+    /* a form control or image styled display:block is still drawn as one
+     * (its options/children are not content) - on a line of its own */
+    {
+        const char* t = e->tag;
+        if (strcmp(t, "select") == 0 || strcmp(t, "input") == 0 || strcmp(t, "button") == 0 ||
+            strcmp(t, "textarea") == 0 || strcmp(t, "img") == 0)
+            return flex_inline_item(C, e, x + st->margin[3], y + st->margin[0], avail - st->margin[1] - st->margin[3]) +
+                   st->margin[0] + st->margin[2];
+    }
     if (st->display == DISP_TABLE) return layout_table(C, e, x, y, avail);
     int ml = st->margin[3], mr = st->margin[1], mt = st->margin[0], mb = st->margin[2];
     int bl = st->border[3], br = st->border[1], bt = st->border[0], bb = st->border[2];
@@ -672,6 +941,7 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     else if (st->width != LEN_AUTO && st->width > 0) { cw = st->width; explicit_w = 1; }
     else cw = avail - ml - mr - bl - br - pl - pr;
     if (st->max_width != LEN_AUTO && st->max_width > 0 && cw > st->max_width) { cw = st->max_width; explicit_w = 1; }
+    if (force_w > 0) { cw = force_w - (bl + br + pl + pr); explicit_w = 1; }
     if (cw < 8) cw = 8;
     int bw = cw + bl + br + pl + pr;
     if (explicit_w && st->margin_auto_lr && bw < avail) ml = (avail - bw) / 2;
@@ -681,8 +951,10 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     int body_like = strcmp(e->tag, "body") == 0 || strcmp(e->tag, "html") == 0;
     if (st->has_bg && !body_like && st->visible) rect(C, bx, by, bw, 1, st->bg, e);
     int content_y = by + bt + pt;
-    int ch = layout_children(C, e, bx + bl + pl, content_y, cw);
+    int hgiven = st->height != LEN_AUTO && st->height > 0 ? st->height : force_h > 0 ? force_h - (bt + pt + pb + bb) : 0;
+    int ch = st->flex ? layout_flex(C, e, bx + bl + pl, content_y, cw, hgiven) : layout_children(C, e, bx + bl + pl, content_y, cw);
     if (st->height != LEN_AUTO && st->height > 0) ch = st->height;
+    else if (force_h > 0 && force_h - (bt + pt + pb + bb) > ch) ch = force_h - (bt + pt + pb + bb);   /* stretched */
     int bh = bt + pt + ch + pb + bb;
     if (st->has_bg && !body_like && st->visible && !C->dry) C->L->items[bg_index].h = bh;
     if (st->visible) borders(C, st, bx, by, bw, bh, e);

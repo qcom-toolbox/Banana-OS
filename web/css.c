@@ -1096,8 +1096,56 @@ static const char* subst_vars(arena_t* A, const style_t* st, const char* v, int 
     return arena_strdup(A, buf, o);
 }
 
+/* "1", "0.5", "2" -> x100 */
+static int flex_num(const char* v) {
+    while (is_ws(*v)) v++;
+    int n = 0, frac = 0, div = 1;
+    while (*v >= '0' && *v <= '9') n = n * 10 + (*v++ - '0');
+    if (*v == '.') { v++; while (*v >= '0' && *v <= '9' && div < 1000) { frac = frac * 10 + (*v++ - '0'); div *= 10; } }
+    return n * 100 + frac * 100 / div;
+}
+
+static int flex_align(const char* v) {
+    if (has_word(v, "center")) return FA_CENTER;
+    if (has_word(v, "flex-end") || has_word(v, "end") || has_word(v, "self-end") || has_word(v, "last")) return FA_END;
+    if (has_word(v, "flex-start") || has_word(v, "start") || has_word(v, "self-start") || has_word(v, "baseline")) return FA_START;
+    if (has_word(v, "stretch") || has_word(v, "normal")) return FA_STRETCH;
+    return FA_AUTO;
+}
+
+/* flexbox properties that are not keyed by the switch below; 1 if handled */
+static int flex_decl(style_t* st, const char* prop, const char* v) {
+    if (strcmp(prop, "gap") == 0 || strcmp(prop, "grid-gap") == 0) {
+        int a = parse_len(v, st->font_px, -1, NULL);
+        const char* sp = v;
+        while (*sp && !is_ws(*sp)) sp++;
+        while (is_ws(*sp)) sp++;
+        int b = *sp ? parse_len(sp, st->font_px, -1, NULL) : a;
+        st->gap_row = a == LEN_AUTO || a < 0 ? 0 : a;
+        st->gap_col = b == LEN_AUTO || b < 0 ? 0 : b;
+        return 1;
+    }
+    if (strcmp(prop, "row-gap") == 0 || strcmp(prop, "column-gap") == 0) {
+        int a = parse_len(v, st->font_px, -1, NULL);
+        if (a == LEN_AUTO || a < 0) a = 0;
+        if (prop[0] == 'r') st->gap_row = a; else st->gap_col = a;
+        return 1;
+    }
+    if (strcmp(prop, "justify-content") == 0) {
+        st->justify = has_word(v, "space-between") ? JUSTIFY_BETWEEN : has_word(v, "space-around") ? JUSTIFY_AROUND :
+                      has_word(v, "space-evenly") ? JUSTIFY_EVENLY : has_word(v, "center") ? JUSTIFY_CENTER :
+                      (has_word(v, "flex-end") || has_word(v, "end") || has_word(v, "right")) ? JUSTIFY_END : JUSTIFY_START;
+        return 1;
+    }
+    if (strcmp(prop, "align-items") == 0) { int a = flex_align(v); st->align_items = a ? a : FA_STRETCH; return 1; }
+    if (strcmp(prop, "align-self") == 0) { st->align_self = flex_align(v); return 1; }
+    if (strcmp(prop, "place-items") == 0) { int a = flex_align(v); st->align_items = a ? a : FA_STRETCH; return 1; }
+    return 0;
+}
+
 static void apply_decl(style_t* st, const style_t* parent, const char* prop, const char* v) {
     int ok;
+    if (flex_decl(st, prop, v)) return;
     if (strcasecmp(v, "inherit") == 0) {
         if (!parent) return;
         if (strcmp(prop, "color") == 0) st->color = parent->color;
@@ -1172,12 +1220,14 @@ static void apply_decl(style_t* st, const style_t* parent, const char* prop, con
     case 'd':
         if (strcmp(prop, "display") == 0) {
             st->flex_row = 0;
+            st->flex = 0;
             if (has_word(v, "none")) st->display = DISP_NONE;
             else if (has_word(v, "contents")) st->display = DISP_INLINE;
             else if (has_word(v, "inline-block") || has_word(v, "inline-flex") || has_word(v, "inline-grid") ||
                      has_word(v, "inline-table")) {
                 st->display = DISP_INLINE_BLOCK;
-                if (has_word(v, "inline-flex")) st->flex_row = 1;
+                if (has_word(v, "inline-flex")) st->flex = 1;
+                else if (has_word(v, "inline-grid")) st->flex_row = 1;
             }
             else if (has_word(v, "inline")) st->display = DISP_INLINE;
             else if (has_word(v, "list-item")) st->display = DISP_LIST_ITEM;
@@ -1188,7 +1238,8 @@ static void apply_decl(style_t* st, const style_t* parent, const char* prop, con
             else if (has_word(v, "table")) st->display = DISP_TABLE;
             else {
                 st->display = DISP_BLOCK;                /* block, flow-root, flex, grid, ... */
-                if (has_word(v, "flex") || has_word(v, "grid")) st->flex_row = 1;
+                if (has_word(v, "flex")) st->flex = 1;
+                else if (has_word(v, "grid")) st->flex_row = 1;
             }
         }
         return;
@@ -1232,7 +1283,40 @@ static void apply_decl(style_t* st, const style_t* parent, const char* prop, con
         }
         if (strcmp(prop, "float") == 0) { st->floated = has_word(v, "left") || has_word(v, "right") || has_word(v, "inline-start") || has_word(v, "inline-end"); return; }
         if (strcmp(prop, "flex-direction") == 0 || strcmp(prop, "flex-flow") == 0) {
+            if (has_word(v, "column-reverse")) st->flex_dir = FLEX_COL_REV;
+            else if (has_word(v, "column")) st->flex_dir = FLEX_COL;
+            else if (has_word(v, "row-reverse")) st->flex_dir = FLEX_ROW_REV;
+            else if (has_word(v, "row")) st->flex_dir = FLEX_ROW;
             if (has_word(v, "column") || has_word(v, "column-reverse")) st->flex_row = 0;
+            if (strcmp(prop, "flex-flow") == 0) st->flex_wrap = has_word(v, "wrap") || has_word(v, "wrap-reverse");
+            return;
+        }
+        if (strcmp(prop, "flex-wrap") == 0) { st->flex_wrap = has_word(v, "wrap") || has_word(v, "wrap-reverse"); return; }
+        if (strcmp(prop, "flex-grow") == 0) { st->flex_grow = flex_num(v); return; }
+        if (strcmp(prop, "flex-shrink") == 0) { st->flex_shrink = flex_num(v); return; }
+        if (strcmp(prop, "flex-basis") == 0) {
+            st->flex_basis = has_word(v, "auto") || has_word(v, "content") ? LEN_AUTO : parse_len(v, st->font_px, -1, NULL);
+            return;
+        }
+        if (strcmp(prop, "flex") == 0) {
+            /* flex: none | auto | <grow> [<shrink>] [<basis>] */
+            if (has_word(v, "none")) { st->flex_grow = 0; st->flex_shrink = 0; st->flex_basis = LEN_AUTO; return; }
+            if (has_word(v, "auto")) { st->flex_grow = 100; st->flex_shrink = 100; st->flex_basis = LEN_AUTO; return; }
+            const char* p = v;
+            int n = 0;
+            st->flex_basis = 0;                  /* flex: 1 means a basis of 0 */
+            while (*p) {
+                while (is_ws(*p)) p++;
+                if (!*p) break;
+                const char* tok = p;
+                while (*p && !is_ws(*p)) p++;
+                int unitless = 1;
+                for (const char* q = tok; q < p; q++) if ((*q < '0' || *q > '9') && *q != '.') unitless = 0;
+                if (unitless && n == 0) st->flex_grow = flex_num(tok);
+                else if (unitless && n == 1) st->flex_shrink = flex_num(tok);
+                else st->flex_basis = strncmp(tok, "auto", 4) == 0 ? LEN_AUTO : parse_len(tok, st->font_px, -1, NULL);
+                n++;
+            }
             return;
         }
         return;
@@ -1355,6 +1439,8 @@ static void inherit(style_t* st, const style_t* p) {
     st->display = DISP_INLINE;
     st->width = st->height = st->max_width = LEN_AUTO;
     st->left = st->top = LEN_AUTO;
+    st->flex_basis = LEN_AUTO;
+    st->flex_shrink = 100;
     st->visible = 1;
     st->color = 0x000000;
     set_font_px(st, 16);

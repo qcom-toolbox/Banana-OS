@@ -48,10 +48,10 @@ static int idx_of(const char* k, uint32_t* out) {
 
 /* ── number conversions (ECMAScript ToInt32 & co) ── */
 
-static int finite(num_t n) { return n == n && n < 1e300L && n > -1e300L; }
+static int num_finite(num_t n) { return n == n && n < 1e300L && n > -1e300L; }
 
 static uint32_t to_u32(num_t n) {
-    if (!finite(n)) return 0;
+    if (!num_finite(n)) return 0;
     num_t t = n < 0 ? -num_floor(-n) : num_floor(n);
     num_t m = t - num_floor(t / 4294967296.0L) * 4294967296.0L;
     return (uint32_t)m;
@@ -125,7 +125,7 @@ static abuf_t* buf_of(value_t v) {
 static value_t js_ArrayBuffer(interp_t* I, value_t self, int argc, value_t* argv) {
     (void)self;
     num_t n = argc ? v_tonum(I, argv[0]) : 0;
-    return v_obj(new_buf(I, finite(n) && n > 0 ? (uint32_t)n : 0)->obj);
+    return v_obj(new_buf(I, num_finite(n) && n > 0 ? (uint32_t)n : 0)->obj);
 }
 
 static int clamp_index(interp_t* I, value_t v, int len, int def) {
@@ -225,7 +225,7 @@ static uint32_t like_len(interp_t* I, value_t v) {
     if (v.t != V_OBJ) return 0;
     if (v.o->kind == OBJ_ARRAY) return v.o->len;
     num_t n = v_tonum(I, obj_get(I, v.o, "length"));
-    return finite(n) && n > 0 ? (uint32_t)n : 0;
+    return num_finite(n) && n > 0 ? (uint32_t)n : 0;
 }
 
 static num_t like_at(interp_t* I, value_t v, uint32_t i) {
@@ -244,12 +244,12 @@ static value_t js_typed(interp_t* I, value_t self, int argc, value_t* argv) {
     abuf_t* b = buf_of(a);
     if (b) {                                         /* a view of an ArrayBuffer */
         num_t o = argc > 1 ? v_tonum(I, argv[1]) : 0;
-        uint32_t off = finite(o) && o > 0 ? (uint32_t)o : 0;
+        uint32_t off = num_finite(o) && o > 0 ? (uint32_t)o : 0;
         if (off > b->len) off = b->len;
         uint32_t len = (b->len - off) / T_SIZE[kind];
         if (argc > 2 && argv[2].t != V_UNDEF) {
             num_t l = v_tonum(I, argv[2]);
-            if (finite(l) && l >= 0 && (uint32_t)l < len) len = (uint32_t)l;
+            if (num_finite(l) && l >= 0 && (uint32_t)l < len) len = (uint32_t)l;
         }
         return v_obj(new_typed(I, kind, b, off, len));
     }
@@ -261,7 +261,7 @@ static value_t js_typed(interp_t* I, value_t self, int argc, value_t* argv) {
         return v_obj(o);
     }
     num_t n = argc ? v_tonum(I, a) : 0;
-    return v_obj(alloc_typed(I, kind, finite(n) && n > 0 ? (uint32_t)n : 0));
+    return v_obj(alloc_typed(I, kind, num_finite(n) && n > 0 ? (uint32_t)n : 0));
 }
 
 #define SELF_T tarr_t* t = typed_of(self); if (!t) return v_undef()
@@ -271,7 +271,7 @@ static value_t t_set(interp_t* I, value_t self, int argc, value_t* argv) {
     SELF_T;
     value_t src = ARG(0);
     num_t o = argc > 1 ? v_tonum(I, argv[1]) : 0;
-    uint32_t off = finite(o) && o > 0 ? (uint32_t)o : 0;
+    uint32_t off = num_finite(o) && o > 0 ? (uint32_t)o : 0;
     uint32_t n = like_len(I, src);
     if (off + n > t->len) { script_throw(I, "RangeError: offset is out of bounds"); return v_undef(); }
     tarr_t* s = typed_of(src);
@@ -414,12 +414,12 @@ static value_t js_DataView(interp_t* I, value_t self, int argc, value_t* argv) {
     abuf_t* b = buf_of(ARG(0));
     if (!b) { script_throw(I, "TypeError: DataView needs an ArrayBuffer"); return v_undef(); }
     num_t o = argc > 1 ? v_tonum(I, argv[1]) : 0;
-    uint32_t off = finite(o) && o > 0 ? (uint32_t)o : 0;
+    uint32_t off = num_finite(o) && o > 0 ? (uint32_t)o : 0;
     if (off > b->len) off = b->len;
     uint32_t len = b->len - off;
     if (argc > 2 && argv[2].t != V_UNDEF) {
         num_t l = v_tonum(I, argv[2]);
-        if (finite(l) && l >= 0 && (uint32_t)l < len) len = (uint32_t)l;
+        if (num_finite(l) && l >= 0 && (uint32_t)l < len) len = (uint32_t)l;
     }
     tarr_t* t = (tarr_t*)arena_alloc(I->A, sizeof(tarr_t));
     t->buf = b;
@@ -439,7 +439,7 @@ static value_t view_access(interp_t* I, value_t self, int argc, value_t* argv, i
     int kind = (int)I->cur_native->data.n;
     int sz = T_SIZE[kind];
     num_t o = v_tonum(I, ARG(0));
-    if (!finite(o) || o < 0 || (uint32_t)o + (uint32_t)sz > t->len) {
+    if (!num_finite(o) || o < 0 || (uint32_t)o + (uint32_t)sz > t->len) {
         script_throw(I, "RangeError: offset is outside the bounds of the DataView");
         return v_undef();
     }

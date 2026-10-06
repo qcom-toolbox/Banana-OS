@@ -38,13 +38,25 @@ typedef struct style {
     uint8_t  position;              /* POS_* */
     uint8_t  overflow_hidden;
     uint8_t  clipped;               /* clip: rect(0 0 0 0) / clip-path: inset(50%) - visually hidden */
-    uint8_t  flex_row;              /* display: flex/grid laying its children out in a row */
+    uint8_t  flex_row;              /* display: grid (or flex): children side by side as inline-blocks */
+    uint8_t  flex;                  /* display: flex - a real flex container (layout_flex) */
+    uint8_t  flex_dir;              /* FLEX_ROW / FLEX_ROW_REV / FLEX_COL / FLEX_COL_REV */
+    uint8_t  flex_wrap;
+    uint8_t  justify;               /* JUSTIFY_* (main axis) */
+    uint8_t  align_items;           /* FA_* (cross axis) */
+    uint8_t  align_self;            /* FA_AUTO or FA_* */
+    int      gap_row, gap_col;      /* px */
+    int      flex_grow, flex_shrink;   /* x100 (flex-grow: 1 -> 100) */
+    int      flex_basis;            /* px or LEN_AUTO */
     uint8_t  floated;
     int      left, top;             /* px or LEN_AUTO (position offsets) */
     struct css_var* vars;           /* custom properties (--x), inherited */
 } style_t;
 
 enum { POS_STATIC = 0, POS_RELATIVE, POS_ABSOLUTE, POS_FIXED, POS_STICKY };
+enum { FLEX_ROW = 0, FLEX_ROW_REV, FLEX_COL, FLEX_COL_REV };
+enum { JUSTIFY_START = 0, JUSTIFY_CENTER, JUSTIFY_END, JUSTIFY_BETWEEN, JUSTIFY_AROUND, JUSTIFY_EVENLY };
+enum { FA_AUTO = 0, FA_STRETCH, FA_START, FA_CENTER, FA_END };   /* flex alignment */
 
 typedef struct css_var {
     const char* name;
