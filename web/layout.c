@@ -1,5 +1,6 @@
 #include "layout.h"
 #include "kstring.h"
+#include "kheap.h"
 
 #define GLYPH 8
 
@@ -233,14 +234,16 @@ static void place_word(inl_t* I, const char* s, uint32_t n, const style_t* st, u
     t->ulspace = (uint8_t)same;
     char* text = (char*)s;
     uint32_t len = n;
-    if (sw) {
+    if (sw && I->C->dry) {
+        len = n + 1;                            /* measuring: only the length matters */
+    } else if (sw) {
         /* the space joins the word, so underlines and backgrounds run on */
         text = (char*)arena_alloc(I->C->L->A, n + 2);
         text[0] = ' ';
         memcpy(text + 1, s, n);
         len = n + 1;
     }
-    if (st->uppercase || st->lowercase) {
+    if ((st->uppercase || st->lowercase) && !I->C->dry) {
         char* u = (char*)arena_alloc(I->C->L->A, len + 1);
         for (uint32_t k = 0; k < len; k++) {
             char c = text[k];
@@ -282,9 +285,28 @@ static int place_box(inl_t* I, int w, int h) {
     return x;
 }
 
+/* measuring passes (C->dry) keep nothing: their text goes into one
+ * reusable buffer, not the layout arena (nested flex boxes and tables
+ * measure their content many times over) */
+static char*    g_dry_buf;
+static uint32_t g_dry_cap;
+
+static char* dry_buffer(uint32_t need) {
+    if (need > g_dry_cap) {
+        uint32_t cap = need < 4096 ? 4096 : need * 2;
+        char* b = (char*)kmalloc(cap);
+        if (!b) return NULL;
+        if (g_dry_buf) kfree(g_dry_buf);
+        g_dry_buf = b;
+        g_dry_cap = cap;
+    }
+    return g_dry_buf;
+}
+
 static void text_run(inl_t* I, const char* s, uint32_t n, const style_t* st, uint32_t bg, int has_bg, dom_node_t* node) {
     ctx_t* C = I->C;
-    char* a = (char*)arena_alloc(C->L->A, n * 3 + 1);
+    char* a = C->dry && !st->pre ? dry_buffer(n * 3 + 1) : NULL;
+    if (!a) a = (char*)arena_alloc(C->L->A, n * 3 + 1);
     n = text_to_ascii(s, n, a);
     if (st->pre) {
         uint32_t i = 0;
@@ -790,11 +812,15 @@ static void flex_inline_size(ctx_t* C, dom_node_t* it, int avail, int* w, int* h
 /* an item's outer height laid out at border-box width bw (measuring only) */
 static int flex_measure_h(ctx_t* C, dom_node_t* it, int bw) {
     const style_t* s = it->style;
+    if (it->mh_gen == g_layout_gen && it->mh_w == bw) return it->mh;
     int saved = C->dry;
     C->dry = 1;
     C->force_w = bw;
     int h = layout_box(C, it, 0, 0, bw + s->margin[1] + s->margin[3]);
     C->dry = saved;
+    it->mh_gen = g_layout_gen;
+    it->mh_w = bw;
+    it->mh = h;
     return h;
 }
 
@@ -1223,8 +1249,7 @@ static void measure_cell(ctx_t* C, dom_node_t* cell, int* maxw, int* minw) {
 
 static int layout_table(ctx_t* C, dom_node_t* t, int x, int y, int avail) {
     const style_t* st = t->style;
-    dom_node_t** rows = (dom_node_t**)arena_alloc(C->L->A, MAX_ROWS * (uint32_t)sizeof(dom_node_t*));
-    if (C->L->A->oom) return 0;             /* out of layout memory: the shared fallback is no place for pointers */
+    dom_node_t* rows[MAX_ROWS];                /* on the stack: tables are measured over and over */
     int nrows = collect_rows(t, rows, MAX_ROWS);
     int ncols = 0;
     for (int r = 0; r < nrows; r++) {

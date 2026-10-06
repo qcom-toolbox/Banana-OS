@@ -48,6 +48,8 @@ typedef struct dom_node {
     int      box_x, box_y, box_w, box_h;   /* last layout position (page coordinates) */
     uint32_t meas_gen;           /* layout.c: max/min content widths measured in layout pass meas_gen */
     int      meas_max, meas_min;
+    uint32_t mh_gen;             /* layout.c: outer height at border-box width mh_w, measured in pass mh_gen */
+    int      mh_w, mh;
 } dom_node_t;
 
 dom_node_t* html_parse(arena_t* A, const char* src, uint32_t len);

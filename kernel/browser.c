@@ -1344,10 +1344,10 @@ static void browser_task(void) {
     g_env.log = env_log;
     g_env.ctx = NULL;
     /* a page may use a share of the heap (big pages, images, script-heavy
-     * sites like Google need ~100 MB), within reason */
+     * sites like GitHub need ~200 MB), within reason */
     uint32_t heap = kheap_total_bytes();
-    g_page_mem = heap / 4;
-    if (g_page_mem > (192u << 20)) g_page_mem = 192u << 20;
+    g_page_mem = heap / 3;
+    if (g_page_mem > (384u << 20)) g_page_mem = 384u << 20;
     if (g_page_mem < (16u << 20)) g_page_mem = 16u << 20;
     for (;;) {
         if (!g_open) {

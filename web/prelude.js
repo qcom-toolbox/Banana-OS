@@ -257,4 +257,160 @@ if (typeof Blob === 'undefined') W.Blob = class Blob {
   slice(a, b, t){ var r = new Blob([this._s.slice(a, b)]); r.type = t || ''; return r; }
 };
 if (W.crypto && crypto.getRandomValues) crypto.getRandomValues = function(a){ for (var i = 0; i < a.length; i++) a[i] = Math.floor(Math.random() * 4294967296); return a; };
+if (!Promise.withResolvers) Promise.withResolvers = function(){ var res, rej; var pr = new Promise(function(a, b){ res = a; rej = b; }); return {promise: pr, resolve: res, reject: rej}; };
+/* more DOM: element insertion helpers, popovers, tree walkers, ranges, events, parsing */
+var EPR = Element.prototype;
+var toNode = function(x){ return typeof x === 'string' ? document.createTextNode(x) : x; };
+if (!EPR.before) EPR.before = function(){ var p = this.parentNode; if (!p) return; for (var i = 0; i < arguments.length; i++) p.insertBefore(toNode(arguments[i]), this); };
+if (!EPR.after) EPR.after = function(){ var p = this.parentNode; if (!p) return; var ref = this.nextSibling;
+  for (var i = 0; i < arguments.length; i++) { var n = toNode(arguments[i]); if (ref) p.insertBefore(n, ref); else p.appendChild(n); } };
+if (!EPR.showPopover) {
+  EPR.showPopover = function(){ this.removeAttribute('hidden'); this.setAttribute('data-popover-open', ''); };
+  EPR.hidePopover = function(){ this.removeAttribute('data-popover-open'); };
+  EPR.togglePopover = function(f){ var open = this.hasAttribute('data-popover-open'); if (f === undefined ? !open : f) this.showPopover(); else this.hidePopover(); return !open; };
+}
+if (!EPR.checkVisibility) EPR.checkVisibility = function(){ return true; };
+/* <template>.content: its children, moved into a fragment the first time */
+Object.defineProperty(EPR, 'content', { get: function(){
+  if (this.tagName !== 'TEMPLATE') return undefined;
+  if (!this.__frag) { var f = document.createDocumentFragment(); while (this.firstChild) f.appendChild(this.firstChild); this.__frag = f; }
+  return this.__frag; } });
+/* shadow DOM: the shadow root is the element itself, so what a web
+ * component puts in it is laid out and shown like normal content */
+EPR.attachShadow = function(){ this.__shadow = this; return this; };
+Object.defineProperty(EPR, 'shadowRoot', { get: function(){ return this.__shadow || null; } });
+if (typeof W.ClipboardItem === 'undefined') W.ClipboardItem = class ClipboardItem {
+  constructor(items){ this.items = items || {}; this.types = Object.keys(this.items); }
+  getType(t){ return Promise.resolve(this.items[t]); }
+  static supports(){ return true; }
+};
+var NF = { FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3, SHOW_ALL: 0xFFFFFFFF, SHOW_ELEMENT: 1, SHOW_ATTRIBUTE: 2,
+  SHOW_TEXT: 4, SHOW_COMMENT: 128, SHOW_DOCUMENT: 256, SHOW_DOCUMENT_FRAGMENT: 1024 };
+if (typeof NodeFilter === 'undefined') W.NodeFilter = NF;
+var showBit = function(n){ var t = n.nodeType; return t === 1 ? 1 : t === 3 ? 4 : t === 8 ? 128 : t === 9 ? 256 : t === 11 ? 1024 : 0; };
+var TreeWalker = function(root, what, filter){ this.root = root; this.whatToShow = what === undefined ? NF.SHOW_ALL : what; this.filter = filter || null; this.currentNode = root; };
+TreeWalker.prototype._ok = function(n){
+  if (!(this.whatToShow & showBit(n))) return 3;
+  if (!this.filter) return 1;
+  var f = typeof this.filter === 'function' ? this.filter : this.filter.acceptNode;
+  return f ? f.call(this.filter, n) : 1; };
+TreeWalker.prototype._next = function(n, skipKids){
+  if (!skipKids && n.firstChild) return n.firstChild;
+  while (n && n !== this.root) { if (n.nextSibling) return n.nextSibling; n = n.parentNode; }
+  return null; };
+TreeWalker.prototype.nextNode = function(){
+  var n = this.currentNode, skip = false;
+  for (;;) { n = this._next(n, skip); if (!n) return null; var r = this._ok(n); skip = r === 2; if (r === 1) { this.currentNode = n; return n; } } };
+TreeWalker.prototype.firstChild = function(){ var n = this.currentNode.firstChild; while (n && this._ok(n) !== 1) n = n.nextSibling; if (n) this.currentNode = n; return n || null; };
+TreeWalker.prototype.nextSibling = function(){ var n = this.currentNode.nextSibling; while (n && this._ok(n) !== 1) n = n.nextSibling; if (n) this.currentNode = n; return n || null; };
+TreeWalker.prototype.parentNode = function(){ var n = this.currentNode; while (n && n !== this.root) { n = n.parentNode; if (n && this._ok(n) === 1) { this.currentNode = n; return n; } } return null; };
+TreeWalker.prototype.previousNode = function(){ return null; };
+if (typeof W.TreeWalker === 'undefined') W.TreeWalker = TreeWalker;
+var DOC = document;
+if (!DOC.createTreeWalker) DOC.createTreeWalker = function(root, what, filter){ return new TreeWalker(root, what, filter); };
+if (!DOC.createNodeIterator) DOC.createNodeIterator = function(root, what, filter){ var w = new TreeWalker(root, what, filter); w.previousNode = function(){ return null; }; return w; };
+var DOMRect = function(x, y, w, h){ this.x = this.left = x || 0; this.y = this.top = y || 0; this.width = w || 0; this.height = h || 0;
+  this.right = this.x + this.width; this.bottom = this.y + this.height; };
+DOMRect.fromRect = function(r){ r = r || {}; return new DOMRect(r.x, r.y, r.width, r.height); };
+if (typeof W.DOMRect === 'undefined') { W.DOMRect = DOMRect; W.DOMRectReadOnly = DOMRect; }
+var Range = function(){ this.startContainer = this.endContainer = DOC; this.startOffset = this.endOffset = 0; this.collapsed = true; this.commonAncestorContainer = DOC; };
+Range.prototype.setStart = function(n, o){ this.startContainer = n; this.startOffset = o; };
+Range.prototype.setEnd = function(n, o){ this.endContainer = n; this.endOffset = o; this.collapsed = false; };
+Range.prototype.setStartBefore = Range.prototype.setStartAfter = Range.prototype.setEndBefore = Range.prototype.setEndAfter = function(n){ this.startContainer = n; };
+Range.prototype.selectNode = Range.prototype.selectNodeContents = function(n){ this.startContainer = this.endContainer = this.commonAncestorContainer = n; this.collapsed = false; };
+Range.prototype.collapse = function(){ this.collapsed = true; };
+Range.prototype.cloneRange = function(){ var r = new Range(); for (var k in this) if (this.hasOwnProperty(k)) r[k] = this[k]; return r; };
+Range.prototype.getBoundingClientRect = function(){ var n = this.startContainer; return n && n.getBoundingClientRect ? n.getBoundingClientRect() : new DOMRect(); };
+Range.prototype.getClientRects = function(){ return [this.getBoundingClientRect()]; };
+Range.prototype.toString = function(){ var n = this.startContainer; return n ? (n.textContent || '') : ''; };
+Range.prototype.createContextualFragment = function(html){ var t = DOC.createElement('template'); t.innerHTML = html;
+  var f = DOC.createDocumentFragment(); var src = t.content || t; while (src.firstChild) f.appendChild(src.firstChild); return f; };
+Range.prototype.deleteContents = Range.prototype.detach = function(){};
+Range.prototype.insertNode = function(n){ var c = this.startContainer; if (c && c.appendChild) c.appendChild(n); };
+if (typeof W.Range === 'undefined') W.Range = Range;
+if (!DOC.createRange) DOC.createRange = function(){ return new Range(); };
+if (!DOC.createEvent) DOC.createEvent = function(kind){
+  var e = new CustomEvent('');
+  e.initEvent = function(type, bubbles, cancelable){ this.type = type; this.bubbles = !!bubbles; this.cancelable = !!cancelable; };
+  e.initCustomEvent = function(type, bubbles, cancelable, detail){ this.initEvent(type, bubbles, cancelable); this.detail = detail; };
+  return e; };
+if (!DOC.importNode) DOC.importNode = function(n, deep){ return n.cloneNode(!!deep); };
+if (!DOC.adoptNode) DOC.adoptNode = function(n){ if (n.parentNode) n.parentNode.removeChild(n); return n; };
+if (!DOC.elementFromPoint) DOC.elementFromPoint = function(){ return null; };
+if (!DOC.elementsFromPoint) DOC.elementsFromPoint = function(){ return []; };
+if (!DOC.startViewTransition) DOC.startViewTransition = function(cb){ var p = Promise.resolve().then(function(){ return cb && cb(); });
+  return { finished: p, ready: Promise.resolve(), updateCallbackDone: p, skipTransition: function(){} }; };
+if (typeof W.DOMParser === 'undefined') W.DOMParser = class DOMParser {
+  parseFromString(s){ var html = DOC.createElement('html'); html.innerHTML = String(s);
+    var body = html.querySelector('body') || html, head = html.querySelector('head') || DOC.createElement('head');
+    return { documentElement: html, body: body, head: head, title: (html.querySelector('title') || {}).textContent || '',
+      querySelector: function(q){ return html.querySelector(q); }, querySelectorAll: function(q){ return html.querySelectorAll(q); },
+      getElementById: function(id){ return html.querySelector('#' + id); }, getElementsByTagName: function(t){ return html.querySelectorAll(t); },
+      createElement: function(t){ return DOC.createElement(t); } }; }
+};
+if (typeof W.XMLSerializer === 'undefined') W.XMLSerializer = class XMLSerializer { serializeToString(n){ return n.outerHTML !== undefined ? n.outerHTML : String(n.textContent || ''); } };
+if (typeof W.Option === 'undefined') W.Option = function(text, value, def, sel){ var o = DOC.createElement('option');
+  if (text !== undefined) o.textContent = text; if (value !== undefined) o.setAttribute('value', value); if (sel) o.setAttribute('selected', ''); return o; };
+if (typeof W.FinalizationRegistry === 'undefined') W.FinalizationRegistry = class FinalizationRegistry { register(){} unregister(){ return false; } };
+if (typeof W.BroadcastChannel === 'undefined') W.BroadcastChannel = class BroadcastChannel { constructor(n){ this.name = n; this.onmessage = null; }
+  postMessage(){} close(){} addEventListener(){} removeEventListener(){} };
+if (typeof W.File === 'undefined' && typeof Blob !== 'undefined') W.File = class File extends Blob {
+  constructor(parts, name, o){ super(parts, o); this.name = String(name); this.lastModified = Date.now(); } };
+if (typeof W.FileReader === 'undefined') W.FileReader = class FileReader {
+  constructor(){ this.result = null; this.readyState = 0; this.onload = this.onloadend = this.onerror = null; }
+  _done(r){ var me = this; me.result = r; me.readyState = 2; setTimeout(function(){ var e = {type: 'load', target: me};
+    if (me.onload) me.onload(e); if (me.onloadend) me.onloadend(e); }, 0); }
+  readAsText(b){ this._done(b && b._s !== undefined ? b._s : String(b)); }
+  readAsDataURL(b){ this._done('data:' + ((b && b.type) || 'application/octet-stream') + ';base64,' + btoa(b && b._s !== undefined ? b._s : '')); }
+  readAsArrayBuffer(b){ this._done(__utf8_encode(b && b._s !== undefined ? b._s : '').buffer); }
+  abort(){} addEventListener(t, f){ if (t === 'load') this.onload = f; else if (t === 'loadend') this.onloadend = f; else if (t === 'error') this.onerror = f; }
+};
+if (typeof W.Response === 'undefined') W.Response = class Response {
+  constructor(body, init){ init = init || {}; this._b = body == null ? '' : (typeof body === 'string' ? body : body._s !== undefined ? body._s : String(body));
+    this.status = init.status === undefined ? 200 : init.status; this.statusText = init.statusText || ''; this.ok = this.status >= 200 && this.status < 300;
+    this.headers = new Headers(init.headers); this.url = ''; this.type = 'default'; this.redirected = false; this.bodyUsed = false; }
+  text(){ return Promise.resolve(this._b); }
+  json(){ var me = this; return Promise.resolve().then(function(){ return JSON.parse(me._b); }); }
+  blob(){ return Promise.resolve(new Blob([this._b])); }
+  arrayBuffer(){ return Promise.resolve(__utf8_encode(this._b).buffer); }
+  clone(){ return new Response(this._b, {status: this.status, statusText: this.statusText, headers: this.headers}); }
+  static json(d, init){ return new Response(JSON.stringify(d), init); }
+  static error(){ return new Response('', {status: 0}); }
+};
+if (typeof W.Request === 'undefined') W.Request = class Request {
+  constructor(input, init){ init = init || {}; this.url = typeof input === 'string' ? input : input.url; this.method = (init.method || 'GET').toUpperCase();
+    this.headers = new Headers(init.headers); this.body = init.body === undefined ? null : init.body; this.credentials = init.credentials || 'same-origin';
+    this.mode = init.mode || 'cors'; this.signal = init.signal || null; }
+  clone(){ return new Request(this.url, this); }
+};
+if (typeof W.Intl === 'undefined') {
+  var pad2 = function(n){ return (n < 10 ? '0' : '') + n; };
+  var MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var DTF = function(loc, o){ this.o = o || {}; };
+  DTF.prototype.format = function(d){ d = d === undefined ? new Date() : (d instanceof Date ? d : new Date(d)); var o = this.o;
+    if (o.hour !== undefined && o.year === undefined && o.month === undefined) return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    var s = MON[d.getMonth()] + ' ' + d.getDate() + ', ' + d.getFullYear();
+    if (o.hour !== undefined) s += ', ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    return s; };
+  DTF.prototype.formatToParts = function(d){ return [{type: 'literal', value: this.format(d)}]; };
+  DTF.prototype.resolvedOptions = function(){ return {locale: 'en-US', timeZone: 'UTC', calendar: 'gregory', numberingSystem: 'latn'}; };
+  var NFm = function(loc, o){ this.o = o || {}; };
+  NFm.prototype.format = function(n){ var o = this.o, x = Number(n);
+    if (o.maximumFractionDigits !== undefined) x = Number(x.toFixed(o.maximumFractionDigits));
+    var s = x.toLocaleString(); if (o.style === 'percent') s = (x * 100).toFixed(0) + '%';
+    if (o.style === 'currency') s = (o.currency === 'EUR' ? '€' : '$') + x.toFixed(2);
+    return s; };
+  NFm.prototype.formatToParts = function(n){ return [{type: 'integer', value: this.format(n)}]; };
+  NFm.prototype.resolvedOptions = function(){ return {locale: 'en-US'}; };
+  var RTF = function(){};
+  RTF.prototype.format = function(v, unit){ v = Number(v); var u = String(unit).replace(/s$/, ''), a = Math.abs(v);
+    var w = a + ' ' + u + (a === 1 ? '' : 's'); return v < 0 ? w + ' ago' : 'in ' + w; };
+  var PR = function(){}; PR.prototype.select = function(n){ return n === 1 ? 'one' : 'other'; };
+  var COL = function(){}; COL.prototype.compare = function(a, b){ a = String(a); b = String(b); return a < b ? -1 : a > b ? 1 : 0; };
+  var LF = function(){}; LF.prototype.format = function(l){ l = Array.from(l); return l.length < 2 ? l.join('') : l.slice(0, -1).join(', ') + ' and ' + l[l.length - 1]; };
+  W.Intl = { DateTimeFormat: DTF, NumberFormat: NFm, RelativeTimeFormat: RTF, PluralRules: PR, Collator: COL, ListFormat: LF,
+    getCanonicalLocales: function(l){ return l ? [].concat(l) : []; },
+    Segmenter: function(){ this.segment = function(s){ return Array.from(String(s)).map(function(c, i){ return {segment: c, index: i}; }); }; } };
+  if (Date.prototype) Date.prototype.toLocaleDateString = function(){ return new DTF().format(this); };
+}
 })();

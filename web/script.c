@@ -436,6 +436,11 @@ value_t obj_get(interp_t* I, obj_t* o, const char* key) {
     value_t v = prop_get_raw(o, key, &found);
     if (found) return (v.t == V_OBJ && v.o->kind == OBJ_ACCESSOR) ? accessor_get(I, v, v_obj(o)) : v;
     for (obj_t* p = o->proto; p; p = p->proto) {
+        if (p->kind == OBJ_ARRAY) {                 /* Object.create(array): its elements and length show through */
+            uint32_t idx;
+            if (key_index(key, &idx)) return arr_get(p, idx);
+            if (strcmp(key, "length") == 0) return v_num(p->len);
+        }
         v = prop_get_raw(p, key, &found);
         if (found) return (v.t == V_OBJ && v.o->kind == OBJ_ACCESSOR) ? accessor_get(I, v, v_obj(o)) : v;
     }
@@ -3401,7 +3406,11 @@ static value_t eval(interp_t* I, node_t* n) {
         value_t* argv;
         int argc = eval_args(I, n->b, small, 16, &argv);
         if (I->ctl) return v_undef();
-        if (fn.t != V_FUNC) { throwf(I, "TypeError: %s is not a constructor", n->a->k == N_IDENT ? n->a->s->s : "value"); return v_undef(); }
+        if (fn.t != V_FUNC) {
+            throwf(I, "TypeError: %s is not a constructor",
+                   n->a->k == N_IDENT || (n->a->k == N_MEMBER && n->a->s) ? n->a->s->s : "value");
+            return v_undef();
+        }
         if (fn.f->native) {
             value_t marker = v_undef();
             marker.t = V_NULL;

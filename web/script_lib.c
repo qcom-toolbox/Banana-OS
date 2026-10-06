@@ -866,9 +866,29 @@ static value_t js_fromCharCode(interp_t* I, value_t self, int argc, value_t* arg
 
 /* ══ JavaScript: array methods ════════════════════════════════════════ */
 
+/* Array.prototype methods also work on array-likes (arguments-like
+ * objects, NodeLists, Object.create(array)): on a copy of their elements */
+static obj_t* as_array(interp_t* I, value_t self) {
+    obj_t* a = obj_new(I, OBJ_ARRAY);
+    if (self.t == V_STR) {
+        for (uint32_t i = 0; i < self.s->len; i++) arr_push(I, a, v_strn(I, self.s->s + i, 1));
+        return a;
+    }
+    if (self.t != V_OBJ) return a;
+    num_t n = v_tonum(I, obj_get(I, self.o, "length"));
+    if (!(n > 0)) return a;
+    if (n > 1000000) n = 1000000;
+    for (uint32_t i = 0; i < (uint32_t)n; i++) {
+        char k[16];
+        ksnprintf(k, sizeof(k), "%u", i);
+        arr_push(I, a, obj_get(I, self.o, k));
+    }
+    return a;
+}
+
 #define SELF_ARR \
-    if (self.t != V_OBJ || self.o->kind != OBJ_ARRAY) { script_throw(I, "TypeError: not an array"); return v_undef(); } \
-    obj_t* A = self.o
+    if (self.t != V_OBJ && self.t != V_STR) { script_throw(I, "TypeError: not an array"); return v_undef(); } \
+    obj_t* A = self.t == V_OBJ && self.o->kind == OBJ_ARRAY ? self.o : as_array(I, self)
 
 static value_t a_push(interp_t* I, value_t self, int argc, value_t* argv) {
     SELF_ARR;
@@ -1216,6 +1236,8 @@ value_t lib_member(interp_t* I, value_t ov, const char* key, int* found) {
     case V_NUM: t = I->proto_number; break;
     case V_OBJ:
         t = ov.o->kind == OBJ_ARRAY ? I->proto_array : NULL;
+        /* an object whose prototype is an array gets the array methods */
+        for (obj_t* q = ov.o->proto; q && !t; q = q->proto) if (q->kind == OBJ_ARRAY) t = I->proto_array;
         if (t) {
             value_t v = prop_get_raw(t, key, found);
             if (*found) return v;
