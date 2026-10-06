@@ -581,18 +581,50 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
         if (cols < 2) cols = 2;
         w = cols * cw + 8;
     }
-    if (st->width != LEN_AUTO && st->width > 0) w = st->width;
+    /* a control the page styled (a background or a border of its own) is
+     * drawn its way: size, padding, colours, rounded corners; others keep
+     * the plain default look */
+    int bw = st->border[0] > 0 ? (st->border[0] > 4 ? 4 : st->border[0]) : 0;
+    int styled = st->has_bg || bw;
+    if (st->width_pct) w = I->w * st->width_pct / 100;
+    else if (st->width != LEN_AUTO && st->width > 0) w = st->width;
+    if (st->max_width != LEN_AUTO && st->max_width > 0 && w > st->max_width) w = st->max_width;
     if (w > I->w) w = I->w;
+    if (styled || st->height != LEN_AUTO) {
+        int pad = st->padding[0] + st->padding[2];
+        if (pad > 40) pad = 40;
+        if (st->height != LEN_AUTO && st->height > 0) h = st->height;
+        else if (pad + 2 * bw > 8) h = cw + pad + 2 * bw;
+        if (h > 200) h = 200;
+    }
     int x = place_box(I, w, h);
-    uint32_t face = button ? (st->has_bg ? st->bg : 0xDDDDDD) : 0xFFFFFF;
-    uint32_t edge = (C->L->focus == e) ? 0x3060C0 : button ? 0x777777 : 0x808080;
-    rect(C, x, 0, w, h, edge, e);
-    rect(C, x + 1, 1, w - 2, h - 2, face, e);
+    int rad = st->radius > h / 2 ? h / 2 : st->radius;
+    uint32_t text_col = button ? st->color : 0x000000;
+    if (styled) {
+        uint32_t face = st->has_bg ? st->bg : (button ? 0xDDDDDD : 0xFFFFFF);
+        uint32_t edge = C->L->focus == e ? 0x3060C0 : st->border_color[0];
+        if (bw) rect(C, x, 0, w, h, edge, e);
+        if (!C->dry && bw && C->L->n) C->L->items[C->L->n - 1].radius = (int16_t)rad;
+        if (st->has_bg || !bw || !button) {
+            rect(C, x + bw, bw, w - 2 * bw, h - 2 * bw, face, e);
+            if (!C->dry && C->L->n) C->L->items[C->L->n - 1].radius = (int16_t)(rad > bw ? rad - bw : 0);
+        } else if (!C->dry && C->L->n) {
+            C->L->items[C->L->n - 1].ring = (uint8_t)bw;   /* an outline button: only its border */
+        }
+        text_col = st->color;
+    } else {
+        uint32_t face = button ? (st->has_bg ? st->bg : 0xDDDDDD) : 0xFFFFFF;
+        uint32_t edge = (C->L->focus == e) ? 0x3060C0 : button ? 0x777777 : 0x808080;
+        rect(C, x, 0, w, h, edge, e);
+        rect(C, x + 1, 1, w - 2, h - 2, face, e);
+    }
+    int tx = styled && !button ? x + (st->padding[3] > 3 ? (st->padding[3] > 30 ? 30 : st->padding[3]) - 3 : 0) : x;
+    int tw = w - (tx - x);
     const char* ph = (!button && !is_select && !ll && C->L->focus != e) ? dom_attr(e, "placeholder") : NULL;
     if (ph && *ph)                      /* grey hint while empty and not focused */
-        form_text(C, x, 0, w, h, ph, (uint32_t)strlen(ph), 0x999999, scale, e, 0, 0);
+        form_text(C, tx, 0, tw, h, ph, (uint32_t)strlen(ph), 0x999999, scale, e, 0, 0);
     else
-        form_text(C, x, 0, w, h, label, ll, button ? st->color : 0x000000, scale, e,
+        form_text(C, tx, 0, tw, h, label, ll, text_col, scale, e,
                   is_input && strcasecmp(type, "password") == 0, button);
     if (is_select) {
         dl_item_t* t = push(C, DL_TEXT);
@@ -607,13 +639,13 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
     }
     if (C->L->focus == e && !button && !is_select) {
         dl_item_t* caret = push(C, DL_CARET);
-        int maxc = (w - 6) / cw;
+        int maxc = (tw - 6) / cw;
         int tl = (int)ll < maxc ? (int)ll : maxc;
-        caret->x = x + 3 + tl * cw;
+        caret->x = tx + 3 + tl * cw;
         caret->w = 1;
         caret->h = cw + 2;
         caret->y = (h - cw) / 2 - 1;
-        caret->color = 0x000000;
+        caret->color = text_col;
     }
     mark_box(C, first, h);
 }

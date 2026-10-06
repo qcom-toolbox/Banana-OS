@@ -439,6 +439,28 @@ static int parse_sel_list(arena_t* A, const char* s, uint32_t n, selector_t** ou
 /* ══ style sheet parser ═══════════════════════════════════════════════ */
 
 static int parse_decls(arena_t* A, const char* s, uint32_t n, decl_t** out) {
+    /* comments between or inside declarations (a French note with l'auteur in it
+     * between two custom properties): blanked first, or they would join the next property name */
+    for (uint32_t k = 0; k + 1 < n; k++) {
+        if (s[k] != '/' || s[k + 1] != '*') continue;
+        char* c = (char*)arena_alloc(A, n + 1);
+        memcpy(c, s, n);
+        c[n] = 0;
+        char q = 0;
+        for (uint32_t j = 0; j < n; j++) {
+            if (q) { if (c[j] == '\\' && j + 1 < n) j++; else if (c[j] == q) q = 0; continue; }
+            if (c[j] == '"' || c[j] == '\'') { q = c[j]; continue; }
+            if (c[j] == '/' && j + 1 < n && c[j + 1] == '*') {
+                uint32_t e = j + 2;
+                while (e + 1 < n && !(c[e] == '*' && c[e + 1] == '/')) e++;
+                e = e + 2 > n ? n : e + 2;
+                while (j < e) c[j++] = ' ';
+                j--;
+            }
+        }
+        s = c;
+        break;
+    }
     int cap = 8, cnt = 0;
     decl_t* d = (decl_t*)arena_alloc(A, (uint32_t)cap * (uint32_t)sizeof(decl_t));
     uint32_t i = 0;
@@ -577,6 +599,13 @@ static int media_alt(const char* q, uint32_t n, int* mn, int* mx) {
     return ok;
 }
 
+/* past the comment starting at i */
+static uint32_t skip_comment(const char* s, uint32_t n, uint32_t i) {
+    i += 2;
+    while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
+    return i + 2 > n ? n : i + 2;
+}
+
 static void parse_block_list(arena_t* A, css_sheet_t* sh, const char* s, uint32_t n, int mmin, int mmax) {
     uint32_t i = 0;
     while (i < n) {
@@ -595,6 +624,7 @@ static void parse_block_list(arena_t* A, css_sheet_t* sh, const char* s, uint32_
         char q = 0;
         while (i < n && (q || (s[i] != '{' && s[i] != ';'))) {
             if (q) { if (s[i] == q) q = 0; }
+            else if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') { i = skip_comment(s, n, i); continue; }
             else if (s[i] == '"' || s[i] == '\'') q = s[i];
             i++;
         }
@@ -607,6 +637,7 @@ static void parse_block_list(arena_t* A, css_sheet_t* sh, const char* s, uint32_
         q = 0;
         while (i < n && depth) {
             if (q) { if (s[i] == q) q = 0; }
+            else if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') { i = skip_comment(s, n, i); continue; }   /* an apostrophe in a note is no string */
             else if (s[i] == '"' || s[i] == '\'') q = s[i];
             else if (s[i] == '{') depth++;
             else if (s[i] == '}') depth--;
