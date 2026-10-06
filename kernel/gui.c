@@ -18,9 +18,11 @@
 #include "clipboard.h"
 #include "kheap.h"
 #include "appwin.h"
+#include "winframe.h"
 #include "ctxmenu.h"
 #include "launcher.h"
 #include "taskmgr.h"
+#include "settings.h"
 #include "../net/net.h"
 #include "../shell/shell.h"
 
@@ -30,13 +32,13 @@
 #define TASKBAR_ROW (VGA_HEIGHT - 1)
 
 /* the Start menu and the desktop shortcuts: the same entries */
-enum { ACT_ABOUT = 0, ACT_TERMINAL, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_WALLPAPER, ACT_QUIT };
-#define MENU_ITEMS 9
+enum { ACT_ABOUT = 0, ACT_TERMINAL, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_SETTINGS, ACT_WALLPAPER, ACT_QUIT };
+#define MENU_ITEMS 10
 static const char* const MENU_LABELS[MENU_ITEMS] = {
-    "About", "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Wallpaper", "Exit to shell",
+    "About", "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Wallpaper", "Exit to shell",
 };
 static const char* const ICON_LABELS[MENU_ITEMS] = {
-    "About", "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Wallpaper", "Quit GUI",
+    "About", "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Wallpaper", "Quit GUI",
 };
 #define START_MENU_W 236
 #define START_MENU_H (16 + MENU_ITEMS * 28)
@@ -52,7 +54,7 @@ static int g_menu_sel = 0;     /* an ACT_* */
  * windows of installed apps) and the terminal windows share one stacking
  * order: the app windows have their own back-to-front order, and at most
  * one of them - g_front_app - is above the terminals. */
-enum { APP_FILES = 0, APP_BROWSER, APP_NOTEPAD, APP_LAUNCHER, APP_TASKMGR, APP_APPWIN, APP_COUNT };
+enum { APP_FILES = 0, APP_BROWSER, APP_NOTEPAD, APP_LAUNCHER, APP_TASKMGR, APP_SETTINGS, APP_APPWIN, APP_COUNT };
 typedef struct {
     int      (*is_open)(void);
     void     (*draw)(const fb_info_t* fi);
@@ -72,10 +74,11 @@ static const app_t g_apps[APP_COUNT] = {
     { notepad_is_open, notepad_draw, notepad_contains, notepad_click, notepad_mouse, notepad_signature, notepad_close, notepad_rclick_menu, "Notepad" },
     { launcher_is_open, launcher_draw, launcher_contains, launcher_click, launcher_mouse, launcher_signature, launcher_close, launcher_rclick, "Apps" },
     { taskmgr_is_open, taskmgr_draw, taskmgr_contains, taskmgr_click, taskmgr_mouse, taskmgr_signature, taskmgr_close, taskmgr_rclick, "Task Manager" },
+    { settings_is_open, settings_draw, settings_contains, settings_click, settings_mouse, settings_signature, settings_close, settings_rclick, "Settings" },
     { appwin_is_open, appwin_draw, appwin_contains, appwin_click, appwin_mouse, appwin_signature, appwin_close_all, appwin_rclick, "App" },
 };
 static int g_front_app = -1;                        /* -1: a terminal window is in front */
-static int g_app_order[APP_COUNT] = { APP_FILES, APP_BROWSER, APP_NOTEPAD, APP_LAUNCHER, APP_TASKMGR, APP_APPWIN };   /* back to front */
+static int g_app_order[APP_COUNT] = { APP_FILES, APP_BROWSER, APP_NOTEPAD, APP_LAUNCHER, APP_TASKMGR, APP_SETTINGS, APP_APPWIN };   /* back to front */
 static int g_app_min[APP_COUNT];                    /* minimized to the taskbar */
 
 /* open and not minimized (the app windows minimize one by one) */
@@ -248,6 +251,19 @@ static void draw_icon_taskmgr(int x, int y, uint32_t bg) {
     gfx_fill_rect(x + 11, y + 2, 2, 8, 0x0057B65Au);
 }
 
+/* a gear */
+static void draw_icon_settings(int x, int y, uint32_t bg) {
+    const uint32_t c = 0x00C8D2E0u;
+    gfx_fill_rect(x + 5, y, 4, 14, c);
+    gfx_fill_rect(x, y + 5, 14, 4, c);
+    gfx_fill_rect(x + 2, y + 2, 10, 10, c);
+    gfx_fill_rect(x + 1, y + 1, 3, 3, c);
+    gfx_fill_rect(x + 10, y + 1, 3, 3, c);
+    gfx_fill_rect(x + 1, y + 10, 3, 3, c);
+    gfx_fill_rect(x + 10, y + 10, 3, 3, c);
+    gfx_fill_rect(x + 5, y + 5, 4, 4, bg);
+}
+
 static void draw_icon_power(int x, int y, uint32_t bg) {
     (void)bg;
     draw_bevel_box(x, y, 12, 12, 0x00412A2Au, 0x00764A4Au, 0x00170D0Du);
@@ -418,13 +434,8 @@ static void draw_terminal_window(const fb_info_t* fi, const term_win_t* win) {
     draw_bevel_box(w.x + 3, w.y + 3, w.w - 6, title_h - 1, title, title_hi, title_lo);
     gfx_draw_text(w.x + 10, w.y + 7, "Terminal", active ? 0x00F2F7FFu : 0x00CED8E6u, title);
 
-    /* close button */
-    int bx = w.x + w.w - 28;
-    draw_bevel_box(bx, w.y + 4, 20, 12, 0x006D2F2Fu, 0x00A14747u, 0x00301717u);
-    gfx_draw_text(bx + 6, w.y + 6, "x", 0x00FFFFFFu, 0x006D2F2Fu);
-    /* minimize (to the taskbar) */
-    draw_bevel_box(bx - 24, w.y + 4, 20, 12, 0x00303740u, 0x00535D6Eu, 0x0015191Fu);
-    gfx_draw_text(bx - 18, w.y + 5, "_", 0x00FFFFFFu, 0x00303740u);
+    /* minimize, maximize / restore, close */
+    win_draw_button_row(w.x + w.w, w.y + 4, 12, 1, w.maxed);
 
     /* client area */
     int cx = w.x + pad;
@@ -1096,6 +1107,7 @@ static void draw_win_glyph(int h, int x, int y, uint32_t bg) {
         else if (i == APP_BROWSER) draw_icon_browser(x, y, bg);
         else if (i == APP_NOTEPAD) draw_icon_notepad(x, y, bg);
         else if (i == APP_LAUNCHER) draw_icon_apps(x, y, bg);
+        else if (i == APP_SETTINGS) draw_icon_settings(x, y, bg);
         else draw_icon_taskmgr(x, y, bg);
         return;
     }
@@ -1191,7 +1203,7 @@ static int        g_force_redraw = 1;
 
 static void (*const g_menu_icons[MENU_ITEMS])(int, int, uint32_t) = {
     draw_icon_info, draw_icon_terminal, draw_icon_files, draw_icon_browser, draw_icon_notepad,
-    draw_icon_apps, draw_icon_taskmgr, draw_icon_wallpaper, draw_icon_power,
+    draw_icon_apps, draw_icon_taskmgr, draw_icon_settings, draw_icon_wallpaper, draw_icon_power,
 };
 
 static int start_menu_y(const fb_info_t* fi) { return (int)fi->height - BAR_H - START_MENU_H - 4; }
@@ -1568,6 +1580,7 @@ void gui_poll(void) {
             /* the app window in front of the terminals */
             if (click && g_front_app >= 0 && app_visible(g_front_app) && g_apps[g_front_app].contains(mx, my)) {
                 g_apps[g_front_app].click(mx, my);
+                if (winframe_take_minimize()) win_minimize(WK_APP << 8 | g_front_app);
                 click = 0;
             }
 
@@ -1587,18 +1600,17 @@ void gui_poll(void) {
                     bring_term_front(wi);
                     g_front_app = -1;
 
-                    int close_x = w->x + w->w - 28;
-                    int min_x = w->x + w->w - 52;
-                    if (mx >= close_x && mx < close_x + 24 && my >= w->y + 2 && my < w->y + 18) {
+                    int tbtn = win_button_hit(w->x + w->w, w->y + 4, 12, 1, mx, my);
+                    if (tbtn == WIN_BTN_CLOSE) {
                         /* Hide only - the vt and its shell task are kept
                          * running so a later reopen picks up right where
                          * this session left off. */
                         w->open = 0;
-                    } else if (mx >= min_x && mx < min_x + 20 && my >= w->y + 2 && my < w->y + 18) {
+                    } else if (tbtn == WIN_BTN_MIN) {
                         win_minimize(WK_TERM << 8 | wi);
                     } else if (my < w->y + title_h) {
                         uint32_t now = timer_ms();
-                        if (now - w->title_click_ms < 400) {          /* double-click: maximize / restore */
+                        if (tbtn == WIN_BTN_MAX || now - w->title_click_ms < 400) {   /* maximize / restore */
                             if (!w->maxed) {
                                 w->sx = w->x; w->sy = w->y; w->sw = w->w; w->sh = w->h;
                                 w->x = 0; w->y = 0; w->w = (int)fi->width; w->h = (int)fi->height - BAR_H;
@@ -1640,6 +1652,7 @@ void gui_poll(void) {
                 if (a >= 0) {
                     raise_app(a);
                     g_apps[a].click(mx, my);
+                    if (winframe_take_minimize()) win_minimize(WK_APP << 8 | a);
                     click = 0;
                 }
             }
@@ -1815,6 +1828,7 @@ static void do_action(int act) {
     case ACT_NOTEPAD: notepad_open(NULL); g_app_min[APP_NOTEPAD] = 0; raise_app(APP_NOTEPAD); break;
     case ACT_APPS: launcher_open(); g_app_min[APP_LAUNCHER] = 0; raise_app(APP_LAUNCHER); break;
     case ACT_TASKMGR: taskmgr_open(); g_app_min[APP_TASKMGR] = 0; raise_app(APP_TASKMGR); break;
+    case ACT_SETTINGS: settings_open(); g_app_min[APP_SETTINGS] = 0; raise_app(APP_SETTINGS); break;
     case ACT_WALLPAPER: open_wallpaper_app(); break;
     case ACT_QUIT: gui_set_enabled(0); break;
     }
@@ -1852,6 +1866,12 @@ void gui_raise_files(void) { g_app_min[APP_FILES] = 0; raise_app(APP_FILES); }
 int gui_open_apps(void) {
     if (!gfx_available() || !g_gui_enabled) return 0;
     do_action(ACT_APPS);
+    return 1;
+}
+
+int gui_open_settings(void) {
+    if (!gfx_available() || !g_gui_enabled) return 0;
+    do_action(ACT_SETTINGS);
     return 1;
 }
 

@@ -190,6 +190,10 @@ int syscmd_dispatch(const char* line) {
         if (!gui_open_apps()) cmd_pkg(2, (char*[]){ "pkg", "list" });
         return 1;
     }
+    if (strcmp(argv[0], "settings") == 0) {
+        if (!gui_open_settings()) terminal_writeln("settings: Settings is part of the desktop - run `startx` first");
+        return 1;
+    }
     if (strcmp(argv[0], "taskmgr") == 0) {
         if (!gui_open_taskmgr()) terminal_writeln("taskmgr: the Task Manager is part of the desktop (startx) - try `top` here");
         return 1;

@@ -1200,7 +1200,7 @@ static const char* const known_cmds[] = {
     "ifconfig", "dhcp", "ping", "nslookup", "host", "netstat", "arp", "curl", "wget",
     "cryptotest", "wallpaper", "lsusb", "usb", "httpd", "sshd", "passwd", "files", "browser", "notepad",
     /* shell/syscmds.c */
-    "mount", "umount", "eject", "pkg", "apps", "taskmgr", "play", "beep", "volume", "lsaudio", (void*)0
+    "mount", "umount", "eject", "pkg", "apps", "taskmgr", "settings", "play", "beep", "volume", "lsaudio", (void*)0
 };
 
 static void cmd_which(const char* args) {

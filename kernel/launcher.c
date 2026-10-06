@@ -151,7 +151,9 @@ void launcher_click(int mx, int my) {
     int lx = mx - g_win.x, ly = my - g_win.y;
     g_gen++;
     if (ly < TITLE_H + 2) {
-        if (lx >= g_win.w - 28 && lx < g_win.w - 8) { launcher_close(); return; }
+        int b = win_button_press(&g_win, 4, 12, mx, my);
+        if (b == WIN_BTN_CLOSE) { launcher_close(); return; }
+        if (b) return;
         win_title_press(&g_win, mx, my);
         return;
     }
@@ -183,8 +185,7 @@ void launcher_draw(const fb_info_t* fi) {
     bevel(x, y, W, H, C_PANEL, 0x00505D72u, 0x0010141Cu);
     bevel(x + 3, y + 3, W - 6, TITLE_H - 1, C_TITLE, 0x00647692u, 0x00111923u);
     gfx_draw_text(x + 10, y + 7, "Apps", 0x00FFFFFFu, C_TITLE);
-    bevel(x + W - 28, y + 4, 20, 12, 0x006D2F2Fu, 0x00A14747u, 0x00301717u);
-    gfx_draw_text(x + W - 22, y + 6, "x", 0x00FFFFFFu, 0x006D2F2Fu);
+    win_draw_buttons(&g_win, 4, 12);
 
     bevel(x + 8, y + TOOL_Y, 112, 18, 0x00303740u, 0x00535D6Eu, 0x0015191Fu);
     gfx_draw_text(x + 16, y + TOOL_Y + 5, "Get apps...", C_TEXT, 0x00303740u);

@@ -21,6 +21,8 @@ Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux k
 - **Sound** - Intel HD Audio and AC'97 drivers (QEMU, VirtualBox, many real PCs) and the PC speaker: `play file.wav`, `beep`, `volume`, and sound for apps
 - **Windows-like taskbar** - a button per open window (click: focus, click again: minimize), minimize buttons, *Show the desktop*
 - **Task Manager** - windows and apps (Switch to / End task), the kernel's tasks with their CPU use, live CPU and memory graphs; from the desktop, the Start menu or a right-click on the taskbar
+- **Settings** - wallpaper, sound volume, keyboard layout, network, date & time and information about the computer (`settings` in a terminal); volume and layout are kept in `/etc/settings.conf`
+- **Window buttons** - every window has minimize, maximize / restore and close buttons in its title bar
 - **Right-click menus everywhere** - desktop, taskbar, terminals (copy, paste, clear), Files (open, install, rename, cut/copy/paste, delete, new file/folder, eject), the browser (open/save link, back, reload, page source...), Notepad
 - **Browser downloads** - anything that is not a web page (apps, archives, programs...) is saved to `~/Downloads`; *Save link as* / *Save page as* in the right-click menu
 - **UEFI fixes** - device registers above 4 GiB (where UEFI firmware puts NVMe, GPUs...) are mapped on demand, and the desktop uses whatever resolution the firmware gives (not only 800x600)
@@ -95,6 +97,7 @@ Banana-OS/
 │   ├── pkg.c           # .bpk packages (pkg install / remove / run)
 │   ├── launcher.c      # "Apps" window
 │   ├── taskmgr.c       # "Task Manager" window
+│   ├── settings.c      # "Settings" window
 │   ├── ctxmenu.c       # Right-click menus
 │   ├── examples.c, exbin.asm # The SDK examples built into the kernel (~/Examples)
 │   └── keyboard.c ...  # PS/2 keyboard/mouse, ATA/ATAPI, RTC, USB handoff
@@ -427,7 +430,7 @@ QEMU: `-audiodev pa,id=snd0 -device intel-hda -device hda-output,audiodev=snd0` 
 
 ## The desktop: taskbar, Task Manager, right-click
 
-- **Taskbar**: the **banana** button opens the Start menu; every open window has a button - click it to bring the window to the front, click again to minimize it (terminal windows also have a **_** button); the right side shows the network status and the clock. Right-click the taskbar for **Task Manager**, **Show the desktop** and **Restore all windows**; right-click a window's button to restore, minimize or close it.
+- **Taskbar**: the **banana** button opens the Start menu; every open window has a button - click it to bring the window to the front, click again to minimize it (every window also has **_** minimize, maximize / restore and **x** close buttons); the right side shows the network status and the clock. Right-click the taskbar for **Task Manager**, **Show the desktop** and **Restore all windows**; right-click a window's button to restore, minimize or close it.
 - **Task Manager**: *Apps & windows* (Switch to / End task, also on right-click), *Processes* (the kernel's tasks, their state and CPU use), *Performance* (CPU and memory graphs, uptime, files, network, sound). Open it from its desktop icon, the Start menu, the taskbar's right-click menu, or `taskmgr`.
 - **Right-click menus**: the desktop (open any app, wallpaper, exit), terminals (copy, paste, clear, new, minimize, close), Files (open, install app, play, set as wallpaper, edit, cut / copy / paste, rename, delete, properties, new folder / text file, terminal here, eject), the browser (open a link / in a new tab, save it, copy its address, back, forward, reload, copy, paste, save page, page source, Downloads folder), Notepad (cut, copy, paste, select all, find, open, save), Apps (open, details, uninstall).
 - Files also takes the keyboard while it is in front: arrows, Enter, Backspace (up), Delete, Ctrl+C / Ctrl+X / Ctrl+V, Ctrl+R (rename), Ctrl+N (new folder).

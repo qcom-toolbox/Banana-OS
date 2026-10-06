@@ -1,4 +1,5 @@
 #include "appwin.h"
+#include "winframe.h"
 #include "gfx.h"
 #include "kheap.h"
 #include "kstring.h"
@@ -308,10 +309,7 @@ void appwin_draw(const fb_info_t* fi) {
         if (maxc < 1) maxc = 1;
         if ((int)strlen(t) > maxc) t[maxc] = 0;
         gfx_draw_text(w->x + 10, w->y + 8, t, 0x00FFFFFFu, tbg);
-        bevel(w->x + W - 28, w->y + 5, 20, 14, 0x00553333u, 0x00885555u, 0x00221111u);
-        gfx_draw_text(w->x + W - 22, w->y + 8, "x", 0x00FFFFFFu, 0x00553333u);
-        bevel(w->x + W - 52, w->y + 5, 20, 14, 0x00303740u, 0x00535D6Eu, 0x0015191Fu);
-        gfx_draw_text(w->x + W - 46, w->y + 7, "_", 0x00FFFFFFu, 0x00303740u);
+        win_draw_button_row(w->x + W, w->y + 5, 14, w->resizable, w->maxed);
         blit(w, w->x + BORDER, w->y + TITLE_H + BORDER);
         if (w->resizable) gfx_draw_grip(w->x + W, w->y + H);
         if (w->resizing || w->pending) {
@@ -346,13 +344,15 @@ void appwin_click(int mx, int my) {
     raise(id);
     int W = outer_w(w);
     if (my < w->y + TITLE_H + 2) {
-        if (mx >= w->x + W - 28 && mx < w->x + W - 8) {
+        int tbtn = win_button_hit(w->x + W, w->y + 5, 14, w->resizable, mx, my);
+        if (tbtn == WIN_BTN_MAX) { toggle_maximize(w); return; }
+        if (tbtn == WIN_BTN_CLOSE) {
             /* first click: the app is asked to close; a second one stops it */
             if (++w->close_clicks >= 2) g_killed[w->owner & 63] = 1;
             push_simple(w, BANANA_EV_CLOSE, 0, 0, 0, 0);
             return;
         }
-        if (mx >= w->x + W - 52 && mx < w->x + W - 32) {   /* minimize to the taskbar */
+        if (tbtn == WIN_BTN_MIN) {                         /* minimize to the taskbar */
             w->min = 1;
             g_gen++;
             return;

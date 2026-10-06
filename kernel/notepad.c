@@ -358,7 +358,9 @@ void notepad_click(int mx, int my) {
     int lx = mx - g_win.x, ly = my - g_win.y;
     g_gen++;
     if (ly < TITLE_H + 2) {
-        if (lx >= g_win.w - 28 && lx < g_win.w - 8) { request_close(); return; }
+        int b = win_button_press(&g_win, 4, 12, mx, my);
+        if (b == WIN_BTN_CLOSE) { request_close(); return; }
+        if (b) { clamp_scroll(); return; }
         win_title_press(&g_win, mx, my);
         return;
     }
@@ -563,8 +565,7 @@ void notepad_draw(const fb_info_t* fi) {
     const char* name = g_path[0] ? strrchr(g_path, '/') + 1 : "Untitled";
     ksnprintf(title, sizeof(title), "%s%s - Notepad", g_tb.dirty ? "*" : "", name);
     draw_clip(x + 10, y + 7, title, (w - 50) / 8, 0x00FFFFFFu, tbg);
-    bevel(x + w - 28, y + 4, 20, 12, 0x006D2F2Fu, 0x00A14747u, 0x00301717u);
-    gfx_draw_text(x + w - 22, y + 6, "x", 0x00FFFFFFu, 0x006D2F2Fu);
+    win_draw_buttons(&g_win, 4, 12);
 
     for (int i = 0; i < TOOL_COUNT; i++) {
         if (TOOLS[i].x + TOOLS[i].w > w - 6) break;

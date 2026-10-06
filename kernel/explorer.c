@@ -598,7 +598,9 @@ void explorer_click(int mx, int my) {
     g_gen++;
 
     if (ly < TITLE_H + 2) {
-        if (lx >= WIN_W - 28 && lx < WIN_W - 8) { explorer_close(); return; }
+        int b = win_button_press(&g_win, 4, 12, mx, my);
+        if (b == WIN_BTN_CLOSE) { explorer_close(); return; }
+        if (b) return;
         win_title_press(&g_win, mx, my);
         return;
     }
@@ -780,8 +782,7 @@ void explorer_draw(const fb_info_t* fi) {
     bevel(x + 3, y + 3, WIN_W - 6, TITLE_H - 1, C_TITLE, 0x00647692u, 0x00111923u);
     draw_folder_icon(x + 8, y + 5);
     gfx_draw_text(x + 26, y + 7, "Files", 0x00FFFFFFu, C_TITLE);
-    bevel(x + WIN_W - 28, y + 4, 20, 12, 0x006D2F2Fu, 0x00A14747u, 0x00301717u);
-    gfx_draw_text(x + WIN_W - 22, y + 6, "x", 0x00FFFFFFu, 0x006D2F2Fu);
+    win_draw_buttons(&g_win, 4, 12);
 
     for (int i = 0; i < TOOL_COUNT; i++) {
         int enabled = (i != 3 || g_sel >= 0) && (i != 0 || strcmp(g_path, "/") != 0) && (i != 6 || fs_find_dir("/mnt/usb") >= 0);

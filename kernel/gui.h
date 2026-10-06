@@ -41,6 +41,7 @@ int gui_appwin_focused(void);
 /* opens Apps / the Task Manager; 0 if the desktop is not running */
 int gui_open_apps(void);
 int gui_open_taskmgr(void);
+int gui_open_settings(void);   /* the Settings window (0 without the desktop) */
 void gui_raise_files(void);
 
 /* the open windows (taskbar order), for the Task Manager */

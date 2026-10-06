@@ -1,3 +1,4 @@
+#include "../kernel/settings.h"
 #include "../net/upnp.h"
 #include "srvcmds.h"
 #include "netcmds.h"
@@ -261,6 +262,7 @@ int srvcmd_dispatch(const char* line) {
 
 void services_boot(void) {
     netconf_boot();
+    settings_boot();                    /* volume, keyboard layout */
     uint16_t port = 80;
     char e[96];
     if (boot_enabled("httpd", &port) && httpd_start(port, e, sizeof(e)) != 0)

@@ -1494,8 +1494,7 @@ void browser_draw(const fb_info_t* fi) {
     char title[160];
     ksnprintf(title, sizeof(title), "%s - Banana Browser", t && t->title[0] ? t->title : "New tab");
     draw_clipped(x + 10, y + 8, title, (W - 60) / 8, 0x00FFFFFFu, tbg, 0);
-    bevel(x + W - 28, y + 5, 20, 14, 0x00553333u, 0x00885555u, 0x00221111u);
-    gfx_draw_text(x + W - 22, y + 8, "x", 0x00FFFFFFu, 0x00553333u);
+    win_draw_buttons(&g_win, 5, 14);
 
     /* tabs */
     int tw = tab_width();
@@ -1585,7 +1584,9 @@ void browser_click(int mx, int my) {
     g_gen++;
     if (g_alert[0]) { g_alert[0] = 0; return; }
     if (ly < TITLE_H + 2) {
-        if (lx >= g_win.w - 28 && lx < g_win.w - 8) { browser_close(); return; }
+        int b = win_button_press(&g_win, 5, 14, mx, my);
+        if (b == WIN_BTN_CLOSE) { browser_close(); return; }
+        if (b) { g_render_req = 1; return; }
         if (win_title_press(&g_win, mx, my)) g_render_req = 1;
         return;
     }

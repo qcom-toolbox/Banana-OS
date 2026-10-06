@@ -196,7 +196,9 @@ void taskmgr_click(int mx, int my) {
     int lx = mx - g_win.x, ly = my - g_win.y;
     g_gen++;
     if (ly < TITLE_H + 2) {
-        if (lx >= g_win.w - 28 && lx < g_win.w - 8) { taskmgr_close(); return; }
+        int b = win_button_press(&g_win, 4, 12, mx, my);
+        if (b == WIN_BTN_CLOSE) { taskmgr_close(); return; }
+        if (b) return;
         win_title_press(&g_win, mx, my);
         return;
     }
@@ -260,8 +262,7 @@ void taskmgr_draw(const fb_info_t* fi) {
     bevel(x, y, W, H, C_PANEL, 0x00505D72u, 0x0010141Cu);
     bevel(x + 3, y + 3, W - 6, TITLE_H - 1, C_TITLE, 0x00647692u, 0x00111923u);
     gfx_draw_text(x + 10, y + 7, "Task Manager", 0x00FFFFFFu, C_TITLE);
-    bevel(x + W - 28, y + 4, 20, 12, 0x006D2F2Fu, 0x00A14747u, 0x00301717u);
-    gfx_draw_text(x + W - 22, y + 6, "x", 0x00FFFFFFu, 0x006D2F2Fu);
+    win_draw_buttons(&g_win, 4, 12);
 
     int tx = x + 6;
     for (int t = 0; t < TAB_COUNT; t++) {
