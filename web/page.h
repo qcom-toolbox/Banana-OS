@@ -77,6 +77,8 @@ typedef struct page {
     arena_t      LA;                  /* styles + layout, emptied on each relayout */
     int          dispatch_depth;      /* jsdom: handlers running (nested dispatch) */
     obj_t*       elem_proto;          /* jsdom: element methods */
+    obj_t*       ce_reg;              /* custom elements: tag -> class */
+    obj_t*       ce_wait;             /* ...whenDefined() promises still waiting: tag -> array */
     obj_t*       style_proto;
     obj_t*       class_proto;
     obj_t*       doc_obj;

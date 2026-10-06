@@ -1092,6 +1092,9 @@ static value_t o_setPrototypeOf(interp_t* I, value_t self, int argc, value_t* ar
 }
 static void define_prop(interp_t* I, obj_t* o, const char* key, value_t desc) {
     if (desc.t != V_OBJ) return;
+    int had = 0, fe = 0;
+    prop_get_raw(o, key, &had);
+    value_t en = prop_get_raw(desc.o, "enumerable", &fe);
     value_t g = obj_get(I, desc.o, "get"), s = obj_get(I, desc.o, "set");
     if (g.t == V_FUNC || s.t == V_FUNC) {
         obj_t* acc = obj_new(I, OBJ_PLAIN);
@@ -1099,11 +1102,14 @@ static void define_prop(interp_t* I, obj_t* o, const char* key, value_t desc) {
         if (g.t == V_FUNC) obj_set(I, acc, "get", g);
         if (s.t == V_FUNC) obj_set(I, acc, "set", s);
         prop_set_raw(I, o, str_new(I, key, (uint32_t)strlen(key)), v_obj(acc));
-        return;
+    } else {
+        int f = 0;
+        value_t v = prop_get_raw(desc.o, "value", &f);
+        if (f) obj_set(I, o, key, v);
+        else if (!had) prop_set_raw(I, o, str_new(I, key, (uint32_t)strlen(key)), v_undef());
     }
-    int f = 0;
-    value_t v = prop_get_raw(desc.o, "value", &f);
-    if (f) obj_set(I, o, key, v);
+    if (fe) prop_set_enumerable(I, o, key, v_truthy(I, en));
+    else if (!had) prop_set_enumerable(I, o, key, 0);    /* new and not said: not enumerable */
 }
 static value_t o_defineProperty(interp_t* I, value_t self, int argc, value_t* argv) {
     (void)self;
@@ -1135,7 +1141,11 @@ static value_t o_getOwnPropertyDescriptor(interp_t* I, value_t self, int argc, v
         obj_set(I, d, "value", v);
         obj_set(I, d, "writable", v_bool(1));
     }
-    obj_set(I, d, "enumerable", v_bool(1));
+    obj_t* hidden = prop_hidden_names(o.o);
+    int en = 1;
+    for (uint32_t i = 0; hidden && i < hidden->len; i++)
+        if (hidden->items[i].t == V_STR && strcmp(hidden->items[i].s->s, v_cstr(I, ARG(1))) == 0) en = 0;
+    obj_set(I, d, "enumerable", v_bool(en));
     obj_set(I, d, "configurable", v_bool(1));
     return v_obj(d);
 }
@@ -1575,6 +1585,8 @@ void es_init(interp_t* I) {
     method(I, statics_of(I, prx), "revocable", js_Proxy_revocable);
     script_def_global(I, "Proxy", prx);
 
+    bi_init(I);
+
     I->proto_gen = obj_new(I, OBJ_PLAIN);
     method(I, I->proto_gen, "next", gen_next);
     method(I, I->proto_gen, "return", gen_return);
@@ -1603,8 +1615,9 @@ void es_init(interp_t* I) {
         method(I, os, "fromEntries", o_fromEntries);
         method(I, os, "is", o_is);
         int ff = 0;
+        prop_get_raw(os, "getOwnPropertyNames", &ff);
         value_t keys = prop_get_raw(os, "keys", &ff);
-        if (ff) obj_set(I, os, "getOwnPropertyNames", keys);
+        if (!ff) obj_set(I, os, "getOwnPropertyNames", keys);
         obj_set(I, os, "prototype", v_obj(I->proto_object));
     }
     /* Array */

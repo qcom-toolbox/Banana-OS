@@ -21,6 +21,8 @@ static const host_class_t elem_class, style_class, class_class, win_class, loc_c
 static page_t* P(interp_t* I) { return (page_t*)script_host(I); }
 
 static value_t wrap(page_t* p, dom_node_t* n);
+static void ce_sweep(page_t* p, dom_node_t* n);
+static void ce_attr(page_t* p, dom_node_t* n, const char* name, const char* old);
 
 static dom_node_t* node_of(value_t v) {
     if (v.t != V_OBJ || v.o->kind != OBJ_HOST || v.o->hc != &elem_class) return NULL;
@@ -495,6 +497,7 @@ static void set_html(page_t* p, dom_node_t* n, const char* s) {
     dom_remove_children(n);
     html_parse_into(&p->A, n, s, (uint32_t)strlen(s));
     changed(p);
+    if (p->ce_reg) ce_sweep(p, n);
 }
 
 /* the document node */
@@ -801,7 +804,9 @@ static value_t m_setAttribute(interp_t* I, value_t self, int argc, value_t* argv
     kstrlcpy(name, arg_str(I, argc, argv, 0), sizeof(name));
     for (char* c = name; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
     const char* val = arg_str(I, argc, argv, 1);
+    const char* old = dom_attr(n, name);
     dom_set_attr(&p->A, n, name, val);
+    if (n->ce_state) ce_attr(p, n, name, old);
     if (name[0] == 'o' && name[1] == 'n') {                /* recompile on next event */
         char ev[40];
         ksnprintf(ev, sizeof(ev), "@%s", name + 2);
@@ -821,9 +826,11 @@ static value_t m_removeAttribute(interp_t* I, value_t self, int argc, value_t* a
     dom_node_t* n = self_node(I, self);
     if (!n || n->type != DOM_ELEM) return v_undef();
     const char* name = arg_str(I, argc, argv, 0);
+    const char* old = dom_attr(n, name);
     dom_remove_attr(n, name);
     if (strcmp(name, "checked") == 0) n->checked = 0;
     changed(P(I));
+    if (old && n->ce_state) ce_attr(P(I), n, name, old);
     return v_undef();
 }
 
@@ -840,22 +847,223 @@ static int contains(dom_node_t* a, dom_node_t* b) {
 }
 
 /* inserts child (or a fragment's children) into parent before ref */
+static void throw_dom(interp_t* I, const char* name, const char* msg);
+
+/* ══ custom elements ══════════════════════════════════════════════════
+ * customElements.define(tag, class): elements with that tag get the
+ * class's prototype and run its constructor (with `this` the element),
+ * then attributeChangedCallback for the observed attributes they have,
+ * and connectedCallback once in the document. That happens on define(),
+ * on createElement / new, and when elements are inserted. */
+
+static int connected(page_t* p, dom_node_t* n) {
+    while (n->parent) n = n->parent;
+    return n == p->doc;
+}
+
+/* an exception in a callback is reported, not passed to whoever inserted the element */
+static void ce_report(page_t* p) {
+    interp_t* I = p->js;
+    if (I->ctl != CTL_THROW) return;
+    char buf[256];
+    ksnprintf(buf, sizeof(buf), "browser: js: Uncaught %s (custom element; %s, line %d:%d)", v_cstr(I, I->ret),
+              I->throw_src ? I->throw_src : "?", I->throw_line, I->throw_col);
+    I->ctl = CTL_NONE;
+    if (p->env && p->env->log) p->env->log(p->env->ctx, buf);
+}
+
+static value_t ce_class(page_t* p, const char* tag) {
+    if (!p->ce_reg || !strchr(tag, '-')) return v_undef();
+    int f = 0;
+    value_t c = prop_get_raw(p->ce_reg, tag, &f);
+    return f ? c : v_undef();
+}
+
+static value_t ce_static(interp_t* I, value_t cls, const char* key) {
+    value_t v = obj_getv(I, cls, key);
+    if (v.t == V_OBJ && v.o->kind == OBJ_ACCESSOR) v = accessor_get(I, v, cls);   /* static get observedAttributes() */
+    return v;
+}
+
+static void ce_attr_call(page_t* p, dom_node_t* n, const char* name, const char* old, const char* now) {
+    interp_t* I = p->js;
+    value_t w = wrap(p, n);
+    value_t cb = obj_getv(I, w, "attributeChangedCallback");
+    if (cb.t != V_FUNC) return;
+    value_t a[3] = { v_str(I, name), old ? v_str(I, old) : v_null(), now ? v_str(I, now) : v_null() };
+    call_value(I, cb, w, 3, a);
+    ce_report(p);
+}
+
+static int ce_observes(page_t* p, value_t cls, const char* name) {
+    value_t oa = ce_static(p->js, cls, "observedAttributes");
+    if (oa.t != V_OBJ || oa.o->kind != OBJ_ARRAY) return 0;
+    for (uint32_t i = 0; i < oa.o->len; i++)
+        if (oa.o->items[i].t == V_STR && strcmp(oa.o->items[i].s->s, name) == 0) return 1;
+    return 0;
+}
+
+/* setAttribute & co on an upgraded element */
+static void ce_attr(page_t* p, dom_node_t* n, const char* name, const char* old) {
+    if (!n->ce_state || !p->ce_reg) return;
+    value_t cls = ce_class(p, n->tag);
+    if (cls.t == V_FUNC && ce_observes(p, cls, name)) ce_attr_call(p, n, name, old, dom_attr(n, name));
+}
+
+static void ce_construct(page_t* p, dom_node_t* n, value_t cls) {
+    interp_t* I = p->js;
+    value_t w = wrap(p, n);
+    value_t proto = obj_getv(I, cls, "prototype");
+    if (proto.t == V_OBJ) w.o->proto = proto.o;
+    n->ce_state = 1;
+    value_t saved = I->new_target;
+    I->new_target = v_undef();                      /* super() keeps `this`: the element */
+    call_value(I, cls, w, 0, NULL);
+    I->new_target = saved;
+    ce_report(p);
+    value_t oa = ce_static(I, cls, "observedAttributes");
+    if (oa.t == V_OBJ && oa.o->kind == OBJ_ARRAY)
+        for (uint32_t i = 0; i < oa.o->len; i++) {
+            if (oa.o->items[i].t != V_STR) continue;
+            const char* v = dom_attr(n, oa.o->items[i].s->s);
+            if (v) ce_attr_call(p, n, oa.o->items[i].s->s, NULL, v);
+        }
+}
+
+static void ce_collect(dom_node_t* n, dom_node_t** list, int* k, int max) {
+    for (; n && *k < max; n = n->next) {
+        if (n->type != DOM_ELEM) continue;
+        if (n->ce_state < 2 && strchr(n->tag, '-')) list[(*k)++] = n;
+        if (n->first) ce_collect(n->first, list, k, max);
+    }
+}
+
+/* upgrade and connect what is defined in n and below it */
+static void ce_sweep(page_t* p, dom_node_t* n) {
+    if (!p->ce_reg || !p->ce_reg->n || !n || !p->js) return;
+    dom_node_t* list[512];
+    int k = 0;
+    if (n->type == DOM_ELEM && n->ce_state < 2 && strchr(n->tag, '-')) list[k++] = n;
+    ce_collect(n->first, list, &k, 512);
+    for (int i = 0; i < k; i++) {
+        dom_node_t* e = list[i];
+        value_t cls = ce_class(p, e->tag);
+        if (cls.t != V_FUNC) continue;
+        if (e->ce_state == 0) ce_construct(p, e, cls);
+        if (e->ce_state == 1 && connected(p, e)) {
+            e->ce_state = 2;
+            value_t w = wrap(p, e);
+            value_t cb = obj_getv(p->js, w, "connectedCallback");
+            if (cb.t == V_FUNC) { call_value(p->js, cb, w, 0, NULL); ce_report(p); }
+        }
+    }
+}
+
+static value_t ce_define(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    page_t* p = P(I);
+    char tag[64];
+    kstrlcpy(tag, arg_str(I, argc, argv, 0), sizeof(tag));
+    for (char* c = tag; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
+    if (argc < 2 || argv[1].t != V_FUNC) { script_throw(I, "TypeError: customElements.define needs a constructor"); return v_undef(); }
+    if (!strchr(tag, '-')) { throw_dom(I, "SyntaxError", "not a valid custom element name"); return v_undef(); }
+    if (!p->ce_reg) p->ce_reg = obj_new(I, OBJ_PLAIN);
+    if (ce_class(p, tag).t != V_UNDEF) { throw_dom(I, "NotSupportedError", "this name has already been used with this registry"); return v_undef(); }
+    obj_set(I, p->ce_reg, tag, argv[1]);
+    ce_sweep(p, p->doc);
+    if (p->ce_wait) {
+        int f = 0;
+        value_t w = prop_get_raw(p->ce_wait, tag, &f);
+        if (f && w.t == V_OBJ && w.o->kind == OBJ_ARRAY) {
+            for (uint32_t i = 0; i < w.o->len; i++) es_promise_settle(I, w.o->items[i], 0, argv[1]);
+            obj_set(I, p->ce_wait, tag, v_undef());
+        }
+    }
+    return v_undef();
+}
+
+static value_t ce_get(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    char tag[64];
+    kstrlcpy(tag, arg_str(I, argc, argv, 0), sizeof(tag));
+    for (char* c = tag; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
+    return ce_class(P(I), tag);
+}
+
+static value_t ce_whenDefined(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    page_t* p = P(I);
+    char tag[64];
+    kstrlcpy(tag, arg_str(I, argc, argv, 0), sizeof(tag));
+    for (char* c = tag; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
+    value_t pr = es_promise_new(I);
+    value_t cls = ce_class(p, tag);
+    if (cls.t != V_UNDEF) { es_promise_settle(I, pr, 0, cls); return pr; }
+    if (!p->ce_wait) p->ce_wait = obj_new(I, OBJ_PLAIN);
+    int f = 0;
+    value_t w = prop_get_raw(p->ce_wait, tag, &f);
+    if (!f || w.t != V_OBJ) { w = v_obj(obj_new(I, OBJ_ARRAY)); obj_set(I, p->ce_wait, tag, w); }
+    arr_push(I, w.o, pr);
+    return pr;
+}
+
+static value_t ce_upgrade(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    page_t* p = P(I);
+    dom_node_t* n = node_of(ARG(0));
+    if (n && p->ce_reg) {                            /* upgrade (not connect) what is under n */
+        dom_node_t* list[512];
+        int k = 0;
+        if (n->type == DOM_ELEM && !n->ce_state && strchr(n->tag, '-')) list[k++] = n;
+        ce_collect(n->first, list, &k, 512);
+        for (int i = 0; i < k; i++) {
+            value_t cls = ce_class(p, list[i]->tag);
+            if (cls.t == V_FUNC && !list[i]->ce_state) ce_construct(p, list[i], cls);
+        }
+    }
+    return v_undef();
+}
+
+/* a DOMException (prelude.js) with this name: `e instanceof DOMException`
+ * and e.name tests in page scripts work */
+static void throw_dom(interp_t* I, const char* name, const char* msg) {
+    value_t ctor = script_get_global(I, "DOMException");
+    if (ctor.t == V_FUNC) {
+        obj_t* o = obj_new(I, OBJ_PLAIN);
+        value_t proto = obj_getv(I, ctor, "prototype");
+        if (proto.t == V_OBJ) o->proto = proto.o;
+        value_t a[2] = { v_str(I, msg), v_str(I, name) };
+        value_t r = call_value(I, ctor, v_obj(o), 2, a);
+        if (I->ctl == CTL_THROW) return;
+        I->ret = r.t == V_OBJ ? r : v_obj(o);
+        I->ctl = CTL_THROW;
+        I->throw_line = I->line; I->throw_col = I->col; I->throw_src = I->src_name;
+        return;
+    }
+    char buf[200];
+    ksnprintf(buf, sizeof(buf), "%s: %s", name, msg);
+    script_throw(I, buf);
+}
+
 static int insert(interp_t* I, dom_node_t* parent, dom_node_t* child, dom_node_t* ref) {
     if (!parent || !child) { script_throw(I, "TypeError: parameter is not of type 'Node'"); return 0; }
-    if (contains(child, parent)) { script_throw(I, "HierarchyRequestError: the new child contains the parent"); return 0; }
+    if (contains(child, parent)) { throw_dom(I, "HierarchyRequestError", "the new child contains the parent"); return 0; }
     if (is_fragment(child)) {
         while (child->first) {
             dom_node_t* c = child->first;
             dom_remove(c);
             dom_insert_before(parent, c, ref);
         }
-    } else {
-        if (child == ref) return 1;
-        if (child->parent) dom_remove(child);
-        if (ref && ref->parent == parent) dom_insert_before(parent, child, ref);
-        else dom_append(parent, child);
+        changed(P(I));
+        if (P(I)->ce_reg) ce_sweep(P(I), parent);
+        return 1;
     }
+    if (child == ref) return 1;
+    if (child->parent) dom_remove(child);
+    if (ref && ref->parent == parent) dom_insert_before(parent, child, ref);
+    else dom_append(parent, child);
     changed(P(I));
+    if (P(I)->ce_reg) ce_sweep(P(I), child);
     return 1;
 }
 
@@ -895,7 +1103,7 @@ static value_t m_insertBefore(interp_t* I, value_t self, int argc, value_t* argv
 static value_t m_removeChild(interp_t* I, value_t self, int argc, value_t* argv) {
     dom_node_t* n = self_node(I, self);
     dom_node_t* c = node_of(ARG(0));
-    if (!n || !c || c->parent != n) { script_throw(I, "NotFoundError: the node is not a child of this node"); return v_undef(); }
+    if (!n || !c || c->parent != n) { throw_dom(I, "NotFoundError", "the node is not a child of this node"); return v_undef(); }
     if (P(I)->focus && contains(c, P(I)->focus)) P(I)->focus = NULL;
     dom_remove(c);
     changed(P(I));
@@ -906,7 +1114,7 @@ static value_t m_replaceChild(interp_t* I, value_t self, int argc, value_t* argv
     dom_node_t* n = self_node(I, self);
     dom_node_t* nw = node_of(ARG(0));
     dom_node_t* old = node_of(ARG(1));
-    if (!n || !nw || !old || old->parent != n) { script_throw(I, "NotFoundError: the node is not a child of this node"); return v_undef(); }
+    if (!n || !nw || !old || old->parent != n) { throw_dom(I, "NotFoundError", "the node is not a child of this node"); return v_undef(); }
     if (insert(I, n, nw, old)) dom_remove(old);
     return ARG(1);
 }
@@ -1164,7 +1372,9 @@ static value_t d_createElement(interp_t* I, value_t self, int argc, value_t* arg
     char tag[32];
     kstrlcpy(tag, arg_str(I, argc, argv, 0), sizeof(tag));
     for (char* c = tag; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
-    return wrap(P(I), dom_new_element(&P(I)->A, tag));
+    dom_node_t* n = dom_new_element(&P(I)->A, tag);
+    if (P(I)->ce_reg) ce_sweep(P(I), n);              /* a custom element: its constructor runs now */
+    return wrap(P(I), n);
 }
 
 static value_t d_createTextNode(interp_t* I, value_t self, int argc, value_t* argv) {
@@ -1533,9 +1743,11 @@ static value_t m_toggleAttribute(interp_t* I, value_t self, int argc, value_t* a
     if (!n || n->type != DOM_ELEM) return v_bool(0);
     const char* name = arg_str(I, argc, argv, 0);
     int on = argc > 1 ? v_truthy(I, argv[1]) : !dom_attr(n, name);
+    const char* old = dom_attr(n, name);
     if (on) dom_set_attr(&P(I)->A, n, name, "");
     else dom_remove_attr(n, name);
     changed(P(I));
+    if (n->ce_state && (on ? !old : old != NULL)) ce_attr(P(I), n, name, old);
     return v_bool(on);
 }
 
@@ -1576,7 +1788,20 @@ static value_t js_Image(interp_t* I, value_t self, int argc, value_t* argv) {
  * method tables, so polyfills added there reach every element. Calling one does
  * nothing: that is what super() in `class X extends HTMLElement` needs */
 static value_t js_dom_class(interp_t* I, value_t self, int argc, value_t* argv) {
-    (void)I; (void)self; (void)argc; (void)argv;
+    (void)self; (void)argc; (void)argv;
+    page_t* p = P(I);
+    value_t nt = I->new_target;                      /* new MyElement(): a fresh element of its tag */
+    if (nt.t != V_FUNC || !p->ce_reg) return v_undef();
+    for (uint32_t i = 0; i < p->ce_reg->n; i++) {
+        value_t c = p->ce_reg->props[i].v;
+        if (c.t != V_FUNC || c.f != nt.f) continue;
+        dom_node_t* n = dom_new_element(&p->A, p->ce_reg->props[i].key->s);
+        value_t w = wrap(p, n);
+        value_t proto = obj_getv(I, nt, "prototype");
+        if (proto.t == V_OBJ) w.o->proto = proto.o;
+        n->ce_state = 1;
+        return w;
+    }
     return v_undef();
 }
 
@@ -2096,9 +2321,10 @@ void jsdom_install(page_t* p) {
     obj_set(I, hist, "state", v_null());
     script_def_global(I, "history", v_obj(hist));
     obj_t* ce = obj_new(I, OBJ_PLAIN);
-    obj_set(I, ce, "define", v_native(I, "define", m_nothing));
-    obj_set(I, ce, "get", v_native(I, "get", m_nothing));
-    obj_set(I, ce, "whenDefined", v_native(I, "whenDefined", m_nothing));
+    obj_set(I, ce, "define", v_native(I, "define", ce_define));
+    obj_set(I, ce, "get", v_native(I, "get", ce_get));
+    obj_set(I, ce, "whenDefined", v_native(I, "whenDefined", ce_whenDefined));
+    obj_set(I, ce, "upgrade", v_native(I, "upgrade", ce_upgrade));
     script_def_global(I, "customElements", v_obj(ce));
     script_set_import(I, module_import, p);
     value_t imp = v_native(I, "import", w_import);   /* import(), import.meta */

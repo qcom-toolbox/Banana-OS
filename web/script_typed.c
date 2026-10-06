@@ -457,6 +457,28 @@ static value_t view_access(interp_t* I, value_t self, int argc, value_t* argv, i
 static value_t view_get(interp_t* I, value_t self, int argc, value_t* argv) { return view_access(I, self, argc, argv, 0); }
 static value_t view_set(interp_t* I, value_t self, int argc, value_t* argv) { return view_access(I, self, argc, argv, 1); }
 
+/* getBigInt64 / getBigUint64 / setBigInt64 / setBigUint64: data.n = 1 signed, + 2 to set */
+static value_t view_big(interp_t* I, value_t self, int argc, value_t* argv) {
+    if (self.t != V_OBJ || self.o->kind != OBJ_HOST || self.o->hc != &g_view_class) return v_undef();
+    tarr_t* t = (tarr_t*)self.o->host;
+    int mode = (int)I->cur_native->data.n, set = mode >= 2;
+    num_t o = v_tonum(I, ARG(0));
+    if (!num_finite(o) || o < 0 || (uint32_t)o + 8 > t->len) {
+        script_throw(I, "RangeError: offset is outside the bounds of the DataView");
+        return v_undef();
+    }
+    uint8_t* p = t->buf->data + t->off + (uint32_t)o;
+    int little = v_truthy(I, ARG(set ? 2 : 1));
+    if (set) {
+        uint64_t v = bi_to_u64(I, ARG(1));
+        for (int i = 0; i < 8; i++) p[little ? i : 7 - i] = (uint8_t)(v >> (8 * i));
+        return v_undef();
+    }
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v |= (uint64_t)p[little ? i : 7 - i] << (8 * i);
+    return bi_from_u64(I, v, mode & 1);
+}
+
 /* ── UTF-8 (TextEncoder / TextDecoder in prelude.js) ── */
 
 static value_t js_utf8_encode(interp_t* I, value_t self, int argc, value_t* argv) {
@@ -552,6 +574,12 @@ void typed_init(interp_t* I) {
         value_t s = v_native(I, VM[i].set, view_set);
         s.f->data = v_num(VM[i].kind);
         obj_set(I, g_view_proto, VM[i].set, s);
+    }
+    static const char* const BIG[] = { "getBigUint64", "getBigInt64", "setBigUint64", "setBigInt64" };
+    for (int i = 0; i < 4; i++) {
+        value_t f = v_native(I, BIG[i], view_big);
+        f.f->data = v_num(i);
+        obj_set(I, g_view_proto, BIG[i], f);
     }
     value_t dv = v_native(I, "DataView", js_DataView);
     obj_set(I, statics(I, dv), "prototype", v_obj(g_view_proto));

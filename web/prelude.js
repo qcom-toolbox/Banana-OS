@@ -260,6 +260,9 @@ if (W.crypto && crypto.getRandomValues) crypto.getRandomValues = function(a){ fo
 if (!Promise.withResolvers) Promise.withResolvers = function(){ var res, rej; var pr = new Promise(function(a, b){ res = a; rej = b; }); return {promise: pr, resolve: res, reject: rej}; };
 /* more DOM: element insertion helpers, popovers, tree walkers, ranges, events, parsing */
 var EPR = Element.prototype;
+/* shadow roots are their elements here: each has its own adopted sheets */
+if (!('adoptedStyleSheets' in EPR)) Object.defineProperty(EPR, 'adoptedStyleSheets', { configurable: true,
+  get: function(){ return this.__adopted || (this.__adopted = []); }, set: function(v){ this.__adopted = v; } });
 var toNode = function(x){ return typeof x === 'string' ? document.createTextNode(x) : x; };
 if (!EPR.before) EPR.before = function(){ var p = this.parentNode; if (!p) return; for (var i = 0; i < arguments.length; i++) p.insertBefore(toNode(arguments[i]), this); };
 if (!EPR.after) EPR.after = function(){ var p = this.parentNode; if (!p) return; var ref = this.nextSibling;
@@ -412,5 +415,16 @@ if (typeof W.Intl === 'undefined') {
     getCanonicalLocales: function(l){ return l ? [].concat(l) : []; },
     Segmenter: function(){ this.segment = function(s){ return Array.from(String(s)).map(function(c, i){ return {segment: c, index: i}; }); }; } };
   if (Date.prototype) Date.prototype.toLocaleDateString = function(){ return new DTF().format(this); };
+}
+if (typeof W.DOMException === 'undefined') {
+  var DE_CODES = { IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4, InvalidCharacterError: 5,
+    NoModificationAllowedError: 7, NotFoundError: 8, NotSupportedError: 9, InvalidStateError: 11, SyntaxError: 12,
+    InvalidModificationError: 13, NamespaceError: 14, InvalidAccessError: 15, TypeMismatchError: 17, SecurityError: 18,
+    NetworkError: 19, AbortError: 20, URLMismatchError: 21, QuotaExceededError: 22, TimeoutError: 23,
+    InvalidNodeTypeError: 24, DataCloneError: 25 };
+  W.DOMException = class DOMException extends Error {
+    constructor(message, name) { super(message === undefined ? '' : String(message)); this.message = message === undefined ? '' : String(message); this.name = name || 'Error'; this.code = DE_CODES[this.name] || 0; }
+  };
+  for (var dk in DE_CODES) W.DOMException[dk.replace(/([a-z])([A-Z])/g, '$1_$2').toUpperCase().replace(/_ERROR$/, '_ERR')] = DE_CODES[dk];
 }
 })();

@@ -204,6 +204,23 @@ static value_t js_Object(interp_t* I, value_t self, int argc, value_t* argv) {
 
 static value_t obj_keys_values(interp_t* I, value_t v, int what) {
     obj_t* r = obj_new(I, OBJ_ARRAY);
+    if (v.t == V_FUNC) {                                  /* a function's own properties */
+        obj_t* st = v.f->statics;
+        obj_t* hidden = st ? prop_hidden_names(st) : NULL;
+        for (uint32_t i = 0; st && i < st->n; i++) {
+            if (strcmp(st->props[i].key->s, "prototype") == 0) continue;
+            if (what == 3 ? st->props[i].key->s[0] == '\x01' : !prop_enumerable(st, hidden, i)) continue;
+            if (what == 0) arr_push(I, r, v_strv(st->props[i].key));
+            else if (what == 1) arr_push(I, r, st->props[i].v);
+            else {
+                obj_t* pair = obj_new(I, OBJ_ARRAY);
+                arr_push(I, pair, v_strv(st->props[i].key));
+                arr_push(I, pair, st->props[i].v);
+                arr_push(I, r, v_obj(pair));
+            }
+        }
+        return v_obj(r);
+    }
     if (v.t != V_OBJ) return v_obj(r);
     obj_t* o = v.o;
     while (es_proxy_target(o)) o = es_proxy_target(o);   /* a proxy: its target's keys */
@@ -222,13 +239,17 @@ static value_t obj_keys_values(interp_t* I, value_t v, int what) {
         }
         return v_obj(r);
     }
+    obj_t* hidden = prop_hidden_names(o);
     for (uint32_t i = 0; i < o->n; i++) {
-        if (what == 0) arr_push(I, r, v_strv(o->props[i].key));
-        else if (what == 1) arr_push(I, r, o->props[i].v);
+        if (what == 3 ? o->props[i].key->s[0] == '\x01' : !prop_enumerable(o, hidden, i)) continue;
+        if (what == 0 || what == 3) { arr_push(I, r, v_strv(o->props[i].key)); continue; }
+        value_t pv = o->props[i].v;
+        if (pv.t == V_OBJ && pv.o->kind == OBJ_ACCESSOR) pv = accessor_get(I, pv, v);   /* getters: their value */
+        if (what == 1) arr_push(I, r, pv);
         else {
             obj_t* pair = obj_new(I, OBJ_ARRAY);
             arr_push(I, pair, v_strv(o->props[i].key));
-            arr_push(I, pair, o->props[i].v);
+            arr_push(I, pair, pv);
             arr_push(I, r, v_obj(pair));
         }
     }
@@ -238,14 +259,35 @@ static value_t obj_keys_values(interp_t* I, value_t v, int what) {
 static value_t js_keys(interp_t* I, value_t self, int argc, value_t* argv) { (void)self; return obj_keys_values(I, ARG(0), 0); }
 static value_t js_values(interp_t* I, value_t self, int argc, value_t* argv) { (void)self; return obj_keys_values(I, ARG(0), 1); }
 static value_t js_entries(interp_t* I, value_t self, int argc, value_t* argv) { (void)self; return obj_keys_values(I, ARG(0), 2); }
+static value_t js_ownNames(interp_t* I, value_t self, int argc, value_t* argv) { (void)self; return obj_keys_values(I, ARG(0), 3); }
+
+/* a function's own properties (f.x = 1): its statics, made on first use */
+static obj_t* fn_props(interp_t* I, value_t f, int make) {
+    if (!f.f->statics && make) f.f->statics = obj_new(I, OBJ_PLAIN);
+    return f.f->statics;
+}
 
 static value_t js_assign(interp_t* I, value_t self, int argc, value_t* argv) {
     (void)self;
-    if (!argc || argv[0].t != V_OBJ) return ARG(0);
+    if (!argc || (argv[0].t != V_OBJ && argv[0].t != V_FUNC)) return ARG(0);
+    obj_t* to = argv[0].t == V_FUNC ? fn_props(I, argv[0], 1) : argv[0].o;   /* Object.assign(Component, {Header}) */
     for (int i = 1; i < argc; i++) {
-        if (argv[i].t != V_OBJ) continue;
-        for (uint32_t k = 0; k < argv[i].o->n; k++)
-            obj_set(I, argv[0].o, argv[i].o->props[k].key->s, argv[i].o->props[k].v);
+        obj_t* from = argv[i].t == V_OBJ ? argv[i].o : argv[i].t == V_FUNC ? fn_props(I, argv[i], 0) : NULL;
+        if (!from) continue;
+        if (from->kind == OBJ_ARRAY)
+            for (uint32_t k = 0; k < from->len; k++) {
+                char b[16];
+                ksnprintf(b, sizeof(b), "%u", k);
+                obj_set(I, to, b, from->items[k]);
+            }
+        obj_t* hidden = prop_hidden_names(from);
+        for (uint32_t k = 0; k < from->n; k++) {
+            if (!prop_enumerable(from, hidden, k)) continue;
+            if (argv[i].t == V_FUNC && strcmp(from->props[k].key->s, "prototype") == 0) continue;
+            value_t v = from->props[k].v;
+            if (v.t == V_OBJ && v.o->kind == OBJ_ACCESSOR) v = accessor_get(I, v, argv[i]);   /* getters: their value */
+            obj_set(I, to, from->props[k].key->s, v);
+        }
     }
     return argv[0];
 }
@@ -450,15 +492,19 @@ static void json_val(interp_t* I, str_t** out, value_t v, int depth) {
             }
         } else {
             int first = 1;
+            obj_t* hidden = prop_hidden_names(o);
             for (uint32_t i = 0; i < o->n; i++) {
-                if (!list && (o->props[i].v.t == V_FUNC || o->props[i].v.t == V_UNDEF)) continue;   /* skipped like JS */
+                if (!prop_enumerable(o, hidden, i)) continue;
+                value_t pv = o->props[i].v;
+                if (pv.t == V_OBJ && pv.o->kind == OBJ_ACCESSOR) pv = accessor_get(I, pv, v);   /* getters: their value */
+                if (!list && (pv.t == V_FUNC || pv.t == V_UNDEF)) continue;   /* skipped like JS */
                 if (!first) *out = str_cat(I, *out, str_new(I, ",", 1));
                 first = 0;
                 if (!list) {
                     json_str(I, out, o->props[i].key);
                     *out = str_cat(I, *out, str_new(I, ":", 1));
                 }
-                json_val(I, out, o->props[i].v, depth + 1);
+                json_val(I, out, pv, depth + 1);
             }
         }
         *out = str_cat(I, *out, str_new(I, list ? "]" : "}", 1));
@@ -1142,9 +1188,23 @@ static value_t n_toString(interp_t* I, value_t self, int argc, value_t* argv) {
 }
 
 static value_t o_hasOwnProperty(interp_t* I, value_t self, int argc, value_t* argv) {
+    const char* k = sv(I, ARG(0))->s;
+    int f = 0;
+    if (self.t == V_FUNC) {
+        if (self.f->statics) prop_get_raw(self.f->statics, k, &f);
+        return v_bool(f);
+    }
     if (self.t != V_OBJ) return v_bool(0);
-    int f;
-    prop_get_raw(self.o, sv(I, ARG(0))->s, &f);
+    obj_t* o = self.o;
+    if (o->kind == OBJ_ARRAY) {                       /* its elements and length */
+        if (strcmp(k, "length") == 0) return v_bool(1);
+        uint32_t idx = 0;
+        const char* d = k;
+        while (*d >= '0' && *d <= '9' && idx < 100000000u) idx = idx * 10 + (uint32_t)(*d++ - '0');
+        if (*k && !*d && (k[0] != '0' || !k[1])) return v_bool(idx < o->len);
+    }
+    if (o->kind == OBJ_HOST && o->hc && o->hc->get) { o->hc->get(I, o, k, &f); if (f) return v_bool(1); }
+    prop_get_raw(o, k, &f);
     return v_bool(f);
 }
 static value_t o_toString(interp_t* I, value_t self, int argc, value_t* argv) { (void)argc; (void)argv; return v_strv(sv(I, self)); }
@@ -1223,7 +1283,7 @@ static const fn_entry_t DATE_METHODS[] = {
     { "getUTCHours", d_getHours }, { "getUTCMinutes", d_getMinutes }, { "getUTCSeconds", d_getSeconds },
     { "getUTCMilliseconds", d_getMilliseconds },
 };
-static const fn_entry_t FUNC_METHODS[] = { { "call", f_call }, { "apply", f_apply } };
+static const fn_entry_t FUNC_METHODS[] = { { "call", f_call }, { "apply", f_apply }, { "hasOwnProperty", o_hasOwnProperty } };
 static const fn_entry_t MATH_FUNCS[] = {
     { "abs", m_abs }, { "floor", m_floor }, { "ceil", m_ceil }, { "round", m_round }, { "trunc", m_trunc },
     { "sign", m_sign }, { "sqrt", m_sqrt }, { "sin", m_sin }, { "cos", m_cos }, { "log", m_log },
@@ -1316,6 +1376,7 @@ void lib_init(interp_t* I) {
     obj_set(I, ap, "isArray", v_native(I, "isArray", js_isArray));
     obj_t* op = obj_new(I, OBJ_PLAIN);
     obj_set(I, op, "keys", v_native(I, "keys", js_keys));
+    obj_set(I, op, "getOwnPropertyNames", v_native(I, "getOwnPropertyNames", js_ownNames));
     obj_set(I, op, "values", v_native(I, "values", js_values));
     obj_set(I, op, "entries", v_native(I, "entries", js_entries));
     obj_set(I, op, "assign", v_native(I, "assign", js_assign));

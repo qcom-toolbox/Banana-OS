@@ -75,11 +75,11 @@ enum {
 };
 
 typedef struct node {
-    uint8_t  k;
-    uint8_t  op;
-    uint16_t col;            /* column, capped (errors in minified code) */
-    int      line : 24;
-    unsigned flags : 8;      /* N_FUNC: NF_* (worked out on first call) */
+    uint64_t k : 8;
+    uint64_t op : 8;
+    uint64_t flags : 8;      /* N_FUNC: NF_* (worked out on first call) */
+    uint64_t line : 20;
+    uint64_t col : 20;       /* column, capped at ~1M (errors in minified code) */
     struct node *a, *b, *c, *d;
     struct node* next;       /* lists */
     str_t*   s;
@@ -183,9 +183,25 @@ struct interp {
     obj_t*    gen_out;       /* a generator body running: what it yields (an array) */
     int       gen_force;     /* call_value: run a generator function's body, not make a generator */
     obj_t*    proto_gen;     /* generator objects: next / return / throw */
+    obj_t*    proto_bigint;  /* BigInt values: toString / valueOf */
+    value_t   new_target;    /* the class `new` is constructing (custom elements) */
     script_import_fn import_fn;
     void*     import_ctx;
 };
+
+/* BigInt (script_bigint.c) */
+static inline int bi_is(interp_t* I, value_t v) { (void)I; return v.t == V_OBJ && v.o->kind == OBJ_BIGINT; }
+void     bi_init(interp_t* I);
+value_t  bi_binary(interp_t* I, int op, value_t a, value_t b, int* handled);
+value_t  bi_unary(interp_t* I, int op, value_t v);
+value_t  bi_add_int(interp_t* I, value_t v, int k);
+value_t  bi_literal(interp_t* I, node_t* n);
+str_t*   bi_tostr(interp_t* I, value_t v);
+num_t    bi_tonum(value_t v);
+int      bi_zero(value_t v);
+int      bi_eq(value_t a, value_t b);
+value_t  bi_from_u64(interp_t* I, uint64_t v, int is_signed);
+uint64_t bi_to_u64(interp_t* I, value_t v);
 
 /* helpers shared with script_lib.c */
 str_t*  str_new(interp_t* I, const char* s, uint32_t n);
@@ -198,6 +214,12 @@ value_t obj_getv(interp_t* I, value_t ov, const char* key);
 value_t prop_get_raw(obj_t* o, const char* key, int* found);
 void    prop_set_raw(interp_t* I, obj_t* o, str_t* key, value_t v);
 int     prop_del(obj_t* o, const char* key);
+obj_t*  prop_hidden_names(obj_t* o);
+int     prop_enumerable(obj_t* o, obj_t* hidden, uint32_t i);
+void    prop_set_enumerable(interp_t* I, obj_t* o, const char* key, int on);
+obj_t*  prop_hidden_names(obj_t* o);
+int     prop_enumerable(obj_t* o, obj_t* hidden, uint32_t i);
+void    prop_set_enumerable(interp_t* I, obj_t* o, const char* key, int on);
 value_t arr_get(obj_t* a, uint32_t i);
 void    arr_set(interp_t* I, obj_t* a, uint32_t i, value_t v);
 value_t call_value(interp_t* I, value_t fn, value_t self, int argc, value_t* argv);

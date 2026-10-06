@@ -205,6 +205,7 @@ str_t* v_tostr(interp_t* I, value_t v) {
     case V_FUNC: return str_new(I, "function", 8);
     case V_OBJ: {
         obj_t* o = v.o;
+        if (o->kind == OBJ_BIGINT) return bi_tostr(I, v);
         if (o->kind == OBJ_ARRAY) return join_array(I, o, ",").s;
         if (o->kind == OBJ_PHPARRAY) return str_new(I, "Array", 5);
         if (o->kind == OBJ_HOST) {
@@ -248,6 +249,7 @@ num_t v_tonum(interp_t* I, value_t v) {
     case V_NUM:   return v.n;
     case V_STR:   return str_tonum(v.s->s, I->lang == LANG_PHP);
     case V_OBJ:
+        if (v.o->kind == OBJ_BIGINT) return bi_tonum(v);
         if (v.o->kind == OBJ_PHPARRAY) return v.o->n ? 1 : 0;
         if (v.o->kind == OBJ_ARRAY) {
             if (v.o->len == 0) return 0;
@@ -268,6 +270,7 @@ int v_truthy(interp_t* I, value_t v) {
         return v.s->len > 0;
     case V_OBJ:
         if (I->lang == LANG_PHP && v.o->kind == OBJ_PHPARRAY) return v.o->n > 0;
+        if (v.o->kind == OBJ_BIGINT) return !bi_zero(v);
         return 1;
     default: return 1;
     }
@@ -280,7 +283,7 @@ int v_strict_eq(value_t a, value_t b) {
     case V_BOOL: return a.b == b.b;
     case V_NUM:  return a.n == b.n;
     case V_STR:  return a.s->len == b.s->len && memcmp(a.s->s, b.s->s, a.s->len) == 0;
-    case V_OBJ:  return a.o == b.o;
+    case V_OBJ:  return a.o == b.o || (a.o->kind == OBJ_BIGINT && b.o->kind == OBJ_BIGINT && bi_eq(a, b));
     case V_FUNC: return a.f == b.f;
     }
     return 0;
@@ -318,6 +321,43 @@ obj_t* obj_new(interp_t* I, int kind) {
     obj_t* o = (obj_t*)arena_alloc(I->A, sizeof(obj_t));
     o->kind = (uint8_t)kind;
     return o;
+}
+
+/* Object.defineProperty(o, k, {value}) - enumerable left out, so false -
+ * keeps k out of Object.keys, for-in, JSON and spreads: such names are
+ * listed in a hidden array on the object. Names starting \x01 are the
+ * engine's own (Map contents, that list) and never show. */
+obj_t* prop_hidden_names(obj_t* o) {
+    int f = 0;
+    value_t v = prop_get_raw(o, "\x01ne", &f);
+    return f && v.t == V_OBJ ? v.o : NULL;
+}
+
+int prop_enumerable(obj_t* o, obj_t* hidden, uint32_t i) {
+    const char* k = o->props[i].key->s;
+    if (k[0] == '\x01') return 0;
+    if (hidden)
+        for (uint32_t j = 0; j < hidden->len; j++)
+            if (hidden->items[j].t == V_STR && strcmp(hidden->items[j].s->s, k) == 0) return 0;
+    return 1;
+}
+
+void prop_set_enumerable(interp_t* I, obj_t* o, const char* key, int on) {
+    obj_t* h = prop_hidden_names(o);
+    for (uint32_t j = 0; h && j < h->len; j++) {
+        if (h->items[j].t != V_STR || strcmp(h->items[j].s->s, key) != 0) continue;
+        if (on) {
+            for (uint32_t k = j + 1; k < h->len; k++) h->items[k - 1] = h->items[k];
+            h->len--;
+        }
+        return;
+    }
+    if (on) return;
+    if (!h) {
+        h = obj_new(I, OBJ_ARRAY);
+        prop_set_raw(I, o, str_new(I, "\x01ne", 3), v_obj(h));
+    }
+    arr_push(I, h, v_str(I, key));
 }
 
 /* buffers an array or object outgrew are reused (by power-of-two capacity)
@@ -583,7 +623,7 @@ enum { T_EOF = 0, T_NUM, T_STR, T_TPL, T_ID, T_VAR, T_OP, T_HTML, T_ECHOTAG, T_R
 
 typedef struct {
     uint8_t     t;
-    uint16_t    col;         /* column (errors in minified code), capped */
+    uint32_t    col;         /* column (errors in minified code), capped */
     int         line;
     const char* p;
     uint32_t    len;
@@ -629,7 +669,7 @@ static tok_t* lex_push(lexer_t* L, int t, const char* p, uint32_t len) {
     k->len = len;
     k->line = L->line;
     if (L->line_start && p >= L->line_start && p <= L->src + L->len)
-        k->col = (uint16_t)(p - L->line_start + 1 > 65535 ? 65535 : p - L->line_start + 1);
+        k->col = (uint32_t)(p - L->line_start + 1 > 0xFFFFF ? 0xFFFFF : p - L->line_start + 1);
     return k;
 }
 
@@ -889,9 +929,10 @@ static void lex_all(lexer_t* L) {
             uint32_t n = 0;
             for (const char* q = s; q < p && n < sizeof(tmp) - 1; q++) if (*q != '_') tmp[n++] = *q;
             tmp[n] = 0;
-            tok_t* t = lex_push(L, T_NUM, s, (uint32_t)(p - s));
+            int big = !php && p < end && *p == 'n';         /* BigInt literal: the n stays in the text */
+            tok_t* t = lex_push(L, T_NUM, s, (uint32_t)(p - s) + (uint32_t)big);
             if (t) t->n = radix_v >= 0 ? radix_v : str_tonum(tmp, 0);
-            if (!php && p < end && *p == 'n') p++;          /* BigInt literal: a plain number here */
+            if (big) p++;
             L->pos = (uint32_t)(p - L->src);
             continue;
         }
@@ -979,7 +1020,7 @@ static void lex_all(lexer_t* L) {
                 if (ol == 2 && s[0] == '?' && s[1] == '.' && s + 2 < end && is_digit(s[2])) continue;
                 tok_t* ot = lex_push(L, T_OP, OPS[i], ol);  /* (p: the shared spelling) */
                 if (ot && L->line_start && s >= L->line_start)
-                    ot->col = (uint16_t)(s - L->line_start + 1 > 65535 ? 65535 : s - L->line_start + 1);
+                    ot->col = (uint32_t)(s - L->line_start + 1 > 0xFFFFF ? 0xFFFFF : s - L->line_start + 1);
                 L->pos += ol;
                 matched = 1;
                 break;
@@ -1466,7 +1507,18 @@ static node_t* parse_primary(parser_t* P) {
     node_t* n;
     if (++P->depth > 200) { perr(P, "expression nested too deeply"); return mk(P, N_UNDEF); }
     switch (t->t) {
-    case T_NUM: nx(P); n = mk(P, N_NUM); n->n = t->n; P->depth--; return n;
+    case T_NUM:
+        nx(P);
+        n = mk(P, N_NUM);
+        n->n = t->n;
+        if (!P->php && t->len > 1 && t->p[t->len - 1] == 'n') {   /* 10n: its digits, for bi_literal */
+            char b[256];
+            uint32_t k = 0;
+            for (uint32_t i = 0; i + 1 < t->len && k < sizeof(b) - 1; i++) if (t->p[i] != '_') b[k++] = t->p[i];
+            n->s = str_new(P->I, b, k);
+        }
+        P->depth--;
+        return n;
     case T_STR: nx(P); n = mk(P, N_STR); n->s = t->s; P->depth--; return n;
     case T_TPL: nx(P); n = parse_template(P, t); P->depth--; return n;
     case T_VAR: nx(P); n = mk(P, N_IDENT); n->s = t->s; P->depth--; return n;
@@ -2632,6 +2684,7 @@ value_t call_value(interp_t* I, value_t fnv, value_t self, int argc, value_t* ar
         else if (I->ctl == CTL_BREAK || I->ctl == CTL_CONTINUE) { I->ctl = CTL_NONE; I->label = NULL; }
     }
     if (I->ctl != CTL_THROW && d->op == 1) r = I->ctl ? v_undef() : r;
+    if (fn->is_class && I->lang == LANG_JS && I->ctl != CTL_THROW && r.t != V_OBJ) r = I->this_v;
     env_release(I, e);
     I->cur = saved_env;
     I->fn_env = saved_fn;
@@ -2685,14 +2738,17 @@ static void super_call(interp_t* I, func_t* cls, int argc, value_t* argv) {
         marker.b = 0x4E57;
         value_t made = call_value(I, parent, marker, argc, argv);
         if (I->ctl) return;
-        if (made.t == V_OBJ && I->this_v.t == V_OBJ && made.o != I->this_v.o) {
+        if (made.t == V_OBJ && made.o->kind == OBJ_HOST) {
+            I->this_v = made;                            /* new MyElement(): the element itself */
+        } else if (made.t == V_OBJ && I->this_v.t == V_OBJ && made.o != I->this_v.o) {
             obj_t* me = I->this_v.o;
             for (uint32_t k = 0; k < made.o->n; k++) prop_set_raw(I, me, made.o->props[k].key, made.o->props[k].v);
             if (made.o->host) me->host = made.o->host;
         }
     } else {
-        call_value(I, parent, I->this_v, argc, argv);
+        value_t made = call_value(I, parent, I->this_v, argc, argv);
         if (I->ctl) return;
+        if (made.t == V_OBJ && made.o->kind == OBJ_HOST) I->this_v = made;
     }
     init_fields(I, cls);
 }
@@ -2871,9 +2927,10 @@ static void destructure(interp_t* I, node_t* pat, value_t v, int kind) {
     for (node_t* p = pat->a; p && !I->ctl; p = p->next) {
         if (p->k == N_SPREAD) {
             obj_t* rest = obj_new(I, OBJ_PLAIN);
+            obj_t* hidden = v.t == V_OBJ ? prop_hidden_names(v.o) : NULL;
             if (v.t == V_OBJ)
                 for (uint32_t k = 0; k < v.o->n; k++) {
-                    int skip = 0;
+                    int skip = !prop_enumerable(v.o, hidden, k);
                     for (int u = 0; u < nused; u++) if (strcmp(used[u], v.o->props[k].key->s) == 0) skip = 1;
                     if (!skip) prop_set_raw(I, rest, v.o->props[k].key, v.o->props[k].v);
                 }
@@ -2899,6 +2956,11 @@ static int32_t to_i32(num_t x) {
 
 static value_t binary(interp_t* I, int op, value_t a, value_t b) {
     int php = I->lang == LANG_PHP;
+    if ((a.t == V_OBJ && a.o->kind == OBJ_BIGINT) || (b.t == V_OBJ && b.o->kind == OBJ_BIGINT)) {
+        int handled;
+        value_t r = bi_binary(I, op, a, b, &handled);
+        if (handled) return r;
+    }
     switch (op) {
     case OP_ADD:
         if (php && a.t == V_OBJ && b.t == V_OBJ && a.o->kind == OBJ_PHPARRAY) {   /* array union */
@@ -3304,7 +3366,7 @@ static value_t eval(interp_t* I, node_t* n) {
     I->col = n->col;
     I->line = n->line;
     switch (n->k) {
-    case N_NUM: return v_num(n->n);
+    case N_NUM: return n->s ? bi_literal(I, n) : v_num(n->n);
     case N_STR: return v_strv(n->s);
     case N_TRUE: return v_bool(1);
     case N_FALSE: return v_bool(0);
@@ -3380,7 +3442,9 @@ static value_t eval(interp_t* I, node_t* n) {
                 } else if (sv.t == V_OBJ) {
                     if (sv.o->kind == OBJ_ARRAY)
                         for (uint32_t k = 0; k < sv.o->len; k++) { char b[16]; ksnprintf(b, sizeof(b), "%u", k); obj_set(I, o, b, sv.o->items[k]); }
+                    obj_t* hidden = prop_hidden_names(sv.o);
                     for (uint32_t k = 0; k < sv.o->n; k++) {
+                        if (!prop_enumerable(sv.o, hidden, k)) continue;
                         value_t pv = sv.o->props[k].v;
                         if (pv.t == V_OBJ && pv.o->kind == OBJ_ACCESSOR) pv = accessor_get(I, pv, sv);
                         prop_set_raw(I, o, sv.o->props[k].key, pv);
@@ -3480,7 +3544,10 @@ static value_t eval(interp_t* I, node_t* n) {
         obj_t* o = obj_new(I, OBJ_PLAIN);
         value_t proto = obj_getv(I, fn, "prototype");
         if (proto.t == V_OBJ) o->proto = proto.o;
+        value_t saved_nt = I->new_target;
+        I->new_target = fn;
         value_t r = call_value(I, fn, v_obj(o), argc, argv);
+        I->new_target = saved_nt;
         return r.t == V_OBJ ? r : v_obj(o);
     }
     case N_TYPEOF: {
@@ -3493,6 +3560,7 @@ static value_t eval(interp_t* I, node_t* n) {
             if (I->ctl) return v_undef();
         }
         static const char* const names[] = { "undefined", "object", "boolean", "number", "string", "object", "function" };
+        if (bi_is(I, v)) return v_str(I, "bigint");
         return v_str(I, names[v.t]);
     }
     case N_UNARY: {
@@ -3505,6 +3573,7 @@ static value_t eval(interp_t* I, node_t* n) {
         }
         value_t v = eval(I, n->a);
         if (I->ctl) return v_undef();
+        if (n->op != OP_NOT && bi_is(I, v)) return bi_unary(I, n->op, v);
         switch (n->op) {
         case OP_NOT: return v_bool(!v_truthy(I, v));
         case OP_NEG: return v_num(-v_tonum(I, v));
@@ -3588,6 +3657,11 @@ static value_t eval(interp_t* I, node_t* n) {
             old = eval(I, n->a);
         }
         if (I->ctl) return v_undef();
+        if (bi_is(I, old)) {
+            value_t bv = bi_add_int(I, old, n->op == '+' ? 1 : -1);
+            assign_to(I, n->a, bv);
+            return n->n ? bv : old;
+        }
         num_t o = v_tonum(I, old);
         value_t nv = v_num(n->op == '+' ? o + 1 : o - 1);
         assign_to(I, n->a, nv);
@@ -3868,7 +3942,9 @@ static void exec(interp_t* I, node_t* n) {
                 }
             } else {
                 uint32_t cnt = o->n;
+                obj_t* hidden = prop_hidden_names(o);
                 for (uint32_t i = 0; i < cnt && i < o->n && !stop; i++) {
+                    if (!prop_enumerable(o, hidden, i)) continue;
                     value_t key = v_strv(o->props[i].key);
                     if (o->kind == OBJ_PHPARRAY) {
                         uint32_t idx;
@@ -4079,7 +4155,6 @@ static void near_text(interp_t* I, const char* src, uint32_t len, const char* at
 /* a program (ns NULL) or a module (its own scope; exports into ns) */
 static int run_program(interp_t* I, const char* src, uint32_t len, const char* name, const char* url, obj_t* ns) {
     I->err[0] = 0;
-    I->src_name = name;
     lexer_t L;
     memset(&L, 0, sizeof(L));
     L.I = I;
@@ -4138,6 +4213,7 @@ static int run_program(interp_t* I, const char* src, uint32_t len, const char* n
     }
     run_state_t st;
     int nested = enter(I, &st);
+    I->src_name = name;                              /* after enter(): it saves the caller's name */
     obj_t* saved_ns = I->module_ns;
     const char* saved_url = I->module_url;
     if (ns) {

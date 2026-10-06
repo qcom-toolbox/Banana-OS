@@ -54,7 +54,8 @@ typedef struct host_class {
     int (*set)(interp_t* I, obj_t* self, const char* key, value_t v);
 } host_class_t;
 
-enum { OBJ_PLAIN = 0, OBJ_ARRAY, OBJ_PHPARRAY, OBJ_HOST, OBJ_ACCESSOR /* a getter/setter pair: props "get", "set" */ };
+enum { OBJ_PLAIN = 0, OBJ_ARRAY, OBJ_PHPARRAY, OBJ_HOST, OBJ_ACCESSOR /* a getter/setter pair: props "get", "set" */,
+       OBJ_BIGINT /* a BigInt (script_bigint.c) */ };
 
 struct obj {
     uint8_t  kind;
