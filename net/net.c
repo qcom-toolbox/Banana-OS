@@ -236,6 +236,10 @@ void net_init(void) {
     if (nd) net_register_device(nd);
     nd = rtl8139_probe();
     if (nd) net_register_device(nd);
+    nd = pcnet_probe();
+    if (nd) net_register_device(nd);
+    nd = virtio_net_probe();
+    if (nd) net_register_device(nd);
     if (!g_ndevs) klog("net: no PCI network card found\n");
     /* always running: a USB adapter may show up later */
     g_netd_pid = task_create("netd", netd_entry);

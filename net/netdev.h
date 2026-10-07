@@ -30,6 +30,8 @@ typedef struct netdev {
  * isn't present. */
 netdev_t* e1000_probe(void);
 netdev_t* rtl8139_probe(void);
+netdev_t* pcnet_probe(void);     /* AMD PCnet-PCI II / PCnet-FAST III (VirtualBox) */
+netdev_t* virtio_net_probe(void); /* virtio-net, legacy interface (VirtualBox, QEMU) */
 
 /* Implemented by the stack (net/net.c): one received Ethernet frame. */
 void net_rx(netdev_t* nd, const uint8_t* frame, uint32_t len);

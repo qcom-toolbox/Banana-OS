@@ -1,6 +1,6 @@
 # 🍌 Banana OS 0.5
 
-Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux kernel, no external OS kernel) - a **64-bit (x86_64) kernel with a 32-bit fallback**, booting on **UEFI and BIOS** machines and in VirtualBox/QEMU via GRUB + Multiboot2 - now with **real networking**: its own drivers for the Intel e1000 and Realtek RTL8139 network cards and its own TCP/IP stack, so `ping`, `curl` and `wget` talk to the actual Internet (HTTP and HTTPS).
+Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux kernel, no external OS kernel) - a **64-bit (x86_64) kernel with a 32-bit fallback**, booting on **UEFI and BIOS** machines and in VirtualBox/QEMU via GRUB + Multiboot2 - now with **real networking**: its own drivers for the Intel e1000, AMD PCnet, virtio-net and Realtek RTL8139 network cards (every card VirtualBox offers) and its own TCP/IP stack, so `ping`, `curl` and `wget` talk to the actual Internet (HTTP and HTTPS).
 
 ```
   ____                               ____  ____
@@ -31,7 +31,7 @@ Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux k
 
 - **64-bit** - the kernel also builds for x86_64 (long mode, 4 GiB identity-mapped with 2 MiB pages); one ISO carries both kernels and its boot menu picks the 64-bit one when the CPU supports it, the 32-bit one otherwise
 - **UEFI** - the ISO (and a disk made with `install`) boots on UEFI firmware as well as on BIOS; `neofetch` shows which one started it
-- **Networking** - PCI NIC drivers (Intel e1000 / 82540EM, the default card in QEMU and VirtualBox, and Realtek RTL8139) and a from-scratch TCP/IP stack: Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS and TCP (retransmission with RTT-based timeouts, fast retransmit, congestion + flow control, out-of-order reassembly)
+- **Networking** - PCI NIC drivers (Intel e1000 - 82540EM / 82543GC / 82545EM, QEMU's default and VirtualBox's PRO/1000 cards; AMD PCnet-PCI II and PCnet-FAST III, VirtualBox's AMD cards; virtio-net, VirtualBox's paravirtualized card; Realtek RTL8139) and a from-scratch TCP/IP stack: Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS and TCP (retransmission with RTT-based timeouts, fast retransmit, congestion + flow control, out-of-order reassembly)
 - **`ping`, `curl`, `wget`, `nslookup`, `ifconfig`, `netstat`, `arp`, `dhcp`** - working against real hosts
 - **USB** - xHCI + EHCI host controllers, USB keyboards and mice, and USB network adapters: **Realtek RTL8152/8152B (Lanberg NC-0100-01)** and CDC-ECM; `lsusb`, hot-plug with `usb rescan`
 - **HTTPS** - a TLS 1.3 client (X25519, AES-128-GCM, ChaCha20-Poly1305, SHA-256/HKDF, all written from the RFCs, with known-answer self-tests: `cryptotest`)
@@ -104,6 +104,8 @@ Banana-OS/
 ├── net/
 │   ├── e1000.c         # Intel 8254x NIC driver
 │   ├── rtl8139.c       # Realtek RTL8139 NIC driver
+│   ├── pcnet.c         # AMD PCnet-PCI II / PCnet-FAST III NIC driver
+│   ├── virtio_net.c    # virtio-net NIC driver (legacy interface)
 │   ├── usbnet.c        # Shared plumbing for USB network adapters
 │   ├── r8152.c         # Realtek RTL8152/8152B USB Ethernet (Lanberg NC-0100-01, ...)
 │   ├── cdc_ecm.c       # USB CDC-ECM class Ethernet (QEMU usb-net, phones, ...)
@@ -155,7 +157,7 @@ Banana-OS/
 - POSIX-flavored shell utilities (`ls -l`, `mkdir -p`, `rm -r`, `cp`, `mv`, `touch`, `whoami`, `hostname`, `date`, `time`, ...)
 - Two shell personas sharing one command engine - stock `sh` (default) and a bash-compatible `bash` (aliases, `export`/`$VAR`, `!!`) - selectable per-session with `chsh`
 - Built-in editor and live system monitor
-- Networking: e1000 + RTL8139 drivers, USB adapters (RTL8152/8152B, CDC-ECM), TCP/IP stack, DHCP, DNS, HTTP + HTTPS (TLS 1.3), saved configuration
+- Networking: e1000, PCnet, virtio-net + RTL8139 drivers, USB adapters (RTL8152/8152B, CDC-ECM), TCP/IP stack, DHCP, DNS, HTTP + HTTPS (TLS 1.3), saved configuration
 - Servers: SSH (password login, 2 sessions) and a web server with PHP pages, optionally started at boot
 - Web browser: tabs, HTML + CSS layout (selectors level 4, variables, `calc()`, media queries), images, forms, JavaScript (ES2020+ with classes, modules, promises, regular expressions) with a DOM, history, copy and paste
 - Notepad: a GUI text editor
@@ -172,7 +174,7 @@ Banana-OS/
 - RAM : 32 MB (256 MB recommended - decoding a large photo for a wallpaper needs width x height x 3 bytes)
 - GPU : any sort of graphics accelerator should do it
 - Keyboard / Mouse : PS/2
-- Network : Intel e1000 (82540EM/82545EM), Realtek RTL8139, or a USB adapter (Realtek RTL8152/8152B such as the Lanberg NC-0100-01, CDC-ECM) - optional
+- Network : Intel e1000 (82540EM/82543GC/82545EM), AMD PCnet (PCnet-PCI II, PCnet-FAST III), virtio-net, Realtek RTL8139, or a USB adapter (Realtek RTL8152/8152B such as the Lanberg NC-0100-01, CDC-ECM) - optional
 - USB : xHCI or EHCI controller for USB devices - optional
 - Not hating AI slop
 
@@ -228,7 +230,7 @@ What's implemented, all from scratch:
 
 | Layer | |
 |---|---|
-| NIC drivers | Intel 8254x "e1000" (DMA descriptor rings, IRQ wakeups), Realtek RTL8139, USB: Realtek RTL8152/8152B, CDC-ECM |
+| NIC drivers | Intel 8254x "e1000" (DMA descriptor rings, IRQ wakeups), AMD PCnet (32-bit descriptor rings), virtio-net (legacy virtqueues), Realtek RTL8139, USB: Realtek RTL8152/8152B, CDC-ECM |
 | Link | Ethernet II, ARP (cache, request queueing), loopback |
 | Network | IPv4 (routing via default gateway, DF, no fragmentation), ICMP echo request/reply |
 | Transport | UDP, TCP (client and server: 3-way handshake both ways with a listen backlog, sliding window, RTT-estimated retransmission timeout with backoff, fast retransmit, slow start/congestion avoidance, out-of-order reassembly, delayed ACKs, zero-window probing, orderly close) |
@@ -243,6 +245,7 @@ What's implemented, all from scratch:
 ```bash
 make run            # e1000 NIC on QEMU user-mode (NAT) networking, serial console on this terminal
 make run-rtl8139    # same, with the RTL8139 card
+# other cards: -nic user,model=pcnet  or  -nic user,model=virtio-net-pci
 make run-headless   # no window: use Banana OS entirely through the serial console
 ```
 
