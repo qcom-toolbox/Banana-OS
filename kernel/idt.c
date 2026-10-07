@@ -388,11 +388,27 @@ void idt_ap_init(int cpu) {
 extern void ipi_stub(void);
 extern void stray_stub(void);
 extern void spurious_stub(void);
+extern void lapic_timer_stub(void);
 
 /* local-APIC interrupts: kernel/isr64.asm */
 void ipi_handler(registers_t* regs) {
+    if (regs->int_no == SMP_VEC_TIMER) {
+        /* the boot core's local APIC timer, standing in for the PIT (IRQ 0) */
+        for (int i = 0; i < IRQ_CHAIN && irq_handlers[0][i]; i++) irq_handlers[0][i]();
+        smp_eoi();
+        app_preempt((uintptr_t)REG_IP(regs));
+        return;
+    }
     smp_eoi();
     if (regs->int_no == SMP_VEC_KICK) task_ipi();
+}
+
+/* kernel/smp.c: the timer's handlers (IRQ 0) run from the local APIC
+ * timer from now on (1), or from the PIT again (0) */
+void irq_timer_from_lapic(int on) {
+    if (on) irq_mask |= 1u;
+    else irq_mask &= (uint16_t)~1u;
+    pic_apply_mask();
 }
 #endif
 
@@ -418,6 +434,7 @@ void idt_init(void) {
 #ifdef __x86_64__
     for (int i = 48; i < 256; i++) idt_set_gate((uint8_t)i, (uintptr_t)stray_stub, code_sel, 0x8E);
     idt_set_gate(SMP_VEC_KICK, (uintptr_t)ipi_stub, code_sel, 0x8E);
+    idt_set_gate(SMP_VEC_TIMER, (uintptr_t)lapic_timer_stub, code_sel, 0x8E);
     idt_set_gate(SMP_VEC_SPURIOUS, (uintptr_t)spurious_stub, code_sel, 0x8E);
 #endif
 

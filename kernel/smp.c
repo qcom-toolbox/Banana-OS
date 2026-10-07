@@ -236,6 +236,47 @@ static int lapic_on(uint32_t madt_addr) {
     return ok;
 }
 
+/* The boot core's 1 kHz tick from its local APIC timer instead of the PIT.
+ * With the local APIC on, the PIT's interrupt reaches the core through the
+ * old "virtual wire" path (LINT0, ExtINT), which virtual machines handle
+ * poorly - VirtualBox delivered those ticks late while the guest idled and
+ * then in bursts, and the sound, the pointer and the clock stuttered with
+ * them. The local APIC timer is what current systems use: counted against
+ * the TSC clock (timer_ms) for 20 ms, then periodic. If it does not tick,
+ * the PIT stays the timer. */
+#define LAPIC_TIMER_INIT 0x380
+#define LAPIC_TIMER_CUR  0x390
+#define LAPIC_TIMER_DIV  0x3E0
+
+static int lapic_timer_start(void) {
+    lapic_wr(LAPIC_TIMER_DIV, 0x3);                       /* the bus clock / 16 */
+    lapic_wr(LAPIC_LVT_TIMER, LVT_MASKED | SMP_VEC_TIMER);
+    lapic_wr(LAPIC_TIMER_INIT, 0xFFFFFFFFu);              /* one shot, counting down: how fast? */
+    uint32_t t0 = timer_ms();
+    for (uint32_t i = 0; i < 400000000u && timer_ms() - t0 < 20; i++) __asm__ volatile("pause");
+    uint32_t ms = timer_ms() - t0;
+    uint32_t left = lapic_rd(LAPIC_TIMER_CUR);
+    lapic_wr(LAPIC_TIMER_INIT, 0);
+    if (ms < 20) return 0;
+    uint32_t per_ms = (0xFFFFFFFFu - left) / ms;
+    if (per_ms < 100) return 0;
+
+    __asm__ volatile("cli");
+    irq_timer_from_lapic(1);                             /* the PIT's IRQ 0 masked */
+    lapic_wr(LAPIC_LVT_TIMER, SMP_VEC_TIMER | (1u << 17)); /* periodic */
+    lapic_wr(LAPIC_TIMER_INIT, per_ms);
+    __asm__ volatile("sti");
+    uint32_t c0 = timer_irq_count();
+    for (uint32_t i = 0; i < 400000000u && timer_irq_count() - c0 < 5; i++) __asm__ volatile("pause");
+    if (timer_irq_count() - c0 >= 5) return 1;
+    __asm__ volatile("cli");                             /* it does not tick: back to the PIT */
+    lapic_wr(LAPIC_LVT_TIMER, LVT_MASKED);
+    lapic_wr(LAPIC_TIMER_INIT, 0);
+    irq_timer_from_lapic(0);
+    __asm__ volatile("sti");
+    return 0;
+}
+
 void smp_init(void) {
     /* "nosmp" on the kernel command line (GRUB): one core, the local APIC left off */
     if (strstr(sysinfo_get()->cmdline, "nosmp")) { klog("smp: nosmp - using one core\n"); return; }
@@ -272,6 +313,8 @@ void smp_init(void) {
         klog("smp: the local APIC would stop the timer - using one core\n");
         return;
     }
+    if (lapic_timer_start()) klog("smp: the 1 kHz tick comes from the local APIC timer\n");
+    else klog("smp: the local APIC timer does not tick - the PIT stays the timer\n");
     for (int i = 0; i < nio; i++) ioapic_mask_all(ioapic[i]);
     uint8_t bsp = (uint8_t)(lapic_rd(LAPIC_ID) >> 24);
     g_apic_id[0] = bsp;

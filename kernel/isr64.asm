@@ -150,11 +150,17 @@ irq_common_stub:
 global ipi_stub
 global stray_stub
 global spurious_stub
+global lapic_timer_stub
 extern ipi_handler
 
 ipi_stub:
     push qword 0
     push qword 0xF0
+    jmp ipi_common_stub
+
+lapic_timer_stub:                   ; the boot core's local APIC timer (kernel/smp.c)
+    push qword 0
+    push qword 0xF1
     jmp ipi_common_stub
 
 stray_stub:

@@ -10,6 +10,7 @@
 
 #define SMP_MAX_CPUS 16
 #define SMP_VEC_KICK 0xF0          /* IPI: look at your work (kernel/task.c, task_ipi) */
+#define SMP_VEC_TIMER 0xF1         /* the boot core's local APIC timer: the 1 kHz tick */
 #define SMP_VEC_SPURIOUS 0xFF
 
 void smp_init(void);
