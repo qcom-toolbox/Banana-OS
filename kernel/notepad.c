@@ -1,4 +1,5 @@
 #include "notepad.h"
+#include "utf8.h"
 #include "gfx.h"
 #include "fs.h"
 #include "kstring.h"
@@ -112,8 +113,9 @@ static void follow_cursor(void) {
     int rows = vis_rows(), cols = vis_cols();
     if (g_tb.cy < g_top) g_top = g_tb.cy;
     if (g_tb.cy >= g_top + rows) g_top = g_tb.cy - rows + 1;
-    if (g_tb.cx < g_left) g_left = g_tb.cx;
-    if (g_tb.cx >= g_left + cols) g_left = g_tb.cx - cols + 1;
+    int cc = tb_col(&g_tb, g_tb.cy, g_tb.cx);
+    if (cc < g_left) g_left = cc;
+    if (cc >= g_left + cols) g_left = cc - cols + 1;
     if (g_top < 0) g_top = 0;
     if (g_left < 0) g_left = 0;
 }
@@ -347,6 +349,7 @@ static void pos_at(int mx, int my, int* x, int* y) {
     *x = g_left + (col < 0 ? 0 : col);
     if (*y < 0) { *y = 0; *x = 0; }
     if (*y >= g_tb.n) { *y = g_tb.n - 1; *x = 1 << 28; }
+    else *x = tb_byte(&g_tb, *y, *x);         /* the column's character */
 }
 
 static int is_word(char c) {
@@ -499,7 +502,7 @@ static void prompt_key(char c) {
     }
     if (c == '\n') prompt_done(1);
     else if (c == 27) prompt_done(0);
-    else if (c == '\b') { if (n) g_input[n - 1] = 0; }
+    else if (c == '\b') { if (n) u8_backspace(g_input, (int)n); }
     else if (c == 22) notepad_paste();
     else if ((unsigned char)c >= 32 && n < sizeof(g_input) - 1) { g_input[n] = c; g_input[n + 1] = 0; }
 }
@@ -594,17 +597,16 @@ void notepad_draw(const fb_info_t* fi) {
         if (li >= g_tb.n) break;
         tb_line_t* l = &g_tb.lines[li];
         int ty = py + 2 + r * LINE_H;
+        int xi = u8_byte_at(l->s, (int)l->len, g_left);
         for (int cidx = 0; cidx < cols; cidx++) {
-            int xi = g_left + cidx;
             int in = has_sel && (li > sy0 || (li == sy0 && xi >= sx0)) && (li < sy1 || (li == sy1 && xi < sx1));
             /* the selection covers the line break too */
             if (xi >= (int)l->len) {
                 if (in && xi == (int)l->len && li < sy1) gfx_fill_rect(px + 3 + cidx * CHAR_W, ty - 1, CHAR_W / 2, LINE_H, C_SELBG);
                 break;
             }
-            char ch = l->s[xi];
-            if (ch == '\t' || (unsigned char)ch < 32) ch = ' ';
-            if ((unsigned char)ch >= 128) ch = '?';
+            uint32_t cp = u8_decode(l->s, (int)l->len, &xi);    /* (xi moves to the next one) */
+            char ch = (cp == '\t' || cp < 32) ? ' ' : u8_cell(cp);
             uint32_t bg = in ? C_SELBG : C_PAGE;
             if (in) gfx_fill_rect(px + 3 + cidx * CHAR_W, ty - 1, CHAR_W, LINE_H, bg);
             if (ch != ' ') gfx_draw_char(px + 3 + cidx * CHAR_W, ty, ch, C_INK, bg);
@@ -612,7 +614,7 @@ void notepad_draw(const fb_info_t* fi) {
     }
     /* caret */
     if (focused && !g_prompt && (timer_ms() / 500) % 2 == 0) {
-        int cr = g_tb.cy - g_top, cc = g_tb.cx - g_left;
+        int cr = g_tb.cy - g_top, cc = tb_col(&g_tb, g_tb.cy, g_tb.cx) - g_left;
         if (cr >= 0 && cr < rows && cc >= 0 && cc <= cols)
             gfx_fill_rect(px + 3 + cc * CHAR_W - 1, py + 1 + cr * LINE_H, 2, LINE_H, 0x00202060u);
     }
@@ -642,7 +644,7 @@ void notepad_draw(const fb_info_t* fi) {
     } else if (g_status[0]) {
         draw_clip(x + 8, sy + 4, g_status, (w - 24) / 8, g_status_err ? C_ERR : C_DIM, 0x00161B22u);
     } else {
-        ksnprintf(line, sizeof(line), "Ln %d, Col %d   %d lines   %s", g_tb.cy + 1, g_tb.cx + 1, g_tb.n,
+        ksnprintf(line, sizeof(line), "Ln %d, Col %d   %d lines   %s", g_tb.cy + 1, tb_col(&g_tb, g_tb.cy, g_tb.cx) + 1, g_tb.n,
                   g_path[0] ? g_path : "(not saved yet)");
         draw_clip(x + 8, sy + 4, line, (w - 24) / 8, C_DIM, 0x00161B22u);
     }

@@ -17,8 +17,8 @@ typedef struct {
 typedef struct {
     tb_line_t* lines;
     int        n, cap;
-    int        cx, cy;          /* cursor: column (byte) and line */
-    int        want_x;          /* column kept while moving up/down */
+    int        cx, cy;          /* cursor: byte in the line, and line */
+    int        want_x;          /* column (character) kept while moving up/down */
     int        sel;             /* selection active: from (ax, ay) to the cursor */
     int        ax, ay;
     int        dirty;
@@ -39,6 +39,10 @@ void  tb_home(textbuf_t* t, int select);
 void  tb_end(textbuf_t* t, int select);
 void  tb_goto(textbuf_t* t, int x, int y, int select);
 void  tb_select_all(textbuf_t* t);
+
+/* text is UTF-8: a character's column on line y <-> its byte */
+int   tb_col(const textbuf_t* t, int y, int x);
+int   tb_byte(const textbuf_t* t, int y, int col);
 
 /* selection: ordered bounds, text (kmalloc'd), removal */
 int   tb_sel_bounds(const textbuf_t* t, int* x0, int* y0, int* x1, int* y1);   /* 0 if none */

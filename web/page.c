@@ -1,5 +1,6 @@
 #include "page.h"
 #include "kstring.h"
+#include "../kernel/utf8.h"
 #include "kheap.h"
 #include "svg.h"
 
@@ -777,7 +778,7 @@ int page_key(page_t* p, char c) {
     char* nv;
     if (c == '\b') {
         if (!len) return 1;
-        nv = arena_strdup(&p->A, v, len - 1);
+        nv = arena_strdup(&p->A, v, (uint32_t)u8_prev(v, (int)len));   /* a whole character */
     } else if ((unsigned char)c >= 32 || c == '\n') {
         const char* ml = dom_attr(f, "maxlength");
         if (ml && (uint32_t)(ml[0] - '0') < 10) {

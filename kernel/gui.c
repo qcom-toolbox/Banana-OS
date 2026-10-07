@@ -17,6 +17,7 @@
 #include "browser.h"
 #include "notepad.h"
 #include "clipboard.h"
+#include "utf8.h"
 #include "kheap.h"
 #include "appwin.h"
 #include "winframe.h"
@@ -324,14 +325,15 @@ static void term_copy_selection(const term_win_t* w) {
     terminal_vt_get_buffer(w->vt, &chars, &cols, &tw, &th, &stride);
     int r0 = w->s_r0, c0 = w->s_c0, r1 = w->s_r1, c1 = w->s_c1;
     if (r1 < r0 || (r1 == r0 && c1 < c0)) { int t = r0; r0 = r1; r1 = t; t = c0; c0 = c1; c1 = t; }
-    static char out[100 * 76];
+    static char out[100 * 76 * 2];
     uint32_t n = 0;
     for (int r = r0; r <= r1 && r < th; r++) {
         int a = r == r0 ? c0 : 0, b = r == r1 ? c1 : tw - 1;
         uint32_t line_start = n;
         for (int c = a; c <= b && c < tw; c++) {
             char ch = chars[r * stride + c];
-            out[n++] = ch ? ch : ' ';
+            if ((unsigned char)ch >= 0xA0) n += (uint32_t)u8_encode((unsigned char)ch, out + n);
+            else out[n++] = ch ? ch : ' ';
         }
         while (n > line_start && out[n - 1] == ' ') n--;
         if (r < r1) out[n++] = '\n';

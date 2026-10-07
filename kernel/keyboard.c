@@ -6,6 +6,7 @@
 #include "serial.h"
 #include "tty.h"
 #include "../usb/usbcore.h"
+#include "utf8.h"
 
 #define KB_DATA_PORT    0x60
 #define KB_STATUS_PORT  0x64
@@ -77,7 +78,7 @@ static char map_layout_char(char c, int shifted) {
     if (g_layout == KB_LAYOUT_EN_DEFAULT) return c;
 
     /* QWERTZ families */
-    if (g_layout == KB_LAYOUT_FR_CH || g_layout == KB_LAYOUT_DE || g_layout == KB_LAYOUT_DE_CH) {
+    if (g_layout == KB_LAYOUT_DE) {
         if (c == 'y') return 'z';
         if (c == 'Y') return 'Z';
         if (c == 'z') return 'y';
@@ -170,6 +171,7 @@ static void kb_wait_read(void) {
 static int shift_held = 0;
 static int ctrl_held  = 0;
 static int alt_held   = 0;
+static int altgr_held = 0;   /* right Alt */
 static int use_set2 = 0;
 static int set2_break = 0;
 static int set2_e0 = 0;
@@ -261,11 +263,176 @@ static char set2_map_char(uint8_t sc, int shifted) {
     }
 }
 
+/* ── Swiss keyboards (fr_CH, de_CH): the whole layout by key position ──
+ * QWERTZ letters, the Swiss number row, AltGr (right Alt, or Ctrl+Alt)
+ * and the dead accents ´ ^ ` ~ ¨. Characters past ASCII are sent as
+ * UTF-8, so é arrives as two bytes. Both layouts share the keys; de_CH
+ * only swaps the accented letters (ü/è, ö/é, ä/à). */
+
+#define DEAD(c) (0x10000u | (c))
+#define IS_DEAD(v) ((v) & 0x10000u)
+
+typedef struct { uint8_t sc; uint32_t n, s, ag; } swiss_key_t;
+
+static const swiss_key_t SWISS_KEYS[] = {
+    { 0x29, 0x00A7, 0x00B0, 0 },              /* § ° */
+    { 0x02, '1', '+', 0x00A6 },               /* ¦ */
+    { 0x03, '2', '"', '@' },
+    { 0x04, '3', '*', '#' },
+    { 0x05, '4', 0x00E7, 0x00B0 },            /* ç ° */
+    { 0x06, '5', '%', 0x00A7 },               /* § */
+    { 0x07, '6', '&', 0x00AC },               /* ¬ */
+    { 0x08, '7', '/', '|' },
+    { 0x09, '8', '(', 0x00A2 },               /* ¢ */
+    { 0x0A, '9', ')', 0 },
+    { 0x0B, '0', '=', 0 },
+    { 0x0C, '\'', '?', DEAD(0x00B4) },        /* dead ´ */
+    { 0x0D, DEAD('^'), DEAD('`'), DEAD('~') },
+    { 0x10, 'q', 'Q', 0 }, { 0x11, 'w', 'W', 0 }, { 0x12, 'e', 'E', 0x20AC },   /* € */
+    { 0x13, 'r', 'R', 0 }, { 0x14, 't', 'T', 0 }, { 0x15, 'z', 'Z', 0 },
+    { 0x16, 'u', 'U', 0 }, { 0x17, 'i', 'I', 0 }, { 0x18, 'o', 'O', 0 },
+    { 0x19, 'p', 'P', 0 },
+    { 0x1A, 0x00E8, 0x00FC, '[' },            /* è ü */
+    { 0x1B, DEAD(0x00A8), '!', ']' },         /* dead ¨ */
+    { 0x1E, 'a', 'A', 0 }, { 0x1F, 's', 'S', 0 }, { 0x20, 'd', 'D', 0 },
+    { 0x21, 'f', 'F', 0 }, { 0x22, 'g', 'G', 0 }, { 0x23, 'h', 'H', 0 },
+    { 0x24, 'j', 'J', 0 }, { 0x25, 'k', 'K', 0 }, { 0x26, 'l', 'L', 0 },
+    { 0x27, 0x00E9, 0x00F6, 0 },              /* é ö */
+    { 0x28, 0x00E0, 0x00E4, '{' },            /* à ä */
+    { 0x2B, '$', 0x00A3, '}' },               /* £ */
+    { 0x56, '<', '>', '\\' },
+    { 0x2C, 'y', 'Y', 0 }, { 0x2D, 'x', 'X', 0 }, { 0x2E, 'c', 'C', 0 },
+    { 0x2F, 'v', 'V', 0 }, { 0x30, 'b', 'B', 0 }, { 0x31, 'n', 'N', 0 },
+    { 0x32, 'm', 'M', 0 },
+    { 0x33, ',', ';', 0 },
+    { 0x34, '.', ':', 0 },
+    { 0x35, '-', '_', 0 },
+};
+#define SWISS_NKEYS ((int)(sizeof(SWISS_KEYS) / sizeof(SWISS_KEYS[0])))
+
+/* accent + letter -> the accented letter */
+static const struct { uint16_t dead; char base; uint16_t out; } COMPOSE[] = {
+    { '^', 'a', 0xE2 }, { '^', 'e', 0xEA }, { '^', 'i', 0xEE }, { '^', 'o', 0xF4 }, { '^', 'u', 0xFB },
+    { '^', 'A', 0xC2 }, { '^', 'E', 0xCA }, { '^', 'I', 0xCE }, { '^', 'O', 0xD4 }, { '^', 'U', 0xDB },
+    { 0xA8, 'a', 0xE4 }, { 0xA8, 'e', 0xEB }, { 0xA8, 'i', 0xEF }, { 0xA8, 'o', 0xF6 }, { 0xA8, 'u', 0xFC },
+    { 0xA8, 'y', 0xFF }, { 0xA8, 'A', 0xC4 }, { 0xA8, 'E', 0xCB }, { 0xA8, 'I', 0xCF }, { 0xA8, 'O', 0xD6 },
+    { 0xA8, 'U', 0xDC },
+    { '`', 'a', 0xE0 }, { '`', 'e', 0xE8 }, { '`', 'i', 0xEC }, { '`', 'o', 0xF2 }, { '`', 'u', 0xF9 },
+    { '`', 'A', 0xC0 }, { '`', 'E', 0xC8 }, { '`', 'I', 0xCC }, { '`', 'O', 0xD2 }, { '`', 'U', 0xD9 },
+    { 0xB4, 'a', 0xE1 }, { 0xB4, 'e', 0xE9 }, { 0xB4, 'i', 0xED }, { 0xB4, 'o', 0xF3 }, { 0xB4, 'u', 0xFA },
+    { 0xB4, 'y', 0xFD }, { 0xB4, 'A', 0xC1 }, { 0xB4, 'E', 0xC9 }, { 0xB4, 'I', 0xCD }, { 0xB4, 'O', 0xD3 },
+    { 0xB4, 'U', 0xDA }, { 0xB4, 'Y', 0xDD },
+    { '~', 'a', 0xE3 }, { '~', 'o', 0xF5 }, { '~', 'n', 0xF1 },
+    { '~', 'A', 0xC3 }, { '~', 'O', 0xD5 }, { '~', 'N', 0xD1 },
+};
+
+static uint32_t g_dead;          /* a pending dead accent, or 0 */
+
+/* bytes of the character still to deliver after the first one */
+static char g_rest[12];
+static int  g_rest_n;
+
+static int is_swiss(void) { return g_layout == KB_LAYOUT_FR_CH || g_layout == KB_LAYOUT_DE_CH; }
+
+/* the first byte of what cps[] encodes goes to *out, the others wait in g_rest */
+static int emit_cps(const uint32_t* cps, int n, char* out) {
+    char buf[16];
+    int len = 0;
+    for (int i = 0; i < n; i++) len += u8_encode(cps[i], buf + len);
+    *out = buf[0];
+    g_rest_n = 0;
+    for (int i = 1; i < len; i++) g_rest[g_rest_n++] = buf[i];
+    return 1;
+}
+
+/* hands the waiting bytes over to the queue (after *out was delivered) */
+static void flush_rest(void) {
+    for (int i = 0; i < g_rest_n; i++) q_push(g_rest[i]);
+    g_rest_n = 0;
+}
+
+/* a key on a Swiss keyboard (set-1 scancode); -1 when the shared tables decide */
+static int swiss_key(uint8_t sc, char* out) {
+    const swiss_key_t* k = 0;
+    for (int i = 0; i < SWISS_NKEYS; i++) if (SWISS_KEYS[i].sc == sc) { k = &SWISS_KEYS[i]; break; }
+    int altgr = altgr_held || (ctrl_held && alt_held);
+    if (!k) {
+        /* Enter, Backspace, Tab, Esc, the keypad...: a pending accent just goes */
+        if (g_dead && sc != 0x39) { g_dead = 0; return -1; }
+        if (!g_dead) return -1;
+    }
+
+    uint32_t v;
+    if (!k) v = ' ';                                  /* the space bar */
+    else if (altgr) v = k->ag;
+    else v = shift_held ? k->s : k->n;
+    if (!v) return 0;
+
+    if (g_layout == KB_LAYOUT_DE_CH && !altgr) {
+        switch (v) {                                  /* the umlaut keys, the other way round */
+        case 0xE8: v = 0xFC; break; case 0xFC: v = 0xE8; break;
+        case 0xE9: v = 0xF6; break; case 0xF6: v = 0xE9; break;
+        case 0xE0: v = 0xE4; break; case 0xE4: v = 0xE0; break;
+        }
+    }
+
+    /* Ctrl+letter: control codes, by the letter printed on the key */
+    if (ctrl_held && !altgr && !IS_DEAD(v)) {
+        if (v < 128 && ((v >= 'a' && v <= 'z') || (v >= 'A' && v <= 'Z'))) {
+            *out = (char)((v & 0x1F));
+            return 1;
+        }
+        if (v < 128) { *out = (char)v; return 1; }
+        return 0;
+    }
+
+    if (IS_DEAD(v)) {
+        uint32_t acc = v & 0xFFFF;
+        if (g_dead) {                                 /* twice: the accent itself */
+            uint32_t two[2] = { g_dead, acc };
+            g_dead = 0;
+            return emit_cps(two, acc == two[0] ? 1 : 2, out);
+        }
+        g_dead = acc;
+        return 0;
+    }
+
+    if (g_dead) {
+        uint32_t acc = g_dead;
+        g_dead = 0;
+        if (v == ' ') return emit_cps(&acc, 1, out);
+        for (int i = 0; i < (int)(sizeof(COMPOSE) / sizeof(COMPOSE[0])); i++)
+            if (COMPOSE[i].dead == acc && (uint32_t)(unsigned char)COMPOSE[i].base == v) {
+                uint32_t cp = COMPOSE[i].out;
+                return emit_cps(&cp, 1, out);
+            }
+        uint32_t two[2] = { acc, v };                 /* no such letter: both */
+        return emit_cps(two, 2, out);
+    }
+    return emit_cps(&v, 1, out);
+}
+
+/* set-2 key codes (no translation by the controller) -> set-1 positions */
+static uint8_t set2_to_set1(uint8_t sc) {
+    static const uint8_t T[][2] = {
+        {0x0E,0x29},{0x16,0x02},{0x1E,0x03},{0x26,0x04},{0x25,0x05},{0x2E,0x06},{0x36,0x07},
+        {0x3D,0x08},{0x3E,0x09},{0x46,0x0A},{0x45,0x0B},{0x4E,0x0C},{0x55,0x0D},
+        {0x15,0x10},{0x1D,0x11},{0x24,0x12},{0x2D,0x13},{0x2C,0x14},{0x35,0x15},{0x3C,0x16},
+        {0x43,0x17},{0x44,0x18},{0x4D,0x19},{0x54,0x1A},{0x5B,0x1B},
+        {0x1C,0x1E},{0x1B,0x1F},{0x23,0x20},{0x2B,0x21},{0x34,0x22},{0x33,0x23},{0x3B,0x24},
+        {0x42,0x25},{0x4B,0x26},{0x4C,0x27},{0x52,0x28},{0x5D,0x2B},
+        {0x61,0x56},{0x1A,0x2C},{0x22,0x2D},{0x21,0x2E},{0x2A,0x2F},{0x32,0x30},{0x31,0x31},
+        {0x3A,0x32},{0x41,0x33},{0x49,0x34},{0x4A,0x35},{0x29,0x39},
+    };
+    for (int i = 0; i < (int)(sizeof(T) / sizeof(T[0])); i++) if (T[i][0] == sc) return T[i][1];
+    return 0;
+}
+
 static int translate_scancode_set2(uint8_t sc, char* out) {
     if (set2_break) {
         if (sc == 0x12 || sc == 0x59) shift_held = 0;
         if (sc == 0x14) ctrl_held = 0;
-        if (sc == 0x11) alt_held = 0;
+        if (sc == 0x11) { alt_held = 0; if (set2_e0) altgr_held = 0; }
         set2_break = 0;
         set2_e0 = 0;
         return 0;
@@ -277,7 +444,7 @@ static int translate_scancode_set2(uint8_t sc, char* out) {
         if (sc == 0x74) { push_arrow('C'); *out = q_pop(); set2_e0 = 0; return 1; }
         if (sc == 0x6B) { push_arrow('D'); *out = q_pop(); set2_e0 = 0; return 1; }
         if (sc == 0x14) { ctrl_held = 1; set2_e0 = 0; return 0; }
-        if (sc == 0x11) { alt_held = 1; set2_e0 = 0; return 0; }  /* right alt */
+        if (sc == 0x11) { alt_held = 1; altgr_held = 1; set2_e0 = 0; return 0; }  /* right alt */
         /* Home End PgUp PgDn Delete: ESC [ H/F/I/G/P (three bytes, like the arrows) */
         if (sc == 0x6C) { push_arrow('H'); *out = q_pop(); set2_e0 = 0; return 1; }
         if (sc == 0x69) { push_arrow('F'); *out = q_pop(); set2_e0 = 0; return 1; }
@@ -295,6 +462,12 @@ static int translate_scancode_set2(uint8_t sc, char* out) {
     if (sc == 0x12 || sc == 0x59) { shift_held = 1; return 0; }
     if (sc == 0x14) { ctrl_held = 1; return 0; }
     if (sc == 0x11) { alt_held = 1; return 0; }  /* left alt */
+
+    if (is_swiss()) {
+        uint8_t s1 = set2_to_set1(sc);
+        int r = s1 ? swiss_key(s1, out) : (g_dead = 0, -1);
+        if (r >= 0) return r;
+    }
 
     char c = set2_map_char(sc, shift_held);
     if (!c) return 0;
@@ -319,6 +492,11 @@ static int translate_scancode(uint8_t sc, char* out) {
     /* Home/End/PgUp/PgDn → ignore for now */
     if (sc == 0x47 || sc == 0x4F || sc == 0x49 || sc == 0x51) return 0;
     if (sc >= 128) return 0;
+
+    if (is_swiss()) {
+        int r = swiss_key(sc, out);
+        if (r >= 0) return r;
+    }
 
     char c = shift_held ? sc_shift[sc] : sc_normal[sc];
     if (!c && !shift_held) c = sc_normal[sc];
@@ -358,8 +536,8 @@ static int process_scancode_byte(uint8_t sc, char* out) {
         if (sc == 0x4B) { push_arrow('D'); *out = q_pop(); set1_e0 = 0; return 1; }
         if (sc == 0x1D) { ctrl_held = 1; set1_e0 = 0; return 0; }  /* right ctrl down */
         if (sc == 0x9D) { ctrl_held = 0; set1_e0 = 0; return 0; }  /* right ctrl up */
-        if (sc == 0x38) { alt_held = 1; set1_e0 = 0; return 0; }   /* right alt down */
-        if (sc == 0xB8) { alt_held = 0; set1_e0 = 0; return 0; }   /* right alt up */
+        if (sc == 0x38) { alt_held = 1; altgr_held = 1; set1_e0 = 0; return 0; }   /* right alt (AltGr) down */
+        if (sc == 0xB8) { alt_held = 0; altgr_held = 0; set1_e0 = 0; return 0; }   /* right alt up */
         if (sc == 0x47) { push_arrow('H'); *out = q_pop(); set1_e0 = 0; return 1; }   /* Home */
         if (sc == 0x4F) { push_arrow('F'); *out = q_pop(); set1_e0 = 0; return 1; }   /* End */
         if (sc == 0x49) { push_arrow('I'); *out = q_pop(); set1_e0 = 0; return 1; }   /* PgUp */
@@ -399,6 +577,7 @@ int keyboard_set_layout(const char* name) {
         g_layout = KB_LAYOUT_EN_DEFAULT;
         return 0;
     }
+    g_dead = 0;
     if (strieq(name, "fr_CH")) { g_layout = KB_LAYOUT_FR_CH; return 0; }
     if (strieq(name, "FR"))    { g_layout = KB_LAYOUT_FR;    return 0; }
     if (strieq(name, "DE"))    { g_layout = KB_LAYOUT_DE;    return 0; }
@@ -421,6 +600,7 @@ void keyboard_feed_scancode(uint8_t sc) {
         q_buf[q_head] = out;
     } else {
         q_push(out);
+        flush_rest();
     }
 }
 
@@ -461,7 +641,7 @@ char keyboard_try_getchar(void) {
     uint8_t sc = inb(KB_DATA_PORT);
 
     char out = 0;
-    if (process_scancode_byte(sc, &out)) return out;
+    if (process_scancode_byte(sc, &out)) { flush_rest(); return out; }
     return 0;
 }
 
@@ -493,7 +673,8 @@ void keyboard_init(void) {
     kb_wait_write();
     outb(KB_CMD_PORT, 0xAE); /* enable first port */
 
-    shift_held = 0; ctrl_held = 0; alt_held = 0;
+    shift_held = 0; ctrl_held = 0; alt_held = 0; altgr_held = 0;
+    g_dead = 0; g_rest_n = 0;
     use_set2 = 0; set2_break = 0; set2_e0 = 0; set1_e0 = 0;
     ctrl_alt_del_pending = 0;
     q_head = 0; q_tail = 0;

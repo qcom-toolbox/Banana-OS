@@ -1,4 +1,5 @@
 #include "textbuf.h"
+#include "utf8.h"
 #include "kheap.h"
 #include "kstring.h"
 
@@ -62,6 +63,19 @@ static void clamp(textbuf_t* t) {
     if (t->cy >= t->n) t->cy = t->n - 1;
     if (t->cx < 0) t->cx = 0;
     if (t->cx > (int)t->lines[t->cy].len) t->cx = (int)t->lines[t->cy].len;
+    while (t->cx > 0 && u8_cont(t->lines[t->cy].s[t->cx])) t->cx--;   /* never inside a character */
+}
+
+int tb_col(const textbuf_t* t, int y, int x) {
+    if (y < 0 || y >= t->n) return x;
+    const tb_line_t* l = &t->lines[y];
+    return u8_cols(l->s, x < (int)l->len ? x : (int)l->len);
+}
+
+int tb_byte(const textbuf_t* t, int y, int col) {
+    if (y < 0 || y >= t->n) return col;
+    const tb_line_t* l = &t->lines[y];
+    return u8_byte_at(l->s, (int)l->len, col);
 }
 
 void tb_load(textbuf_t* t, const char* text, uint32_t len) {
@@ -189,7 +203,7 @@ void tb_insert(textbuf_t* t, const char* s, uint32_t n) {
         t->cx += (int)k;
         i = j - 1;
     }
-    t->want_x = t->cx;
+    t->want_x = tb_col(t, t->cy, t->cx);
     t->dirty = 1;
 }
 
@@ -198,9 +212,10 @@ void tb_backspace(textbuf_t* t) {
     t->sel = 0;
     if (t->cx > 0) {
         tb_line_t* l = &t->lines[t->cy];
-        memmove(l->s + t->cx - 1, l->s + t->cx, l->len - (uint32_t)t->cx + 1);
-        l->len--;
-        t->cx--;
+        int pv = u8_prev(l->s, t->cx);
+        memmove(l->s + pv, l->s + t->cx, l->len - (uint32_t)t->cx + 1);
+        l->len -= (uint32_t)(t->cx - pv);
+        t->cx = pv;
     } else if (t->cy > 0) {
         tb_line_t* p = &t->lines[t->cy - 1];
         tb_line_t* l = &t->lines[t->cy];
@@ -215,7 +230,7 @@ void tb_backspace(textbuf_t* t) {
     } else {
         return;
     }
-    t->want_x = t->cx;
+    t->want_x = tb_col(t, t->cy, t->cx);
     t->dirty = 1;
 }
 
@@ -224,8 +239,9 @@ void tb_delete(textbuf_t* t) {
     t->sel = 0;
     tb_line_t* l = &t->lines[t->cy];
     if (t->cx < (int)l->len) {
-        memmove(l->s + t->cx, l->s + t->cx + 1, l->len - (uint32_t)t->cx);
-        l->len--;
+        int d = u8_next(l->s, (int)l->len, t->cx) - t->cx;
+        memmove(l->s + t->cx, l->s + t->cx + d, l->len - (uint32_t)t->cx - (uint32_t)d + 1);
+        l->len -= (uint32_t)d;
         t->dirty = 1;
     } else if (t->cy < t->n - 1) {
         t->cy++;
@@ -245,29 +261,29 @@ void tb_move(textbuf_t* t, int dx, int dy, int select) {
         t->cy += dy;
         if (t->cy < 0) { t->cy = 0; t->want_x = 0; }
         if (t->cy >= t->n) { t->cy = t->n - 1; t->want_x = (int)t->lines[t->cy].len; }
-        t->cx = t->want_x;
+        t->cx = tb_byte(t, t->cy, t->want_x);   /* want_x: a column */
         clamp(t);
         return;
     }
     if (dx < 0) {
-        if (t->cx > 0) t->cx--;
+        if (t->cx > 0) t->cx = u8_prev(t->lines[t->cy].s, t->cx);
         else if (t->cy > 0) { t->cy--; t->cx = (int)t->lines[t->cy].len; }
     } else if (dx > 0) {
-        if (t->cx < (int)t->lines[t->cy].len) t->cx++;
+        if (t->cx < (int)t->lines[t->cy].len) t->cx = u8_next(t->lines[t->cy].s, (int)t->lines[t->cy].len, t->cx);
         else if (t->cy < t->n - 1) { t->cy++; t->cx = 0; }
     }
-    t->want_x = t->cx;
+    t->want_x = tb_col(t, t->cy, t->cx);
 }
 
 void tb_home(textbuf_t* t, int select) { start_sel(t, select); t->cx = 0; t->want_x = 0; }
-void tb_end(textbuf_t* t, int select) { start_sel(t, select); t->cx = (int)t->lines[t->cy].len; t->want_x = t->cx; }
+void tb_end(textbuf_t* t, int select) { start_sel(t, select); t->cx = (int)t->lines[t->cy].len; t->want_x = tb_col(t, t->cy, t->cx); }
 
 void tb_goto(textbuf_t* t, int x, int y, int select) {
     start_sel(t, select);
     t->cy = y;
     t->cx = x;
     clamp(t);
-    t->want_x = t->cx;
+    t->want_x = tb_col(t, t->cy, t->cx);
 }
 
 void tb_select_all(textbuf_t* t) {

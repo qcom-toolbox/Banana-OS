@@ -1,4 +1,5 @@
 #include "terminal.h"
+#include "utf8.h"
 #include "types.h"
 #include "fb.h"
 #include "gfx.h"
@@ -31,6 +32,9 @@ static size_t term_fb_rows = VGA_HEIGHT;
  * modules can size their own per-window state to match) */
 #define VT_MAX TERMINAL_VT_MAX
 static char    vt_chars[VT_MAX][FB_MAX_ROWS][FB_MAX_COLS];
+/* a UTF-8 character still arriving, per vt (cells hold ASCII or Latin-1) */
+static uint8_t  vt_u8_need[VT_MAX];
+static uint32_t vt_u8_cp[VT_MAX];
 static uint8_t vt_colors[VT_MAX][FB_MAX_ROWS][FB_MAX_COLS];
 static size_t  vt_row[VT_MAX];
 static size_t  vt_col[VT_MAX];
@@ -256,6 +260,21 @@ static inline uint8_t vga_entry_color(uint8_t fg, uint8_t bg) {
     return fg | bg << 4;
 }
 
+/* VGA text mode draws code page 437: the Latin-1 characters it has */
+static const unsigned char LATIN1_CP437[96] = {
+    0xFF,0xAD,0x9B,0x9C,'?', 0x9D,'|', 0x15,'"', 'c', 0xA6,0xAE,0xAA,'-', 'r', '-',
+    0xF8,0xF1,0xFD,'3', '\'','?', 0x14,0xFA,',', '1', 0xA7,0xAF,0xAC,0xAB,'?', 0xA8,
+    'A', 'A', 'A', 'A', 0x8E,0x8F,0x92,0x80,'E', 0x90,'E', 'E', 'I', 'I', 'I', 'I',
+    'D', 0xA5,'O', 'O', 'O', 'O', 0x99,'x', 'O', 'U', 'U', 'U', 0x9A,'Y', '?', 0xE1,
+    0x85,0xA0,0x83,'a', 0x84,0x86,0x91,0x87,0x8A,0x82,0x88,0x89,0x8D,0xA1,0x8C,0x8B,
+    '?', 0xA4,0x95,0xA2,0x93,'o', 0x94,0xF6,'o', 0x97,0xA3,0x96,0x81,'y', '?', 0x98,
+};
+static char vga_glyph(char c) {
+    unsigned char b = (unsigned char)c;
+    if (b < 0x80) return c;
+    return b >= 0xA0 ? (char)LATIN1_CP437[b - 0xA0] : '?';
+}
+
 static inline uint16_t vga_entry(char c, uint8_t color) {
     return (uint16_t)c | (uint16_t)color << 8;
 }
@@ -438,6 +457,30 @@ void terminal_putchar(char c) {
     /* ...and an SSH session's vt to its client */
     if (g_serial_mirror && vt_active != 0) tty_mirror((int)vt_active, c);
 
+    /* text is UTF-8: é comes as two bytes and fills one cell */
+    {
+        unsigned char b = (unsigned char)c;
+        int v = (int)vt_active;
+        if (b >= 0x80) {
+            if ((b & 0xC0) == 0x80) {
+                if (!vt_u8_need[v]) {
+                    c = '?';
+                } else {
+                    vt_u8_cp[v] = vt_u8_cp[v] << 6 | (b & 0x3F);
+                    if (--vt_u8_need[v]) return;
+                    c = u8_cell(vt_u8_cp[v]);
+                }
+            } else {
+                vt_u8_need[v] = (uint8_t)(b >= 0xF0 ? 3 : b >= 0xE0 ? 2 : b >= 0xC0 ? 1 : 0);
+                vt_u8_cp[v] = b & (0x3Fu >> vt_u8_need[v]);
+                if (vt_u8_need[v]) return;
+                c = '?';
+            }
+        } else {
+            vt_u8_need[v] = 0;
+        }
+    }
+
     size_t h = terminal_usable_height();
     if (h == 0) return;
     size_t w = terminal_width();
@@ -525,7 +568,7 @@ void terminal_putchar(char c) {
         return;
     }
 
-    term_buf[term_row * VGA_WIDTH + term_col] = vga_entry(c, term_color);
+    term_buf[term_row * VGA_WIDTH + term_col] = vga_entry(vga_glyph(c), term_color);
 
     if (++term_col == w) {
         term_col = 0;
@@ -620,7 +663,7 @@ void terminal_putentryat(char c, uint8_t fg, uint8_t bg, size_t row, size_t col)
     }
 
     uint8_t color = vga_entry_color(fg, bg);
-    term_buf[row * VGA_WIDTH + col] = vga_entry(c, color);
+    term_buf[row * VGA_WIDTH + col] = vga_entry(vga_glyph(c), color);
 }
 
 void terminal_write_at(const char* str, uint8_t fg, uint8_t bg, size_t row, size_t col) {

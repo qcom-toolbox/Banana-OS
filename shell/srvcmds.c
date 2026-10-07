@@ -1,3 +1,4 @@
+#include "../kernel/utf8.h"
 #include "../kernel/settings.h"
 #include "../net/upnp.h"
 #include "srvcmds.h"
@@ -173,7 +174,7 @@ static int read_secret(const char* prompt, char* buf, int cap) {
         if (c == 27) { skip = 2; continue; }          /* arrow keys: ESC [ X */
         if (c == 3) { terminal_writeln("^C"); memset(buf, 0, (size_t)cap); return -1; }
         if (c == '\n') break;
-        if (c == '\b') { if (n) n--; continue; }
+        if (c == '\b') { if (n) n = u8_prev(buf, n); continue; }
         if ((unsigned char)c >= 32 && n < cap - 1) buf[n++] = c;
     }
     buf[n] = '\0';

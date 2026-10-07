@@ -1,4 +1,5 @@
 #include "editor.h"
+#include "../kernel/utf8.h"
 #include "../kernel/terminal.h"
 #include "../kernel/keyboard.h"
 #include "../kernel/fs.h"
@@ -55,8 +56,9 @@ static void fit_view(editor_t* e) {
     textbuf_t* t = &e->tb;
     if (t->cy < e->scroll) e->scroll = t->cy;
     if (t->cy >= e->scroll + rows) e->scroll = t->cy - rows + 1;
-    if (t->cx < e->hscroll) e->hscroll = t->cx;
-    if (t->cx >= e->hscroll + w) e->hscroll = t->cx - w + 1;
+    int cc = tb_col(t, t->cy, t->cx);
+    if (cc < e->hscroll) e->hscroll = cc;
+    if (cc >= e->hscroll + w) e->hscroll = cc - w + 1;
 }
 
 static void draw(editor_t* e) {
@@ -76,12 +78,19 @@ static void draw(editor_t* e) {
         int y = e->scroll + r;
         if (y < t->n) {
             tb_line_t* l = &t->lines[y];
-            for (int x = e->hscroll; x < (int)l->len && x < e->hscroll + w; x++) {
-                char c = l->s[x];
-                if (c == '\t' || (unsigned char)c < 32) c = ' ';
+            int x = u8_byte_at(l->s, (int)l->len, e->hscroll);
+            for (int col = e->hscroll; x < (int)l->len && col < e->hscroll + w; col++) {
+                int nx = u8_next(l->s, (int)l->len, x);
                 int in = has_sel && (y > sy0 || (y == sy0 && x >= sx0)) && (y < sy1 || (y == sy1 && x < sx1));
                 if (in) terminal_setcolor(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_CYAN);
-                terminal_putchar(c);
+                if (nx - x > 1) {
+                    for (int k = x; k < nx; k++) terminal_putchar(l->s[k]);   /* one character */
+                } else {
+                    char c = l->s[x];
+                    if (c == '\t' || (unsigned char)c < 32) c = ' ';
+                    terminal_putchar(c);
+                }
+                x = nx;
                 if (in) terminal_setcolor(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
             }
         }
@@ -92,13 +101,13 @@ static void draw(editor_t* e) {
         ksnprintf(line, sizeof(line), "  %s", e->msg);
         e->msg[0] = 0;
     } else {
-        ksnprintf(line, sizeof(line), "  Line %d/%d, Col %d", t->cy + 1, t->n, t->cx + 1);
+        ksnprintf(line, sizeof(line), "  Line %d/%d, Col %d", t->cy + 1, t->n, tb_col(t, t->cy, t->cx) + 1);
     }
     bar(line);
     terminal_putchar('\n');
     bar("^X Exit ^S Save ^K Cut line ^U Paste line ^V Paste ^C Copy line ^W Find");
 
-    terminal_set_cursor((size_t)(1 + t->cy - e->scroll), (size_t)(t->cx - e->hscroll));
+    terminal_set_cursor((size_t)(1 + t->cy - e->scroll), (size_t)(tb_col(t, t->cy, t->cx) - e->hscroll));
 }
 
 /* Cooperative wait for the next keystroke aimed at this window: keeps the
@@ -151,7 +160,7 @@ static int prompt(editor_t* e, int my_vt, const char* label, char* out, int cap)
         char c = editor_wait_key(NULL, my_vt);
         if (c == '\n') return n > 0;
         if (c == 27 || c == 3) return 0;
-        if (c == '\b') { if (n) out[--n] = 0; continue; }
+        if (c == '\b') { if (n) n = u8_backspace(out, n); continue; }
         if ((unsigned char)c >= 32 && n < cap - 1) { out[n++] = c; out[n] = 0; }
     }
 }

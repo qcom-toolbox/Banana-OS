@@ -31,11 +31,11 @@ void gfx_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg) {
     uint32_t* t = fb_target(&stride, &tw, &th);
     if (!t) return;
     uint8_t uc = (uint8_t)c;
-    if (uc >= 128) uc = '?'; /* font8x8_basic only covers 0-127 */
+    if (uc >= 128 && uc < 0xA0) uc = '?';   /* a cell holds ASCII or Latin-1 */
 
     /* Blank cells (most of any terminal) are a plain fill. */
-    if (uc == ' ' || uc == 0) { fb_fill_rect(x, y, 8, 8, bg); return; }
-    const uint8_t* glyph = font8x8_basic[uc];
+    if (uc == ' ' || uc == 0 || uc == 0xA0) { fb_fill_rect(x, y, 8, 8, bg); return; }
+    const uint8_t* glyph = uc >= 0xA0 ? font8x8_latin1[uc - 0xA0] : font8x8_basic[uc];
 
     /* Clip once per glyph, then write rows straight into the target
      * instead of 64 bounds-checked fb_putpixel() calls. */
@@ -54,8 +54,8 @@ void gfx_draw_char_scaled(int x, int y, int scale, char c, uint32_t fg, uint32_t
     if (scale <= 1) { gfx_draw_char(x, y, c, fg, bg); return; }
 
     uint8_t uc = (uint8_t)c;
-    if (uc >= 128) uc = '?'; /* font8x8_basic only covers 0-127 */
-    const uint8_t* glyph = font8x8_basic[uc];
+    if (uc >= 128 && uc < 0xA0) uc = '?';
+    const uint8_t* glyph = uc >= 0xA0 ? font8x8_latin1[uc - 0xA0] : font8x8_basic[uc];
 
     for (int gy = 0; gy < 8; gy++) {
         uint8_t row = glyph[gy];

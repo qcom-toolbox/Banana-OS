@@ -1,4 +1,5 @@
 #include "explorer.h"
+#include "utf8.h"
 #include "gfx.h"
 #include "fs.h"
 #include "kstring.h"
@@ -554,7 +555,7 @@ void explorer_key(char c) {
         size_t n = strlen(g_rename);
         if (c == '\n') finish_rename();
         else if (c == 27) { g_renaming = -1; set_status("Not renamed"); }
-        else if (c == '\b') { if (n) g_rename[n - 1] = 0; }
+        else if (c == '\b') { if (n) u8_backspace(g_rename, (int)n); }
         else if ((unsigned char)c >= 32 && c != '/' && n < FS_NAME_LEN - 1) { g_rename[n] = c; g_rename[n + 1] = 0; }
         return;
     }

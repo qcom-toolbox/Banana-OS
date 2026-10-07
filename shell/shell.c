@@ -2,6 +2,7 @@
 #include "editor.h"
 #include "../kernel/terminal.h"
 #include "../kernel/keyboard.h"
+#include "../kernel/utf8.h"
 #include "../kernel/fs.h"
 #include "../kernel/sysinfo.h"
 #include "../kernel/timer.h"
@@ -1695,17 +1696,18 @@ static void line_place_cursor(int start, int cur) {
  * start offset is recomputed from where the cursor actually ended up. */
 static void line_repaint(int* start, const char* buf, int len, int prev_len, int cur) {
     int w = (int)terminal_get_width();
-    int total = (prev_len > len) ? prev_len : len;
+    int cols = u8_cols(buf, len);                /* prev_len: columns too */
+    int total = (prev_len > cols) ? prev_len : cols;
     terminal_serial_mirror(0);
     terminal_set_cursor((size_t)(*start / w), (size_t)(*start % w));
     for (int i = 0; i < len; i++) terminal_putchar(buf[i]);
-    for (int i = len; i < total; i++) terminal_putchar(' ');
+    for (int i = cols; i < total; i++) terminal_putchar(' ');
     size_t r, c;
     terminal_get_cursor(&r, &c);
     *start = (int)(r * (size_t)w + c) - total;
     if (*start < 0) *start = 0;
     terminal_serial_mirror(1);
-    line_place_cursor(*start, cur);
+    line_place_cursor(*start, u8_cols(buf, cur));
 }
 
 /* The serial console gets a plain ANSI repaint of the line instead. */
@@ -1734,7 +1736,7 @@ static void line_serial_echo(const char* buf, int len, int cur, int persona) {
     echo_out(tt, "\x1b[K");
     if (len > cur) {
         char seq[16];
-        ksnprintf(seq, sizeof(seq), "\x1b[%dD", len - cur);
+        ksnprintf(seq, sizeof(seq), "\x1b[%dD", u8_cols(buf + cur, len - cur));
         echo_out(tt, seq);
     }
 }
@@ -1803,23 +1805,24 @@ static void shell_readline(char* buf, int maxlen, int persona) {
             if (gui_handle_arrow(c3)) continue;
 
             if (c3 == 'D' || c3 == 'C' || c3 == 'H' || c3 == 'F') {
-                if (c3 == 'D' && cur > 0) cur--;
-                else if (c3 == 'C' && cur < len) cur++;
+                if (c3 == 'D' && cur > 0) cur = u8_prev(buf, cur);
+                else if (c3 == 'C' && cur < len) cur = u8_next(buf, len, cur);
                 else if (c3 == 'H' && cur > 0) cur = 0;            /* Home */
                 else if (c3 == 'F' && cur < len) cur = len;        /* End */
                 else continue;
-                line_place_cursor(start, cur);
+                line_place_cursor(start, u8_cols(buf, cur));
                 line_serial_echo(buf, len, cur, persona);
                 continue;
             }
             if (c3 == 'P') {                                  /* Delete */
                 if (cur >= len) continue;
-                for (int i = cur; i < len; i++) buf[i] = buf[i + 1];
-                len--;
+                int d = u8_next(buf, len, cur) - cur;
+                for (int i = cur; i + d <= len; i++) buf[i] = buf[i + d];
+                len -= d;
                 buf[len] = 0;
                 line_repaint(&start, buf, len, prev_len, cur);
                 line_serial_echo(buf, len, cur, persona);
-                prev_len = len;
+                prev_len = u8_cols(buf, len);
                 continue;
             }
             if (c3 == 'A') { /* history up */
@@ -1862,19 +1865,20 @@ static void shell_readline(char* buf, int maxlen, int persona) {
             }
         } else if (c == 3) { /* Ctrl+C: cancel line, do not execute history entry */
             buf[0] = '\0';
-            line_place_cursor(start, len);
+            line_place_cursor(start, u8_cols(buf, len));
             terminal_write("^C\n");
             return;
         } else if (c == '\n') {
             buf[len] = '\0'; /* ensure empty Enter stays empty */
-            line_place_cursor(start, len);   /* newline after the whole (wrapped) line */
+            line_place_cursor(start, u8_cols(buf, len));   /* newline after the whole (wrapped) line */
             terminal_putchar('\n');
             break;
         } else if (c == '\b') {
             if (cur > 0) {
-                for (int i = cur - 1; i < len; i++) buf[i] = buf[i + 1];
-                cur--;
-                len--;
+                int pv = u8_prev(buf, cur), d = cur - pv;
+                for (int i = pv; i + d <= len; i++) buf[i] = buf[i + d];
+                cur = pv;
+                len -= d;
             }
         } else if ((unsigned char)c >= 32 && len < maxlen - 1) {
             for (int i = len; i > cur; i--) buf[i] = buf[i - 1];
@@ -1887,10 +1891,18 @@ static void shell_readline(char* buf, int maxlen, int persona) {
 
         buf[len] = '\0';
 
+        /* part of a character like é or €: repaint once all of it is in */
+        if ((unsigned char)c >= 0x80 && cur > 0) {
+            int p0 = u8_prev(buf, cur);
+            unsigned char lb = (unsigned char)buf[p0];
+            int need = lb >= 0xF0 ? 4 : lb >= 0xE0 ? 3 : lb >= 0xC0 ? 2 : 1;
+            if (cur - p0 < need) continue;
+        }
+
         /* Repaint the editable text in place (it may span several rows) */
         line_repaint(&start, buf, len, prev_len, cur);
         line_serial_echo(buf, len, cur, persona);
-        prev_len = len;
+        prev_len = u8_cols(buf, len);
     }
 
     /* "!!" (bash/csh-style history-bang) has to resolve here, against

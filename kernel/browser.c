@@ -1,4 +1,5 @@
 #include "browser.h"
+#include "utf8.h"
 #include "gfx.h"
 #include "fs.h"
 #include "kstring.h"
@@ -1210,7 +1211,7 @@ static void handle_key(char c) {
         if (c == 1) { g_addr_all = 1; g_gen++; return; }                     /* Ctrl+A */
         size_t n = strlen(t->addr);
         if (c == '\n') { kstrlcpy(g_go_url, t->addr, sizeof(g_go_url)); push_cmd(CMD_GO, 0, 0); }
-        else if (c == '\b') { if (g_addr_all) t->addr[0] = 0; else if (n) t->addr[n - 1] = 0; }
+        else if (c == '\b') { if (g_addr_all) t->addr[0] = 0; else if (n) u8_backspace(t->addr, (int)n); }
         else if (c == 27) { g_addr_focus = 0; if (t->page) kstrlcpy(t->addr, t->page->url, sizeof(t->addr)); }
         else if ((unsigned char)c >= 32) {
             if (g_addr_all) { t->addr[0] = 0; n = 0; }
