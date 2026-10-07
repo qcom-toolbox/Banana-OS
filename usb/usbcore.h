@@ -9,10 +9,11 @@
  *   usbcore.c   device enumeration, descriptors, driver matching, lsusb
  *   xhci.c      xHCI (USB 3.x) host controller driver
  *   ehci.c      EHCI (USB 2.0) host controller driver
+ *   uhci.c      UHCI (USB 1.1) host controller driver (Intel, VIA)
+ *   usbhub.c    hubs (EHCI and UHCI; the root hubs are the controllers')
  *   usbhid.c    boot-protocol keyboard + mouse
  *   (net/r8152.c, net/cdc_ecm.c: USB Ethernet adapters)
  *
- * Devices directly on a root port are supported (no external hubs yet).
  * Everything is polled from task context (usb_poll()); controller
  * interrupts only wake sleeping tasks.
  */
@@ -95,7 +96,11 @@ typedef struct usb_device {
     int               present;        /* 0 once unplugged */
     struct usb_hc*    hc;
     void*             hcpriv;         /* controller's per-device state */
-    int               port;           /* root port, 1-based */
+    int               port;           /* root port - or the parent hub's port - 1-based */
+    struct usb_device* parent;        /* the hub it is plugged into, NULL on a root port */
+    /* a low/full-speed device behind a high-speed hub: that hub's transaction
+     * translator (its address and port) - EHCI split transactions */
+    uint8_t           tt_addr, tt_port;
     int               speed;          /* USB_SPEED_* */
     uint8_t           address;        /* USB address / xHCI slot */
     uint16_t          ep0_mps;
@@ -139,6 +144,11 @@ typedef struct usb_hc_ops {
     void (*poll)(struct usb_hc* hc);
     /* re-check root ports, enumerating new devices */
     void (*rescan)(struct usb_hc* hc);
+    /* a device just reset on a hub's port (usbhub.c): address it, enumerate
+     * it (usb_new_child); NULL if the controller has no hub support */
+    usb_device_t* (*attach_child)(struct usb_hc* hc, usb_device_t* hub, int port, int speed);
+    /* that device was unplugged (after usb_device_gone): free its state */
+    void (*detach_child)(usb_device_t* d);
 } usb_hc_ops_t;
 
 typedef struct usb_hc {
@@ -169,7 +179,14 @@ int  usb_register_hc(usb_hc_t* hc);
 /* HC drivers call this for a newly addressed device on a root port */
 usb_device_t* usb_new_device(usb_hc_t* hc, int port, int speed, uint8_t address,
                              uint16_t ep0_mps, void* hcpriv);
+/* the same for a device on port `port` of hub `parent` */
+usb_device_t* usb_new_child(usb_hc_t* hc, usb_device_t* parent, int port, int speed, uint8_t address,
+                            uint16_t ep0_mps, void* hcpriv);
+/* the transaction translator a new device on hub port `port` uses (EHCI) */
+void usb_child_tt(const usb_device_t* parent, int port, int speed, uint8_t* tt_addr, uint8_t* tt_port);
 void usb_device_gone(usb_device_t* d);
+/* running in the usbd task (enumeration happens there only) */
+int  usb_in_usbd(void);
 
 int usb_control(usb_device_t* d, uint8_t reqtype, uint8_t req, uint16_t value,
                 uint16_t index, void* data, uint16_t len);

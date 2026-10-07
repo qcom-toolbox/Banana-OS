@@ -10,18 +10,20 @@
 /* host controller drivers */
 int xhci_init_controller(const pci_dev_t* pd);
 int ehci_init_controller(const pci_dev_t* pd);
+int uhci_init_controller(const pci_dev_t* pd);
 
 /* device drivers, tried in this order */
 extern const usb_driver_t r8152_driver;
 extern const usb_driver_t cdc_ecm_driver;
 extern const usb_driver_t hid_driver;
 extern const usb_driver_t usb_storage_driver;
+extern const usb_driver_t hub_driver;
 static const usb_driver_t* const g_drivers[] = {
-    &r8152_driver, &cdc_ecm_driver, &hid_driver, &usb_storage_driver,
+    &hub_driver, &r8152_driver, &cdc_ecm_driver, &hid_driver, &usb_storage_driver,
 };
 #define DRIVER_COUNT ((int)(sizeof(g_drivers) / sizeof(g_drivers[0])))
 
-#define MAX_HC 4
+#define MAX_HC 12                       /* (ICH9/10: 6 UHCI + 2 EHCI, plus an xHCI) */
 static usb_hc_t*    g_hcs[MAX_HC];
 static int          g_hc_count;
 static usb_device_t g_devs[USB_MAX_DEVICES];
@@ -192,8 +194,21 @@ static void bind_driver(usb_device_t* d) {
     }
 }
 
-usb_device_t* usb_new_device(usb_hc_t* hc, int port, int speed, uint8_t address,
-                             uint16_t ep0_mps, void* hcpriv) {
+void usb_child_tt(const usb_device_t* parent, int port, int speed, uint8_t* tt_addr, uint8_t* tt_port) {
+    *tt_addr = 0;
+    *tt_port = 0;
+    if (!parent || speed == USB_SPEED_HIGH || speed == USB_SPEED_SUPER) return;
+    if (parent->speed == USB_SPEED_HIGH) {          /* the nearest high-speed hub translates */
+        *tt_addr = parent->address;
+        *tt_port = (uint8_t)port;
+    } else {                                        /* (behind a full-speed hub: that hub's own) */
+        *tt_addr = parent->tt_addr;
+        *tt_port = parent->tt_port;
+    }
+}
+
+usb_device_t* usb_new_child(usb_hc_t* hc, usb_device_t* parent, int port, int speed, uint8_t address,
+                            uint16_t ep0_mps, void* hcpriv) {
     usb_device_t* d = NULL;
     for (int i = 0; i < USB_MAX_DEVICES; i++)
         if (!g_devs[i].used) { d = &g_devs[i]; break; }
@@ -204,17 +219,27 @@ usb_device_t* usb_new_device(usb_hc_t* hc, int port, int speed, uint8_t address,
     d->hc = hc;
     d->hcpriv = hcpriv;
     d->port = port;
+    d->parent = parent;
+    usb_child_tt(parent, port, speed, &d->tt_addr, &d->tt_port);
     d->speed = speed;
     d->address = address;
     d->ep0_mps = ep0_mps;
     d->active_config = -1;
     if (enumerate(d) != 0) {
         d->present = 0;
-        return d;
+        d->used = 0;                                /* (the slot is free again) */
+        return NULL;
     }
     bind_driver(d);
     return d;
 }
+
+usb_device_t* usb_new_device(usb_hc_t* hc, int port, int speed, uint8_t address,
+                             uint16_t ep0_mps, void* hcpriv) {
+    return usb_new_child(hc, NULL, port, speed, address, ep0_mps, hcpriv);
+}
+
+int usb_in_usbd(void) { return in_usbd(); }
 
 void usb_device_gone(usb_device_t* d) {
     if (!d || !d->used) return;
@@ -280,6 +305,13 @@ void usb_stack_init(void) {
     s.n = 0; s.prog_if = 0x30;
     pci_scan(scan_cb, &s);
     for (int i = 0; i < s.n; i++) xhci_init_controller(&s.list[i]);
+    /* USB 1.1 (UHCI): the companions of the EHCI ports on Intel chipsets take
+     * the low/full-speed devices (mice, keyboards) EHCI hands them. Taken
+     * over before EHCI: they share its interrupt line, and the BIOS leaves
+     * them interrupting - quiet before EHCI unmasks that line. */
+    s.n = 0; s.prog_if = 0x00;
+    pci_scan(scan_cb, &s);
+    for (int i = 0; i < s.n; i++) uhci_init_controller(&s.list[i]);
     s.n = 0; s.prog_if = 0x20;
     pci_scan(scan_cb, &s);
     for (int i = 0; i < s.n; i++) ehci_init_controller(&s.list[i]);

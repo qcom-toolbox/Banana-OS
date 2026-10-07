@@ -9,12 +9,18 @@
 /*
  * EHCI (Enhanced Host Controller Interface, USB 2.0) driver.
  *
- * High-speed devices on root ports, control and bulk transfers through
- * the asynchronous schedule (a ring of queue heads, one per endpoint).
- * Full/low-speed devices (most keyboards and mice) are handed to the
- * companion UHCI/OHCI controller, which the BIOS keeps driving - so they
- * keep working through its legacy PS/2 emulation. Section numbers: EHCI
- * spec 1.0.
+ * High-speed devices on root ports, and any device behind a hub
+ * (usbhub.c). Control and bulk transfers go through the asynchronous
+ * schedule (a ring of queue heads, one per endpoint); interrupt endpoints
+ * (keyboards, mice) through the periodic schedule: every frame of the
+ * frame list points at an inactive anchor QH, the interrupt QHs hang
+ * behind it and are polled every millisecond. A low/full-speed device
+ * behind a high-speed hub (Intel's rate-matching hub, behind every port
+ * since 2011) is reached with split transactions: its QHs carry the hub's
+ * address and port (its transaction translator), interrupt QHs a
+ * start-split / complete-split microframe mask. Low/full-speed devices on
+ * a root port are handed to the companion UHCI controller (uhci.c).
+ * Section numbers: EHCI spec 1.0.
  *
  * Each queue head keeps an inactive "dummy" qTD at the end of its queue:
  * queuing a transfer fills in the dummy, appends a fresh one, and flips
@@ -100,14 +106,22 @@ typedef struct {
     pending_t  pend[MAX_PEND];
     uint8_t    ep;                       /* endpoint address */
     int        halted;
+    int        periodic;                 /* an interrupt QH (periodic schedule) */
 } qh_t;
 
 typedef struct {
     usb_device_t* udev;
     uint8_t       port, addr;
+    uint8_t       speed, tt_addr, tt_port;   /* (split transactions when not high speed) */
     uint8_t*      ctrl_buf;              /* setup packet (64 B) + control data (4 KiB) */
     qh_t*         qh[32];                /* by (num*2 + in) */
 } edev_t;
+
+#define MAX_EDEV 32
+#define QT_CONTROL 0
+#define QT_BULK    1
+#define QT_INTR    2
+#define CMD_PSE    (1u << 4)
 
 struct ehci {
     usb_hc_t          hc;
@@ -115,7 +129,10 @@ struct ehci {
     volatile uint8_t* op;
     int               ports;
     qh_hw_t*          head;              /* reclamation head of the async ring */
+    uint32_t*         frames;            /* the periodic frame list (1024 entries) */
+    qh_hw_t*          panchor;           /* every frame points here; interrupt QHs follow */
     edev_t*           port_dev[16];
+    edev_t*           devs[MAX_EDEV];    /* every device: on root ports and behind hubs */
     uint8_t           next_addr;
     uint8_t*          pool;              /* qTD/QH blocks */
     uint8_t*          pool_free;
@@ -154,7 +171,7 @@ static void td_free(ehci_t* e, qtd_t* t) {
 
 /* ── queue heads ────────────────────────────────────────────────── */
 
-static qh_t* qh_new(ehci_t* e, uint8_t addr, uint8_t ep, uint16_t mps, int control) {
+static qh_t* qh_new(ehci_t* e, const edev_t* ed, uint8_t addr, uint8_t ep, uint16_t mps, int type) {
     qh_t* q = (qh_t*)kzalloc(sizeof(qh_t));
     if (!q) return NULL;
     q->hw = (qh_hw_t*)blk_alloc(e, sizeof(qh_hw_t));
@@ -164,17 +181,28 @@ static qh_t* qh_new(ehci_t* e, uint8_t addr, uint8_t ep, uint16_t mps, int contr
     q->dummy->next = LINK_T;
     q->dummy->alt = LINK_T;
     q->dummy->token = TOK_HALTED;         /* inactive */
-    /* high speed; control endpoints take the data toggle from each qTD */
-    q->hw->ep_char = (uint32_t)addr | ((uint32_t)(ep & 0x0F) << 8) | (2u << 12) |
-                     (control ? (1u << 14) : 0) | ((uint32_t)mps << 16) | (0u << 28);
-    q->hw->ep_caps = 1u << 30;           /* Mult = 1 */
+    /* the device's speed: 2 high, 1 low, 0 full; control endpoints take the
+     * data toggle from each qTD, and a non-high-speed one says it is control (C) */
+    uint32_t eps = ed->speed == USB_SPEED_HIGH ? 2u : ed->speed == USB_SPEED_LOW ? 1u : 0u;
+    q->hw->ep_char = (uint32_t)addr | ((uint32_t)(ep & 0x0F) << 8) | (eps << 12) |
+                     (type == QT_CONTROL ? (1u << 14) : 0) | ((uint32_t)(mps & 0x7FF) << 16) |
+                     ((type == QT_CONTROL && eps != 2) ? (1u << 27) : 0);
+    uint32_t caps = 1u << 30;            /* Mult = 1 */
+    if (eps != 2)                        /* split transactions through the hub's translator */
+        caps |= ((uint32_t)ed->tt_addr << 16) | ((uint32_t)ed->tt_port << 23);
+    if (type == QT_INTR)                 /* every frame: start in microframe 0 (and complete in 2-4) */
+        caps |= eps == 2 ? 0x01u : (0x01u | (0x1Cu << 8));
+    q->hw->ep_caps = caps;
     q->hw->next = (uint32_t)(uintptr_t)q->dummy;
     q->hw->alt = LINK_T;
     q->hw->token = 0;
-    /* insert right after the head: a single aligned pointer store is atomic */
-    q->hw->hlink = e->head->hlink;
+    /* insert right after the head (the periodic anchor for interrupt
+     * endpoints): a single aligned pointer store is atomic */
+    qh_hw_t* at = type == QT_INTR ? e->panchor : e->head;
+    q->periodic = type == QT_INTR;
+    q->hw->hlink = at->hlink;
     __asm__ volatile("" ::: "memory");
-    e->head->hlink = (uint32_t)(uintptr_t)q->hw | LINK_QH;
+    at->hlink = (uint32_t)(uintptr_t)q->hw | LINK_QH;
     return q;
 }
 
@@ -184,6 +212,17 @@ static void qh_set_addr(qh_t* q, uint8_t addr) {
 
 static void qh_unlink(ehci_t* e, qh_t* q) {
     uint32_t me = (uint32_t)(uintptr_t)q->hw | LINK_QH;
+    if (q->periodic) {
+        /* the periodic chain ends with T; the controller may still be on
+         * the QH during this frame: two frames later it is not */
+        qh_hw_t* p = e->panchor;
+        for (int guard = 0; guard < 256 && !(p->hlink & LINK_T); guard++) {
+            if (p->hlink == me) { p->hlink = q->hw->hlink; break; }
+            p = (qh_hw_t*)(uintptr_t)(p->hlink & ~0x1Fu);
+        }
+        usb_delay_ms(2);
+        return;
+    }
     qh_hw_t* p = e->head;
     for (int guard = 0; guard < 256; guard++) {
         if (p->hlink == me) { p->hlink = q->hw->hlink; break; }
@@ -361,10 +400,12 @@ static int ehci_set_ep0_mps(usb_device_t* d, uint16_t mps) {
 static int ehci_open_endpoint(usb_device_t* d, const usb_ep_desc_t* ep) {
     ehci_t* e = (ehci_t*)d->hc->priv;
     edev_t* ed = (edev_t*)d->hcpriv;
-    if ((ep->bmAttributes & 3) != USB_EP_BULK) return -1;   /* interrupt/isoch: not on EHCI (yet) */
+    int type = ep->bmAttributes & 3;
+    if (type != USB_EP_BULK && type != USB_EP_INTERRUPT) return -1;   /* (isochronous: not here) */
     int idx = (ep->bEndpointAddress & 0x0F) * 2 + ((ep->bEndpointAddress & 0x80) ? 1 : 0);
     if (ed->qh[idx]) return 0;
-    ed->qh[idx] = qh_new(e, ed->addr, ep->bEndpointAddress, ep->wMaxPacketSize & 0x7FF, 0);
+    ed->qh[idx] = qh_new(e, ed, ed->addr, ep->bEndpointAddress, ep->wMaxPacketSize & 0x7FF,
+                         type == USB_EP_INTERRUPT ? QT_INTR : QT_BULK);
     return ed->qh[idx] ? 0 : -1;
 }
 
@@ -387,9 +428,9 @@ static void ehci_poll(usb_hc_t* hc) {
         wr(e->op, OP_USBSTS, 1u << 2);
         hc->port_change = 1;
     }
-    for (int p = 1; p <= e->ports; p++) {
-        edev_t* ed = e->port_dev[p];
-        if (!ed) continue;
+    for (int k = 0; k < MAX_EDEV; k++) {
+        edev_t* ed = e->devs[k];
+        if (!ed) continue;           /* (also while it is being set up: its driver already transfers) */
         for (int i = 1; i < 32; i++) {
             qh_t* q = ed->qh[i];
             if (!q) continue;
@@ -409,7 +450,7 @@ static void ehci_poll(usb_hc_t* hc) {
                 qh_recover(e, q);
                 /* clear the halt on the device side too */
                 usb_setup_t cf = { USB_RECIP_EP, USB_REQ_CLEAR_FEATURE, 0, q->ep, 0 };
-                ehci_control(ed->udev, &cf, NULL, 500);
+                if (ed->udev) ehci_control(ed->udev, &cf, NULL, 500);
             }
         }
     }
@@ -419,6 +460,55 @@ static void ehci_poll(usb_hc_t* hc) {
 
 static uint32_t portsc(ehci_t* e, int p) { return rd(e->op, OP_PORTSC(p)); }
 static void port_write(ehci_t* e, int p, uint32_t v) { wr(e->op, OP_PORTSC(p), v); }
+
+/* a device's state: its control QH at address 0 (for SET_ADDRESS), in the device list */
+static edev_t* edev_new(ehci_t* e, uint8_t port, int speed, uint8_t tt_addr, uint8_t tt_port) {
+    int slot = -1;
+    for (int i = 0; i < MAX_EDEV; i++) if (!e->devs[i]) { slot = i; break; }
+    if (slot < 0) return NULL;
+    edev_t* ed = (edev_t*)kzalloc(sizeof(edev_t));
+    if (!ed) return NULL;
+    ed->port = port;
+    ed->speed = (uint8_t)speed;
+    ed->tt_addr = tt_addr;
+    ed->tt_port = tt_port;
+    ed->qh[0] = qh_new(e, ed, 0, 0, speed == USB_SPEED_HIGH ? 64 : 8, QT_CONTROL);
+    ed->ctrl_buf = (uint8_t*)usb_dma_alloc(8192);
+    if (!ed->qh[0] || !ed->ctrl_buf) { if (ed->qh[0]) qh_unlink(e, ed->qh[0]); kfree(ed); return NULL; }
+    e->devs[slot] = ed;
+    return ed;
+}
+
+/* SET_ADDRESS through address 0, then retarget the control QH */
+static int edev_address(ehci_t* e, edev_t* ed) {
+    uint8_t addr = e->next_addr++;
+    if (e->next_addr > 127) e->next_addr = 1;
+    usb_device_t tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.hc = &e->hc;
+    tmp.hcpriv = ed;
+    tmp.present = 1;
+    usb_setup_t sa = { USB_TYPE_STANDARD | USB_RECIP_DEVICE, USB_REQ_SET_ADDRESS, addr, 0, 0 };
+    if (ehci_control(&tmp, &sa, NULL, 1000) < 0) return -1;
+    usb_delay_ms(5);
+    ed->addr = addr;
+    qh_set_addr(ed->qh[0], addr);
+    return 0;
+}
+
+/* out of the schedules and the device list (the device is already gone for the core) */
+static void edev_free(ehci_t* e, edev_t* ed) {
+    if (!ed) return;
+    for (int i = 0; i < MAX_EDEV; i++) if (e->devs[i] == ed) e->devs[i] = NULL;
+    for (int i = 0; i < 32; i++) {
+        qh_t* q = ed->qh[i];
+        if (!q) continue;
+        qh_unlink(e, q);
+        for (int s = 0; s < MAX_PEND; s++)
+            if (q->pend[s].xfer) q->pend[s].xfer->status = USB_XFER_GONE;
+    }
+    kfree(ed);                           /* (its QH and qTD blocks are not reused: a few bytes) */
+}
 
 static void attach_port(ehci_t* e, int p) {
     uint32_t v = portsc(e, p);
@@ -443,48 +533,50 @@ static void attach_port(ehci_t* e, int p) {
         return;
     }
 
-    edev_t* ed = (edev_t*)kzalloc(sizeof(edev_t));
+    edev_t* ed = edev_new(e, (uint8_t)p, USB_SPEED_HIGH, 0, 0);
     if (!ed) return;
-    ed->port = (uint8_t)p;
-    ed->qh[0] = qh_new(e, 0, 0, 64, 1);
-    ed->ctrl_buf = (uint8_t*)usb_dma_alloc(8192);
-    if (!ed->ctrl_buf) return;
-    if (!ed->qh[0]) return;
     e->port_dev[p] = ed;
-
-    /* SET_ADDRESS through address 0, then retarget the control QH */
-    uint8_t addr = e->next_addr++;
-    if (e->next_addr > 127) e->next_addr = 1;
-    usb_device_t tmp;
-    memset(&tmp, 0, sizeof(tmp));
-    tmp.hc = &e->hc;
-    tmp.hcpriv = ed;
-    tmp.present = 1;
-    usb_setup_t sa = { USB_TYPE_STANDARD | USB_RECIP_DEVICE, USB_REQ_SET_ADDRESS, addr, 0, 0 };
-    if (ehci_control(&tmp, &sa, NULL, 1000) < 0) {
+    if (edev_address(e, ed) < 0) {
         klog("ehci: port %d: SET_ADDRESS failed\n", p);
-        qh_unlink(e, ed->qh[0]);
         e->port_dev[p] = NULL;
+        edev_free(e, ed);
         return;
     }
-    usb_delay_ms(5);
-    ed->addr = addr;
-    qh_set_addr(ed->qh[0], addr);
-    ed->udev = usb_new_device(&e->hc, p, USB_SPEED_HIGH, addr, 64, ed);
+    ed->udev = usb_new_device(&e->hc, p, USB_SPEED_HIGH, ed->addr, 64, ed);
 }
 
 static void detach_port(ehci_t* e, int p) {
     edev_t* ed = e->port_dev[p];
     if (!ed) return;
     e->port_dev[p] = NULL;
-    for (int i = 0; i < 32; i++) {
-        qh_t* q = ed->qh[i];
-        if (!q) continue;
-        qh_unlink(e, q);
-        for (int s = 0; s < MAX_PEND; s++)
-            if (q->pend[s].xfer) q->pend[s].xfer->status = USB_XFER_GONE;
+    if (ed->udev) usb_device_gone(ed->udev);    /* (a hub there takes its children with it) */
+    edev_free(e, ed);
+}
+
+/* a device reset on a hub's port (usbhub.c): high speed, or low/full speed
+ * through the nearest high-speed hub's transaction translator */
+static usb_device_t* ehci_attach_child(usb_hc_t* hc, usb_device_t* hub, int port, int speed) {
+    ehci_t* e = (ehci_t*)hc->priv;
+    uint8_t tta, ttp;
+    usb_child_tt(hub, port, speed, &tta, &ttp);
+    if (speed != USB_SPEED_HIGH && !tta) {
+        klog("ehci: a low/full-speed device behind a full-speed hub - not reachable from EHCI\n");
+        return NULL;
     }
-    if (ed->udev) usb_device_gone(ed->udev);
+    edev_t* ed = edev_new(e, (uint8_t)port, speed, tta, ttp);
+    if (!ed) return NULL;
+    if (edev_address(e, ed) < 0) {
+        klog("ehci: hub port %d: SET_ADDRESS failed\n", port);
+        edev_free(e, ed);
+        return NULL;
+    }
+    ed->udev = usb_new_child(hc, hub, port, speed, ed->addr, speed == USB_SPEED_HIGH ? 64 : 8, ed);
+    if (!ed->udev) { edev_free(e, ed); return NULL; }
+    return ed->udev;
+}
+
+static void ehci_detach_child(usb_device_t* d) {
+    edev_free((ehci_t*)d->hc->priv, (edev_t*)d->hcpriv);
 }
 
 static void ehci_rescan(usb_hc_t* hc) {
@@ -501,6 +593,7 @@ static void ehci_rescan(usb_hc_t* hc) {
 
 static const usb_hc_ops_t g_ops = {
     ehci_control, ehci_set_ep0_mps, ehci_open_endpoint, ehci_submit, ehci_poll, ehci_rescan,
+    ehci_attach_child, ehci_detach_child,
 };
 
 static void ehci_irq(void) {
@@ -572,7 +665,18 @@ int ehci_init_controller(const pci_dev_t* pd) {
     wr(e->op, OP_CTRLDSSEG, 0);
     wr(e->op, OP_ASYNC, (uint32_t)(uintptr_t)e->head);
     wr(e->op, OP_USBINTR, 0x07);                     /* transfer done, error, port change */
-    wr(e->op, OP_USBCMD, CMD_RS | CMD_ASE | (8u << 16));   /* 1 ms interrupt threshold */
+    /* the periodic schedule: 1024 frames, each pointing at the anchor QH
+     * (inactive: S-mask 0) - interrupt QHs are linked in behind it */
+    e->frames = (uint32_t*)usb_dma_alloc(4096);
+    e->panchor = (qh_hw_t*)blk_alloc(e, sizeof(qh_hw_t));
+    if (!e->frames || !e->panchor) return -1;
+    e->panchor->hlink = LINK_T;
+    e->panchor->next = LINK_T;
+    e->panchor->alt = LINK_T;
+    e->panchor->token = TOK_HALTED;
+    for (int i = 0; i < 1024; i++) e->frames[i] = (uint32_t)(uintptr_t)e->panchor | LINK_QH;
+    wr(e->op, OP_PERIODIC, (uint32_t)(uintptr_t)e->frames);
+    wr(e->op, OP_USBCMD, CMD_RS | CMD_ASE | CMD_PSE | (8u << 16));   /* 1 ms interrupt threshold */
     wr(e->op, OP_CONFIG, 1);                         /* route every port to EHCI */
     usb_delay_ms(5);
 

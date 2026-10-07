@@ -568,6 +568,7 @@ static void xhci_poll(usb_hc_t* hc) {
 
 static const usb_hc_ops_t g_ops = {
     xhci_control, xhci_set_ep0_mps, xhci_open_endpoint, xhci_submit, xhci_poll, xhci_rescan,
+    NULL, NULL,                       /* (hubs: not on xHCI yet) */
 };
 
 /* ── bring-up ───────────────────────────────────────────────────── */
