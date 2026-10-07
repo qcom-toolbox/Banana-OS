@@ -782,6 +782,7 @@ static void cmd_help(void) {
         "  install            install to a dedicated IDE or SATA disk (bootable, persistent)",
         "  sync               re-write filesystem to the installed disk now",
         "  update             from a newer CD: update the installed system, keeping your files",
+        "  installer          live CD: the graphical installer (desktop running)",
         "  time <command>     run a command and print how long it took",
         "",
         "Networking:",
@@ -1198,7 +1199,7 @@ static const char* const known_cmds[] = {
     "ls", "cd", "pwd", "mkdir", "rm", "touch", "cp", "mv", "edit", "cat", "run",
     "uptime", "top", "exit", "start", "stop", "startx", "stopx",
     "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
-    "hw_info", "shutdown", "reboot", "halt", "install", "sync", "update", "disks", "history", "which", "type",
+    "hw_info", "shutdown", "reboot", "halt", "install", "sync", "update", "installer", "disks", "history", "which", "type",
     "alias", "unalias", "export", "unset", "env", "chsh",
     "grep", "wc", "head", "tail", "find", "time",
     /* shell/netcmds.c + shell/wpcmd.c */
@@ -2420,7 +2421,7 @@ void shell_run(void) {
     else if (fsdisk_is_installed())
         terminal_write_color("Running the installed system (from the disk).\n\n", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     if (live && !fsdisk_find_install(NULL))
-        terminal_writeln("Changes are lost at shutdown - type 'install' to put Banana OS on a disk.\n");
+        terminal_writeln("Changes are lost at shutdown - to keep them, open Install Banana OS on the desktop (or type install).\n");
     if (live && fsdisk_find_install(NULL))
         terminal_write_color(
             "Live CD - Banana OS is also installed on a disk here (its files are not used now).\n"

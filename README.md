@@ -617,7 +617,9 @@ SATA (AHCI) works the same way - in QEMU with the q35 machine, whose disk contro
 qemu-system-x86_64 -machine q35 -m 256 -cdrom Banana_OS.iso -drive file=disk.img,format=raw,if=none,id=d0 -device ide-hd,drive=d0,bus=ide.1
 ```
 
-Then, inside Banana OS:
+The easiest way is the **installer** on the live CD: start the desktop and open **Install Banana OS** (or type `installer`). It shows the disk it found, asks for the keyboard layout, a password and what starts at boot (desktop, login screen, web and SSH servers), then installs with a progress bar - or, when the disk already holds Banana OS, offers to update it and keep its files. It is only on the live CD.
+
+Or, inside Banana OS:
 
 ```
 install     # copies the boot image onto the disk and writes the current filesystem to it

@@ -17,6 +17,7 @@
 #include "browser.h"
 #include "notepad.h"
 #include "clipboard.h"
+#include "installer.h"
 #include "passwd.h"
 #include "login.h"
 #include "utf8.h"
@@ -37,14 +38,23 @@
 
 /* the Start menu and the desktop shortcuts: the same entries */
 /* (About and Wallpaper live in Settings now: past MENU_ITEMS, reached from the desktop's menu) */
-enum { ACT_TERMINAL = 0, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_SETTINGS, ACT_QUIT, ACT_ABOUT, ACT_WALLPAPER, ACT_LOCK };
-#define MENU_ITEMS 8
-static const char* const MENU_LABELS[MENU_ITEMS] = {
-    "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Exit to shell",
+enum { ACT_TERMINAL = 0, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_SETTINGS, ACT_QUIT, ACT_ABOUT, ACT_WALLPAPER, ACT_LOCK, ACT_INSTALL };
+/* slots: the installer's ("Install Banana OS") is there only on the live CD */
+#define MENU_ITEMS_MAX 9
+#define MENU_SLOT_INSTALL 7
+static const int MENU_ACTS[MENU_ITEMS_MAX] = {
+    ACT_TERMINAL, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_SETTINGS, ACT_INSTALL, ACT_QUIT,
 };
-static const char* const ICON_LABELS[MENU_ITEMS] = {
-    "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Quit GUI",
+static const char* const MENU_LABELS[MENU_ITEMS_MAX] = {
+    "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Install Banana OS", "Exit to shell",
 };
+static const char* const ICON_LABELS[MENU_ITEMS_MAX] = {
+    "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Install", "Quit GUI",
+};
+static int menu_count(void) { return installer_available() ? MENU_ITEMS_MAX : MENU_ITEMS_MAX - 1; }
+/* a visible slot's entry in the tables above */
+static int menu_idx(int slot) { return (!installer_available() && slot >= MENU_SLOT_INSTALL) ? slot + 1 : slot; }
+#define MENU_ITEMS menu_count()
 #define START_MENU_W 236
 #define START_MENU_H (16 + MENU_ITEMS * 28)
 #define ICON_W 132
@@ -62,7 +72,7 @@ static int g_menu_sel = 0;     /* an ACT_* */
  * windows of installed apps) and the terminal windows share one stacking
  * order: the app windows have their own back-to-front order, and at most
  * one of them - g_front_app - is above the terminals. */
-enum { APP_FILES = 0, APP_BROWSER, APP_NOTEPAD, APP_LAUNCHER, APP_TASKMGR, APP_SETTINGS, APP_APPWIN, APP_COUNT };
+enum { APP_FILES = 0, APP_BROWSER, APP_NOTEPAD, APP_LAUNCHER, APP_TASKMGR, APP_SETTINGS, APP_INSTALLER, APP_APPWIN, APP_COUNT };
 typedef struct {
     int      (*is_open)(void);
     void     (*draw)(const fb_info_t* fi);
@@ -83,10 +93,11 @@ static const app_t g_apps[APP_COUNT] = {
     { launcher_is_open, launcher_draw, launcher_contains, launcher_click, launcher_mouse, launcher_signature, launcher_close, launcher_rclick, "Apps" },
     { taskmgr_is_open, taskmgr_draw, taskmgr_contains, taskmgr_click, taskmgr_mouse, taskmgr_signature, taskmgr_close, taskmgr_rclick, "Task Manager" },
     { settings_is_open, settings_draw, settings_contains, settings_click, settings_mouse, settings_signature, settings_close, settings_rclick, "Settings" },
+    { installer_is_open, installer_draw, installer_contains, installer_click, installer_mouse, installer_signature, installer_close, installer_rclick, "Install Banana OS" },
     { appwin_is_open, appwin_draw, appwin_contains, appwin_click, appwin_mouse, appwin_signature, appwin_close_all, appwin_rclick, "App" },
 };
 static int g_front_app = -1;                        /* -1: a terminal window is in front */
-static int g_app_order[APP_COUNT] = { APP_FILES, APP_BROWSER, APP_NOTEPAD, APP_LAUNCHER, APP_TASKMGR, APP_SETTINGS, APP_APPWIN };   /* back to front */
+static int g_app_order[APP_COUNT] = { APP_FILES, APP_BROWSER, APP_NOTEPAD, APP_LAUNCHER, APP_TASKMGR, APP_SETTINGS, APP_INSTALLER, APP_APPWIN };   /* back to front */
 static int g_app_min[APP_COUNT];                    /* minimized to the taskbar */
 
 /* open and not minimized (the app windows minimize one by one) */
@@ -106,7 +117,7 @@ static void raise_app(int a) {
 /* the topmost app window at a point, -1 if none (with_front: also the one above the terminals) */
 /* the mouse wheel, per app window (NULL: it does not scroll) */
 static void (*const g_app_wheel[APP_COUNT])(int mx, int my, int dz) = {
-    explorer_wheel, browser_wheel, notepad_wheel, NULL, NULL, NULL, appwin_wheel,
+    explorer_wheel, browser_wheel, notepad_wheel, NULL, NULL, NULL, NULL, appwin_wheel,
 };
 
 static int app_at(int mx, int my, int with_front) {
@@ -250,6 +261,16 @@ static void draw_icon_settings(int x, int y, uint32_t bg) {
     gfx_fill_rect(x + 1, y + 10, 3, 3, c);
     gfx_fill_rect(x + 10, y + 10, 3, 3, c);
     gfx_fill_rect(x + 5, y + 5, 4, 4, bg);
+}
+
+static void draw_icon_install(int x, int y, uint32_t bg) {
+    (void)bg;
+    gfx_fill_rect(x + 5, y, 4, 6, 0x0080E080u);           /* the arrow */
+    gfx_fill_rect(x + 2, y + 5, 10, 2, 0x0080E080u);
+    gfx_fill_rect(x + 4, y + 7, 6, 1, 0x0080E080u);
+    gfx_fill_rect(x + 6, y + 8, 2, 1, 0x0080E080u);
+    gfx_fill_rect(x, y + 10, 14, 4, 0x00C8D2E0u);         /* the disk */
+    gfx_fill_rect(x + 10, y + 11, 2, 2, 0x0080E080u);
 }
 
 static void draw_icon_power(int x, int y, uint32_t bg) {
@@ -557,7 +578,7 @@ static void draw_menu(void) {
         uint8_t bg = VGA_COLOR_DARK_GREY;
         if (g_menu_sel == i) { fg = VGA_COLOR_WHITE; bg = VGA_COLOR_BLUE; }
 
-        const char* item = MENU_LABELS[i];
+        const char* item = MENU_LABELS[menu_idx(i)];
         /* fill the rest of the row in highlight color for clean look */
         for (size_t x = 0; x < menu_w - 2; x++) {
             terminal_putentryat(' ', fg, bg, menu_y + (size_t)i, menu_x + 1 + x);
@@ -574,7 +595,7 @@ static void menu_close_redraw(void) {
     g_menu_open = 0;
     draw_taskbar();
     /* clear menu area */
-    for (size_t y = 0; y < MENU_ITEMS + 1; y++) {
+    for (size_t y = 0; y < (size_t)MENU_ITEMS + 1; y++) {
         for (size_t x = 0; x < 20; x++) {
             terminal_putentryat(' ', VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK, (TASKBAR_ROW - (MENU_ITEMS + 1)) + y, x);
         }
@@ -890,6 +911,7 @@ static void draw_win_glyph(int h, int x, int y, uint32_t bg) {
         else if (i == APP_NOTEPAD) draw_icon_notepad(x, y, bg);
         else if (i == APP_LAUNCHER) draw_icon_apps(x, y, bg);
         else if (i == APP_SETTINGS) draw_icon_settings(x, y, bg);
+        else if (i == APP_INSTALLER) draw_icon_install(x, y, bg);
         else draw_icon_taskmgr(x, y, bg);
         return;
     }
@@ -984,9 +1006,9 @@ static void capture_view(gui_view_t* v, uint32_t sec) {
 static gui_view_t g_last_view;
 static int        g_force_redraw = 1;
 
-static void (*const g_menu_icons[MENU_ITEMS])(int, int, uint32_t) = {
+static void (*const g_menu_icons[MENU_ITEMS_MAX])(int, int, uint32_t) = {
     draw_icon_terminal, draw_icon_files, draw_icon_browser, draw_icon_notepad,
-    draw_icon_apps, draw_icon_taskmgr, draw_icon_settings, draw_icon_power,
+    draw_icon_apps, draw_icon_taskmgr, draw_icon_settings, draw_icon_install, draw_icon_power,
 };
 
 static int start_menu_y(const fb_info_t* fi) { return (int)fi->height - BAR_H - START_MENU_H - 4; }
@@ -999,8 +1021,8 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
     for (int i = 0; i < MENU_ITEMS; i++) {
         int iy = ICON_Y + ICON_STEP * i;
         draw_bevel_box(ICON_X, iy, ICON_W, ICON_H, 0x0029313Du, 0x00586678u, 0x0010151Eu);
-        g_menu_icons[i](ICON_X + 8, iy + 12, 0x0029313Du);
-        gfx_draw_text(ICON_X + 30, iy + 13, ICON_LABELS[i], 0x00F0F6FFu, 0x0029313Du);
+        g_menu_icons[menu_idx(i)](ICON_X + 8, iy + 12, 0x0029313Du);
+        gfx_draw_text(ICON_X + 30, iy + 13, ICON_LABELS[menu_idx(i)], 0x00F0F6FFu, 0x0029313Du);
     }
 
     /* windows back to front: the app windows behind the terminals, the
@@ -1024,8 +1046,8 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
         for (int i = 0; i < MENU_ITEMS; i++) {
             uint32_t bg = (g_menu_sel == i) ? 0x003A4A66u : 0x001D232Cu;
             gfx_fill_rect(menu_x + 24, menu_y + 8 + i * 28, START_MENU_W - 32, 24, bg);
-            g_menu_icons[i](menu_x + 28, menu_y + 14 + i * 28, bg);
-            gfx_draw_text(menu_x + 48, menu_y + 16 + i * 28, MENU_LABELS[i], 0x00E8EEF6u, bg);
+            g_menu_icons[menu_idx(i)](menu_x + 28, menu_y + 14 + i * 28, bg);
+            gfx_draw_text(menu_x + 48, menu_y + 16 + i * 28, MENU_LABELS[menu_idx(i)], 0x00E8EEF6u, bg);
         }
     }
 
@@ -1064,8 +1086,8 @@ static void icon_menu_cb(int id, void* arg) { (void)arg; do_action(id); }
 
 static void open_icon_menu(int slot, int mx, int my) {
     char open[40];
-    ksnprintf(open, sizeof(open), "Open %s", ICON_LABELS[slot]);
-    ctx_item_t items[] = { { open, slot, 0 } };
+    ksnprintf(open, sizeof(open), "Open %s", ICON_LABELS[menu_idx(slot)]);
+    ctx_item_t items[] = { { open, MENU_ACTS[menu_idx(slot)], 0 } };
     ctxmenu_open(mx, my, items, 1, icon_menu_cb, NULL);
 }
 
@@ -1236,7 +1258,7 @@ void gui_poll(void) {
          * and the Start menu first). Apps and Task Manager read no keys
          * (Esc closes them). */
         if (gui_notepad_focused() || gui_appwin_focused() ||
-            ((g_front_app == APP_LAUNCHER || g_front_app == APP_TASKMGR || g_front_app == APP_FILES || g_front_app == APP_SETTINGS) &&
+            ((g_front_app == APP_LAUNCHER || g_front_app == APP_TASKMGR || g_front_app == APP_FILES || g_front_app == APP_SETTINGS || g_front_app == APP_INSTALLER) &&
              app_visible(g_front_app) && tty_current() < 0)) {
             for (int k = 0; k < 64; k++) {
                 char c = keyboard_try_getchar();
@@ -1246,6 +1268,7 @@ void gui_poll(void) {
                 else if (g_front_app == APP_APPWIN) appwin_key(c);
                 else if (g_front_app == APP_FILES) explorer_key(c);
                 else if (g_front_app == APP_SETTINGS) settings_key(c);
+                else if (g_front_app == APP_INSTALLER) installer_key(c);
                 else if (c == 27) g_apps[g_front_app].close();
             }
         }
@@ -1441,7 +1464,7 @@ void gui_poll(void) {
             /* desktop shortcuts */
             if (click && !g_menu_open) {
                 int slot = icon_at(mx, my);
-                if (slot >= 0) do_action(slot);
+                if (slot >= 0) do_action(MENU_ACTS[menu_idx(slot)]);
                 if (!g_gui_enabled) return;
             }
         }
@@ -1570,7 +1593,7 @@ int gui_focused_vt(void) {
     if (g_front_app == APP_BROWSER && browser_is_open() && !g_app_min[APP_BROWSER]) return BROWSER_VT;
     if (g_front_app == APP_NOTEPAD && notepad_is_open() && !g_app_min[APP_NOTEPAD]) return NOTEPAD_VT;
     if (g_front_app == APP_APPWIN && appwin_any_visible()) return APPWIN_VT;
-    if ((g_front_app == APP_LAUNCHER || g_front_app == APP_TASKMGR || g_front_app == APP_FILES || g_front_app == APP_SETTINGS) && app_visible(g_front_app))
+    if ((g_front_app == APP_LAUNCHER || g_front_app == APP_TASKMGR || g_front_app == APP_FILES || g_front_app == APP_SETTINGS || g_front_app == APP_INSTALLER) && app_visible(g_front_app))
         return APPWIN_VT + 1;          /* keys handed out by gui_poll() */
 
     /* Frontmost OPEN window, if any - g_term_order always lists every
@@ -1611,6 +1634,7 @@ static void do_action(int act) {
     case ACT_SETTINGS: settings_open(); g_app_min[APP_SETTINGS] = 0; raise_app(APP_SETTINGS); break;
     case ACT_WALLPAPER: settings_open_page(SETTINGS_PAGE_DISPLAY); g_app_min[APP_SETTINGS] = 0; raise_app(APP_SETTINGS); break;
     case ACT_QUIT: gui_set_enabled(0); break;
+    case ACT_INSTALL: installer_open(); g_app_min[APP_INSTALLER] = 0; raise_app(APP_INSTALLER); break;
     case ACT_LOCK:
         if (passwd_is_set(PASSWD_USER)) {
             g_lock_pending = 1;            /* gui_poll() shows it, outside any menu */
@@ -1625,10 +1649,11 @@ static void do_action(int act) {
 }
 
 static void menu_activate(void) {
-    if (gfx_available()) { do_action(g_menu_sel); return; }
+    int act = MENU_ACTS[menu_idx(g_menu_sel)];
+    if (gfx_available()) { do_action(act); return; }
     /* text mode: the desktop's apps need the framebuffer */
     menu_close_redraw();
-    if (g_menu_sel == ACT_QUIT) gui_set_enabled(0);
+    if (act == ACT_QUIT) gui_set_enabled(0);
 }
 
 /* ── windows for the Task Manager ──────────────────────────────────── */
@@ -1651,6 +1676,13 @@ void gui_window_close(int handle) { if (win_exists(handle)) win_close(handle); }
 void gui_window_activate(int handle) { if (win_exists(handle)) win_activate(handle); }
 
 void gui_raise_files(void) { g_app_min[APP_FILES] = 0; raise_app(APP_FILES); }
+
+/* `installer`: only on the live CD, with the desktop running */
+int gui_open_installer(void) {
+    if (!g_gui_enabled || !gfx_available() || !installer_available()) return 0;
+    do_action(ACT_INSTALL);
+    return 1;
+}
 
 /* a new resolution: the desktop's buffers and every window follow at the next frame */
 void gui_screen_changed(void) {

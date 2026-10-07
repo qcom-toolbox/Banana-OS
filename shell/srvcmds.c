@@ -1,3 +1,4 @@
+#include "../kernel/sysinfo.h"
 #include "../kernel/utf8.h"
 #include "../kernel/settings.h"
 #include "../net/upnp.h"
@@ -233,6 +234,12 @@ int srvcmd_dispatch(const char* line) {
             p = path;
         }
         if (!gui_open_notepad(p)) terminal_writeln("notepad: Notepad is part of the desktop - run `startx` first (or use `edit`)");
+        return 1;
+    }
+    if (strcmp(argv[0], "installer") == 0) {
+        /* the live CD's graphical installer */
+        if (!sysinfo_live_boot()) terminal_writeln("installer: only on the live CD (this system is already installed - see 'update')");
+        else if (!gui_open_installer()) terminal_writeln("installer: it is part of the desktop - run `startx` first (or use `install`)");
         return 1;
     }
     if (strcmp(argv[0], "browser") == 0) {

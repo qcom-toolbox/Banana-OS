@@ -156,8 +156,15 @@ static void patch_marker(uint8_t* b, uint32_t n) {
 /* reads the CD's image in chunks, patched, and hands them to sink(first block, blocks, data) */
 typedef int (*image_sink_t)(uint32_t blk, uint32_t nblk, const uint8_t* data, void* ctx);
 
+/* how far the copy is (the installer's progress bar): CD blocks, +1 for the files */
+static volatile uint32_t g_prog_done, g_prog_total;
+
+void fsdisk_progress(uint32_t* done, uint32_t* total) { *done = g_prog_done; *total = g_prog_total; }
+
 static int stream_image(const ata_disk_t* src, uint32_t iso_bytes, image_sink_t sink, void* ctx) {
     uint32_t total = iso_bytes / 2048u;
+    g_prog_done = 0;
+    g_prog_total = total + 1;
     find_marker(src, total);
     uint8_t* buf = (uint8_t*)kmalloc(FSDISK_COPY_BUF_BYTES + CARRY);
     if (!buf) return -1;
@@ -172,6 +179,8 @@ static int stream_image(const ata_disk_t* src, uint32_t iso_bytes, image_sink_t 
         uint32_t first = have_carry ? carry_blk : done;
         patch_marker(start, len);
         done += chunk;
+        g_prog_done = done;
+        task_yield();                      /* the desktop keeps drawing (the installer's progress) */
         if (done < total) {
             /* the last block waits for the next chunk (a name may continue there) */
             if (len / 2048u > 1) rc = sink(first, len / 2048u - 1, start, ctx);
@@ -410,6 +419,7 @@ int fsdisk_install(void) {
     if (l.nslots == 2) wipe_header(&target, slot_lba_of(&l, 1));
     int rc = write_snapshot_slot(&target, &l, 0, 1);
     if (rc != FSDISK_OK) return rc;
+    g_prog_done = g_prog_total;
 
     g_layout = l;
     g_target = target;
@@ -606,5 +616,6 @@ int fsdisk_update(void) {
     if (iso_bytes <= V3_BASE_LBA * FSDISK_SECTOR) wipe_header(&dst, V3_BASE_LBA);
     if (disk_flush(&dst) != 0) return FSDISK_ERR_IO;
     g_fi_state = -1;
+    g_prog_done = g_prog_total;
     return FSDISK_OK;
 }

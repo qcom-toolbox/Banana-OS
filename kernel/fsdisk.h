@@ -70,5 +70,7 @@ int  fsdisk_update(void);
 int  fsdisk_install_layout(void);
 /* the saved filesystem's size and what one slot of the disk holds */
 void fsdisk_space(uint32_t* used_bytes, uint32_t* capacity_bytes);
+/* how far an install / update / comparison is (done of total) */
+void fsdisk_progress(uint32_t* done, uint32_t* total);
 
 #endif
