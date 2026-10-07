@@ -65,7 +65,8 @@ Banana-OS/
 │   ├── kernel.c        # kernel_main()
 │   ├── idt.c, isr.asm  # CPU exceptions (panic screen) + PIC / hardware IRQs (isr64.asm: 64-bit)
 │   ├── timer.c         # PIT at 1 kHz on IRQ0, hlt-based idle
-│   ├── task.c/h        # Cooperative kernel threads; the scheduler halts when all sleep
+│   ├── task.c/h        # Kernel threads, fair scheduling (weighted run time, priorities); app code on other cores
+│   ├── smp.c, smp_tramp.asm # Starts the other CPU cores (ACPI MADT, INIT/STARTUP IPIs, real -> long mode)
 │   ├── kheap.c         # Kernel heap (first-fit, coalescing) over the Multiboot2 memory map
 │   ├── kstring.c       # memcpy/memset/..., ksnprintf
 │   ├── serial.c        # COM1 console: mirrored output (async), keyboard input
@@ -86,7 +87,7 @@ Banana-OS/
 │   ├── passwd.c        # Password hashes (PBKDF2) in /etc/shadow
 │   ├── wallpaper.c     # Wallpaper presets, user images, /etc/wallpaper
 │   ├── image.c         # Image decoding (via stb_image) + resampling
-│   ├── fs.c, fsdisk.c  # In-memory Unix-like FS (with mounts) + on-disk persistence
+│   ├── fs.c, fsdisk.c  # In-memory Unix-like FS (with mounts) + on-disk persistence (only changed files are written)
 │   ├── fat32.c         # FAT32 volumes (USB sticks, NVMe partitions), long file names
 │   ├── blockdev.c      # Removable drives + the automount task
 │   ├── nvme.c          # NVMe SSD driver
@@ -631,7 +632,7 @@ sync        # saves right away (changes are also saved by themselves, ~2 s after
 
 `install` works because `grub-mkrescue` already builds `Banana_OS.iso` as a GRUB "hybrid" image - the same trick that lets Linux live ISOs be `dd`'d straight onto a USB stick or disk and boot with no CD. `install` raw-copies that already-bootable image from the CD onto the target disk via a small ATAPI driver (renaming the boot marker its UEFI GRUB searches for, so the CD and the disk never pick each other's files), then writes the filesystem after it - no custom bootloader needed.
 
-Disk layout: the first **128 MB** are the boot area (room for the system to grow); the rest of the disk is split into **two save slots** written in turn, so a power cut during a save leaves the previous save intact (disks under ~193 MB get one slot). Settings > About and `sync` show how much of a slot your files use. The files are kept in memory while Banana OS runs, so the RAM also limits how much you can store.
+Disk layout: the first **128 MB** are the boot area (room for the system to grow); the rest of the disk holds your files, each in a place of its own, with an index of them (names, folders, where each file is, a checksum) at the end of the disk. A save writes **only the files that changed** - each into a new place, never over the saved copy - and then the index, in the one of its two copies that does not hold the newest: a power cut during a save leaves the previous save intact. Renaming, moving or deleting writes nothing but the index. Saving happens in the background in 64 KiB pieces with the other tasks running in between, so the desktop never freezes while it saves. (Changing one line in a small file with 33 MB of other files on the disk: 5.9 s of frozen system before, a few ms now.) Disks installed by earlier versions are moved to this layout at their first boot, the old copy kept until the new one is complete. Settings > About and `sync` show how much of the disk your files use. The files are kept in memory while Banana OS runs, so the RAM also limits how much you can store.
 
 Once installed, the disk boots Banana OS **on its own** - drop `-cdrom Banana_OS.iso` entirely:
 
@@ -696,7 +697,8 @@ The boot menu has both entries - **Banana OS 0.5 (64-bit)** and **(32-bit)**; th
 - **Long mode**: GRUB starts a Multiboot2 kernel in 32-bit protected mode on both firmwares. `boot/boot64.asm` checks the CPU, builds page tables mapping the first 4 GiB 1:1 with 2 MiB pages (RAM, PCI device memory and the framebuffer all live there), enables PAE, long mode and paging, loads a 64-bit GDT and jumps to `kernel_main`.
 - **Same C code**: both kernels are built from the same sources (`*.o` for i386, `*.o64` for x86_64: `-mcmodel=small -mno-red-zone`, no SSE). Pointer-sized types come from the compiler, the interrupt stubs (`isr64.asm`), the task switch (`task_switch64.asm`), the IDT gate format and the new-task stack frame have 64-bit versions; the heap stays below 3.5 GiB, so DMA addresses still fit the 32-bit registers of the older devices.
 - **UEFI quirk**: UEFI firmware leaves the CPU's local APIC enabled with the legacy PIC input masked (a BIOS sets it to pass-through); Banana OS drives interrupts with the 8259 PIC, so it switches the local APIC off at boot - without that, no timer or device interrupt would arrive.
-- **Not (yet)**: Secure Boot (the GRUB on the ISO is unsigned), memory above 4 GiB (64-bit Banana OS uses at most 3.5 GiB of RAM), more than one CPU core.
+- **Several CPU cores**: the 64-bit kernel starts every core the ACPI tables list (up to 16). The kernel itself runs on the first core; apps run on all of them - an app's threads compute in parallel (`threads`, `mandel` in ~/Examples), and every system call an app makes on another core is carried out on the first one. Task Manager and `top` show which core each app runs on. The 32-bit kernel uses one core.
+- **Not (yet)**: Secure Boot (the GRUB on the ISO is unsigned), memory above 4 GiB (64-bit Banana OS uses at most 3.5 GiB of RAM), kernel code on more than one core.
 
 ## Technical Notes
 
@@ -705,7 +707,8 @@ The boot menu has both entries - **Banana OS 0.5 (64-bit)** and **(32-bit)**; th
 - **Language**: freestanding C + NASM, no floating point (integer-only graphics and crypto)
 - **Graphics**: 32-bit framebuffer + 8x8 bitmap font; the console paints lazily (dirty rows, coalesced scrolling)
 - **Interrupts**: PIC remapped to vectors 32-47; IRQ0 (1 kHz timer) and the NIC's IRQ are used, keyboard/mouse stay polled
-- **Scheduling**: cooperative kernel threads; with nothing to run the CPU halts until the next interrupt
+- **Scheduling**: kernel threads switch where they choose to (app code is also time-sliced by the timer); the next to run is the ready one that has had the least CPU time (counted with the TSC, weighted: the desktop's task x2, daemons like autosave x1/4), and a task waking from a sleep (a key, a packet) runs at the next switch; with nothing to run the CPU halts until the next interrupt
+- **Multicore** (64-bit): the other cores are started with INIT/STARTUP IPIs through a real-mode trampoline at 0x8000 and run app code taken from a queue; the boot core's local APIC is on in "virtual wire" mode (the 8259 still delivers the device interrupts), IPIs move tasks between cores
 - **Memory**: physical = virtual (32-bit: paging off; 64-bit: the first 4 GiB identity-mapped), kernel heap from the Multiboot2 memory map, so heap buffers double as DMA buffers
 - **Input**:
   - PS/2 keyboard (`0x60` / `0x64`)

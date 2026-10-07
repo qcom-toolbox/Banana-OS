@@ -213,6 +213,7 @@ static int create_file_in(int parent, const char* name_in) {
             files[i].mnt        = m ? dirs[parent].mnt : 0;
             files[i].loaded     = 1;
             files[i].node       = node;
+            files[i].data_gen   = g_fs_gen;
             k_strcpy(files[i].name, name, FS_NAME_LEN);
             return i;
         }
@@ -224,6 +225,7 @@ int fs_write(int idx, const void* data, uint32_t len) {
     touched();
     fs_file_t* f = fs_file_info(idx);
     if (!f || !f->used) return -1;
+    f->data_gen = g_fs_gen;
     if (reserve(f, len) != 0) return -1;
     mount_t* m = mount_of(f->mnt);
     if (m && m->ops->write(m->ctx, f->node, data, len) != 0) {
@@ -252,6 +254,7 @@ int fs_append(int idx, const void* data, uint32_t len) {
     touched();
     fs_file_t* f = fs_file_info(idx);
     if (!f || !f->used) return -1;
+    f->data_gen = g_fs_gen;
     if (ensure_loaded(f) != 0) return -1;
     if (reserve(f, f->size + len) != 0) return -1;
     mount_t* m = mount_of(f->mnt);
@@ -1127,6 +1130,8 @@ static int load_tree(const uint8_t* buf, uint32_t len, uint32_t dir_off, uint32_
     return 0;
 }
 
+static void finish_load(void);
+
 int fs_snapshot_load(const uint8_t* buf, uint32_t len, uint32_t version) {
     int rc = -1;
     if (version == FS_SNAPSHOT_V1) rc = load_v1(buf, len);
@@ -1137,6 +1142,48 @@ int fs_snapshot_load(const uint8_t* buf, uint32_t len, uint32_t version) {
         rc = load_tree(buf, len, 4, nd);
     }
     if (rc != 0) return rc;
+    finish_load();
+    return 0;
+}
+
+/* ── layout-5 restore (kernel/fsdisk.c) ─────────────────────────── */
+
+int fs_home_dir(void) { return home_dir; }
+
+void fs_restore_begin(void) {
+    clear_tree();
+    dirs[0].used = 1;
+    dirs[0].parent_dir = -1;
+    home_dir = 0;
+}
+
+void fs_restore_dir(int idx, const char* name, int parent) {
+    if (idx <= 0 || idx >= FS_MAX_DIRS || parent < 0 || parent >= FS_MAX_DIRS) return;
+    k_strcpy(dirs[idx].name, name, FS_NAME_LEN);
+    dirs[idx].used = 1;
+    dirs[idx].parent_dir = parent;
+}
+
+int fs_restore_file(int idx, const char* name, int parent, const void* data, uint32_t size) {
+    if (idx < 0 || idx >= FS_MAX_FILES || files[idx].used || size > FS_MAX_FILE_SIZE) return -1;
+    fs_file_t* f = &files[idx];
+    k_strcpy(f->name, name, FS_NAME_LEN);
+    f->parent_dir = parent;
+    f->used = 1;
+    f->content = NULL;
+    f->size = f->cap = 0;
+    f->loaded = 1;
+    if (fs_write(idx, data, size) != 0) { f->used = 0; return -1; }
+    return 0;
+}
+
+void fs_restore_end(int home) {
+    home_dir = (home > 0 && home < FS_MAX_DIRS && dirs[home].used) ? home : 0;
+    finish_load();
+}
+
+/* after a whole tree was loaded */
+static void finish_load(void) {
     /* anything not reachable from / (corrupt parent links) is dropped */
     for (int i = 0; i < FS_MAX_FILES; i++)
         if (files[i].used && (files[i].parent_dir < 0 || files[i].parent_dir >= FS_MAX_DIRS ||
@@ -1149,7 +1196,6 @@ int fs_snapshot_load(const uint8_t* buf, uint32_t len, uint32_t version) {
     if (home_dir > 0 && find_dir_in(home_dir, "Downloads") < 0) mkdir_in(home_dir, "Downloads");
     if (find_dir_in(0, "mnt") < 0) mkdir_in(0, "mnt");
     if (find_dir_in(0, "apps") < 0) mkdir_in(0, "apps");
-    return 0;
 }
 
 int fs_list_files(const char* path, int* out_idx, int max) {

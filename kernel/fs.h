@@ -21,6 +21,7 @@ typedef struct {
     uint16_t mnt;        /* 0, or the mount (USB stick, ...) the file lives on */
     uint8_t  loaded;     /* mounted files: content read in yet */
     uint32_t node;       /* the mount driver's handle for it */
+    uint32_t data_gen;   /* fs_generation() of the last change to its data (kernel/fsdisk.c) */
 } fs_file_t;
 
 typedef struct {
@@ -109,6 +110,15 @@ uint32_t fs_snapshot_size(void);
 void     fs_snapshot_save(uint8_t* buf);       /* buf must be >= fs_snapshot_size() bytes */
 /* returns 0 on success; the current tree is only replaced on success */
 int      fs_snapshot_load(const uint8_t* buf, uint32_t len, uint32_t version);
+
+/* Layout-5 disks (kernel/fsdisk.c) keep every file in a place of its own
+ * and write only the files that changed: the tree is rebuilt from their
+ * records with these, each entry at the index it was saved from. */
+int  fs_home_dir(void);
+void fs_restore_begin(void);
+void fs_restore_dir(int idx, const char* name, int parent);
+int  fs_restore_file(int idx, const char* name, int parent, const void* data, uint32_t size);
+void fs_restore_end(int home);
 
 /* ── mounts (kernel/fat32.c) ─────────────────────────────────────────
  * Another filesystem's tree is mirrored under a directory: its folders

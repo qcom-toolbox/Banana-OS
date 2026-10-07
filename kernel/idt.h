@@ -12,4 +12,8 @@ void idt_init(void);
  * until the kernel executes `sti` (kernel_main, after timer_init). */
 void irq_install(int irq, void (*handler)(void));
 
+/* another processor core, starting (kernel/smp.c, 64-bit): the kernel's
+ * GDT with that core's own TSS, and the IDT */
+void idt_ap_init(int cpu);
+
 #endif

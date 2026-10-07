@@ -4,6 +4,7 @@
 #include "io.h"
 #include "terminal.h"
 #include "serial.h"
+#include "task.h"
 
 /*
  * PIT channel 0, mode 2 (rate generator) at 1 kHz, counted by IRQ0.
@@ -26,6 +27,7 @@ static volatile uint32_t g_ms = 0;
 static void timer_irq(void) {
     g_ms++;
     serial_kick();      /* drain the serial console's output queue */
+    task_smp_tick();    /* app code on the other cores takes turns (kernel/task.c) */
 }
 
 void timer_init(void) {

@@ -141,3 +141,35 @@ irq_common_stub:
     POP_ALL
     add rsp, 16
     iretq
+
+; ── local-APIC interrupts (kernel/smp.c) ──────────────────────────────
+; ipi_stub: SMP_VEC_KICK, another core asking this one to look at its
+; work; stray_stub: any other vector that should not arrive (the I/O APIC
+; is masked) - acknowledged and ignored; spurious_stub: the local APIC's
+; spurious vector, which must not be acknowledged at all.
+global ipi_stub
+global stray_stub
+global spurious_stub
+extern ipi_handler
+
+ipi_stub:
+    push qword 0
+    push qword 0xF0
+    jmp ipi_common_stub
+
+stray_stub:
+    push qword 0
+    push qword 0x30
+    jmp ipi_common_stub
+
+spurious_stub:
+    iretq
+
+ipi_common_stub:
+    PUSH_ALL
+    cld
+    mov rdi, rsp
+    call ipi_handler
+    POP_ALL
+    add rsp, 16
+    iretq

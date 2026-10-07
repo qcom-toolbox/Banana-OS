@@ -42,6 +42,10 @@ void app_fault(uint32_t vector, uint32_t err, uintptr_t ip, uintptr_t addr);
 /* kernel/idt.c: a hardware interrupt came at ip (time-slices app code) */
 void app_preempt(uintptr_t ip);
 
+/* kernel/task.c: the kernel stack task pid left to run app code (0 if it
+ * is not running any) - a fault on another core is handled below it */
+uintptr_t app_fault_stack(int pid);
+
 /* running apps, for `pkg ps` */
 void app_list(void);
 int  app_count(void);

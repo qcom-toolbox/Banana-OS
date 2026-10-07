@@ -200,6 +200,13 @@ void sysinfo_init_mb2(uint32_t mb2_info_addr) {
             info.biosdev = *(const uint32_t*)((const uint8_t*)t + 8);
             info.has_biosdev = 1;
         }
+        /* the ACPI RSDP (14: version 1, 15: version 2 - preferred) */
+        if ((t->type == 14 && !info.has_rsdp && t->size >= 8 + 20) || (t->type == 15 && t->size >= 8 + 36)) {
+            uint32_t n = t->type == 15 ? 36u : 20u;
+            const uint8_t* s = (const uint8_t*)t + 8;
+            for (uint32_t i = 0; i < sizeof(info.rsdp); i++) info.rsdp[i] = i < n ? s[i] : 0;
+            info.has_rsdp = 1;
+        }
         o += (t->size + 7u) & ~7u;
     }
 

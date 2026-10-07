@@ -736,7 +736,9 @@ static int a_thread_create(int (*fn)(void*), void* arg) {
     t->pid = -1;
     t->used = 1;
     char name[24];
-    ksnprintf(name, sizeof(name), "%.14s/t%d", p->name, id + 1);
+    char base[15];                          /* (ksnprintf has no %.14s) */
+    kstrlcpy(base, p->name, sizeof(base));
+    ksnprintf(name, sizeof(name), "%s/t%d", base, id + 1);
     int pid = task_create(name, thread_entry);
     if (pid < 0) { kfree(t->stack_mem); t->used = 0; return -1; }
     t->pid = pid;                           /* it runs once we yield (no preemption in here) */
@@ -828,7 +830,21 @@ void app_preempt(uintptr_t ip) {
     breathe(p, 0);
     task_maybe_yield();
     if (p->has_term) terminal_vt_set_active(p->vt);
+    /* a free processor core takes the app code from here (kernel/task.h):
+     * nothing of the kernel may run after this - it may be on that core now */
+    task_offload();
     __asm__ volatile("cli");
+}
+
+uintptr_t app_fault_stack(int pid) {
+    for (int i = 0; i < APP_MAX; i++) {
+        app_proc_t* p = &g_procs[i];
+        if (!p->used) continue;
+        if (p->pid == pid && p->running) return p->saved_sp;
+        for (int t = 0; t < APP_THREADS; t++)
+            if (p->threads[t].used && p->threads[t].pid == pid && p->threads[t].running) return p->threads[t].saved_sp;
+    }
+    return 0;
 }
 
 static void a_exit(int code) {
@@ -837,6 +853,35 @@ static void a_exit(int code) {
     for (;;) task_sleep_ms(1000);    /* not an app: cannot happen */
 }
 
+#ifdef __x86_64__
+/* App code may run on another processor core (kernel/task.h), the kernel
+ * only on the boot core: every entry of the table points at a little stub
+ * built here - call smp_app_gate (kernel/appcall64.asm), which brings the
+ * task back to the boot core if needed, then jump to the function. The
+ * few calls that only compute on the app's own memory skip it. */
+extern void smp_app_gate(void);
+#define API_GATES 96
+static uint8_t g_gates[API_GATES][32] __attribute__((aligned(16)));
+static int     g_ngates;
+
+static void* gate(void* fn) {
+    if (g_ngates >= API_GATES) return fn;
+    uint8_t* s = g_gates[g_ngates++];
+    int32_t rel = (int32_t)((intptr_t)smp_app_gate - (intptr_t)(s + 5));
+    uint64_t target = (uint64_t)(uintptr_t)fn;
+    s[0] = 0xE8;                                        /* call smp_app_gate */
+    memcpy(s + 1, &rel, 4);
+    s[5] = 0xFF;                                        /* jmp [rip + 0] */
+    s[6] = 0x25;
+    memset(s + 7, 0, 4);
+    memcpy(s + 11, &target, 8);                         /* the function */
+    return s;
+}
+#define G(fn) ((__typeof__(&fn))gate((void*)fn))
+#else
+#define G(fn) (fn)
+#endif
+
 static void api_init(void) {
     if (g_api.magic) return;
     g_api.magic = BANANA_API_MAGIC;
@@ -844,75 +889,75 @@ static void api_init(void) {
     g_api.size = sizeof(banana_api_t);
     g_api.arch = BANANA_ARCH;
     g_api.os_version = "0.5";
-    g_api.exit = a_exit;
-    g_api.write = a_write;
-    g_api.getchar = a_getchar;
-    g_api.trygetchar = a_trygetchar;
-    g_api.readline = a_readline;
-    g_api.set_color = a_set_color;
-    g_api.clear_screen = a_clear;
-    g_api.term_size = a_term_size;
-    g_api.set_cursor = a_set_cursor;
-    g_api.malloc = a_malloc;
-    g_api.free = a_free;
-    g_api.realloc = a_realloc;
-    g_api.open = a_open;
-    g_api.read = a_read;
-    g_api.seek = a_seek;
-    g_api.close = a_close;
-    g_api.remove = a_remove;
-    g_api.mkdir = a_mkdir;
-    g_api.rename = a_rename;
-    g_api.stat = a_stat;
-    g_api.readdir = a_readdir;
-    g_api.getcwd = a_getcwd;
-    g_api.chdir = a_chdir;
+    g_api.exit = G(a_exit);
+    g_api.write = G(a_write);
+    g_api.getchar = G(a_getchar);
+    g_api.trygetchar = G(a_trygetchar);
+    g_api.readline = G(a_readline);
+    g_api.set_color = G(a_set_color);
+    g_api.clear_screen = G(a_clear);
+    g_api.term_size = G(a_term_size);
+    g_api.set_cursor = G(a_set_cursor);
+    g_api.malloc = G(a_malloc);
+    g_api.free = G(a_free);
+    g_api.realloc = G(a_realloc);
+    g_api.open = G(a_open);
+    g_api.read = G(a_read);
+    g_api.seek = G(a_seek);
+    g_api.close = G(a_close);
+    g_api.remove = G(a_remove);
+    g_api.mkdir = G(a_mkdir);
+    g_api.rename = G(a_rename);
+    g_api.stat = G(a_stat);
+    g_api.readdir = G(a_readdir);
+    g_api.getcwd = G(a_getcwd);
+    g_api.chdir = G(a_chdir);
     g_api.ticks_ms = a_ticks;
-    g_api.sleep_ms = a_sleep;
-    g_api.yield = a_yield;
-    g_api.localtime = a_localtime;
-    g_api.random = a_random;
-    g_api.win_open = a_win_open;
-    g_api.win_pixels = a_win_pixels;
-    g_api.win_update = a_win_update;
-    g_api.win_event = a_win_event;
-    g_api.win_close = a_win_close;
-    g_api.win_set_title = a_win_set_title;
-    g_api.win_size = a_win_size;
+    g_api.sleep_ms = G(a_sleep);
+    g_api.yield = G(a_yield);
+    g_api.localtime = G(a_localtime);
+    g_api.random = G(a_random);
+    g_api.win_open = G(a_win_open);
+    g_api.win_pixels = G(a_win_pixels);
+    g_api.win_update = G(a_win_update);
+    g_api.win_event = G(a_win_event);
+    g_api.win_close = G(a_win_close);
+    g_api.win_set_title = G(a_win_set_title);
+    g_api.win_size = G(a_win_size);
     g_api.draw_text = a_draw_text;
     g_api.font8x8 = &font8x8_basic[0][0];
-    g_api.http_get = a_http_get;
-    g_api.audio_play = a_audio_play;
-    g_api.audio_beep = a_audio_beep;
-    g_api.audio_busy = a_audio_busy;
-    g_api.clipboard_set = a_clip_set;
-    g_api.clipboard_get = a_clip_get;
-    g_api.interrupted = a_interrupted;
-    g_api.win_set_resizable = a_win_set_resizable;
-    g_api.thread_create = a_thread_create;
-    g_api.thread_join = a_thread_join;
-    g_api.thread_id = a_thread_id;
-    g_api.thread_exit = a_thread_exit;
+    g_api.http_get = G(a_http_get);
+    g_api.audio_play = G(a_audio_play);
+    g_api.audio_beep = G(a_audio_beep);
+    g_api.audio_busy = G(a_audio_busy);
+    g_api.clipboard_set = G(a_clip_set);
+    g_api.clipboard_get = G(a_clip_get);
+    g_api.interrupted = G(a_interrupted);
+    g_api.win_set_resizable = G(a_win_set_resizable);
+    g_api.thread_create = G(a_thread_create);
+    g_api.thread_join = G(a_thread_join);
+    g_api.thread_id = G(a_thread_id);
+    g_api.thread_exit = G(a_thread_exit);
     g_api.cpu_count = a_cpu_count;
-    g_api.wait = a_wait;
-    g_api.wake = a_wake;
-    g_api.web_open = a_web_open;
-    g_api.web_close = a_web_close;
-    g_api.web_load = a_web_load;
-    g_api.web_load_html = a_web_load_html;
-    g_api.web_resize = a_web_resize;
-    g_api.web_poll = a_web_poll;
-    g_api.web_draw = a_web_draw;
-    g_api.web_event = a_web_event;
-    g_api.web_scroll = a_web_scroll;
-    g_api.web_go = a_web_go;
-    g_api.web_info = a_web_info;
-    g_api.web_eval = a_web_eval;
-    g_api.web_message = a_web_message;
-    g_api.web_post = a_web_post;
-    g_api.font_draw = a_font_draw;
-    g_api.font_width = a_font_width;
-    g_api.font_metrics = a_font_metrics;
+    g_api.wait = G(a_wait);
+    g_api.wake = G(a_wake);
+    g_api.web_open = G(a_web_open);
+    g_api.web_close = G(a_web_close);
+    g_api.web_load = G(a_web_load);
+    g_api.web_load_html = G(a_web_load_html);
+    g_api.web_resize = G(a_web_resize);
+    g_api.web_poll = G(a_web_poll);
+    g_api.web_draw = G(a_web_draw);
+    g_api.web_event = G(a_web_event);
+    g_api.web_scroll = G(a_web_scroll);
+    g_api.web_go = G(a_web_go);
+    g_api.web_info = G(a_web_info);
+    g_api.web_eval = G(a_web_eval);
+    g_api.web_message = G(a_web_message);
+    g_api.web_post = G(a_web_post);
+    g_api.font_draw = G(a_font_draw);
+    g_api.font_width = G(a_font_width);
+    g_api.font_metrics = G(a_font_metrics);
 }
 
 /* ── the ELF loader ────────────────────────────────────────────────── */

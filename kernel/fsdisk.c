@@ -280,6 +280,22 @@ static uint32_t super_check(const fsdisk_super_t* sb) {
     return c;
 }
 
+/* Big writes go out in pieces, and the other tasks run in between: a save
+ * in the background never holds up the desktop for more than one piece. */
+#define WRITE_CHUNK_SECTORS 128u                          /* 64 KiB */
+
+static int write_chunked(const ata_disk_t* disk, uint32_t lba, uint32_t sectors, const uint8_t* buf) {
+    while (sectors) {
+        uint32_t n = sectors < WRITE_CHUNK_SECTORS ? sectors : WRITE_CHUNK_SECTORS;
+        if (disk_write(disk, lba, n, buf) != 0) return -1;
+        lba += n;
+        sectors -= n;
+        buf += n * FSDISK_SECTOR;
+        if (sectors) task_yield();
+    }
+    return 0;
+}
+
 /* writes a snapshot payload (already serialized, after its header space) into a slot */
 static int write_payload(const ata_disk_t* disk, const layout_t* l, int slot, uint32_t seq,
                          uint8_t* buf, uint32_t payload, uint32_t snap_version) {
@@ -298,7 +314,7 @@ static int write_payload(const ata_disk_t* disk, const layout_t* l, int slot, ui
     if (l->version == LAYOUT_V4) { sb.layout = LAYOUT_V4; sb.slot_sectors = l->slot_sectors; }
     sb.super_check   = super_check(&sb);
     memcpy(buf, &sb, hdr);
-    return (disk_write(disk, slot_lba_of(l, slot), sectors, buf) == 0 && disk_flush(disk) == 0) ? FSDISK_OK : FSDISK_ERR_IO;
+    return (write_chunked(disk, slot_lba_of(l, slot), sectors, buf) == 0 && disk_flush(disk) == 0) ? FSDISK_OK : FSDISK_ERR_IO;
 }
 
 static int write_snapshot_slot(const ata_disk_t* disk, const layout_t* l, int slot, uint32_t seq) {
@@ -396,6 +412,420 @@ static void wipe_header(const ata_disk_t* d, uint32_t lba) {
     disk_write(d, lba, 1, g_buf);
 }
 
+/* ── layout 5: every file in a place of its own ─────────────────────
+ * Layouts 3 and 4 wrote the whole filesystem as one blob on every save -
+ * hundreds of MB for one changed setting, while nothing else could run.
+ * Layout 5 works like the file systems of other systems:
+ *
+ *   128 MB          the mark: says the disk is layout 5, where its parts are
+ *   128 MB + 4 KiB  the files' area: each file's data in one extent of 4 KiB
+ *                   blocks, found in the free space between the others
+ *   end - 1 MB      two metadata slots (256 KiB each): the folders and, for
+ *                   every file, its name, folder, size, extent and checksum
+ *
+ * A save writes only the files whose data changed since the last one - each
+ * into a NEW extent, never over the one the saved metadata points at - then
+ * the metadata into the slot not holding the newest copy (copy-on-write).
+ * A power cut at any moment leaves the previous save whole. The extents
+ * the new metadata no longer uses are free from then on. Renaming, moving
+ * or deleting a file writes nothing but the metadata.
+ *
+ * Older disks are moved to layout 5 at boot (v5_migrate), the copy they
+ * were loaded from untouched until the new one is complete. */
+
+#define V5_MAGIC        0x354E4142u    /* "BAN5" */
+#define V5_MAGIC2       0x4B52414Du    /* "MARK" */
+#define V5_BLOCK_SECT   8u             /* 4 KiB blocks */
+#define V5_META_SECT    512u           /* per metadata slot */
+#define V5_DIR_REC      (4u + FS_NAME_LEN + 4u)               /* idx, name, parent */
+#define V5_FILE_REC     (4u + FS_NAME_LEN + 4u + 4u * 3u)     /* idx, name, parent, size, lba, check */
+#define V5_BODY_MAX     (4u + FS_MAX_DIRS * V5_DIR_REC + 8u + FS_MAX_FILES * V5_FILE_REC)
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic, magic2;
+    uint32_t version;
+    uint32_t nonce;        /* this install's: metadata from an earlier one is ignored */
+    uint32_t data_lba;     /* the files' area: [data_lba, data_end) */
+    uint32_t data_end;
+    uint32_t meta_lba;     /* the two metadata slots */
+    uint32_t check;
+} v5_mark_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t nonce;
+    uint32_t seq;
+    uint32_t body_bytes;
+    uint32_t body_check;
+    uint32_t check;
+} v5_meta_t;
+
+/* where each file's saved copy is (by file index) */
+typedef struct {
+    uint8_t  valid;
+    uint32_t gen;          /* the file's data_gen when it was written */
+    uint32_t lba, sectors; /* its extent (0 sectors: an empty file) */
+    uint32_t size, check;
+} v5_rec_t;
+
+/* the parts of the disk in use, sorted by lba: the files' extents, and
+ * while moving an older disk to layout 5, the copy being moved */
+typedef struct { uint32_t lba, sectors; } v5_ext_t;
+#define V5_EXT_MAX (FS_MAX_FILES * 2 + 8)
+
+static int       g_v5;                     /* the installed disk is layout 5 */
+static v5_mark_t g_mark;
+static v5_rec_t  g_rec[FS_MAX_FILES];
+static v5_rec_t  g_nrec[FS_MAX_FILES];     /* the save being written */
+static v5_ext_t  g_ext[V5_EXT_MAX];
+static int       g_next;
+
+static uint32_t mark_check(const v5_mark_t* m) {
+    return checksum_of((const uint8_t*)m, (uint32_t)sizeof(*m) - 4u) ^ 0x5A5A1234u;
+}
+static uint32_t meta_check(const v5_meta_t* h) {
+    return checksum_of((const uint8_t*)h, (uint32_t)sizeof(*h) - 4u) ^ 0xC0FFEE55u;
+}
+
+static void ext_reset(void) { g_next = 0; }
+
+static int ext_add(uint32_t lba, uint32_t sectors) {
+    if (!sectors) return 0;
+    if (g_next >= V5_EXT_MAX) return -1;
+    int i = g_next;
+    while (i > 0 && g_ext[i - 1].lba > lba) { g_ext[i] = g_ext[i - 1]; i--; }
+    g_ext[i].lba = lba;
+    g_ext[i].sectors = sectors;
+    g_next++;
+    return 0;
+}
+
+static void ext_remove(uint32_t lba, uint32_t sectors) {
+    if (!sectors) return;
+    for (int i = 0; i < g_next; i++) {
+        if (g_ext[i].lba != lba) continue;
+        for (int j = i; j + 1 < g_next; j++) g_ext[j] = g_ext[j + 1];
+        g_next--;
+        return;
+    }
+}
+
+/* the first free stretch of the files' area that holds `sectors` (0: full) */
+static uint32_t ext_alloc(uint32_t sectors) {
+    uint32_t cur = g_mark.data_lba;
+    for (int i = 0; i <= g_next; i++) {
+        uint32_t next = i < g_next ? g_ext[i].lba : g_mark.data_end;
+        if (next > g_mark.data_end) next = g_mark.data_end;
+        if (next > cur && next - cur >= sectors) {
+            if (ext_add(cur, sectors) != 0) return 0;
+            return cur;
+        }
+        if (i < g_next) {
+            uint32_t end = g_ext[i].lba + g_ext[i].sectors;
+            end = (end + V5_BLOCK_SECT - 1u) & ~(V5_BLOCK_SECT - 1u);
+            if (end > cur) cur = end;
+        }
+    }
+    return 0;
+}
+
+static uint32_t v5_sectors_for(uint32_t size) {
+    return ((size + 4095u) / 4096u) * V5_BLOCK_SECT;
+}
+
+static void v5_new_mark(const ata_disk_t* d, v5_mark_t* m) {
+    memset(m, 0, sizeof(*m));
+    m->magic = V5_MAGIC;
+    m->magic2 = V5_MAGIC2;
+    m->version = 5;
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    m->nonce = (lo ^ (hi * 2654435761u) ^ timer_ms()) | 1u;
+    m->data_lba = V4_BASE_LBA + V5_BLOCK_SECT;
+    m->meta_lba = (d->sectors - V4_TAIL_SECTORS) & ~(V5_BLOCK_SECT - 1u);
+    m->data_end = m->meta_lba;
+    m->check = mark_check(m);
+}
+
+/* a layout-5 disk: its mark */
+static int v5_detect(const ata_disk_t* d, v5_mark_t* out) {
+    if (d->sectors <= V4_BASE_LBA + V4_TAIL_SECTORS + 2048u) return 0;
+    uint8_t sec[FSDISK_SECTOR];
+    if (disk_read(d, V4_BASE_LBA, 1, sec) != 0) return 0;
+    v5_mark_t m;
+    memcpy(&m, sec, sizeof(m));
+    if (m.magic != V5_MAGIC || m.magic2 != V5_MAGIC2 || m.version != 5 || m.check != mark_check(&m)) return 0;
+    if (m.data_lba < V4_BASE_LBA + V5_BLOCK_SECT || m.data_end <= m.data_lba || m.meta_lba < m.data_end ||
+        m.meta_lba + 2u * V5_META_SECT > d->sectors)
+        return 0;
+    *out = m;
+    return 1;
+}
+
+/* one metadata slot, checked: its header and body (kfree the body) */
+static int v5_read_meta(const ata_disk_t* d, const v5_mark_t* m, int slot, v5_meta_t* h, uint8_t** body) {
+    uint32_t lba = m->meta_lba + (uint32_t)slot * V5_META_SECT;
+    uint8_t sec[FSDISK_SECTOR];
+    if (disk_read(d, lba, 1, sec) != 0) return 0;
+    memcpy(h, sec, sizeof(*h));
+    if (h->magic != V5_MAGIC || h->version != 5 || h->nonce != m->nonce || h->check != meta_check(h)) return 0;
+    if (h->body_bytes < 12u || h->body_bytes > V5_BODY_MAX) return 0;
+    uint32_t sectors = bytes_to_sectors(h->body_bytes);
+    uint8_t* b = (uint8_t*)kmalloc(sectors * FSDISK_SECTOR);
+    if (!b) return 0;
+    if (disk_read(d, lba + 1u, sectors, b) != 0 || checksum_of(b, h->body_bytes) != h->body_check) {
+        kfree(b);
+        return 0;
+    }
+    *body = b;
+    return 1;
+}
+
+static uint32_t rd32(const uint8_t* p) { uint32_t v; memcpy(&v, p, 4); return v; }
+static void     wr32(uint8_t* p, uint32_t v) { memcpy(p, &v, 4); }
+
+/* checks a metadata body before anything of the live tree is replaced */
+static int v5_body_ok(const uint8_t* b, uint32_t len, const v5_mark_t* m) {
+    uint32_t off = 0, nd = rd32(b);
+    off = 4;
+    if (nd > FS_MAX_DIRS || off + nd * V5_DIR_REC + 8u > len) return 0;
+    off += nd * V5_DIR_REC + 4u;
+    uint32_t nf = rd32(b + off);
+    off += 4;
+    if (nf > FS_MAX_FILES || off + nf * V5_FILE_REC > len) return 0;
+    for (uint32_t i = 0; i < nf; i++, off += V5_FILE_REC) {
+        const uint8_t* r = b + off;
+        uint32_t idx = rd32(r), size = rd32(r + 4 + FS_NAME_LEN + 4), lba = rd32(r + 4 + FS_NAME_LEN + 8);
+        if (idx >= FS_MAX_FILES || size > FS_MAX_FILE_SIZE) return 0;
+        if (size && (lba < m->data_lba || lba + v5_sectors_for(size) > m->data_end)) return 0;
+    }
+    return 1;
+}
+
+/* rebuilds the tree from a checked body, reading every file */
+static void v5_load_body(const ata_disk_t* d, const uint8_t* b) {
+    uint32_t off = 4, nd = rd32(b);
+    char name[FS_NAME_LEN];
+    fs_restore_begin();
+    for (uint32_t i = 0; i < nd; i++, off += V5_DIR_REC) {
+        memcpy(name, b + off + 4, FS_NAME_LEN);
+        name[FS_NAME_LEN - 1] = '\0';
+        fs_restore_dir((int)rd32(b + off), name, (int32_t)rd32(b + off + 4 + FS_NAME_LEN));
+    }
+    int home = (int32_t)rd32(b + off);
+    off += 4;
+    uint32_t nf = rd32(b + off);
+    off += 4;
+    ext_reset();
+    memset(g_rec, 0, sizeof(g_rec));
+    for (uint32_t i = 0; i < nf; i++, off += V5_FILE_REC) {
+        const uint8_t* r = b + off;
+        uint32_t idx = rd32(r), size = rd32(r + 4 + FS_NAME_LEN + 4);
+        uint32_t lba = rd32(r + 4 + FS_NAME_LEN + 8), check = rd32(r + 4 + FS_NAME_LEN + 12);
+        int parent = (int32_t)rd32(r + 4 + FS_NAME_LEN);
+        memcpy(name, r + 4, FS_NAME_LEN);
+        name[FS_NAME_LEN - 1] = '\0';
+        uint32_t sectors = v5_sectors_for(size);
+        uint8_t* data = sectors ? (uint8_t*)kmalloc(sectors * FSDISK_SECTOR) : NULL;
+        int good = 0;
+        if (!sectors) good = 1;
+        else if (data && disk_read(d, lba, sectors, data) == 0 && checksum_of(data, size) == check) good = 1;
+        if (!good) {
+            klog("fsdisk: %s could not be read back (damaged) - it is empty now\n", name);
+            fs_restore_file((int)idx, name, parent, "", 0);
+        } else if (fs_restore_file((int)idx, name, parent, data ? data : (const uint8_t*)"", size) == 0) {
+            v5_rec_t* rec = &g_rec[idx];
+            rec->valid = 1;
+            rec->gen = fs_file_info((int)idx)->data_gen;
+            rec->lba = sectors ? lba : 0;
+            rec->sectors = sectors;
+            rec->size = size;
+            rec->check = check;
+            ext_add(rec->lba, sectors);
+        }
+        if (data) kfree(data);
+    }
+    fs_restore_end(home);
+}
+
+/* A layout-5 disk: the newest good metadata (and every file) loaded.
+ * 1 loaded, 0 not layout 5, -1 layout 5 but no metadata could be read. */
+static int v5_try_load(const ata_disk_t* d) {
+    v5_mark_t m;
+    if (!v5_detect(d, &m)) return 0;
+    v5_meta_t h[2];
+    uint8_t* body[2] = { NULL, NULL };
+    int have[2];
+    for (int s = 0; s < 2; s++) have[s] = v5_read_meta(d, &m, s, &h[s], &body[s]);
+    int first = (have[1] && (!have[0] || h[1].seq > h[0].seq)) ? 1 : 0;
+    int rc = -1;
+    for (int k = 0; k < 2 && rc < 0; k++) {
+        int s = k ? first ^ 1 : first;
+        if (!have[s] || !v5_body_ok(body[s], h[s].body_bytes, &m)) continue;
+        g_mark = m;
+        v5_load_body(d, body[s]);
+        g_cur_slot = s;
+        g_seq = h[s].seq;
+        rc = 1;
+    }
+    for (int s = 0; s < 2; s++) if (body[s]) kfree(body[s]);
+    if (rc == 1) g_v5 = 1;
+    return rc;
+}
+
+/* writes one file's private copy into a fresh extent */
+static int v5_write_file(const ata_disk_t* d, v5_rec_t* rec, const uint8_t* data) {
+    rec->sectors = v5_sectors_for(rec->size);
+    rec->check = checksum_of(data, rec->size);
+    if (!rec->sectors) { rec->lba = 0; return FSDISK_OK; }
+    rec->lba = ext_alloc(rec->sectors);
+    if (!rec->lba) { rec->sectors = 0; return FSDISK_ERR_FULL; }
+    return write_chunked(d, rec->lba, rec->sectors, data) == 0 ? FSDISK_OK : FSDISK_ERR_IO;
+}
+
+/* A save: the changed files, then the metadata (see above). The tree is
+ * read in one go before anything is written - the changed files' data is
+ * copied - so the other tasks can keep changing files while it writes. */
+static int v5_sync(const ata_disk_t* d) {
+    uint32_t gen = fs_generation();
+    uint32_t body_sect = bytes_to_sectors(V5_BODY_MAX);
+    uint8_t* meta = (uint8_t*)kzalloc((1u + body_sect) * FSDISK_SECTOR);
+    uint8_t** copy = (uint8_t**)kzalloc(FS_MAX_FILES * sizeof(uint8_t*));
+    uint32_t* rec_off = (uint32_t*)kzalloc(FS_MAX_FILES * sizeof(uint32_t));
+    if (!meta || !copy || !rec_off) { kfree(meta); kfree(copy); kfree(rec_off); return FSDISK_ERR_IO; }
+    uint8_t* b = meta + FSDISK_SECTOR;
+    int rc = FSDISK_OK;
+
+    /* 1. the tree as it is now (nothing yields in here) */
+    uint32_t off = 4, nd = 0;
+    for (int i = 1; i < FS_MAX_DIRS; i++) {
+        const fs_dir_t* dir = fs_get_dir(i);
+        if (!dir || !dir->used || dir->mnt) continue;
+        wr32(b + off, (uint32_t)i);
+        memcpy(b + off + 4, dir->name, FS_NAME_LEN);
+        wr32(b + off + 4 + FS_NAME_LEN, (uint32_t)dir->parent_dir);
+        off += V5_DIR_REC;
+        nd++;
+    }
+    wr32(b, nd);
+    wr32(b + off, (uint32_t)fs_home_dir());
+    off += 4;
+    uint32_t nf_off = off, nf = 0;
+    off += 4;
+    memset(g_nrec, 0, sizeof(g_nrec));
+    for (int i = 0; i < FS_MAX_FILES; i++) {
+        fs_file_t* f = fs_file_info(i);
+        v5_rec_t* n = &g_nrec[i];
+        memset(n, 0, sizeof(*n));
+        if (!f || !f->used || f->mnt) continue;
+        if (g_rec[i].valid && g_rec[i].gen == f->data_gen) {
+            *n = g_rec[i];                                  /* unchanged: stays where it is */
+        } else {
+            n->valid = 1;
+            n->gen = f->data_gen;
+            n->size = f->size;
+            uint32_t sectors = v5_sectors_for(f->size);
+            if (sectors) {
+                copy[i] = (uint8_t*)kmalloc(sectors * FSDISK_SECTOR);
+                if (!copy[i]) { rc = FSDISK_ERR_IO; break; }
+                memcpy(copy[i], f->content, f->size);
+                memset(copy[i] + f->size, 0, sectors * FSDISK_SECTOR - f->size);
+            }
+        }
+        uint8_t* r = b + off;
+        wr32(r, (uint32_t)i);
+        memcpy(r + 4, f->name, FS_NAME_LEN);
+        wr32(r + 4 + FS_NAME_LEN, (uint32_t)f->parent_dir);
+        wr32(r + 4 + FS_NAME_LEN + 4, n->size);
+        rec_off[i] = off;
+        off += V5_FILE_REC;
+        nf++;
+    }
+    wr32(b + nf_off, nf);
+    uint32_t body_bytes = off;
+
+    /* 2. the changed files, each into a new extent (the other tasks run in between) */
+    for (int i = 0; i < FS_MAX_FILES && rc == FSDISK_OK; i++) {
+        v5_rec_t* n = &g_nrec[i];
+        if (!n->valid || (g_rec[i].valid && g_rec[i].gen == n->gen)) continue;
+        rc = v5_write_file(d, n, copy[i] ? copy[i] : (const uint8_t*)"");
+        task_yield();
+    }
+    if (rc == FSDISK_OK) {
+        for (int i = 0; i < FS_MAX_FILES; i++) {
+            if (!g_nrec[i].valid) continue;
+            wr32(b + rec_off[i] + 4 + FS_NAME_LEN + 8, g_nrec[i].lba);
+            wr32(b + rec_off[i] + 4 + FS_NAME_LEN + 12, g_nrec[i].check);
+        }
+        /* 3. the data is on the disk before the metadata that points at it */
+        int slot = g_cur_slot ^ 1;
+        v5_meta_t h;
+        memset(&h, 0, sizeof(h));
+        h.magic = V5_MAGIC;
+        h.version = 5;
+        h.nonce = g_mark.nonce;
+        h.seq = g_seq + 1;
+        h.body_bytes = body_bytes;
+        h.body_check = checksum_of(b, body_bytes);
+        h.check = meta_check(&h);
+        memcpy(meta, &h, sizeof(h));
+        uint32_t lba = g_mark.meta_lba + (uint32_t)slot * V5_META_SECT;
+        if (disk_flush(d) != 0 || disk_write(d, lba, 1u + bytes_to_sectors(body_bytes), meta) != 0 || disk_flush(d) != 0)
+            rc = FSDISK_ERR_IO;
+        else {
+            g_cur_slot = slot;
+            g_seq = h.seq;
+        }
+    }
+
+    /* 4. what the saved copy no longer uses is free; a failed save frees its own extents */
+    for (int i = 0; i < FS_MAX_FILES; i++) {
+        v5_rec_t* o = &g_rec[i];
+        v5_rec_t* n = &g_nrec[i];
+        int fresh = n->valid && !(o->valid && o->gen == n->gen);
+        if (rc == FSDISK_OK) {
+            if (o->valid && (!n->valid || fresh)) ext_remove(o->lba, o->sectors);
+            *o = *n;
+        } else if (fresh) {
+            ext_remove(n->lba, n->sectors);
+        }
+        if (copy[i]) kfree(copy[i]);
+    }
+    kfree(copy);
+    kfree(rec_off);
+    kfree(meta);
+    if (rc == FSDISK_OK) g_synced_gen = gen;
+    return rc;
+}
+
+/* Makes `d` a layout-5 disk holding the current tree. [keep_lba, keep_lba +
+ * keep_sect) - the older copy the tree was loaded from - is not written over
+ * until the mark goes on, last: until then the disk is still what it was. */
+static int v5_format(const ata_disk_t* d, uint32_t keep_lba, uint32_t keep_sect) {
+    v5_mark_t m;
+    v5_new_mark(d, &m);
+    if (m.data_end <= m.data_lba + 2048u) return FSDISK_ERR_TOO_SMALL;
+    if (keep_sect && m.meta_lba < keep_lba + keep_sect && m.meta_lba + 2u * V5_META_SECT > keep_lba)
+        return FSDISK_ERR_TOO_SMALL;                         /* (a small layout-3 disk: stays as it is) */
+    g_mark = m;
+    ext_reset();
+    if (keep_sect) ext_add(keep_lba, keep_sect);
+    memset(g_rec, 0, sizeof(g_rec));
+    g_cur_slot = 1;                                          /* the first save goes to slot 0 */
+    g_seq = 0;
+    uint8_t zero[FSDISK_SECTOR];
+    memset(zero, 0, sizeof(zero));
+    disk_write(d, m.meta_lba + V5_META_SECT, 1, zero);       /* an earlier install's slot 1 */
+    int rc = v5_sync(d);
+    if (keep_sect) ext_remove(keep_lba, keep_sect);
+    if (rc != FSDISK_OK) return rc;
+    memcpy(zero, &m, sizeof(m));
+    if (disk_write(d, V4_BASE_LBA, 1, zero) != 0 || disk_flush(d) != 0) return FSDISK_ERR_IO;
+    g_v5 = 1;
+    return FSDISK_OK;
+}
+
 int fsdisk_install(void) {
     ata_disk_t target;
     int tr = fsdisk_find_target(&target);
@@ -411,13 +841,16 @@ int fsdisk_install(void) {
 
     layout_t l;
     if (!layout_v4(&target, &l)) return FSDISK_ERR_TOO_SMALL;
-    if (fs_snapshot_size() > slot_capacity(&l)) return FSDISK_ERR_FULL;
+    v5_mark_t m;
+    v5_new_mark(&target, &m);
+    if (bytes_to_sectors(fs_snapshot_size()) > m.data_end - m.data_lba) return FSDISK_ERR_FULL;
 
     if (copy_boot_image(&source, &target, iso_bytes) != 0) return FSDISK_ERR_IO;
-    /* old headers: a layout-3 install's (past the new image), our second slot */
+    /* old headers: a layout-3 install's (past the new image), a layout-4 one's */
     if (iso_bytes <= V3_BASE_LBA * FSDISK_SECTOR) wipe_header(&target, V3_BASE_LBA);
+    wipe_header(&target, V4_BASE_LBA);
     if (l.nslots == 2) wipe_header(&target, slot_lba_of(&l, 1));
-    int rc = write_snapshot_slot(&target, &l, 0, 1);
+    int rc = v5_format(&target, 0, 0);
     if (rc != FSDISK_OK) return rc;
     g_prog_done = g_prog_total;
 
@@ -432,7 +865,7 @@ int fsdisk_sync(void) {
     if (!g_have_target) return FSDISK_ERR_NO_TARGET;
     while (g_busy) task_sleep_ms(10);        /* the autosave task and `sync` take turns */
     g_busy = 1;
-    int rc = write_snapshot_to(&g_target);
+    int rc = g_v5 ? v5_sync(&g_target) : write_snapshot_to(&g_target);
     g_busy = 0;
     g_last_err = rc;
     return rc;
@@ -441,6 +874,15 @@ int fsdisk_sync(void) {
 int fsdisk_try_load(void) {
     ata_disk_t target;
     if (fsdisk_find_target(&target) != 1) return 0; /* none, or ambiguous */
+
+    int r5 = v5_try_load(&target);
+    if (r5 < 0) return -1;
+    if (r5 == 1) {
+        g_target = target;
+        g_have_target = 1;
+        g_synced_gen = fs_generation();
+        return 1;
+    }
 
     layout_t l;
     fsdisk_super_t sb[2];
@@ -462,6 +904,15 @@ int fsdisk_try_load(void) {
         g_cur_slot = s;
         g_seq = sb[s].seq;
         g_synced_gen = fs_generation();
+        /* move the disk to layout 5; the copy just loaded stays as it is until that is done */
+        int rc = v5_format(&target, slot_lba_of(&l, s), bytes_to_sectors(hdr_size(l.version) + sb[s].payload_bytes));
+        if (rc == FSDISK_OK) {
+            klog("fsdisk: the disk was moved to layout 5 (only changed files are written from now on)\n");
+            return 1;
+        }
+        klog("fsdisk: the disk stays on layout %u (%d)\n", l.version, rc);
+        g_cur_slot = s;
+        g_seq = sb[s].seq;
         /* upgrade an older format right away, and repair a damaged newest slot */
         if (sb[s].version != FSDISK_VERSION || k == 1) fsdisk_sync();
         return 1;
@@ -511,6 +962,14 @@ int fsdisk_pending(void) {
 int fsdisk_last_error(void) { return g_last_err; }
 
 void fsdisk_space(uint32_t* used_bytes, uint32_t* capacity_bytes) {
+    if (g_v5) {
+        uint64_t used = 0;
+        for (int i = 0; i < FS_MAX_FILES; i++) if (g_rec[i].valid) used += (uint64_t)g_rec[i].sectors * FSDISK_SECTOR;
+        uint64_t cap = (uint64_t)(g_mark.data_end - g_mark.data_lba) * FSDISK_SECTOR;
+        *used_bytes = used > 0xFFF00000ull ? 0xFFF00000u : (uint32_t)used;
+        *capacity_bytes = cap > 0xFFF00000ull ? 0xFFF00000u : (uint32_t)cap;
+        return;
+    }
     *used_bytes = fs_snapshot_size();
     *capacity_bytes = g_have_target ? slot_capacity(&g_layout) : 0;
 }
@@ -526,7 +985,8 @@ int fsdisk_find_install(ata_disk_t* out) {
         layout_t l;
         fsdisk_super_t sb[2];
         int have[2];
-        if (fsdisk_find_target(&d) == 1 && detect(&d, &l, sb, have)) {
+        v5_mark_t m;
+        if (fsdisk_find_target(&d) == 1 && (v5_detect(&d, &m) || detect(&d, &l, sb, have))) {
             g_fi_disk = d;
             g_fi_state = 1;
         }
@@ -541,7 +1001,10 @@ int fsdisk_install_layout(void) {
     layout_t l;
     fsdisk_super_t sb[2];
     int have[2];
-    if (fsdisk_find_target(&d) != 1 || !detect(&d, &l, sb, have)) return 0;
+    v5_mark_t m;
+    if (fsdisk_find_target(&d) != 1) return 0;
+    if (v5_detect(&d, &m)) return 5;
+    if (!detect(&d, &l, sb, have)) return 0;
     return (int)l.version;
 }
 
@@ -560,7 +1023,8 @@ int fsdisk_compare_boot(void) {
     uint32_t iso_bytes;
     if (!fsdisk_find_install(&dst)) return FSDISK_ERR_NO_INSTALL;
     if (!find_atapi_source(&src) || disk_cd_iso_size(&src, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
-    if (fsdisk_install_layout() != (int)LAYOUT_V4) return 0;    /* an old layout: always worth updating */
+    int lay = fsdisk_install_layout();
+    if (lay != (int)LAYOUT_V4 && lay != 5) return 0;            /* an old layout: always worth updating */
     cmp_ctx_t c = { &dst, (uint8_t*)kmalloc(FSDISK_COPY_BUF_BYTES + CARRY), 1 };
     if (!c.buf) return FSDISK_ERR_IO;
     int rc = stream_image(&src, iso_bytes, sink_compare, &c);
@@ -576,6 +1040,8 @@ static int migrate_to_v4(const ata_disk_t* d) {
     layout_t old, nl;
     fsdisk_super_t sb[2];
     int have[2];
+    v5_mark_t m;
+    if (v5_detect(d, &m)) return FSDISK_OK;                     /* layout 5: its files stay where they are */
     if (!detect(d, &old, sb, have) || old.version == LAYOUT_V4) return FSDISK_OK;
     if (!layout_v4(d, &nl)) return FSDISK_ERR_TOO_SMALL;
     uint8_t* buf = 0;

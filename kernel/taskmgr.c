@@ -4,6 +4,7 @@
 #include "kheap.h"
 #include "timer.h"
 #include "task.h"
+#include "smp.h"
 #include "fs.h"
 #include "winframe.h"
 #include "ctxmenu.h"
@@ -312,8 +313,11 @@ void taskmgr_draw(const fb_info_t* fi) {
         for (int i = 0; i < n && row < maxr; i++) {
             if (t[i].state == TASK_UNUSED) continue;
             uint32_t s = t[i].ticks_total / 100;
+            char st[16];
+            if (t[i].state == TASK_AWAY && t[i].cpu > 0) ksnprintf(st, sizeof(st), "core %d", t[i].cpu);
+            else kstrlcpy(st, t[i].state == TASK_AWAY ? "wait core" : task_state_str(t[i].state), sizeof(st));
             ksnprintf(line, sizeof(line), "%-4u %-23s %-9s %3u%%  %u:%02u", t[i].pid, t[i].name,
-                      task_state_str(t[i].state), t[i].cpu_pct, s / 60, s % 60);
+                      st, t[i].cpu_pct, s / 60, s % 60);
             gfx_draw_text(lx + 8, list_top() + row * ROW_H + 3, line, t[i].cpu_pct >= 50 ? 0x00F0A060u : C_TEXT, C_LIST);
             row++;
         }
@@ -353,6 +357,11 @@ void taskmgr_draw(const fb_info_t* fi) {
         gfx_draw_text(lx, ty + 80, line, C_TEXT, C_PANEL);
         ksnprintf(line, sizeof(line), "Kernel:         %s", BANANA_ARCH_DESC);
         gfx_draw_text(lx, ty + 96, line, C_TEXT, C_PANEL);
+        if (cpu_count() > 1)
+            ksnprintf(line, sizeof(line), "Processor:      %d cores (the kernel on core 0, apps on all)", cpu_count());
+        else
+            ksnprintf(line, sizeof(line), "Processor:      1 core in use (%d found)", smp_cores_found());
+        gfx_draw_text(lx, ty + 112, line, C_TEXT, C_PANEL);
     }
 
     gfx_fill_rect(x + 3, y + H - 18, W - 6, 15, 0x00161B22u);

@@ -17,6 +17,8 @@ typedef struct {
     char     cmdline[128];      /* from GRUB ("root=cd0") */
     uint32_t biosdev;           /* BIOS boot drive (0x80.. = hard disk), if has_biosdev */
     int      has_biosdev;
+    uint8_t  rsdp[36];          /* GRUB's copy of the ACPI RSDP (kernel/smp.c), if has_rsdp */
+    int      has_rsdp;
 } sysinfo_t;
 
 void sysinfo_init(uint32_t mb_info_addr);

@@ -28,6 +28,9 @@ app_enter:
     mov rax, rdi
     mov rdi, rsi
     call rax
+    push rax                ; its code returned: the kernel goes on on the boot core
+    call smp_app_gate
+    pop rax
     mov rsp, [r12]
     pop r15
     pop r14
@@ -46,4 +49,41 @@ app_leave:
     pop r12
     pop rbx
     pop rbp
+    ret
+
+; void smp_app_gate(void) - kernel/app.c: every system call an app makes
+; (and the return from its code into the kernel) passes through here first.
+; On the boot core it does nothing; on another core (kernel/task.c) it
+; moves the task back to the boot core, where the kernel runs. Every
+; register is kept: the call's arguments are still in them.
+global smp_app_gate
+extern task_ap_go_home
+
+smp_app_gate:
+    pushfq
+    cli
+    push rax
+    str ax
+    cmp ax, 0x10                    ; no TSS (0) or the boot core's (0x10)
+    jbe .here
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push r8
+    push r9
+    push r10
+    push r11
+    call task_ap_go_home            ; (the stack is 16-byte aligned here)
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+.here:
+    pop rax
+    popfq
     ret

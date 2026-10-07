@@ -9,6 +9,7 @@
 #include "../kernel/daemon.h"
 #include "../kernel/usb.h"
 #include "../kernel/task.h"
+#include "../kernel/smp.h"
 #include "../kernel/gui.h"
 #include "../kernel/fb.h"
 #include "../kernel/rtc.h"
@@ -629,6 +630,12 @@ static void cmd_top(void) {
         terminal_write_color("OS:  ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
         terminal_writeln("Banana OS 0.5 (Banana Kernel 0.5)");
 
+        /* PROCESSOR CORES (kernel/smp.c) */
+        terminal_write_color("Cores: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+        fmt_u32(b1, sizeof(b1), (uint32_t)cpu_count());
+        terminal_write(b1);
+        terminal_writeln(cpu_count() > 1 ? " (kernel on core 0, app code on every core)" : " in use");
+
         /* RAM USAGE */
         uint32_t total_mb = (si->mem_kb / 1024u) + 1u;
         uint32_t used_mb  = (fs_ram_used_bytes() + 1024u*1024u - 1u) / (1024u*1024u);
@@ -695,7 +702,13 @@ static void cmd_top(void) {
             draw_bar(cpu, 100);
 
             terminal_write("   ");
+            char stb[16];
             const char* state = task_state_str(procs[i].state);
+            if (procs[i].state == TASK_AWAY) {          /* app code on another core */
+                if (procs[i].cpu > 0) ksnprintf(stb, sizeof(stb), "core %d", procs[i].cpu);
+                else kstrlcpy(stb, "waitcore", sizeof(stb));
+                state = stb;
+            }
             terminal_write(state);
 
             int sl = k_strlen(state);

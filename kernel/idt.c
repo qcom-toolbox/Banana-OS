@@ -4,6 +4,8 @@
 #include "serial.h"
 #include "app.h"
 #include "kstring.h"
+#include "smp.h"
+#include "task.h"
 
 #define VGA_MEMORY ((volatile uint16_t*)0xB8000)
 
@@ -182,6 +184,17 @@ void isr_handler(registers_t* regs) {
     uint32_t n = regs->int_no;
     const char* name = (n < 32) ? exception_names[n] : "Unknown";
 
+    /* on another core it is app code that faulted: the app is stopped on
+     * the boot core (kernel/task.c) - this returns only for a kernel bug */
+    if (n < 32 && cpu_id() != 0) {
+        uintptr_t cr2;
+        __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+        task_ap_fault(n, (uint32_t)regs->err_code, (uintptr_t)REG_IP(regs), cr2);
+        klog("*** PANIC on core %d: %s (vector %u) at ip %llx\n", cpu_id(), name, n,
+             (unsigned long long)REG_IP(regs));
+        for (;;) __asm__ volatile("cli; hlt");
+    }
+
     /* an app that crashed is stopped; only kernel faults are fatal */
     if (n < 32 && n != 2 && n != 8 && n != 18) {
         uintptr_t cr2;
@@ -333,27 +346,53 @@ struct tss64 {
     uint16_t iomap;
 } __attribute__((packed));
 
-static struct tss64 g_tss;
-static uint8_t g_fault_stack[16384] __attribute__((aligned(16)));
-static uint64_t g_gdt[4];                  /* null, 64-bit code (0x08), TSS (0x10, 16 bytes) */
+/* One TSS per processor core (kernel/smp.c), each with its own fault
+ * stack; core n's is at selector 0x10 + 16 * n, which is also how a core
+ * knows which one it is (cpu_id(), kernel/smp.h). */
+static struct tss64 g_tss[SMP_MAX_CPUS];
+static uint8_t g_fault_stack[SMP_MAX_CPUS][16384] __attribute__((aligned(16)));
+static uint64_t g_gdt[2 + 2 * SMP_MAX_CPUS];   /* null, 64-bit code (0x08), a TSS (16 bytes) per core */
 
-static void tss_init(void) {
-    memset(&g_tss, 0, sizeof(g_tss));
-    g_tss.ist[0] = (uint64_t)(uintptr_t)(g_fault_stack + sizeof(g_fault_stack));
-    g_tss.iomap = sizeof(g_tss);
-    uint64_t base = (uint64_t)(uintptr_t)&g_tss, limit = sizeof(g_tss) - 1;
-    g_gdt[0] = 0;
-    g_gdt[1] = 0x00AF9A000000FFFFull;      /* the same code segment as boot64.asm's */
-    g_gdt[2] = (limit & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (0x89ull << 40) | (((limit >> 16) & 0xF) << 48) |
-               (((base >> 24) & 0xFF) << 56);
-    g_gdt[3] = base >> 32;
+static void gdt_load_cpu(int cpu) {
     struct { uint16_t limit; uint64_t base; } __attribute__((packed)) gp = { sizeof(g_gdt) - 1, (uint64_t)(uintptr_t)g_gdt };
     __asm__ volatile("lgdt %0" :: "m"(gp));
     /* long mode ignores the data segments, but iretq reloads SS from the
      * interrupt frame: the old selectors must not point at the TSS slot */
     __asm__ volatile("xor %%eax, %%eax; mov %%ax, %%ss; mov %%ax, %%ds; mov %%ax, %%es; mov %%ax, %%fs; mov %%ax, %%gs"
                      ::: "rax", "memory");
-    __asm__ volatile("ltr %w0" :: "r"((uint16_t)0x10));
+    __asm__ volatile("ltr %w0" :: "r"((uint16_t)(0x10 + 16 * cpu)));
+}
+
+static void tss_init(void) {
+    memset(g_tss, 0, sizeof(g_tss));
+    g_gdt[0] = 0;
+    g_gdt[1] = 0x00AF9A000000FFFFull;      /* the same code segment as boot64.asm's */
+    for (int c = 0; c < SMP_MAX_CPUS; c++) {
+        struct tss64* t = &g_tss[c];
+        t->ist[0] = (uint64_t)(uintptr_t)(g_fault_stack[c] + sizeof(g_fault_stack[c]));
+        t->iomap = sizeof(*t);
+        uint64_t base = (uint64_t)(uintptr_t)t, limit = sizeof(*t) - 1;
+        g_gdt[2 + 2 * c] = (limit & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (0x89ull << 40) |
+                           (((limit >> 16) & 0xF) << 48) | (((base >> 24) & 0xFF) << 56);
+        g_gdt[3 + 2 * c] = base >> 32;
+    }
+    gdt_load_cpu(0);
+}
+
+/* another core, starting (kernel/smp.c) */
+void idt_ap_init(int cpu) {
+    gdt_load_cpu(cpu);
+    __asm__ volatile("lidt %0" : : "m"(idtp));
+}
+
+extern void ipi_stub(void);
+extern void stray_stub(void);
+extern void spurious_stub(void);
+
+/* local-APIC interrupts: kernel/isr64.asm */
+void ipi_handler(registers_t* regs) {
+    smp_eoi();
+    if (regs->int_no == SMP_VEC_KICK) task_ipi();
 }
 #endif
 
@@ -376,6 +415,11 @@ void idt_init(void) {
     for (int i = 0; i < 16; i++) {
         idt_set_gate((uint8_t)(32 + i), (uintptr_t)irq_stubs[i], code_sel, 0x8E);
     }
+#ifdef __x86_64__
+    for (int i = 48; i < 256; i++) idt_set_gate((uint8_t)i, (uintptr_t)stray_stub, code_sel, 0x8E);
+    idt_set_gate(SMP_VEC_KICK, (uintptr_t)ipi_stub, code_sel, 0x8E);
+    idt_set_gate(SMP_VEC_SPURIOUS, (uintptr_t)spurious_stub, code_sel, 0x8E);
+#endif
 
     __asm__ volatile("lidt %0" : : "m"(idtp));
     lapic_off();
