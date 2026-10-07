@@ -83,25 +83,104 @@ static int find_atapi_source(ata_disk_t* out) {
     return 0;
 }
 
-/* Raw-copies `iso_bytes` (already block-exact, per the ISO9660 PVD) from
- * the ATAPI source onto the target ATA disk starting at LBA 0, translating
- * between the source's 2048-byte blocks and the target's 512-byte
- * sectors (1 block = 4 sectors) as it goes. */
-static int copy_boot_image(const ata_disk_t* src, const ata_disk_t* dst, uint32_t iso_bytes) {
-    uint32_t total_blocks = iso_bytes / 2048u;
-    uint32_t done_blocks  = 0;
+/* ── the boot image on the disk: the CD's, with its own marker ─────────
+ * The installed disk is a copy of the CD, so both would hold the file the
+ * UEFI GRUB looks for ("search --file /.disk/<build>.uuid", embedded in
+ * its EFI program) - and a CD started by hand could then load the disk's
+ * system, files and password (VMware lists the disk first). So the copy
+ * gets the marker renamed to <build>.inst, in its file system (Rock Ridge
+ * and Joliet names) and in its own EFI program's search: the CD's GRUB
+ * only finds the CD, the disk's only the disk. (BIOS GRUB does not search:
+ * it uses the drive it was started from.) Same length, nothing moves. */
 
-    while (done_blocks < total_blocks) {
-        uint32_t chunk = total_blocks - done_blocks;
-        if (chunk > FSDISK_COPY_CHUNK_BLOCKS) chunk = FSDISK_COPY_CHUNK_BLOCKS;
+#define CARRY 2048u                        /* one CD block kept back: a name split across chunks */
 
-        if (disk_cd_read(src, done_blocks, chunk, g_buf) != 0)
-            return -1;
+static char     g_mark_old[64], g_mark_new[64];    /* "<build>.uuid" / "<build>.inst" */
+static uint32_t g_mark_len;
 
-        if (disk_write(dst, done_blocks * 4u, chunk * 4u, g_buf) != 0) return -1;
-        done_blocks += chunk;
+/* finds the build marker in the CD's EFI program (in its first 4 MB) */
+static void find_marker(const ata_disk_t* src, uint32_t total_blocks) {
+    g_mark_len = 0;
+    uint32_t blocks = total_blocks < 2048u ? total_blocks : 2048u;
+    uint8_t* b = (uint8_t*)kmalloc(blocks * 2048u);
+    if (!b) return;
+    if (disk_cd_read(src, 0, blocks, b) == 0) {
+        static const char KEY[] = "--file /.disk/";
+        uint32_t kl = sizeof(KEY) - 1, n = blocks * 2048u;
+        for (uint32_t k = 0; k + kl + 8 < n; k++) {
+            if (memcmp(b + k, KEY, kl) != 0) continue;
+            uint32_t a = k + kl, e = a;
+            while (e < n && e - a < 48 && b[e] > ' ' && b[e] != '\n') e++;
+            uint32_t len = e - a;
+            if (len > 5 && len < sizeof(g_mark_old) && memcmp(b + e - 5, ".uuid", 5) == 0) {
+                memcpy(g_mark_old, b + a, len);
+                memcpy(g_mark_new, b + a, len - 5);
+                memcpy(g_mark_new + len - 5, ".inst", 5);
+                g_mark_old[len] = g_mark_new[len] = 0;
+                g_mark_len = len;
+            }
+            break;
+        }
     }
-    return 0;
+    kfree(b);
+}
+
+/* the CD's bytes as they go onto the disk */
+static void patch_marker(uint8_t* b, uint32_t n) {
+    uint32_t L = g_mark_len;
+    if (!L) return;
+    for (uint32_t k = 0; k + L <= n; k++) {
+        if (b[k] == (uint8_t)g_mark_old[0] && memcmp(b + k, g_mark_old, L) == 0) memcpy(b + k, g_mark_new, L);
+        /* Joliet: UCS-2, big-endian */
+        if (k + 2 * L <= n && b[k] == 0 && b[k + 1] == (uint8_t)g_mark_old[0]) {
+            uint32_t m = 0;
+            while (m < L && b[k + 2 * m] == 0 && b[k + 2 * m + 1] == (uint8_t)g_mark_old[m]) m++;
+            if (m == L) for (m = 0; m < L; m++) b[k + 2 * m + 1] = (uint8_t)g_mark_new[m];
+        }
+    }
+}
+
+/* reads the CD's image in chunks, patched, and hands them to sink(first block, blocks, data) */
+typedef int (*image_sink_t)(uint32_t blk, uint32_t nblk, const uint8_t* data, void* ctx);
+
+static int stream_image(const ata_disk_t* src, uint32_t iso_bytes, image_sink_t sink, void* ctx) {
+    uint32_t total = iso_bytes / 2048u;
+    find_marker(src, total);
+    uint8_t* buf = (uint8_t*)kmalloc(FSDISK_COPY_BUF_BYTES + CARRY);
+    if (!buf) return -1;
+    uint32_t done = 0, carry_blk = 0;
+    int have_carry = 0, rc = 0;
+    while (done < total && rc == 0) {
+        uint32_t chunk = total - done;
+        if (chunk > FSDISK_COPY_CHUNK_BLOCKS) chunk = FSDISK_COPY_CHUNK_BLOCKS;
+        if (disk_cd_read(src, done, chunk, buf + CARRY) != 0) { rc = -1; break; }
+        uint8_t* start = have_carry ? buf : buf + CARRY;
+        uint32_t len = chunk * 2048u + (have_carry ? CARRY : 0);
+        uint32_t first = have_carry ? carry_blk : done;
+        patch_marker(start, len);
+        done += chunk;
+        if (done < total) {
+            /* the last block waits for the next chunk (a name may continue there) */
+            if (len / 2048u > 1) rc = sink(first, len / 2048u - 1, start, ctx);
+            memcpy(buf, start + len - CARRY, CARRY);
+            have_carry = 1;
+            carry_blk = first + len / 2048u - 1;
+        } else {
+            rc = sink(first, len / 2048u, start, ctx);
+        }
+    }
+    kfree(buf);
+    return rc;
+}
+
+static int sink_write(uint32_t blk, uint32_t nblk, const uint8_t* data, void* ctx) {
+    return disk_write((const ata_disk_t*)ctx, blk * 4u, nblk * 4u, data) == 0 ? 0 : -1;
+}
+
+/* Copies the CD's boot image (block-exact, per the ISO9660 PVD) onto the
+ * disk from LBA 0 - 2048-byte CD blocks become 4 disk sectors each. */
+static int copy_boot_image(const ata_disk_t* src, const ata_disk_t* dst, uint32_t iso_bytes) {
+    return stream_image(src, iso_bytes, sink_write, (void*)dst);
 }
 
 /* ── the filesystem on disk: two slots, written in turn ──────────────
@@ -321,27 +400,27 @@ int fsdisk_find_install(ata_disk_t* out) {
 }
 
 /* 1: the installed system is the same as this CD's, 0: it differs, <0: an FSDISK_ERR_* */
+typedef struct { const ata_disk_t* disk; uint8_t* buf; int same; } cmp_ctx_t;
+
+static int sink_compare(uint32_t blk, uint32_t nblk, const uint8_t* data, void* vctx) {
+    cmp_ctx_t* c = (cmp_ctx_t*)vctx;
+    if (!c->same) return 0;
+    if (disk_read(c->disk, blk * 4u, nblk * 4u, c->buf) != 0) return -1;
+    if (memcmp(c->buf, data, nblk * 2048u) != 0) c->same = 0;
+    return 0;
+}
+
 int fsdisk_compare_boot(void) {
     ata_disk_t dst, src;
     uint32_t iso_bytes;
     if (!fsdisk_find_install(&dst)) return FSDISK_ERR_NO_INSTALL;
     if (!find_atapi_source(&src) || disk_cd_iso_size(&src, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
-    uint8_t* other = (uint8_t*)kmalloc(FSDISK_COPY_BUF_BYTES);
-    if (!other) return FSDISK_ERR_IO;
-    uint32_t total = iso_bytes / 2048u, done = 0;
-    int same = 1;
-    while (done < total && same) {
-        uint32_t chunk = total - done;
-        if (chunk > FSDISK_COPY_CHUNK_BLOCKS) chunk = FSDISK_COPY_CHUNK_BLOCKS;
-        if (disk_cd_read(&src, done, chunk, g_buf) != 0 || disk_read(&dst, done * 4u, chunk * 4u, other) != 0) {
-            kfree(other);
-            return FSDISK_ERR_IO;
-        }
-        if (memcmp(g_buf, other, chunk * 2048u) != 0) same = 0;
-        done += chunk;
-    }
-    kfree(other);
-    return same;
+    cmp_ctx_t c = { &dst, (uint8_t*)kmalloc(FSDISK_COPY_BUF_BYTES + CARRY), 1 };
+    if (!c.buf) return FSDISK_ERR_IO;
+    int rc = stream_image(&src, iso_bytes, sink_compare, &c);
+    kfree(c.buf);
+    if (rc != 0) return FSDISK_ERR_IO;
+    return c.same;
 }
 
 int fsdisk_update(void) {
