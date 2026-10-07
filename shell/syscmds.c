@@ -10,6 +10,7 @@
 #include "../kernel/app.h"
 #include "../kernel/gui.h"
 #include "../kernel/audio.h"
+#include "../kernel/settings.h"
 
 static void say(const char* fmt, ...) {
     char buf[256];
@@ -156,6 +157,9 @@ static void cmd_volume(int argc, char** argv) {
         uint32_t v;
         if (!k_parse_u32(argv[1], &v) || v > 100) { fail("volume", "0 to 100"); return; }
         audio_set_volume((int)v);
+        char vs[8];
+        ksnprintf(vs, sizeof(vs), "%u", v);
+        settings_set("volume", vs);
     }
     say("volume: %d%%\n", audio_get_volume());
 }

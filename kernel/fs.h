@@ -99,6 +99,9 @@ uint32_t fs_ram_used_bytes(void);
  * Version 2 (Banana OS 0.5): the same with a raw 64-entry dirs table.
  * Version 1 (Banana OS 0.4): raw fixed-size dirs[32]/files[64] tables
  * with 2 KiB inline file contents. Both still load, for upgrades. */
+/* changes on every write, create, delete, rename... */
+uint32_t fs_generation(void);
+
 #define FS_SNAPSHOT_V1 1u
 #define FS_SNAPSHOT_V2 2u
 #define FS_SNAPSHOT_V3 3u

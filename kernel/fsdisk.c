@@ -6,6 +6,9 @@
 #include "types.h"
 #include "kheap.h"
 #include "kstring.h"
+#include "serial.h"
+#include "timer.h"
+#include "task.h"
 
 #define FSDISK_MAGIC   0x414E4142u /* "BANA" */
 #define FSDISK_VERSION 3u   /* = FS_SNAPSHOT_V3; version 1 and 2 disks (Banana OS 0.4, 0.5) still load */
@@ -26,6 +29,8 @@ typedef struct __attribute__((packed)) {
     uint32_t version;
     uint32_t payload_bytes;
     uint32_t checksum;
+    uint32_t seq;           /* which slot is newer (0 on disks from before the slots) */
+    uint32_t super_check;   /* this header's own check */
 } fsdisk_super_t;
 
 /* Boot-image copy chunk buffer. The filesystem snapshot itself is now
@@ -98,33 +103,62 @@ static int copy_boot_image(const ata_disk_t* src, const ata_disk_t* dst, uint32_
     return 0;
 }
 
-/* Writes superblock + payload from `buf` (header space included at the
- * front) starting at FSDISK_BASE_LBA. */
-static int write_sectors(const ata_disk_t* disk, const uint8_t* buf, uint32_t sectors) {
-    if (disk_write(disk, FSDISK_BASE_LBA, sectors, buf) != 0) return -1;
-    return disk_flush(disk);
+/* ── the filesystem on disk: two slots, written in turn ──────────────
+ * A sync writes the slot that does NOT hold the newest good copy, then
+ * that one becomes the newest (by sequence number). A power cut during a
+ * write leaves the other slot - the previous save - intact, and the
+ * checksum tells the half-written one apart. Disks too small for two
+ * slots (under ~550 MB) keep the single slot older versions used. */
+
+#define FSDISK_SLOT_SECTORS (((uint32_t)sizeof(fsdisk_super_t) + FSDISK_MAX_PAYLOAD + 65535u) / FSDISK_SECTOR)
+
+static int      g_cur_slot = 0;      /* the slot holding the newest copy */
+static uint32_t g_seq = 0;
+static uint32_t g_synced_gen = 0;    /* fs_generation() of what is on disk */
+static int      g_busy = 0;
+static int      g_last_err = 0;
+
+static int two_slots(const ata_disk_t* d) {
+    return d->sectors >= FSDISK_BASE_LBA + 2u * FSDISK_SLOT_SECTORS;
+}
+static uint32_t slot_lba(int slot) { return FSDISK_BASE_LBA + (uint32_t)slot * FSDISK_SLOT_SECTORS; }
+
+static uint32_t super_check(const fsdisk_super_t* sb) {
+    return sb->magic ^ (sb->seq * 2654435761u) ^ sb->payload_bytes ^ sb->checksum ^ 0x5EC0DE5Au;
 }
 
-static int write_snapshot_to(const ata_disk_t* disk) {
+static int write_snapshot_slot(const ata_disk_t* disk, int slot, uint32_t seq) {
+    uint32_t gen = fs_generation();          /* (taken before: a change while writing syncs again) */
     uint32_t payload = fs_snapshot_size();
+    if (payload > FSDISK_MAX_PAYLOAD) return FSDISK_ERR_FULL;
     uint32_t total   = (uint32_t)sizeof(fsdisk_super_t) + payload;
     uint32_t sectors = bytes_to_sectors(total);
-    if (disk->sectors < FSDISK_BASE_LBA + sectors) return FSDISK_ERR_TOO_SMALL;
+    if (disk->sectors < slot_lba(slot) + sectors) return FSDISK_ERR_TOO_SMALL;
 
     uint8_t* buf = (uint8_t*)kzalloc(sectors * FSDISK_SECTOR);
     if (!buf) return FSDISK_ERR_IO;
     fs_snapshot_save(buf + sizeof(fsdisk_super_t));
 
     fsdisk_super_t sb;
+    memset(&sb, 0, sizeof(sb));
     sb.magic         = FSDISK_MAGIC;
     sb.version       = FSDISK_VERSION;
     sb.payload_bytes = payload;
     sb.checksum      = checksum_of(buf + sizeof(fsdisk_super_t), payload);
+    sb.seq           = seq;
+    sb.super_check   = super_check(&sb);
     memcpy(buf, &sb, sizeof(sb));
 
-    int rc = write_sectors(disk, buf, sectors) == 0 ? FSDISK_OK : FSDISK_ERR_IO;
+    int rc = (disk_write(disk, slot_lba(slot), sectors, buf) == 0 && disk_flush(disk) == 0) ? FSDISK_OK : FSDISK_ERR_IO;
     kfree(buf);
+    if (rc == FSDISK_OK) { g_cur_slot = slot; g_seq = seq; g_synced_gen = gen; }
     return rc;
+}
+
+/* the next save: into the other slot (or the only one) */
+static int write_snapshot_to(const ata_disk_t* disk) {
+    int slot = two_slots(disk) ? (g_cur_slot ^ 1) : 0;
+    return write_snapshot_slot(disk, slot, g_seq + 1);
 }
 
 int fsdisk_install(void) {
@@ -140,12 +174,18 @@ int fsdisk_install(void) {
     if (disk_cd_iso_size(&source, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
     if (iso_bytes > FSDISK_BOOT_RESERVE_BYTES) return FSDISK_ERR_ISO_TOO_BIG;
 
+    if (fs_snapshot_size() > FSDISK_MAX_PAYLOAD) return FSDISK_ERR_FULL;
     uint32_t fs_sectors  = bytes_to_sectors((uint32_t)sizeof(fsdisk_super_t) + fs_snapshot_size());
     uint32_t need_sectors = FSDISK_BASE_LBA + fs_sectors;
     if (target.sectors < need_sectors) return FSDISK_ERR_TOO_SMALL;
 
     if (copy_boot_image(&source, &target, iso_bytes) != 0) return FSDISK_ERR_IO;
-    int rc = write_snapshot_to(&target);
+    /* a copy left in the second slot by an earlier install must never win */
+    if (two_slots(&target)) {
+        memset(g_buf, 0, FSDISK_SECTOR);
+        if (disk_write(&target, slot_lba(1), 1, g_buf) != 0) return FSDISK_ERR_IO;
+    }
+    int rc = write_snapshot_slot(&target, 0, 1);
     if (rc != FSDISK_OK) return rc;
 
     g_target = target;
@@ -155,7 +195,38 @@ int fsdisk_install(void) {
 
 int fsdisk_sync(void) {
     if (!g_have_target) return FSDISK_ERR_NO_TARGET;
-    return write_snapshot_to(&g_target);
+    while (g_busy) task_sleep_ms(10);        /* the autosave task and `sync` take turns */
+    g_busy = 1;
+    int rc = write_snapshot_to(&g_target);
+    g_busy = 0;
+    g_last_err = rc;
+    return rc;
+}
+
+/* reads and loads one slot's copy; 1 if it is good */
+static int load_slot(const ata_disk_t* d, int slot, const fsdisk_super_t* sb) {
+    uint32_t total   = (uint32_t)sizeof(fsdisk_super_t) + sb->payload_bytes;
+    uint32_t sectors = bytes_to_sectors(total);
+    if (slot_lba(slot) + sectors > d->sectors) return 0;
+    uint8_t* buf = (uint8_t*)kmalloc(sectors * FSDISK_SECTOR);
+    if (!buf) return 0;
+    int ok = disk_read(d, slot_lba(slot), sectors, buf) == 0;
+    if (ok && checksum_of(buf + sizeof(fsdisk_super_t), sb->payload_bytes) != sb->checksum) ok = 0;
+    if (ok && fs_snapshot_load(buf + sizeof(fsdisk_super_t), sb->payload_bytes, sb->version) != 0) ok = 0;
+    kfree(buf);
+    return ok;
+}
+
+/* a slot's header, if it looks like a Banana OS filesystem */
+static int read_super(const ata_disk_t* d, int slot, fsdisk_super_t* sb) {
+    if (disk_read(d, slot_lba(slot), 1, g_buf) != 0) return 0;
+    memcpy(sb, g_buf, sizeof(*sb));
+    if (sb->magic != FSDISK_MAGIC) return 0;
+    if (sb->version != FS_SNAPSHOT_V1 && sb->version != FS_SNAPSHOT_V2 && sb->version != FS_SNAPSHOT_V3) return 0;
+    if (sb->payload_bytes == 0 || sb->payload_bytes > FSDISK_MAX_PAYLOAD) return 0;
+    /* disks from before the two slots have no sequence number (0, unchecked) */
+    if (sb->seq != 0 && sb->super_check != super_check(sb)) return 0;
+    return 1;
 }
 
 int fsdisk_try_load(void) {
@@ -163,33 +234,66 @@ int fsdisk_try_load(void) {
     if (fsdisk_find_target(&target) != 1) return 0; /* none, or ambiguous */
     if (target.sectors <= FSDISK_BASE_LBA) return 0; /* too small to hold our region at all */
 
-    if (disk_read(&target, FSDISK_BASE_LBA, 1, g_buf) != 0) return 0;
+    fsdisk_super_t sb[2];
+    int have[2] = { read_super(&target, 0, &sb[0]), 0 };
+    if (two_slots(&target)) have[1] = read_super(&target, 1, &sb[1]);
+    if (!have[0] && !have[1]) return 0;
 
-    fsdisk_super_t sb;
-    memcpy(&sb, g_buf, sizeof(sb));
-    if (sb.magic != FSDISK_MAGIC) return 0;
-    if (sb.version != FS_SNAPSHOT_V1 && sb.version != FS_SNAPSHOT_V2 && sb.version != FS_SNAPSHOT_V3) return 0;
-    if (sb.payload_bytes == 0 || sb.payload_bytes > FSDISK_MAX_PAYLOAD) return 0;
-
-    uint32_t total   = (uint32_t)sizeof(fsdisk_super_t) + sb.payload_bytes;
-    uint32_t sectors = bytes_to_sectors(total);
-    if (FSDISK_BASE_LBA + sectors > target.sectors) return 0;
-
-    uint8_t* buf = (uint8_t*)kmalloc(sectors * FSDISK_SECTOR);
-    if (!buf) return 0;
-    int ok = disk_read(&target, FSDISK_BASE_LBA, sectors, buf) == 0;
-    if (ok && checksum_of(buf + sizeof(fsdisk_super_t), sb.payload_bytes) != sb.checksum) ok = 0;
-    if (ok && fs_snapshot_load(buf + sizeof(fsdisk_super_t), sb.payload_bytes, sb.version) != 0) ok = 0;
-    kfree(buf);
-    if (!ok) return 0;
-
-    g_target = target;
-    g_have_target = 1;
-    /* upgrade an older disk to the current format right away */
-    if (sb.version != FSDISK_VERSION) write_snapshot_to(&target);
-    return 1;
+    /* the newest first; if it is damaged (a cut during its write), the other */
+    int first = (have[1] && (!have[0] || sb[1].seq > sb[0].seq)) ? 1 : 0;
+    int order[2] = { first, first ^ 1 };
+    for (int k = 0; k < 2; k++) {
+        int s = order[k];
+        if (!have[s] || !load_slot(&target, s, &sb[s])) continue;
+        g_target = target;
+        g_have_target = 1;
+        g_cur_slot = s;
+        g_seq = sb[s].seq;
+        g_synced_gen = fs_generation();
+        /* upgrade an older disk to the current format right away */
+        if (sb[s].version != FSDISK_VERSION || k == 1) fsdisk_sync();
+        return 1;
+    }
+    return -1;   /* a Banana OS disk, but no copy could be read */
 }
 
 int fsdisk_is_installed(void) {
     return g_have_target;
 }
+
+/* ── autosave: a change is on disk a few seconds after it was made ── */
+#define AUTOSAVE_QUIET_MS 2000u
+
+static void autosave_task(void) {
+    task_set_background();
+    uint32_t seen = 0, changed_at = 0, retry_at = 0;
+    int warned = 0;
+    for (;;) {
+        task_sleep_ms(500);
+        if (!g_have_target) continue;
+        uint32_t gen = fs_generation();
+        if (gen == g_synced_gen) { warned = 0; continue; }
+        if (gen != seen) { seen = gen; changed_at = timer_ms(); continue; }   /* still changing */
+        if (timer_ms() - changed_at < AUTOSAVE_QUIET_MS) continue;
+        if ((int32_t)(timer_ms() - retry_at) < 0) continue;
+        int rc = fsdisk_sync();
+        if (rc != FSDISK_OK) {
+            if (!warned) klog("autosave: could not write the filesystem to disk (%d)\n", rc);
+            warned = 1;
+            retry_at = timer_ms() + 30000u;     /* try again in a while */
+        }
+    }
+}
+
+void fsdisk_start_autosave(void) {
+    static int started = 0;
+    if (started) return;
+    started = 1;
+    task_create("autosave", autosave_task);
+}
+
+int fsdisk_pending(void) {
+    return g_have_target && fs_generation() != g_synced_gen;
+}
+
+int fsdisk_last_error(void) { return g_last_err; }

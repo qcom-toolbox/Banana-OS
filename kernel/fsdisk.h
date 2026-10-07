@@ -20,6 +20,7 @@
 #define FSDISK_ERR_TOO_SMALL   -4 /* target disk too small for the boot region + filesystem */
 #define FSDISK_ERR_ISO_TOO_BIG -5 /* boot image bigger than the reserved region (build issue) */
 #define FSDISK_ERR_IO          -6 /* a read or write failed */
+#define FSDISK_ERR_FULL        -7 /* the files are past the 256 MB a disk copy may hold */
 
 /* Looks for exactly one non-ATAPI ATA disk attached (any bus/position).
  * Returns 1 and fills *out if exactly one was found, 0 if none, -1 if
@@ -43,10 +44,18 @@ int fsdisk_sync(void);
  * hierarchy: if exactly one ATA disk is present and holds a valid Banana
  * OS filesystem image, loads it and returns 1 (skip fs_init()). Returns 0
  * if there's nothing to load (caller should fall back to fs_init()). */
-int fsdisk_try_load(void);
+int fsdisk_try_load(void);   /* (-1: a Banana OS disk, but no copy of it could be read) */
 
 /* Whether this session has a remembered installed/loaded target disk
  * (used to decide whether shutdown/reboot/halt should auto-sync). */
 int fsdisk_is_installed(void);
+
+/* Saves by itself: a background task writes the filesystem to the
+ * installed disk ~2 s after the last change (files, folders, settings). */
+void fsdisk_start_autosave(void);
+/* 1 while there are changes not on disk yet */
+int  fsdisk_pending(void);
+/* the last sync's result (FSDISK_OK or an FSDISK_ERR_*) */
+int  fsdisk_last_error(void);
 
 #endif

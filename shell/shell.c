@@ -26,6 +26,7 @@
 #include "../kernel/kheap.h"
 #include "../kernel/tty.h"
 #include "../kernel/examples.h"
+#include "../kernel/settings.h"
 
 extern char _kernel_end[];   /* boot/linker.ld */
 
@@ -920,6 +921,7 @@ static void cmd_keyboardctl(const char* args) {
     }
 
     if (keyboard_set_layout(layout) == 0) {
+        settings_set("keyboard", keyboard_layout_name());     /* kept for the next boot too */
         terminal_write_color("Keyboard layout set to: ", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
         terminal_writeln(keyboard_layout_name());
         return;
@@ -1384,6 +1386,7 @@ static void cmd_chsh(const char* args, int persona) {
     }
 
     g_default_shell_kind = kind;
+    settings_set("shell", kind == SHELL_KIND_BASH ? "bash" : "sh");
     terminal_write_color("Default shell set to: ", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     terminal_writeln(shell_kind_name(kind));
     terminal_writeln("(takes effect for new terminal windows / the next boot - this session is unaffected)");
@@ -1616,8 +1619,8 @@ static void cmd_install(void) {
             terminal_write_color(
                 "install: done. This disk now boots Banana OS on its own - no CD needed\n"
                 "(e.g. `qemu-system-i386 -drive file=disk.img,format=raw,if=ide`).\n"
-                "Filesystem changes persist across reboot/shutdown/halt (auto-synced,\n"
-                "or run 'sync' manually).\n",
+                "Files and settings are saved to it automatically, a few seconds after\n"
+                "each change ('sync' saves right away).\n",
                 VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
             break;
         case FSDISK_ERR_NO_SOURCE:
@@ -1638,6 +1641,9 @@ static void cmd_install(void) {
                 "Banana OS build issue, not something fixable from here.\n",
                 VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
             break;
+        case FSDISK_ERR_FULL:
+            terminal_write_color("install: the files take more than 256 MB - delete some first.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            break;
         default:
             terminal_write_color("install: failed (disk I/O error).\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
             break;
@@ -1651,8 +1657,10 @@ static void cmd_sync(void) {
         return;
     }
     int rc = fsdisk_sync();
-    if (rc == FSDISK_ERR_TOO_SMALL) {
-        terminal_write_color("sync: failed - the files no longer fit on the disk (delete some, or use a bigger disk).\n",
+    if (rc == FSDISK_ERR_TOO_SMALL || rc == FSDISK_ERR_FULL) {
+        terminal_write_color(rc == FSDISK_ERR_FULL
+                             ? "sync: failed - the files take more than 256 MB (delete some).\n"
+                             : "sync: failed - the files no longer fit on the disk (delete some, or use a bigger disk).\n",
                              VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }
@@ -2325,13 +2333,25 @@ void shell_run(void) {
     /* If a dedicated ATA disk was previously `install`ed, load its saved
      * filesystem instead of reseeding the defaults - this is what makes
      * files persist across reboots. See kernel/fsdisk.c. */
-    if (!fsdisk_try_load()) {
+    int loaded = fsdisk_try_load();
+    if (loaded <= 0) {
         fs_init();
         examples_seed();          /* the SDK example apps in ~/Examples */
     }
+    if (loaded < 0)
+        terminal_write_color(
+            "The installed disk's files could not be read (damaged). Starting with a fresh\n"
+            "filesystem; the disk is not written to unless you run 'install' again.\n\n",
+            VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+    fsdisk_start_autosave();      /* changes reach the installed disk by themselves */
 
     /* saved network settings, services enabled at boot (shell/srvcmds.c) */
     services_boot();
+    {
+        char sk[8];
+        if (settings_get("shell", sk, sizeof(sk)))
+            g_default_shell_kind = persona = (k_strcmp(sk, "bash") == 0) ? SHELL_KIND_BASH : SHELL_KIND_SH;
+    }
 
     run_init_file(persona);
 

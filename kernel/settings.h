@@ -33,4 +33,8 @@ uint32_t settings_signature(void);
 /* applies /etc/settings.conf (boot, once the filesystem is there) */
 void settings_boot(void);
 
+/* saves one setting in /etc/settings.conf (and on the installed disk) */
+void settings_set(const char* key, const char* value);
+int  settings_get(const char* key, char* out, int cap);
+
 #endif

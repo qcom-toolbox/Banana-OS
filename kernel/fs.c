@@ -107,7 +107,13 @@ static int find_file_in(int parent, const char* name) {
     return -1;
 }
 
+/* bumped by every change to the tree or a file (the disk autosave watches it) */
+static uint32_t g_fs_gen = 1;
+static void touched(void) { g_fs_gen++; }
+uint32_t fs_generation(void) { return g_fs_gen; }
+
 static int mkdir_in(int parent, const char* name_in) {
+    touched();
     char name[FS_NAME_LEN];
     k_strcpy(name, name_in, FS_NAME_LEN);
     if (find_dir_in(parent, name) >= 0)  return -1; /* already exists */
@@ -146,6 +152,7 @@ static void free_file(int i) {
 
 /* deletes a file, on its volume too */
 static int remove_file(int i) {
+    touched();
     mount_t* m = mount_of(files[i].mnt);
     if (m && m->ops->remove(m->ctx, files[i].node, 0) != 0) { g_io_err = 1; return -1; }
     free_file(i);
@@ -182,6 +189,7 @@ static int ensure_loaded(fs_file_t* f) {
 }
 
 static int create_file_in(int parent, const char* name_in) {
+    touched();
     char name[FS_NAME_LEN];
     k_strcpy(name, name_in, FS_NAME_LEN);
     if (find_dir_in(parent, name) >= 0) return -1; /* name clash */
@@ -213,6 +221,7 @@ static int create_file_in(int parent, const char* name_in) {
 }
 
 int fs_write(int idx, const void* data, uint32_t len) {
+    touched();
     fs_file_t* f = fs_file_info(idx);
     if (!f || !f->used) return -1;
     if (reserve(f, len) != 0) return -1;
@@ -240,6 +249,7 @@ int fs_write(int idx, const void* data, uint32_t len) {
 }
 
 int fs_append(int idx, const void* data, uint32_t len) {
+    touched();
     fs_file_t* f = fs_file_info(idx);
     if (!f || !f->used) return -1;
     if (ensure_loaded(f) != 0) return -1;
@@ -327,6 +337,7 @@ static int has_mount_inside(int idx) {
 
 /* deletes a folder and everything in it (on its volume too); 0 = ok */
 static int delete_dir_recursive(int idx) {
+    touched();
     int rc = 0;
     for (int i = 0; i < FS_MAX_FILES; i++)
         if (files[i].used && files[i].parent_dir == idx && remove_file(i) != 0) rc = -1;
@@ -546,6 +557,7 @@ fs_file_t* fs_get_file(int idx) {
 }
 
 void fs_delete(const char* path, int recursive) {
+    touched();
     char p[FS_PATH_LEN];
     expand_tilde(path, p, sizeof(p));
     char leaf[FS_NAME_LEN];
@@ -648,6 +660,7 @@ int fs_copy(const char* src, const char* dst) {
 }
 
 int fs_move(const char* src, const char* dst) {
+    touched();
     char sp[FS_PATH_LEN], dp[FS_PATH_LEN];
     expand_tilde(src, sp, sizeof(sp));
     expand_tilde(dst, dp, sizeof(dp));

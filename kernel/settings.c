@@ -72,6 +72,9 @@ static void save_setting(const char* key, const char* value) {
     cfg_persist();
 }
 
+void settings_set(const char* key, const char* value) { save_setting(key, value); }
+int  settings_get(const char* key, char* out, int cap) { return cfg_get(CFG_SETTINGS, key, out, cap); }
+
 /* ── layout of the content area ───────────────────────────────────── */
 
 static int cx0(void) { return g_win.x + SIDE_W + 16; }
