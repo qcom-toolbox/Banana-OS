@@ -2285,6 +2285,32 @@ static void print_banner_window(int persona) {
     terminal_writeln("");
 }
 
+/* /etc/init.sh: shell commands run once at boot, before the first prompt
+ * (after the network, the settings and the services). A fresh system gets
+ * a commented example. */
+#define INIT_FILE "/etc/init.sh"
+static const char INIT_DEFAULT[] =
+    "# /etc/init.sh - commands Banana OS runs once at boot, before the first prompt.\n"
+    "# One shell command per line; lines starting with '#' are ignored.\n"
+    "# Edit it with:  edit /etc/init.sh   (or Notepad), then reboot.\n"
+    "#\n"
+    "# Examples (remove the '#' to use one):\n"
+    "#   startx                 start the desktop\n"
+    "#   keyboardctl fr_CH      keyboard layout\n"
+    "#   cd /home/banana\n"
+    "#   echo Welcome back!\n";
+
+static void run_init_file(int persona) {
+    int idx = fs_find_file(INIT_FILE);
+    if (idx < 0) {
+        fs_mkdir_p("/etc");
+        fs_write_path(INIT_FILE, INIT_DEFAULT, (uint32_t)(sizeof(INIT_DEFAULT) - 1));
+        return;
+    }
+    fs_file_t* f = fs_get_file(idx);
+    if (f && f->content) run_script_text(f->content, persona);
+}
+
 /* ── entry ──────────────────────────────────────────────────────── */
 void shell_run(void) {
     char buf[SH_LINE_MAX];
@@ -2306,6 +2332,8 @@ void shell_run(void) {
 
     /* saved network settings, services enabled at boot (shell/srvcmds.c) */
     services_boot();
+
+    run_init_file(persona);
 
     while (1) {
         buf[0] = '\0';

@@ -172,6 +172,41 @@ static int shift_held = 0;
 static int ctrl_held  = 0;
 static int alt_held   = 0;
 static int altgr_held = 0;   /* right Alt */
+static int caps_lock  = 0;
+static int caps_down  = 0;   /* held: the keyboard repeats it, it toggles once */
+static int g_from_usb = 0;   /* the scancode came from a USB keyboard (no PS/2 LEDs) */
+
+/* Caps Lock: letters the other case (with Shift: back to small), é -> É too */
+static uint32_t caps_flip(uint32_t v) {
+    if ((v >= 'a' && v <= 'z') || (v >= 'A' && v <= 'Z')) return v ^ 0x20;
+    if (v >= 0xE0 && v <= 0xFE && v != 0xF7) return v - 0x20;
+    if (v >= 0xC0 && v <= 0xDE && v != 0xD7) return v + 0x20;
+    return v;
+}
+
+/* the PS/2 keyboard's lights: command 0xED, then the mask (bit 2 = Caps Lock),
+ * each answered by an ACK before the next byte is sent */
+static void kb_set_leds(void) {
+    uint8_t leds = caps_lock ? 0x04 : 0;
+    for (int step = 0; step < 2; step++) {
+        kb_wait_write();
+        outb(KB_DATA_PORT, step == 0 ? 0xED : leds);
+        for (int t = 0; t < 20000; t++) {
+            uint8_t st = inb(KB_STATUS_PORT);
+            if (!(st & 0x01)) continue;
+            uint8_t b = inb(KB_DATA_PORT);
+            if (st & 0x20) { mouse_on_aux_byte(b); continue; }
+            if (b == 0xFA || b == 0xFE) break;
+        }
+    }
+}
+
+static void caps_press(void) {
+    if (caps_down) return;
+    caps_down = 1;
+    caps_lock = !caps_lock;
+    if (!g_from_usb) kb_set_leds();
+}
 static int use_set2 = 0;
 static int set2_break = 0;
 static int set2_e0 = 0;
@@ -376,6 +411,8 @@ static int swiss_key(uint8_t sc, char* out) {
         }
     }
 
+    if (caps_lock && !altgr && !IS_DEAD(v)) v = caps_flip(v);
+
     /* Ctrl+letter: control codes, by the letter printed on the key */
     if (ctrl_held && !altgr && !IS_DEAD(v)) {
         if (v < 128 && ((v >= 'a' && v <= 'z') || (v >= 'A' && v <= 'Z'))) {
@@ -431,6 +468,7 @@ static uint8_t set2_to_set1(uint8_t sc) {
 static int translate_scancode_set2(uint8_t sc, char* out) {
     if (set2_break) {
         if (sc == 0x12 || sc == 0x59) shift_held = 0;
+        if (sc == 0x58) caps_down = 0;
         if (sc == 0x14) ctrl_held = 0;
         if (sc == 0x11) { alt_held = 0; if (set2_e0) altgr_held = 0; }
         set2_break = 0;
@@ -462,6 +500,7 @@ static int translate_scancode_set2(uint8_t sc, char* out) {
     if (sc == 0x12 || sc == 0x59) { shift_held = 1; return 0; }
     if (sc == 0x14) { ctrl_held = 1; return 0; }
     if (sc == 0x11) { alt_held = 1; return 0; }  /* left alt */
+    if (sc == 0x58) { caps_press(); return 0; }   /* Caps Lock */
 
     if (is_swiss()) {
         uint8_t s1 = set2_to_set1(sc);
@@ -472,6 +511,7 @@ static int translate_scancode_set2(uint8_t sc, char* out) {
     char c = set2_map_char(sc, shift_held);
     if (!c) return 0;
     c = map_layout_char(c, shift_held);
+    if (caps_lock) c = (char)caps_flip((unsigned char)c);
 
     if (ctrl_held) {
         char base = (c >= 'A' && c <= 'Z') ? c :
@@ -502,6 +542,7 @@ static int translate_scancode(uint8_t sc, char* out) {
     if (!c && !shift_held) c = sc_normal[sc];
     if (!c) return 0;
     c = map_layout_char(c, shift_held);
+    if (caps_lock) c = (char)caps_flip((unsigned char)c);
 
     /* Ctrl+letter → codes 1-26 */
     if (ctrl_held) {
@@ -557,10 +598,14 @@ static int process_scancode_byte(uint8_t sc, char* out) {
     if (sc == 0x9D)               { ctrl_held  = 0; return 0; }
     if (sc == 0x38)               { alt_held   = 1; return 0; }  /* left alt down */
     if (sc == 0xB8)               { alt_held   = 0; return 0; }  /* left alt up */
+    if (sc == 0x3A)               { caps_press();  return 0; }  /* Caps Lock */
+    if (sc == 0xBA)               { caps_down  = 0; return 0; }
     if (sc & 0x80)                return 0; /* key-up */
 
     return translate_scancode(sc, out);
 }
+
+int keyboard_caps_lock(void) { return caps_lock; }
 
 const char* keyboard_layout_name(void) {
     return kbd_layout_names[(int)g_layout];
@@ -592,7 +637,10 @@ int keyboard_set_layout(const char* name) {
  * modifiers, arrows and Ctrl+Alt+Del behave identically. */
 void keyboard_feed_scancode(uint8_t sc) {
     char out = 0;
-    if (!process_scancode_byte(sc, &out)) return;
+    g_from_usb = 1;
+    int got = process_scancode_byte(sc, &out);
+    g_from_usb = 0;
+    if (!got) return;
     if (out == 27) {
         /* an arrow: the decoder queued "[X" and handed back the ESC that
          * must come first */
@@ -675,6 +723,7 @@ void keyboard_init(void) {
 
     shift_held = 0; ctrl_held = 0; alt_held = 0; altgr_held = 0;
     g_dead = 0; g_rest_n = 0;
+    caps_lock = 0; caps_down = 0;
     use_set2 = 0; set2_break = 0; set2_e0 = 0; set1_e0 = 0;
     ctrl_alt_del_pending = 0;
     q_head = 0; q_tail = 0;

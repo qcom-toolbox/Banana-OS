@@ -10,6 +10,7 @@ void keyboard_readline(char* buf, int maxlen);
 const char* keyboard_layout_name(void);
 const char* keyboard_layouts_help(void);
 int keyboard_set_layout(const char* name);
+int keyboard_caps_lock(void);    /* 1 while Caps Lock is on */
 
 /* One-shot: 1 exactly once per Ctrl+Alt+Delete press, then clears. */
 int keyboard_ctrl_alt_del_pending(void);
