@@ -51,14 +51,34 @@ static uint64_t tsc_over_50ms(void) {
     uint16_t count = (uint16_t)(PIT_BASE / 20u);    /* 50 ms */
     outb(PIT_CH2, (uint8_t)count);
     outb(PIT_CH2, (uint8_t)(count >> 8));           /* counting starts */
-    uint64_t t0 = tsc_now();
-    uint32_t guard = 0;
+    uint64_t t0 = tsc_now(), t1;
+    /* (a PIT that never ends it: given up after ~2.5 s even at 4 GHz, not ~100 s of port reads) */
     while (!(inb(0x61) & 0x20))                     /* OUT2 goes high at 0 */
-        if (++guard > 100000000u) { outb(0x61, p61); return 0; }
-    uint64_t t1 = tsc_now();
+        if (tsc_now() - t0 > 10000000000ull) { outb(0x61, p61); return 0; }
+    t1 = tsc_now();
     outb(0x61, p61);
     return t1 - t0;
 }
+
+static void cpuid(uint32_t leaf, uint32_t* a, uint32_t* b, uint32_t* c, uint32_t* d) {
+    __asm__ volatile("cpuid" : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d) : "a"(leaf), "c"(0));
+}
+
+/* A TSC good for a clock: one that runs at a constant rate (CPUID's
+ * "invariant TSC") or a virtual machine's. On older processors (Pentium M,
+ * Core Duo, Core 2...) it speeds up and slows down with power saving or
+ * stops in sleep states: the interrupts stay the clock there. */
+static int tsc_is_clock(void) {
+    uint32_t a, b, c, d;
+    cpuid(1, &a, &b, &c, &d);
+    if (c & (1u << 31)) return 1;                   /* a hypervisor */
+    cpuid(0x80000000u, &a, &b, &c, &d);
+    if (a < 0x80000007u) return 0;
+    cpuid(0x80000007u, &a, &b, &c, &d);
+    return (d >> 8) & 1;                            /* invariant TSC */
+}
+
+static int g_tsc_clock;                             /* timer_ms() reads the TSC */
 
 static void calibrate_tsc(void) {
     uint64_t a = tsc_over_50ms(), b = tsc_over_50ms();
@@ -66,8 +86,9 @@ static void calibrate_tsc(void) {
     uint64_t per = c / 50u;
     if (!a || !b || per < 10000u || per > 20000000u) return;    /* 10 MHz .. 20 GHz, else unusable */
     if ((a > b ? a - b : b - a) > c / 20u) return;              /* two measures 5 % apart: unusable */
-    g_tsc_per_ms = per;
+    g_tsc_per_ms = per;                             /* (run-time accounting uses it in any case) */
     g_tsc0 = tsc_now();
+    g_tsc_clock = tsc_is_clock();
 }
 
 uint64_t timer_tsc_per_ms(void) { return g_tsc_per_ms; }
@@ -93,7 +114,7 @@ void timer_init(void) {
 }
 
 uint32_t timer_ms(void) {
-    if (g_tsc_per_ms) return (uint32_t)((tsc_now() - g_tsc0) / g_tsc_per_ms);
+    if (g_tsc_clock) return (uint32_t)((tsc_now() - g_tsc0) / g_tsc_per_ms);
     return g_ms;
 }
 

@@ -1,6 +1,7 @@
 #include "terminal.h"
 #include "keyboard.h"
 #include "sysinfo.h"
+#include "kstring.h"
 #include "task.h"
 #include "timer.h"
 #include "rtc.h"
@@ -27,6 +28,9 @@
 #include "font.h"
 
 #define MULTIBOOT2_MAGIC 0x36D76289
+
+/* a boot step, in the log (and on the screen with "verbose") */
+#define STEP(what) klog("boot: %s\n", what)
 
 /* The x87 FPU: the web browser's JavaScript and httpd's PHP compute with
  * it (the kernel is built without SSE). No emulation, no lazy switching
@@ -77,26 +81,43 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     paging_guard_null();      /* NULL pointers fault (64-bit), after every Multiboot2 reader */
 
     terminal_init();
+    /* "verbose" (GRUB's "boot messages" entry): no boot screen, every step on
+     * the screen - so a computer that stops during the boot shows where */
+    int verbose = strstr(sysinfo_get()->cmdline, "verbose") != NULL;
+    if (verbose) klog_to_screen(1);
+    STEP("timer");
     timer_init();
     __asm__ volatile("sti");  /* timer IRQ from here on */
-    splash_start();           /* the boot screen until the system is ready */
+    if (!verbose) splash_start();   /* the boot screen until the system is ready */
+    STEP("clock");
     rtc_init();
     web_init();       /* clock for JavaScript Date / PHP date() */
+    STEP("fonts");
     fonts_init();     /* the built-in TrueType fonts (DejaVu) */
+    STEP("tasks");
     task_init("banana-sh");   /* boot stack becomes the shell's real thread */
     task_start_sysmon();      /* real background stats-sampling thread */
+    STEP("processor cores");
     smp_init();               /* the other processor cores: they run app code (64-bit) */
+    STEP("usb (legacy handoff)");
     usb_init();       /* xHCI legacy handoff → USB keyboards work via PS/2 */
+    STEP("mouse, keyboard");
     mouse_init();     /* enable PS/2 AUX port for USB/PS2 mice */
     keyboard_init();  /* drain buffer after USB init */
     random_init();
+    STEP("network");
     net_init();       /* NIC probe + netd task; DHCP runs in the background */
+    STEP("sound");
     audio_init();     /* HD Audio / AC'97 sound card (PC speaker otherwise) */
     blockdev_init();  /* mounts USB sticks (FAT32) under /mnt once they show up */
+    STEP("nvme");
     nvme_init();      /* NVMe SSDs: disks for install/sync, FAT32 partitions in /mnt/nvme */
+    STEP("usb");
     usb_stack_init(); /* xHCI/EHCI: USB network adapters, keyboards, mice, sticks */
+    STEP("services");
     daemon_init();
     gui_init();
+    STEP("shell");
 
     if (magic != MULTIBOOT2_MAGIC) {
         terminal_write_color(

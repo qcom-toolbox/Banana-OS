@@ -1,6 +1,7 @@
 #include "serial.h"
 #include "kstring.h"
 #include "io.h"
+#include "terminal.h"
 
 #define COM1 0x3F8
 
@@ -74,12 +75,20 @@ int serial_try_getc(void) {
     return inb(COM1);
 }
 
+/* "verbose" boot (GRUB): the log also goes to the screen - real PCs have no serial port */
+static int g_klog_screen;
+void klog_to_screen(int on) { g_klog_screen = on; }
+
 void klog(const char* fmt, ...) {
-    if (!g_present) return;
+    if (!g_present && !g_klog_screen) return;
     char buf[256];
     __builtin_va_list ap;
     __builtin_va_start(ap, fmt);
     kvsnprintf(buf, sizeof(buf), fmt, ap);
     __builtin_va_end(ap);
-    serial_write(buf);
+    if (g_present) serial_write(buf);
+    if (g_klog_screen) {
+        terminal_write(buf);
+        terminal_flush();               /* (on the screen now: the next step may hang) */
+    }
 }

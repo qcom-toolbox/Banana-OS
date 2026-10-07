@@ -157,17 +157,65 @@ static const sdt_t* find_madt(const rsdp_t* r) {
     return NULL;
 }
 
-/* the I/O APIC is not used (the 8259 is): none of its inputs may get through */
-static void ioapic_mask_all(uint32_t base) {
-    if (!base) return;
-    volatile uint32_t* io = (volatile uint32_t*)(uintptr_t)base;
-    io[0] = 1;
-    uint32_t n = ((io[4] >> 16) & 0xFF) + 1;
-    for (uint32_t i = 0; i < n; i++) {
-        io[0] = 0x10 + 2 * i;
-        uint32_t v = io[4];
-        io[0] = 0x10 + 2 * i;
-        io[4] = v | LVT_MASKED;
+/* ── the I/O APICs ───────────────────────────────────────────────────
+ * Not used for devices (the 8259 is), so their inputs are masked once the
+ * local APIC is on - except an input in ExtINT mode: on many real boards
+ * that is how the 8259 reaches the processor ("virtual wire" through the
+ * I/O APIC rather than LINT0), and masking it silenced the timer: every
+ * wait on it waited forever (stuck on the boot screen). What the firmware
+ * set is saved first, and put back if the local APIC goes off again. */
+#define IOAPIC_PINS 120
+
+typedef struct {
+    volatile uint32_t* io;
+    uint32_t pins;
+    uint32_t lo[IOAPIC_PINS];        /* the low half of each redirection entry */
+} ioapic_t;
+
+static ioapic_t g_ioa[4];
+static int      g_nioa;
+static int      g_extint_ioapic;     /* the 8259 reaches the core through an I/O APIC input */
+
+static uint32_t ioa_rd(ioapic_t* a, uint32_t reg) { a->io[0] = reg; return a->io[4]; }
+static void     ioa_wr(ioapic_t* a, uint32_t reg, uint32_t v) { a->io[0] = reg; a->io[4] = v; }
+
+static void ioapic_save(uint32_t base) {
+    if (!base || g_nioa >= 4) return;
+    ioapic_t* a = &g_ioa[g_nioa++];
+    a->io = (volatile uint32_t*)(uintptr_t)base;
+    a->pins = ((ioa_rd(a, 1) >> 16) & 0xFF) + 1;
+    if (a->pins > IOAPIC_PINS) a->pins = IOAPIC_PINS;
+    for (uint32_t i = 0; i < a->pins; i++) {
+        a->lo[i] = ioa_rd(a, 0x10 + 2 * i);
+        if (!(a->lo[i] & LVT_MASKED) && ((a->lo[i] >> 8) & 7) == 7) g_extint_ioapic = 1;
+    }
+}
+
+static void ioapic_mask_devices(void) {
+    for (int k = 0; k < g_nioa; k++)
+        for (uint32_t i = 0; i < g_ioa[k].pins; i++)
+            if (((g_ioa[k].lo[i] >> 8) & 7) != 7) ioa_wr(&g_ioa[k], 0x10 + 2 * i, g_ioa[k].lo[i] | LVT_MASKED);
+}
+
+static void ioapic_restore(void) {
+    for (int k = 0; k < g_nioa; k++)
+        for (uint32_t i = 0; i < g_ioa[k].pins; i++) ioa_wr(&g_ioa[k], 0x10 + 2 * i, g_ioa[k].lo[i]);
+}
+
+static inline uint64_t tsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+/* n timer interrupts within max_ms (busy: no hlt, they may not come) - bounded by the TSC */
+static int ticks_arrive(uint32_t n, uint32_t max_ms) {
+    uint32_t c0 = timer_irq_count();
+    uint64_t per = timer_tsc_per_ms(), t0 = tsc();
+    for (uint32_t i = 0;; i++) {
+        if (timer_irq_count() - c0 >= n) return 1;
+        if (per ? tsc() - t0 > per * max_ms : i > 50000000u) return 0;
+        __asm__ volatile("pause");
     }
 }
 
@@ -218,14 +266,13 @@ static int lapic_on(uint32_t madt_addr) {
     lapic_wr(LAPIC_TPR, 0);
     lapic_wr(LAPIC_LVT_TIMER, LVT_MASKED);
     lapic_wr(LAPIC_LVT_ERR, LVT_MASKED);
-    lapic_wr(LAPIC_LVT_LINT0, 0x700);                     /* ExtINT: the 8259 */
+    /* the 8259 through LINT0 (ExtINT) - unless it comes through an I/O APIC input */
+    lapic_wr(LAPIC_LVT_LINT0, g_extint_ioapic ? LVT_MASKED : 0x700);
     lapic_wr(LAPIC_LVT_LINT1, 0x400);                     /* NMI */
     lapic_wr(LAPIC_SVR, 0x100u | SMP_VEC_SPURIOUS);
     __asm__ volatile("sti");
     /* does the timer still tick? (bounded: no hlt, it may not) */
-    uint32_t t0 = timer_irq_count();         /* (the interrupts themselves, not the clock) */
-    for (uint32_t i = 0; i < 400000000u && timer_irq_count() - t0 < 3; i++) __asm__ volatile("pause");
-    int ok = timer_irq_count() - t0 >= 3;
+    int ok = ticks_arrive(3, 100);
     if (!ok) {
         __asm__ volatile("cli");
         wrmsr(0x1B, lo & ~((1u << 11) | (1u << 10)), hi);
@@ -248,16 +295,38 @@ static int lapic_on(uint32_t madt_addr) {
 #define LAPIC_TIMER_CUR  0x390
 #define LAPIC_TIMER_DIV  0x3E0
 
+static void lapic_timer_stop(void) {
+    __asm__ volatile("cli");
+    lapic_wr(LAPIC_LVT_TIMER, LVT_MASKED);
+    lapic_wr(LAPIC_TIMER_INIT, 0);
+    irq_timer_from_lapic(0);                             /* the PIT's IRQ 0 again */
+    __asm__ volatile("sti");
+}
+
+/* Only where it keeps counting while the core is halted: in a virtual
+ * machine, or with CPUID's "always running APIC timer". On older real
+ * processors it stops in power-saving states - the hlt of every idle wait
+ * would then never end. */
+static int lapic_timer_safe(void) {
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    if (c & (1u << 31)) return 1;                        /* a hypervisor */
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0), "c"(0));
+    if (a < 6) return 0;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(6), "c"(0));
+    return (a >> 2) & 1;                                 /* ARAT */
+}
+
 static int lapic_timer_start(void) {
+    if (!lapic_timer_safe()) return 0;
     lapic_wr(LAPIC_TIMER_DIV, 0x3);                       /* the bus clock / 16 */
     lapic_wr(LAPIC_LVT_TIMER, LVT_MASKED | SMP_VEC_TIMER);
     lapic_wr(LAPIC_TIMER_INIT, 0xFFFFFFFFu);              /* one shot, counting down: how fast? */
-    uint32_t t0 = timer_ms();
-    for (uint32_t i = 0; i < 400000000u && timer_ms() - t0 < 20; i++) __asm__ volatile("pause");
-    uint32_t ms = timer_ms() - t0;
+    uint32_t c0 = timer_irq_count();                     /* 20 PIT ticks: 20 ms */
+    if (!ticks_arrive(20, 200)) { lapic_wr(LAPIC_TIMER_INIT, 0); return 0; }
+    uint32_t ms = timer_irq_count() - c0;
     uint32_t left = lapic_rd(LAPIC_TIMER_CUR);
     lapic_wr(LAPIC_TIMER_INIT, 0);
-    if (ms < 20) return 0;
     uint32_t per_ms = (0xFFFFFFFFu - left) / ms;
     if (per_ms < 100) return 0;
 
@@ -266,15 +335,23 @@ static int lapic_timer_start(void) {
     lapic_wr(LAPIC_LVT_TIMER, SMP_VEC_TIMER | (1u << 17)); /* periodic */
     lapic_wr(LAPIC_TIMER_INIT, per_ms);
     __asm__ volatile("sti");
-    uint32_t c0 = timer_irq_count();
-    for (uint32_t i = 0; i < 400000000u && timer_irq_count() - c0 < 5; i++) __asm__ volatile("pause");
-    if (timer_irq_count() - c0 >= 5) return 1;
-    __asm__ volatile("cli");                             /* it does not tick: back to the PIT */
+    if (ticks_arrive(5, 100)) return 1;
+    lapic_timer_stop();                                  /* it does not tick: back to the PIT */
+    return 0;
+}
+
+/* everything as it was before smp_init: the local APIC off, the firmware's I/O APIC setup */
+static void lapic_revert(void) {
+    __asm__ volatile("cli");
     lapic_wr(LAPIC_LVT_TIMER, LVT_MASKED);
     lapic_wr(LAPIC_TIMER_INIT, 0);
     irq_timer_from_lapic(0);
+    ioapic_restore();
+    uint32_t lo, hi;
+    rdmsr(0x1B, &lo, &hi);
+    wrmsr(0x1B, lo & ~((1u << 11) | (1u << 10)), hi);
+    g_lapic = NULL;
     __asm__ volatile("sti");
-    return 0;
 }
 
 void smp_init(void) {
@@ -309,13 +386,20 @@ void smp_init(void) {
     g_found = n;
     if (n < 2) { klog("smp: one processor core\n"); return; }
 
+    for (int i = 0; i < nio; i++) ioapic_save(ioapic[i]);
     if (!lapic_on(lapic_addr)) {
         klog("smp: the local APIC would stop the timer - using one core\n");
         return;
     }
+    ioapic_mask_devices();
     if (lapic_timer_start()) klog("smp: the 1 kHz tick comes from the local APIC timer\n");
-    else klog("smp: the local APIC timer does not tick - the PIT stays the timer\n");
-    for (int i = 0; i < nio; i++) ioapic_mask_all(ioapic[i]);
+    else klog("smp: the PIT stays the timer\n");
+    /* the last word: if the timer no longer ticks now, nothing of this stays */
+    if (!ticks_arrive(5, 200)) {
+        lapic_revert();
+        klog("smp: the timer stopped with the local APIC on - it is off again, using one core\n");
+        return;
+    }
     uint8_t bsp = (uint8_t)(lapic_rd(LAPIC_ID) >> 24);
     g_apic_id[0] = bsp;
 

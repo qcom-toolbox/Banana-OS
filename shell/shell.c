@@ -2410,7 +2410,7 @@ void shell_run(void) {
      * "shell personas" comment near the top of this file. */
     int persona = g_default_shell_kind;
 
-    terminal_clear();
+    if (!strstr(sysinfo_get()->cmdline, "verbose")) terminal_clear();   /* (boot messages: the steps stay) */
     print_banner(persona);
 
     /* If a dedicated ATA disk was previously `install`ed, load its saved
@@ -2419,6 +2419,7 @@ void shell_run(void) {
     /* Started from the CD: the live system, fresh - an installed disk is
      * left alone (no login, no autosave onto it); `update` can update it. */
     int live = sysinfo_live_boot();
+    klog("boot: disks (an installed Banana OS?)\n");
     int loaded = live ? 0 : fsdisk_try_load();
     if (loaded <= 0) {
         fs_init();
@@ -2442,6 +2443,7 @@ void shell_run(void) {
             "Type 'update' to update that installation with this CD (files kept), or boot from the disk.\n\n",
             VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
 
+    klog("boot: settings, servers\n");
     /* saved network settings, services enabled at boot (shell/srvcmds.c) */
     services_boot();
     {
@@ -2450,6 +2452,7 @@ void shell_run(void) {
             g_default_shell_kind = persona = (k_strcmp(sk, "bash") == 0) ? SHELL_KIND_BASH : SHELL_KIND_SH;
     }
 
+    klog("boot: ready\n");
     splash_end();                 /* ready: the boot screen gives way to the console */
     login_screen();               /* the password, when one is set */
     if (services_desktop_at_boot()) gui_set_enabled(1);

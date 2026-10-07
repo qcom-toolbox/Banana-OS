@@ -18,5 +18,7 @@ void serial_kick(void);
 
 /* printf to the serial port only (kernel debug log) */
 void klog(const char* fmt, ...);
+/* "verbose" boot: the log is also written on the screen (kernel/kernel.c) */
+void klog_to_screen(int on);
 
 #endif
