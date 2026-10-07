@@ -234,6 +234,8 @@ void net_init(void) {
     memset(&g_if, 0, sizeof(g_if));
     netdev_t* nd = e1000_probe();
     if (nd) net_register_device(nd);
+    nd = r8169_probe();
+    if (nd) net_register_device(nd);
     nd = rtl8139_probe();
     if (nd) net_register_device(nd);
     nd = pcnet_probe();

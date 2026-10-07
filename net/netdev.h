@@ -30,6 +30,7 @@ typedef struct netdev {
  * isn't present. */
 netdev_t* e1000_probe(void);
 netdev_t* rtl8139_probe(void);
+netdev_t* r8169_probe(void);      /* Realtek RTL8111/8168, RTL8169, RTL8101/8102 */
 netdev_t* pcnet_probe(void);     /* AMD PCnet-PCI II / PCnet-FAST III (VirtualBox) */
 netdev_t* virtio_net_probe(void); /* virtio-net, legacy interface (VirtualBox, QEMU) */
 
