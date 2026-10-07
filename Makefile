@@ -81,7 +81,7 @@ kernel64.bin: $(OBJS64)
 
 # grub-mkrescue adds a UEFI boot image when the x86_64-efi GRUB modules
 # are installed (grub-efi-amd64-bin) - the ISO then boots BIOS and UEFI
-Banana_OS.iso: kernel.bin kernel64.bin iso/boot/grub/grub.cfg
+Banana_OS.iso: kernel.bin kernel64.bin iso/boot/grub/grub.cfg iso/boot/grub/medium.cfg
 	@test -d /usr/lib/grub/x86_64-efi || echo "warning: grub-efi-amd64-bin missing - the ISO will boot on BIOS only"
 	cp kernel.bin iso/boot/kernel.bin
 	cp kernel64.bin iso/boot/kernel64.bin

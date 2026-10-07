@@ -247,7 +247,26 @@ void sysinfo_log_boot(void) {
     klog("boot: cmdline [%s], bios drive %s0x%x\n", info.cmdline, info.has_biosdev ? "" : "(none) ", info.biosdev);
 }
 
+/* "medium=live-cd" / "medium=install" (grub.cfg sources /boot/grub/medium.cfg,
+ * which the disk's copy has rewritten) - the copy GRUB really started,
+ * whatever names the firmware gave the drives */
+static int medium_is(const char* word) {
+    for (const char* p = info.cmdline; *p; p++) {
+        const char* a = "medium=";
+        const char* q = p;
+        while (*a && *q == *a) { a++; q++; }
+        if (*a) continue;
+        const char* w = word;
+        while (*w && *q == *w) { w++; q++; }
+        return !*w && (*q == 0 || *q == ' ');
+    }
+    return 0;
+}
+
 int sysinfo_live_boot(void) {
+    if (medium_is("live-cd")) return 1;
+    if (medium_is("install")) return 0;
+    /* older disks (no medium line): */
     /* GRUB's $root (grub.cfg): "cdN" for a CD/DVD under UEFI; under BIOS
      * "hdN" with N = drive - 0x80, so a CD is hd96 (0xE0) while hard disks
      * and USB sticks are hd0..hd15 */

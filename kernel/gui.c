@@ -55,6 +55,8 @@ static const char* const ICON_LABELS[MENU_ITEMS] = {
 
 static int g_menu_open = 0;
 static int g_lock_pending = 0;   /* "Lock screen" was chosen */
+static int g_cur_mx = 100, g_cur_my = 100;   /* the pointer, for the lock screen */
+static int g_mouse_from_lock = 0;           /* it moved there: take it back */
 static int g_menu_sel = 0;     /* an ACT_* */
 /* The app windows (Files, Browser, Notepad, Apps, Task Manager and the
  * windows of installed apps) and the terminal windows share one stacking
@@ -1190,11 +1192,13 @@ void gui_poll(void) {
      * windows' shells poll too) leaves the screen and the keyboard to it */
     static int in_lock = 0;
     if (in_lock) return;
-    if (g_lock_pending && g_gui_enabled) {
+    /* (background tasks - the servers, app windows - call this too, but read no keys) */
+    if (g_lock_pending && g_gui_enabled && !task_is_background()) {
         g_lock_pending = 0;
         in_lock = 1;
         g_menu_open = 0;
-        login_lock();
+        login_lock(&g_cur_mx, &g_cur_my);
+        g_mouse_from_lock = 1;
         in_lock = 0;
         keyboard_ctrl_alt_del_pending();   /* (a press while locked does nothing) */
         gui_screen_changed();              /* the desktop repaints everything */
@@ -1256,8 +1260,11 @@ void gui_poll(void) {
         }
 
         mouse_state_t ms = mouse_read();
+        if (g_mouse_from_lock) { mx = g_cur_mx; my = g_cur_my; g_mouse_from_lock = 0; }
         mx += ms.dx;
         my -= ms.dy;
+        g_cur_mx = mx;
+        g_cur_my = my;
         if (ms.dz) {
             /* the wheel scrolls the window under the mouse */
             int a = (g_front_app >= 0 && app_visible(g_front_app) && g_apps[g_front_app].contains(mx, my)) ? g_front_app : app_at(mx, my, 0);

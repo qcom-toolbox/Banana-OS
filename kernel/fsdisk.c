@@ -122,8 +122,24 @@ static void find_marker(const ata_disk_t* src, uint32_t total_blocks) {
     kfree(b);
 }
 
+/* grub/medium.cfg: tells the kernel which copy GRUB started (see
+ * sysinfo_live_boot). The line is put together here at run time: written
+ * out whole, it would sit in this kernel's own image on the CD and be
+ * rewritten in the disk's copy along with medium.cfg. */
+static void medium_line(char* out, const char* word) {
+    kstrlcpy(out, "set banana_", 32);
+    kstrlcpy(out + 11, "medium=", 16);
+    kstrlcpy(out + 18, word, 12);
+}
+
 /* the CD's bytes as they go onto the disk */
 static void patch_marker(uint8_t* b, uint32_t n) {
+    char cd[32], disk[32];
+    medium_line(cd, "live-cd");
+    medium_line(disk, "install");
+    uint32_t M = (uint32_t)strlen(cd);
+    for (uint32_t k = 0; k + M <= n; k++)
+        if (b[k] == 's' && memcmp(b + k, cd, M) == 0) memcpy(b + k, disk, M);
     uint32_t L = g_mark_len;
     if (!L) return;
     for (uint32_t k = 0; k + L <= n; k++) {
