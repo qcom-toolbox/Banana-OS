@@ -9,6 +9,7 @@
 #include "timer.h"
 #include "task.h"
 #include "kheap.h"
+#include "splash.h"
 
 #define VGA_WIDTH  80
 #define VGA_HEIGHT 25
@@ -185,6 +186,7 @@ static void console_cursor(size_t* row, size_t* col) {
 
 void terminal_flush(void) {
     if (!fb_console_on()) return;
+    if (splash_active()) return;            /* the boot screen is up: the text waits in the grid */
     size_t cr, cc;
     console_cursor(&cr, &cc);
     int cursor_moved = !g_ov_valid || g_ov_row != cr || g_ov_col != cc;
@@ -673,6 +675,7 @@ void terminal_write_at(const char* str, uint8_t fg, uint8_t bg, size_t row, size
 
 void terminal_screen_changed(void) {
     fb_recompute_grid();
+    if (splash_active()) { splash_screen_changed(); return; }   /* (drawn again at the new size) */
     if (term_mode == TERMINAL_MODE_FRAMEBUFFER && gfx_available()) fb_redraw_all();
 }
 

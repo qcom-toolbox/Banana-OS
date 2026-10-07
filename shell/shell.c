@@ -10,6 +10,7 @@
 #include "../kernel/usb.h"
 #include "../kernel/task.h"
 #include "../kernel/smp.h"
+#include "../kernel/splash.h"
 #include "../kernel/gui.h"
 #include "../kernel/fb.h"
 #include "../kernel/rtc.h"
@@ -2449,6 +2450,7 @@ void shell_run(void) {
             g_default_shell_kind = persona = (k_strcmp(sk, "bash") == 0) ? SHELL_KIND_BASH : SHELL_KIND_SH;
     }
 
+    splash_end();                 /* ready: the boot screen gives way to the console */
     login_screen();               /* the password, when one is set */
     if (services_desktop_at_boot()) gui_set_enabled(1);
 

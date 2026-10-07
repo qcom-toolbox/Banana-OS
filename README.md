@@ -67,6 +67,7 @@ Banana-OS/
 │   ├── timer.c         # PIT at 1 kHz on IRQ0, hlt-based idle
 │   ├── task.c/h        # Kernel threads, fair scheduling (weighted run time, priorities); app code on other cores
 │   ├── smp.c, smp_tramp.asm # Starts the other CPU cores (ACPI MADT, INIT/STARTUP IPIs, real -> long mode)
+│   ├── splash.c        # The boot screen: a banana drawn in code, three dots taking turns under it
 │   ├── kheap.c         # Kernel heap (first-fit, coalescing) over the Multiboot2 memory map
 │   ├── kstring.c       # memcpy/memset/..., ksnprintf
 │   ├── serial.c        # COM1 console: mirrored output (async), keyboard input

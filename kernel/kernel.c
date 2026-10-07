@@ -22,6 +22,7 @@
 #include "nvme.h"
 #include "paging.h"
 #include "smp.h"
+#include "splash.h"
 #include "../shell/shell.h"
 #include "font.h"
 
@@ -78,6 +79,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     terminal_init();
     timer_init();
     __asm__ volatile("sti");  /* timer IRQ from here on */
+    splash_start();           /* the boot screen until the system is ready */
     rtc_init();
     web_init();       /* clock for JavaScript Date / PHP date() */
     fonts_init();     /* the built-in TrueType fonts (DejaVu) */
