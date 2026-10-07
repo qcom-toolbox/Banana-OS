@@ -11,6 +11,7 @@
 
 #define CFG_NETWORK  "/etc/network.conf"   /* ifconfig/dhcp: interface + addresses */
 #define CFG_SERVICES "/etc/rc.conf"        /* services started at boot */
+#define RC_CONF_HEADER "# Banana OS: started at boot (Settings > Startup, `httpd boot on`, `sshd boot on`)\n"
 
 /* 1 and the value in out if `key` is set, 0 otherwise */
 int  cfg_get(const char* path, const char* key, char* out, int cap);

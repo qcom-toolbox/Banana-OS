@@ -1205,7 +1205,7 @@ void gui_poll(void) {
          * and the Start menu first). Apps and Task Manager read no keys
          * (Esc closes them). */
         if (gui_notepad_focused() || gui_appwin_focused() ||
-            ((g_front_app == APP_LAUNCHER || g_front_app == APP_TASKMGR || g_front_app == APP_FILES) &&
+            ((g_front_app == APP_LAUNCHER || g_front_app == APP_TASKMGR || g_front_app == APP_FILES || g_front_app == APP_SETTINGS) &&
              app_visible(g_front_app) && tty_current() < 0)) {
             for (int k = 0; k < 64; k++) {
                 char c = keyboard_try_getchar();
@@ -1214,6 +1214,7 @@ void gui_poll(void) {
                 if (g_front_app == APP_NOTEPAD) notepad_key(c);
                 else if (g_front_app == APP_APPWIN) appwin_key(c);
                 else if (g_front_app == APP_FILES) explorer_key(c);
+                else if (g_front_app == APP_SETTINGS) settings_key(c);
                 else if (c == 27) g_apps[g_front_app].close();
             }
         }
@@ -1534,7 +1535,7 @@ int gui_focused_vt(void) {
     if (g_front_app == APP_BROWSER && browser_is_open() && !g_app_min[APP_BROWSER]) return BROWSER_VT;
     if (g_front_app == APP_NOTEPAD && notepad_is_open() && !g_app_min[APP_NOTEPAD]) return NOTEPAD_VT;
     if (g_front_app == APP_APPWIN && appwin_any_visible()) return APPWIN_VT;
-    if ((g_front_app == APP_LAUNCHER || g_front_app == APP_TASKMGR || g_front_app == APP_FILES) && app_visible(g_front_app))
+    if ((g_front_app == APP_LAUNCHER || g_front_app == APP_TASKMGR || g_front_app == APP_FILES || g_front_app == APP_SETTINGS) && app_visible(g_front_app))
         return APPWIN_VT + 1;          /* keys handed out by gui_poll() */
 
     /* Frontmost OPEN window, if any - g_term_order always lists every

@@ -19,9 +19,10 @@
 
 void settings_open(void);
 #define SETTINGS_PAGE_DISPLAY 0
-#define SETTINGS_PAGE_ABOUT   6
+#define SETTINGS_PAGE_ABOUT   7
 void settings_open_page(int page);
 void settings_close(void);
+void settings_key(char c);          /* typing (the password fields) */
 int  settings_is_open(void);
 void settings_draw(const fb_info_t* fi);
 int  settings_contains(int mx, int my);

@@ -15,6 +15,11 @@
 #include "rtc.h"
 #include "../net/net.h"
 #include "../net/netconf.h"
+#include "../net/httpd.h"
+#include "../net/sshd.h"
+#include "passwd.h"
+#include "fsdisk.h"
+#include "utf8.h"
 
 #define TITLE_H  20
 #define SIDE_W   132
@@ -30,8 +35,8 @@
 #define C_ACCENT 0x003A7BD5u
 #define C_SEL    0x002C3E5Cu
 
-enum { PG_DISPLAY = 0, PG_SCREEN, PG_SOUND, PG_KEYBOARD, PG_NETWORK, PG_TIME, PG_ABOUT, PG_COUNT };
-static const char* const PAGE_NAMES[PG_COUNT] = { "Display", "Screen", "Sound", "Keyboard", "Network", "Date & time", "About" };
+enum { PG_DISPLAY = 0, PG_SCREEN, PG_SOUND, PG_KEYBOARD, PG_NETWORK, PG_TIME, PG_STARTUP, PG_ABOUT, PG_COUNT };
+static const char* const PAGE_NAMES[PG_COUNT] = { "Display", "Screen", "Sound", "Keyboard", "Network", "Date & time", "Startup", "About" };
 
 static const char* const LAYOUTS[] = { "EN (Default)", "fr_CH", "FR", "DE", "de_CH", "BEPO" };
 #define NLAYOUTS ((int)(sizeof(LAYOUTS) / sizeof(LAYOUTS[0])))
@@ -215,6 +220,171 @@ static void draw_screen(void) {
         label(x, y + 44 + n * ITEM_H + 8, "This display keeps the mode set at boot (changing it needs QEMU, Bochs or VirtualBox graphics).", C_DIM);
 }
 
+/* Startup: what starts at boot (/etc/rc.conf), and the SSH password */
+#define SU_ROW_H 34
+static char g_pw[2][64];
+static int  g_pw_focus = -1;        /* the password field being typed in, or -1 */
+
+static int rc_on(const char* name) {
+    char v[8];
+    return cfg_get(CFG_SERVICES, name, v, sizeof(v)) && strcmp(v, "yes") == 0;
+}
+static uint16_t rc_port(const char* name, uint16_t def) {
+    char key[32], v[8];
+    uint32_t n;
+    ksnprintf(key, sizeof(key), "%s_port", name);
+    if (cfg_get(CFG_SERVICES, key, v, sizeof(v)) && k_parse_u32(v, &n) && n > 0 && n < 65536) return (uint16_t)n;
+    return def;
+}
+/* the same keys `httpd boot on` / `sshd boot on` write */
+static void rc_set(const char* name, int on, uint16_t port) {
+    cfg_set(CFG_SERVICES, name, on ? "yes" : NULL, RC_CONF_HEADER);
+    if (port) {
+        char key[32], v[8];
+        ksnprintf(key, sizeof(key), "%s_port", name);
+        ksnprintf(v, sizeof(v), "%u", port);
+        cfg_set(CFG_SERVICES, key, on ? v : NULL, RC_CONF_HEADER);
+    }
+    cfg_persist();
+}
+
+static void checkbox(int x, int y, int on) {
+    bevel(x, y, 14, 14, 0x00141920u, 0x0010141Cu, 0x00404B5Cu);
+    if (on) { gfx_fill_rect(x + 3, y + 3, 8, 8, C_ACCENT); }
+}
+
+static void su_rows(int y, int* ry) { for (int i = 0; i < 3; i++) ry[i] = y + 44 + i * SU_ROW_H; }
+static int  su_pw_y(int y) { return y + 44 + 3 * SU_ROW_H + 14; }
+
+static void draw_startup(void) {
+    int x = cx0(), y = cy0(), w = cw();
+    label(x, y, "Startup", C_HEAD);
+    label(x, y + 18, "Started by themselves when Banana OS boots:", C_DIM);
+    int ry[3];
+    su_rows(y, ry);
+    char line[96];
+
+    checkbox(x, ry[0], rc_on("desktop"));
+    label(x + 24, ry[0] + 3, "Desktop (start the GUI instead of the text console)", C_TEXT);
+
+    checkbox(x, ry[1], rc_on("httpd"));
+    ksnprintf(line, sizeof(line), "Web server (httpd), port %u", rc_port("httpd", 80));
+    label(x + 24, ry[1] + 3, line, C_TEXT);
+    label(x + w - 170, ry[1] + 3, httpd_running() ? "running" : "stopped", httpd_running() ? 0x0080E080u : C_DIM);
+    button(x + w - 90, ry[1] - 3, 86, httpd_running() ? "Stop" : "Start now", 0);
+
+    checkbox(x, ry[2], rc_on("sshd"));
+    ksnprintf(line, sizeof(line), "SSH server (sshd), port %u", rc_port("sshd", 22));
+    label(x + 24, ry[2] + 3, line, C_TEXT);
+    label(x + w - 170, ry[2] + 3, sshd_running() ? "running" : "stopped", sshd_running() ? 0x0080E080u : C_DIM);
+    button(x + w - 90, ry[2] - 3, 86, sshd_running() ? "Stop" : "Start now", 0);
+
+    /* the password */
+    int py = su_pw_y(y);
+    label(x, py, "Password (for SSH logins)", C_HEAD);
+    int set = passwd_is_set(PASSWD_USER);
+    label(x, py + 18, set ? "A password is set." : "No password yet: the SSH server will not start without one.",
+          set ? C_DIM : 0x00FFC060u);
+    static const char* const NAMES[2] = { "New:", "Again:" };
+    for (int f = 0; f < 2; f++) {
+        int fy = py + 42 + f * 26;
+        label(x, fy + 4, NAMES[f], C_TEXT);
+        bevel(x + 60, fy, 200, 20, 0x00141920u, 0x0010141Cu, g_pw_focus == f ? C_ACCENT : 0x00404B5Cu);
+        int n = u8_cols(g_pw[f], (int)strlen(g_pw[f]));
+        char stars[40];
+        int k = 0;
+        for (; k < n && k < 24; k++) stars[k] = '*';
+        stars[k] = 0;
+        gfx_draw_text(x + 66, fy + 6, stars, C_TEXT, 0x00141920u);
+        if (g_pw_focus == f && (timer_ms() / 500) % 2 == 0) gfx_fill_rect(x + 66 + k * 8, fy + 4, 2, 12, C_TEXT);
+    }
+    button(x + 272, py + 42, 120, set ? "Change" : "Set password", 0);
+
+    label(x, py + 106, fsdisk_is_installed()
+          ? "Kept on the installed disk (saved automatically)."
+          : "Live session: run `install` to keep these after a reboot.", C_DIM);
+}
+
+static void su_submit_password(void) {
+    if ((int)strlen(g_pw[0]) < PASSWD_MIN) {
+        ksnprintf(g_status, sizeof(g_status), "The password needs at least %d characters", PASSWD_MIN);
+    } else if (strcmp(g_pw[0], g_pw[1]) != 0) {
+        kstrlcpy(g_status, "The two passwords are not the same", sizeof(g_status));
+    } else if (passwd_set(PASSWD_USER, g_pw[0]) != 0) {
+        kstrlcpy(g_status, "Could not save the password", sizeof(g_status));
+    } else {
+        kstrlcpy(g_status, fsdisk_is_installed() ? "Password saved" : "Password saved (until reboot: not installed)",
+                 sizeof(g_status));
+    }
+    memset(g_pw, 0, sizeof(g_pw));
+    g_pw_focus = -1;
+}
+
+static void click_startup(int mx, int my) {
+    int x = cx0(), y = cy0(), w = cw();
+    int ry[3];
+    su_rows(y, ry);
+    char err[96];
+    err[0] = 0;
+    /* Start / Stop now */
+    if (inside(mx, my, x + w - 90, ry[1] - 3, 86, 20)) {
+        if (httpd_running()) { httpd_stop(); kstrlcpy(g_status, "Web server stopped", sizeof(g_status)); }
+        else if (httpd_start(rc_port("httpd", 80), err, sizeof(err)) == 0) kstrlcpy(g_status, "Web server started", sizeof(g_status));
+        else ksnprintf(g_status, sizeof(g_status), "httpd: %s", err);
+        return;
+    }
+    if (inside(mx, my, x + w - 90, ry[2] - 3, 86, 20)) {
+        if (sshd_running()) { sshd_stop(); kstrlcpy(g_status, "SSH server stopped", sizeof(g_status)); }
+        else if (sshd_start(rc_port("sshd", 22), err, sizeof(err)) == 0) kstrlcpy(g_status, "SSH server started", sizeof(g_status));
+        else ksnprintf(g_status, sizeof(g_status), "sshd: %s", err);
+        return;
+    }
+    /* the boot switches */
+    if (inside(mx, my, x, ry[0] - 4, w - 100, 24)) {
+        int on = !rc_on("desktop");
+        rc_set("desktop", on, 0);
+        kstrlcpy(g_status, on ? "The desktop starts at boot" : "Boots to the text console", sizeof(g_status));
+        return;
+    }
+    if (inside(mx, my, x, ry[1] - 4, w - 180, 24)) {
+        int on = !rc_on("httpd");
+        rc_set("httpd", on, rc_port("httpd", 80));
+        kstrlcpy(g_status, on ? "The web server starts at boot" : "The web server no longer starts at boot", sizeof(g_status));
+        return;
+    }
+    if (inside(mx, my, x, ry[2] - 4, w - 180, 24)) {
+        int on = !rc_on("sshd");
+        rc_set("sshd", on, rc_port("sshd", 22));
+        kstrlcpy(g_status, !on ? "The SSH server no longer starts at boot"
+                 : passwd_is_set(PASSWD_USER) ? "The SSH server starts at boot"
+                 : "The SSH server starts at boot (set a password below)", sizeof(g_status));
+        return;
+    }
+    /* the password fields and button */
+    int py = su_pw_y(y);
+    g_pw_focus = -1;
+    for (int f = 0; f < 2; f++)
+        if (inside(mx, my, x + 60, py + 42 + f * 26, 200, 20)) { g_pw_focus = f; return; }
+    if (inside(mx, my, x + 272, py + 42, 120, 20)) su_submit_password();
+}
+
+/* typing into the password fields */
+void settings_key(char c) {
+    if (!g_open) return;
+    if (g_page != PG_STARTUP || g_pw_focus < 0) {
+        if (c == 27) settings_close();              /* Esc closes, as in the other windows */
+        return;
+    }
+    char* s = g_pw[g_pw_focus];
+    int n = (int)strlen(s);
+    if (c == '\n') { if (g_pw_focus == 0) g_pw_focus = 1; else su_submit_password(); }
+    else if (c == '\t') g_pw_focus ^= 1;
+    else if (c == 27) { memset(g_pw, 0, sizeof(g_pw)); g_pw_focus = -1; }
+    else if (c == '\b') { if (n) u8_backspace(s, n); }
+    else if ((unsigned char)c >= 32 && n < (int)sizeof(g_pw[0]) - 1) { s[n] = c; s[n + 1] = 0; }
+    g_gen++;
+}
+
 static void draw_network(void) {
     int x = cx0(), y = cy0();
     label(x, y, "Network", C_HEAD);
@@ -318,6 +488,7 @@ void settings_draw(const fb_info_t* fi) {
     case PG_KEYBOARD: draw_keyboard(); break;
     case PG_NETWORK:  draw_network(); break;
     case PG_TIME:     draw_time(); break;
+    case PG_STARTUP:  draw_startup(); break;
     default:          draw_about(); break;
     }
     if (g_status[0]) gfx_draw_text(x + 10, y + H - 18, g_status, C_DIM, C_PANEL);
@@ -405,6 +576,8 @@ void settings_click(int mx, int my) {
                 return;
             }
         }
+    } else if (g_page == PG_STARTUP) {
+        click_startup(mx, my);
     } else if (g_page == PG_NETWORK) {
         netif_t* nf = net_if();
         if (nf && nf->dev && inside(mx, my, x, y + 160, 200, 20)) {
@@ -443,6 +616,8 @@ void settings_open(void) {
 
 void settings_close(void) {
     g_open = 0;
+    memset(g_pw, 0, sizeof(g_pw));
+    g_pw_focus = -1;
     g_win.dragging = g_win.resizing = 0;
     g_dragging_vol = 0;
     g_gen++;
@@ -454,8 +629,8 @@ int settings_contains(int mx, int my) { return g_open && inside(mx, my, g_win.x,
 uint32_t settings_signature(void) {
     if (!g_open) return 0;
     /* the clock, uptime and network status change by themselves */
-    if (g_page == PG_TIME || g_page == PG_NETWORK || g_page == PG_ABOUT) {
-        uint32_t s = timer_ms() / 1000;
+    if (g_page == PG_TIME || g_page == PG_NETWORK || g_page == PG_ABOUT || g_page == PG_STARTUP) {
+        uint32_t s = timer_ms() / (g_page == PG_STARTUP ? 500 : 1000);
         if (s != g_tick_s) { g_tick_s = s; g_gen++; }
     }
     return g_gen * 2654435761u ^ (uint32_t)(g_win.x << 16 | g_win.y) ^ (uint32_t)(g_win.w << 20 | g_win.h << 4) ^
