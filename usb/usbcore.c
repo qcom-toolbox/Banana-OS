@@ -5,6 +5,7 @@
 #include "timer.h"
 #include "serial.h"
 #include "terminal.h"
+#include "task.h"
 
 /* host controller drivers */
 int xhci_init_controller(const pci_dev_t* pd);
@@ -26,7 +27,22 @@ static int          g_hc_count;
 static usb_device_t g_devs[USB_MAX_DEVICES];
 static int          g_in_poll;
 
+/* The "usbd" task finds the devices on the ports (at boot and when one is
+ * plugged in) and sets them up. That used to happen inside the boot itself:
+ * a device that did not answer - a USB stick on some controller - made
+ * every request wait for its timeout, minutes of "boot: usb" on screen.
+ * Now the boot goes on while usbd waits; its waits let the other tasks run. */
+static int g_usbd_pid = -1;
+
+static int in_usbd(void) { return g_usbd_pid >= 0 && task_current_pid() == g_usbd_pid; }
+
+void usb_wait(void) {
+    if (in_usbd()) task_sleep_ms(1);
+    else timer_idle();
+}
+
 void usb_delay_ms(uint32_t ms) {
+    if (in_usbd()) { task_sleep_ms(ms); return; }
     timer_sleep_ms(ms);
 }
 
@@ -216,8 +232,9 @@ void usb_poll(void) {
     if (g_in_poll) return;
     g_in_poll = 1;
     for (int i = 0; i < g_hc_count; i++) g_hcs[i]->ops->poll(g_hcs[i]);
-    /* hotplug: a controller saw a port change - (re)enumerate its ports */
-    for (int i = 0; i < g_hc_count; i++) {
+    /* hotplug: a controller saw a port change - (re)enumerate its ports
+     * (only in usbd: it can take a while, the shells' keyboard polls must not) */
+    for (int i = 0; i < g_hc_count && in_usbd(); i++) {
         if (g_hcs[i]->port_change && g_hcs[i]->ops->rescan) {
             g_hcs[i]->port_change = 0;
             g_hcs[i]->ops->rescan(g_hcs[i]);
@@ -247,6 +264,15 @@ static int scan_cb(const pci_dev_t* d, void* ctx) {
     return 0;
 }
 
+static void usbd_entry(void) {
+    task_set_background();
+    task_sleep_ms(100);                     /* devices need ~100 ms after the ports are powered */
+    for (;;) {
+        usb_poll();
+        task_sleep_ms(50);
+    }
+}
+
 void usb_stack_init(void) {
     /* xHCI first: on Intel chipsets taking it over also switches the
      * shared USB 2.0 ports from the EHCI controller to it */
@@ -257,6 +283,9 @@ void usb_stack_init(void) {
     s.n = 0; s.prog_if = 0x20;
     pci_scan(scan_cb, &s);
     for (int i = 0; i < s.n; i++) ehci_init_controller(&s.list[i]);
+    /* the devices on the ports: found by usbd, after the boot */
+    for (int i = 0; i < g_hc_count; i++) g_hcs[i]->port_change = 1;
+    if (g_hc_count) g_usbd_pid = task_create("usbd", usbd_entry);
 }
 
 /* ── lsusb ──────────────────────────────────────────────────────── */

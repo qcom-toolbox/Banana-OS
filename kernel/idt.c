@@ -6,6 +6,7 @@
 #include "kstring.h"
 #include "smp.h"
 #include "task.h"
+#include "timer.h"
 
 #define VGA_MEMORY ((volatile uint16_t*)0xB8000)
 
@@ -308,6 +309,23 @@ void irq_handler(registers_t* regs) {
     }
 
     for (int i = 0; i < IRQ_CHAIN && irq_handlers[irq][i]; i++) irq_handlers[irq][i]();
+
+    /* An interrupt storm: a line that fires without end (a device on a
+     * shared line that no driver here quiets - the BIOS's USB 1.1
+     * controllers next to the USB 2.0 one, on older Intel chipsets) leaves
+     * the processor no time for anything else: the boot stood still. More
+     * than 5000 in 100 ms is no real device's load: the line is masked
+     * (its drivers poll too, they go on). */
+    if (irq != 0) {
+        static uint32_t win[16], cnt[16];
+        uint32_t now = timer_irq_count();
+        if (now - win[irq] >= 100) { win[irq] = now; cnt[irq] = 0; }
+        if (++cnt[irq] > 5000) {
+            irq_mask |= (uint16_t)(1u << irq);
+            pic_apply_mask();
+            klog("irq %d: interrupt storm (a device nobody answers) - the line is masked\n", irq);
+        }
+    }
 
     if (irq >= 8) pic_outb(PIC2_CMD, 0x20);
     pic_outb(PIC1_CMD, 0x20);

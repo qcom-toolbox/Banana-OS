@@ -137,7 +137,7 @@ static int wait_reg(volatile uint8_t* b, uint32_t off, uint32_t mask, uint32_t w
     uint32_t start = timer_ms();
     while ((rd(b, off) & mask) != want) {
         if (timer_ms() - start > ms) return -1;
-        timer_idle();
+        usb_wait();
     }
     return 0;
 }
@@ -267,7 +267,7 @@ static uint32_t command(xhci_t* x, uint32_t param_lo, uint32_t status, uint32_t 
             klog("xhci: command %u timed out\n", (control >> 10) & 0x3F);
             return 0;
         }
-        timer_idle();
+        usb_wait();
     }
     return x->cmd_code;
 }
@@ -349,7 +349,7 @@ static int xhci_control(usb_device_t* d, const usb_setup_t* s, void* data, uint3
             klog("xhci: control request %02x timed out (slot %u)\n", s->bRequest, xd->slot);
             return -1;
         }
-        timer_idle();
+        usb_wait();
     }
     if (xd->ctrl_code != CC_SUCCESS && xd->ctrl_code != CC_SHORT) {
         if (xd->halted[1]) reset_endpoint(x, xd, 1);
@@ -471,7 +471,7 @@ static int port_reset(xhci_t* x, int p) {
         uint32_t start = timer_ms();
         while (!(portsc(x, p) & PORT_PRC)) {
             if (timer_ms() - start > 500) return -1;
-            timer_idle();
+            usb_wait();
         }
         usb_delay_ms(20);             /* reset recovery (TRSTRCY is 10 ms) */
     }
@@ -683,8 +683,6 @@ int xhci_init_controller(const pci_dev_t* pd) {
     for (uint32_t p = 1; p <= x->max_ports; p++) {
         if (!(portsc(x, (int)p) & PORT_PP)) wr(x->op, OP_PORTSC(p), PORT_PP);
     }
-    usb_delay_ms(100);
-    xhci_rescan(&x->hc);
-    x->hc.port_change = 0;
+    /* the devices on the ports: the usbd task looks (usb/usbcore.c), not the boot */
     return 0;
 }

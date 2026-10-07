@@ -65,7 +65,7 @@ static int bulk(usb_device_t* d, uint8_t ep, uint8_t* buf, uint32_t len) {
         /* the controller itself, not usb_poll(): this also runs from
          * inside usb_poll() (a stick plugged in), where that is a no-op */
         d->hc->ops->poll(d->hc);
-        timer_idle();
+        usb_wait();
     }
     return x.status == USB_XFER_OK ? (int)x.actual : -1;
 }
@@ -133,6 +133,7 @@ static int test_unit_ready(msc_t* m) {
     for (int i = 0; i < 10; i++) {
         int r = scsi(m, cdb, 6, NULL, 0, 0);
         if (r >= 0) return 0;
+        if (r == -1) return -1;          /* no answer at all: waiting longer will not help */
         request_sense(m);
         usb_delay_ms(100);
     }
@@ -216,7 +217,16 @@ static int msc_attach(usb_device_t* d) {
     static const uint8_t inquiry[6] = { 0x12, 0, 0, 0, 36, 0 };
     static const uint8_t capacity[10] = { 0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     char vendor[9] = "", product[17] = "";
-    if (scsi_in(m, inquiry, 6, 36) >= 36) {
+    int r = scsi_in(m, inquiry, 6, 36);
+    if (r == -1) {
+        /* not even the first command went through: every retry below would
+         * wait its timeout too (minutes) - the drive is left alone */
+        klog("usb-storage: the drive does not answer - not used\n");
+        d->drvdata = NULL;
+        kfree(m);
+        return -1;
+    }
+    if (r >= 36) {
         memcpy(vendor, m->buf + 64 + 8, 8);
         memcpy(product, m->buf + 64 + 16, 16);
     }
@@ -225,10 +235,13 @@ static int msc_attach(usb_device_t* d) {
     test_unit_ready(m);
     uint32_t last = 0, bs = 0;
     for (int tries = 0; tries < 3 && !bs; tries++) {
-        if (scsi_in(m, capacity, 10, 8) >= 8) {
+        r = scsi_in(m, capacity, 10, 8);
+        if (r >= 8) {
             const uint8_t* c = m->buf + 64;
             last = ((uint32_t)c[0] << 24) | (c[1] << 16) | (c[2] << 8) | c[3];
             bs = ((uint32_t)c[4] << 24) | (c[5] << 16) | (c[6] << 8) | c[7];
+        } else if (r == -1) {
+            break;                       /* (no answer: no more waiting) */
         } else {
             request_sense(m);
         }

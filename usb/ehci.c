@@ -337,7 +337,7 @@ static int ehci_control(usb_device_t* d, const usb_setup_t* s, void* data, uint3
             status = USB_XFER_ERROR;
             break;
         }
-        timer_idle();
+        usb_wait();
     }
     pend_release(e, q, slot);
     if (q->halted) qh_recover(e, q);
@@ -590,8 +590,6 @@ int ehci_init_controller(const pci_dev_t* pd) {
     /* power the ports (if software-controlled), give devices time to connect */
     if (rd(e->cap, 0x04) & (1u << 4))
         for (int p = 1; p <= e->ports; p++) port_write(e, p, (portsc(e, p) & ~PORT_RWC) | PORT_PP);
-    usb_delay_ms(100);
-    ehci_rescan(&e->hc);
-    e->hc.port_change = 0;
+    /* the devices on the ports: the usbd task looks (usb/usbcore.c), not the boot */
     return 0;
 }

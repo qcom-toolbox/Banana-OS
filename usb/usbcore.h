@@ -191,5 +191,8 @@ int  usb_device_count(void);
 
 /* delays for the controller drivers */
 void usb_delay_ms(uint32_t ms);
+/* waiting for a transfer: the usbd task lets the others run meanwhile (a
+ * slow or broken device holds up nothing), elsewhere a plain hlt */
+void usb_wait(void);
 
 #endif
