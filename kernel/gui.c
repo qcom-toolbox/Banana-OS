@@ -66,7 +66,13 @@ static int menu_idx(int slot) { return (!installer_available() && slot >= MENU_S
 static int g_menu_open = 0;
 static int g_lock_pending = 0;   /* "Lock screen" was chosen */
 static int g_in_lock = 0;        /* the lock screen is up (in some task's gui_poll) */
-static int g_cur_mx = 100, g_cur_my = 100;   /* the pointer, for the lock screen */
+/* The pointer. The desktop loop moves it, and so does the timer interrupt
+ * (gui_cursor_tick) while the loop is not drawing: interrupts are off
+ * wherever the loop updates it. */
+static int g_cur_mx = 100, g_cur_my = 100;
+static volatile int g_ptr_drawn_x = -1, g_ptr_drawn_y = -1;   /* where it is on the screen (-1: not drawn) */
+static volatile int g_gui_busy;      /* a task is drawing the desktop (gui_poll): hands off the screen */
+static volatile int g_scr_w, g_scr_h;
 static int g_mouse_from_lock = 0;           /* it moved there: take it back */
 static int g_menu_sel = 0;     /* an ACT_* */
 /* The app windows (Files, Browser, Notepad, Apps, Task Manager and the
@@ -757,6 +763,31 @@ static void draw_cursor(int mx, int my) {
     draw_cursor_shape(mx, my, g_drawn_shape);
 }
 
+/* The timer interrupt, every millisecond: when the mouse moved and no task
+ * is drawing the desktop, the pointer is moved here - restored spot, drawn
+ * anew, on the presented frame - so it follows the hand at full speed
+ * even while another task keeps the CPU (saving files, a heavy page).
+ * Clicks, the wheel and what the pointer is over are still the desktop
+ * loop's, next time it runs; it finds the pointer already in place. */
+void gui_cursor_tick(void) {
+    if (g_gui_busy || !g_gui_enabled || !g_backbuf_active || g_in_lock || g_lock_pending) return;
+    if (g_ptr_drawn_x < 0 || g_scr_w <= 0 || g_scr_h <= 0) return;
+    int dx, dy;
+    if (!mouse_irq_motion(&dx, &dy)) return;
+    int x = g_cur_mx + dx, y = g_cur_my - dy;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > g_scr_w - 1) x = g_scr_w - 1;
+    if (y > g_scr_h - 1) y = g_scr_h - 1;
+    g_cur_mx = x;
+    g_cur_my = y;
+    if (x == g_ptr_drawn_x && y == g_ptr_drawn_y) return;
+    fb_present_rect(g_ptr_drawn_x + CURSOR_X0, g_ptr_drawn_y + CURSOR_Y0, CURSOR_W, CURSOR_H);
+    draw_cursor_shape(x, y, g_drawn_shape);
+    g_ptr_drawn_x = x;
+    g_ptr_drawn_y = y;
+}
+
 static int cursor_shape(int mx, int my) {
     for (int i = 0; i < TERM_WIN_MAX; i++) {
         term_win_t* w = &g_terms[i];
@@ -1210,7 +1241,18 @@ int gui_appwin_focused(void) {
     return gfx_available() && g_gui_enabled && g_front_app == APP_APPWIN && appwin_any_visible() && tty_current() < 0;
 }
 
+static void gui_poll_body(void);
+
+/* While a task is in here (drawing the desktop), the timer interrupt
+ * leaves the pointer alone (gui_cursor_tick); not while it waits in
+ * task_yield. A counter: tasks can be in here at the same time. */
 void gui_poll(void) {
+    g_gui_busy++;
+    gui_poll_body();
+    g_gui_busy--;
+}
+
+static void gui_poll_body(void) {
     /* the lock screen: while it is up, every other caller (the terminal
      * windows' shells poll too) leaves the screen and the keyboard to it */
     if (g_in_lock) return;
@@ -1221,6 +1263,7 @@ void gui_poll(void) {
         g_menu_open = 0;
         login_lock(&g_cur_mx, &g_cur_my);
         g_mouse_from_lock = 1;
+        g_ptr_drawn_x = -1;              /* (the lock screen was on the screen) */
         g_in_lock = 0;
         keyboard_ctrl_alt_del_pending();   /* (a press while locked does nothing) */
         gui_screen_changed();              /* the desktop repaints everything */
@@ -1228,7 +1271,9 @@ void gui_poll(void) {
     /* every idle/wait loop passes through here: paint pending console output */
     terminal_flush();
     timer_poll();
+    g_gui_busy--;
     task_yield();
+    g_gui_busy++;
     /* another task may have locked the screen while this one waited here:
      * no frame, no mouse, no keys from this caller now */
     if (g_in_lock) return;
@@ -1246,8 +1291,7 @@ void gui_poll(void) {
         const fb_info_t* fi = fb_info();
         if (!fi || fi->width == 0 || fi->height == 0) return;
 
-        static int mx = 100, my = 100;
-        static int drawn_mx = -1, drawn_my = -1;
+        int mx, my;
         static uint32_t last_frame_ms = 0;
         static int prev_left = 0;
 
@@ -1285,12 +1329,22 @@ void gui_poll(void) {
             wallpaper_load_config();
         }
 
+        /* (the timer interrupt moves the pointer too: interrupts off while it changes here) */
+        g_scr_w = (int)fi->width;
+        g_scr_h = (int)fi->height;
+        uintptr_t fl;
+        __asm__ volatile("pushf; pop %0; cli" : "=r"(fl) :: "memory");
         mouse_state_t ms = mouse_read();
-        if (g_mouse_from_lock) { mx = g_cur_mx; my = g_cur_my; g_mouse_from_lock = 0; }
-        mx += ms.dx;
-        my -= ms.dy;
-        g_cur_mx = mx;
-        g_cur_my = my;
+        g_mouse_from_lock = 0;               /* (the lock screen moved g_cur_mx/my itself) */
+        g_cur_mx += ms.dx;
+        g_cur_my -= ms.dy;
+        if (g_cur_mx < 0) g_cur_mx = 0;
+        if (g_cur_my < 0) g_cur_my = 0;
+        if (g_cur_mx > (int)fi->width - 1) g_cur_mx = (int)fi->width - 1;
+        if (g_cur_my > (int)fi->height - 1) g_cur_my = (int)fi->height - 1;
+        mx = g_cur_mx;
+        my = g_cur_my;
+        if (fl & 0x200) __asm__ volatile("sti" ::: "memory");
         if (ms.dz) {
             /* the wheel scrolls the window under the mouse */
             int a = (g_front_app >= 0 && app_visible(g_front_app) && g_apps[g_front_app].contains(mx, my)) ? g_front_app : app_at(mx, my, 0);
@@ -1514,11 +1568,11 @@ void gui_poll(void) {
 
         if (!changed) {
             /* only the mouse moved (or its shape changed): restore its old spot, draw it anew */
-            if (mx != drawn_mx || my != drawn_my || cursor_shape(mx, my) != g_drawn_shape) {
-                fb_present_rect(drawn_mx + CURSOR_X0, drawn_my + CURSOR_Y0, CURSOR_W, CURSOR_H);
+            if (mx != g_ptr_drawn_x || my != g_ptr_drawn_y || cursor_shape(mx, my) != g_drawn_shape) {
+                fb_present_rect(g_ptr_drawn_x + CURSOR_X0, g_ptr_drawn_y + CURSOR_Y0, CURSOR_W, CURSOR_H);
                 draw_cursor(mx, my);
-                drawn_mx = mx;
-                drawn_my = my;
+                g_ptr_drawn_x = mx;
+                g_ptr_drawn_y = my;
             }
             return;
         }
@@ -1529,8 +1583,8 @@ void gui_poll(void) {
         last_frame_ms = now;
 
         render_desktop(fi, mx, my);
-        drawn_mx = mx;
-        drawn_my = my;
+        g_ptr_drawn_x = mx;
+        g_ptr_drawn_y = my;
         g_last_view = view;
         g_force_redraw = 0;
         return;
@@ -1549,6 +1603,7 @@ void gui_poll(void) {
 
 void gui_set_enabled(int enabled) {
     g_gui_enabled = enabled ? 1 : 0;
+    g_ptr_drawn_x = -1;              /* no pointer on the screen until the desktop draws one */
     g_menu_open = 0;
     g_force_redraw = 1;
     ctxmenu_close();

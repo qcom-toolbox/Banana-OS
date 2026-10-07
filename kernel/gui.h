@@ -5,6 +5,8 @@
 
 void gui_init(void);
 void gui_poll(void);
+/* the timer interrupt: moves the mouse pointer while no task draws the desktop */
+void gui_cursor_tick(void);
 
 void gui_set_enabled(int enabled);
 int  gui_is_enabled(void);

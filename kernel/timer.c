@@ -5,6 +5,7 @@
 #include "terminal.h"
 #include "serial.h"
 #include "task.h"
+#include "gui.h"
 
 /*
  * PIT channel 0, mode 2 (rate generator) at 1 kHz, counted by IRQ0.
@@ -28,6 +29,7 @@ static void timer_irq(void) {
     g_ms++;
     serial_kick();      /* drain the serial console's output queue */
     task_smp_tick();    /* app code on the other cores takes turns (kernel/task.c) */
+    gui_cursor_tick();  /* the mouse pointer moves even while the desktop's task is busy */
 }
 
 void timer_init(void) {

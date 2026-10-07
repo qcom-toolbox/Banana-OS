@@ -683,15 +683,23 @@ char keyboard_try_getchar(void) {
     char sk = serial_key();
     if (sk) return sk;
 
-    if (!(inb(KB_STATUS_PORT) & 0x01)) return 0; /* no data */
+    /* the timer interrupt takes mouse bytes from the controller too
+     * (mouse_irq_motion): status and data are read in one go */
+    uintptr_t fl;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(fl) :: "memory");
     uint8_t st = inb(KB_STATUS_PORT);
+    if (!(st & 0x01)) {                         /* no data */
+        if (fl & 0x200) __asm__ volatile("sti");
+        return 0;
+    }
     if (st & 0x20) {
         uint8_t b = inb(KB_DATA_PORT);
         mouse_on_aux_byte(b);
+        if (fl & 0x200) __asm__ volatile("sti");
         return 0;
     }
-
     uint8_t sc = inb(KB_DATA_PORT);
+    if (fl & 0x200) __asm__ volatile("sti");
 
     char out = 0;
     if (process_scancode_byte(sc, &out)) { flush_rest(); return out; }

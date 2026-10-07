@@ -35,6 +35,9 @@ typedef struct {
 
 void         mouse_init(void);
 mouse_state_t mouse_read(void);   /* non-blocking, returns last known state */
+/* timer interrupt only (kernel/gui.c): the motion of the waiting PS/2
+ * packets that change no button; 1 if there was any */
+int          mouse_irq_motion(int* dx, int* dy);
 /* USB mice report here (dy positive = up, buttons bit0 left/1 right/2 middle) */
 void         mouse_inject(int dx, int dy, int buttons);
 void         mouse_inject_wheel(int dz);      /* + = scroll down */

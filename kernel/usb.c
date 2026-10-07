@@ -543,7 +543,59 @@ void mouse_inject(int dx, int dy, int buttons) {
     g_usb_buttons = buttons;
 }
 
+/* ── the pointer from the timer interrupt (kernel/gui.c) ─────────────
+ * The desktop reads the mouse only when its task runs; while another task
+ * holds the CPU (a save, a page being laid out) the pointer would stop.
+ * The timer interrupt takes the motion of the queued plain packets here
+ * and moves the pointer itself. Packets that press or release a button
+ * or turn the wheel are left for mouse_read(), so every click is still
+ * seen by the desktop, in order. A keyboard byte waiting first in the
+ * controller is left alone too (it is the keyboard's). The task side
+ * (mouse_read, keyboard_try_getchar) runs with interrupts off while it
+ * touches the controller or the packet queue. */
+int mouse_irq_motion(int* dx, int* dy) {
+    if (!mouse_enabled || syn_detected) return 0;
+    for (;;) {
+        uint8_t st = inb(PS2_STATUS);
+        if (!((st & 0x01) && (st & 0x20))) break;
+        mouse_on_aux_byte(inb(PS2_DATA));
+    }
+    int sx = 0, sy = 0, any = 0;
+    while (mouse_ring_len > 0) {
+        const uint8_t* p = mouse_ring[mouse_ring_head];
+        uint8_t btn = (uint8_t)(last_mouse.btn_left | last_mouse.btn_right << 1 | last_mouse.btn_middle << 2);
+        if ((p[0] & 7) != btn) break;                         /* a click: the desktop's */
+        if (mouse_pkt_size == 4 && (p[3] & 0x0F)) break;      /* the wheel: the desktop's */
+        sx += (int)p[1] - ((p[0] & 0x10) ? 256 : 0);
+        sy += (int)p[2] - ((p[0] & 0x20) ? 256 : 0);
+        mouse_ring_head = (mouse_ring_head + 1) % MPKT_RING;
+        mouse_ring_len--;
+        any = 1;
+    }
+    *dx = sx;
+    *dy = sy;
+    return any;
+}
+
+static inline uintptr_t irq_off(void) {
+    uintptr_t f;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(f) :: "memory");
+    return f;
+}
+static inline void irq_on(uintptr_t f) {
+    if (f & 0x200) __asm__ volatile("sti" ::: "memory");
+}
+
+static mouse_state_t mouse_read_locked(void);
+
 mouse_state_t mouse_read(void) {
+    uintptr_t f = irq_off();
+    mouse_state_t m = mouse_read_locked();
+    irq_on(f);
+    return m;
+}
+
+static mouse_state_t mouse_read_locked(void) {
     if (g_usb_dx || g_usb_dy || g_usb_buttons >= 0 || g_usb_dz) {
         mouse_state_t m = last_mouse;
         m.dx = g_usb_dx;
