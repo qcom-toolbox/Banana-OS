@@ -76,6 +76,23 @@ static void* dma_alloc(uint32_t size, uint32_t align) {
 
 /* ══ the feeder ═══════════════════════════════════════════════════════ */
 
+/* What is written into the ring goes out to RAM right away (CLFLUSH, one
+ * 64-byte line at a time): a sound chip that fetches without snooping the
+ * caches (hda_pci_quirks turns that on where it can) still plays what was
+ * written, not old bytes - static otherwise. */
+static int g_clflush = -1;
+
+static void flush(const uint8_t* p, uint32_t n) {
+    if (g_clflush < 0) {
+        uint32_t a = 1, b, c, d;
+        __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+        g_clflush = (d >> 19) & 1;
+    }
+    if (!g_clflush || !n) return;
+    for (uintptr_t a = (uintptr_t)p & ~(uintptr_t)63; a < (uintptr_t)p + n; a += 64)
+        __asm__ volatile("clflush (%0)" :: "r"(a) : "memory");
+}
+
 static void feed(void) {
     if (!g_card) return;
     if (g_card->tick) g_card->tick();
@@ -99,6 +116,7 @@ static void feed(void) {
         __sync_fetch_and_sub(&g_qcount, take);
         if (take) g_data_end = g_wr_abs + take;
         if (take < chunk) memset(g_ring + g_wp + take, 0, chunk - take);
+        flush(g_ring + g_wp, chunk);
         g_wp = (g_wp + chunk) % RING;
         g_wr_abs += chunk;
     }
@@ -111,6 +129,7 @@ static void feed(void) {
         uint32_t n = RING - zp;
         if (n > 4096) n = 4096;
         memset(g_ring + zp, 0, n);
+        flush(g_ring + zp, n);
         g_zero_abs += n;
     }
 }
@@ -167,6 +186,7 @@ static int ac97_start(void) {
         g_ac_bdl[i * 2] = (uint32_t)(uintptr_t)(g_ring + i * AC_SEG);
         g_ac_bdl[i * 2 + 1] = (AC_SEG / 2);              /* samples, no interrupts */
     }
+    flush((const uint8_t*)g_ac_bdl, 32 * 8);
     outl(g_nabm + 0x10, (uint32_t)(uintptr_t)g_ac_bdl);
     outb(g_nabm + 0x15, 30);
     outb(g_nabm + 0x1B, 0x01);                           /* run */
@@ -336,6 +356,7 @@ static int hda_start(void) {
         g_hda_bdl[i * 2] = (uint64_t)(uintptr_t)(g_ring + i * (RING / 2));
         g_hda_bdl[i * 2 + 1] = RING / 2;          /* length, no interrupt */
     }
+    flush((const uint8_t*)g_hda_bdl, 32);           /* (the list, out to RAM before the chip reads it) */
     hw32(g_sd + 0x18, (uint32_t)(uintptr_t)g_hda_bdl);
     hw32(g_sd + 0x1C, 0);
     hw32(g_sd + 0x08, RING);
@@ -432,11 +453,47 @@ static int setup_codec(int cad) {
     return n;
 }
 
+/* one byte of the PCI configuration: (byte & ~clear) | set */
+static void cfg8(const pci_dev_t* pd, uint8_t off, uint8_t clear, uint8_t set) {
+    uint8_t al = off & ~3u, sh = (uint8_t)((off & 3u) * 8u);
+    uint32_t v = pci_read32(pd->bus, pd->dev, pd->fn, al);
+    uint8_t b = (uint8_t)(((v >> sh) & 0xFF & ~clear) | set);
+    pci_write32(pd->bus, pd->dev, pd->fn, al, (v & ~(0xFFu << sh)) | ((uint32_t)b << sh));
+}
+
+/* Static or buzzing from the speakers on real PCs, with nothing playing:
+ * the controller fetches the sound by DMA; if it does that without
+ * "snooping" the processor's caches, it reads RAM behind the cache - old
+ * bytes instead of the silence just written - and plays them. What the
+ * Linux driver does at this point (hda_intel.c, azx_init_pci): the PCI
+ * Express traffic class to 0 (its "playback static" fix), and snooping on
+ * where the chipset lets it be turned off (Intel since the 5/6-series
+ * PCH, AMD/ATI, NVIDIA). QEMU and VirtualBox have no caches to miss. */
+static void hda_pci_quirks(const pci_dev_t* pd) {
+    cfg8(pd, 0x44, 0x07, 0);                          /* TCSEL: traffic class 0 */
+    if (pd->vendor == 0x8086) {
+        static const uint16_t ich[] = { 0x2668, 0x27D8, 0x269A, 0x284B, 0x293E, 0x293F, 0x3A3E, 0x3A6E, 0x811B };
+        int is_ich = 0;
+        for (uint32_t i = 0; i < sizeof(ich) / sizeof(ich[0]); i++) if (pd->device == ich[i]) is_ich = 1;
+        if (!is_ich) {                                /* PCH / SCH: DEVC's no-snoop bit off */
+            uint16_t devc = pci_read16(pd->bus, pd->dev, pd->fn, 0x78);
+            if (devc & (1u << 11)) pci_write16(pd->bus, pd->dev, pd->fn, 0x78, devc & (uint16_t)~(1u << 11));
+        }
+    } else if (pd->vendor == 0x1002) {                /* ATI/AMD SB450 and later: enable snoop */
+        cfg8(pd, 0x42, 0x07, 0x02);
+    } else if (pd->vendor == 0x10DE) {                /* NVIDIA: coherent transactions, both directions */
+        cfg8(pd, 0x4E, 0x0F, 0x0F);
+        cfg8(pd, 0x4C, 0, 0x01);
+        cfg8(pd, 0x4D, 0, 0x01);
+    }
+}
+
 static int hda_init(const pci_dev_t* pd) {
     int io;
     uintptr_t bar = pci_bar(pd, 0, &io);
     if (io || !bar) return -1;
     pci_enable(pd);
+    hda_pci_quirks(pd);
     g_hda = (volatile uint8_t*)(uintptr_t)bar;
     /* controller reset */
     hw32(0x08, hr32(0x08) & ~1u);
@@ -522,6 +579,7 @@ void audio_init(void) {
     if (p.have_hda && hda_init(&p.hda) != 0) g_card = NULL;
     if (!g_card && p.have_ac97 && ac97_init(&p.ac97) != 0) g_card = NULL;
     if (!g_card) { kstrlcpy(g_card_name, "none (PC speaker only)", sizeof(g_card_name)); return; }
+    flush(g_ring, RING);                    /* the silence it starts with, in RAM */
     g_card->start();
     g_last_hw = g_card->position();
     g_wp = g_last_hw;
