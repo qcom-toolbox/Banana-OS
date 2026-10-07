@@ -43,6 +43,7 @@ static uint8_t g_buf[FSDISK_COPY_BUF_BYTES];
 #define FSDISK_MAX_PAYLOAD (256u * 1024u * 1024u)
 
 static int        g_have_target = 0;
+static int        g_fi_state = -1;   /* fsdisk_find_install(): not looked up yet */
 static ata_disk_t g_target;
 
 static uint32_t checksum_of(const uint8_t* buf, uint32_t len) {
@@ -190,6 +191,7 @@ int fsdisk_install(void) {
 
     g_target = target;
     g_have_target = 1;
+    g_fi_state = -1;
     return FSDISK_OK;
 }
 
@@ -297,3 +299,59 @@ int fsdisk_pending(void) {
 }
 
 int fsdisk_last_error(void) { return g_last_err; }
+
+/* ── updating an install from the CD: the system only, files kept ── */
+
+/* (looked up once: Settings > About asks every second; an install resets it) */
+static ata_disk_t g_fi_disk;
+
+int fsdisk_find_install(ata_disk_t* out) {
+    if (g_fi_state < 0) {
+        g_fi_state = 0;
+        ata_disk_t d;
+        fsdisk_super_t sb;
+        if (fsdisk_find_target(&d) == 1 && d.sectors > FSDISK_BASE_LBA &&
+            (read_super(&d, 0, &sb) || (two_slots(&d) && read_super(&d, 1, &sb)))) {
+            g_fi_disk = d;
+            g_fi_state = 1;
+        }
+    }
+    if (g_fi_state && out) *out = g_fi_disk;
+    return g_fi_state;
+}
+
+/* 1: the installed system is the same as this CD's, 0: it differs, <0: an FSDISK_ERR_* */
+int fsdisk_compare_boot(void) {
+    ata_disk_t dst, src;
+    uint32_t iso_bytes;
+    if (!fsdisk_find_install(&dst)) return FSDISK_ERR_NO_INSTALL;
+    if (!find_atapi_source(&src) || disk_cd_iso_size(&src, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
+    uint8_t* other = (uint8_t*)kmalloc(FSDISK_COPY_BUF_BYTES);
+    if (!other) return FSDISK_ERR_IO;
+    uint32_t total = iso_bytes / 2048u, done = 0;
+    int same = 1;
+    while (done < total && same) {
+        uint32_t chunk = total - done;
+        if (chunk > FSDISK_COPY_CHUNK_BLOCKS) chunk = FSDISK_COPY_CHUNK_BLOCKS;
+        if (disk_cd_read(&src, done, chunk, g_buf) != 0 || disk_read(&dst, done * 4u, chunk * 4u, other) != 0) {
+            kfree(other);
+            return FSDISK_ERR_IO;
+        }
+        if (memcmp(g_buf, other, chunk * 2048u) != 0) same = 0;
+        done += chunk;
+    }
+    kfree(other);
+    return same;
+}
+
+int fsdisk_update(void) {
+    ata_disk_t dst, src;
+    uint32_t iso_bytes;
+    if (!fsdisk_find_install(&dst)) return FSDISK_ERR_NO_INSTALL;
+    if (!find_atapi_source(&src) || disk_cd_iso_size(&src, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
+    if (iso_bytes > FSDISK_BOOT_RESERVE_BYTES) return FSDISK_ERR_ISO_TOO_BIG;
+    /* the boot area only: the filesystem after FSDISK_BASE_LBA stays as it is */
+    if (copy_boot_image(&src, &dst, iso_bytes) != 0) return FSDISK_ERR_IO;
+    if (disk_flush(&dst) != 0) return FSDISK_ERR_IO;
+    return FSDISK_OK;
+}

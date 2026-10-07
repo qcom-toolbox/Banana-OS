@@ -67,6 +67,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
         fb_init_multiboot2(mb_info);
         gfx_init();
         sysinfo_init_mb2(mb_info);
+        sysinfo_log_boot();
     }
     /* After every Multiboot2 consumer above: the heap may reuse that memory. */
     kheap_init(magic == MULTIBOOT2_MAGIC ? mb_info : 0);

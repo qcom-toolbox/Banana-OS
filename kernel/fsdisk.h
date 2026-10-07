@@ -21,6 +21,7 @@
 #define FSDISK_ERR_ISO_TOO_BIG -5 /* boot image bigger than the reserved region (build issue) */
 #define FSDISK_ERR_IO          -6 /* a read or write failed */
 #define FSDISK_ERR_FULL        -7 /* the files are past the 256 MB a disk copy may hold */
+#define FSDISK_ERR_NO_INSTALL  -8 /* no disk holds an installed Banana OS */
 
 /* Looks for exactly one non-ATAPI ATA disk attached (any bus/position).
  * Returns 1 and fills *out if exactly one was found, 0 if none, -1 if
@@ -57,5 +58,12 @@ void fsdisk_start_autosave(void);
 int  fsdisk_pending(void);
 /* the last sync's result (FSDISK_OK or an FSDISK_ERR_*) */
 int  fsdisk_last_error(void);
+
+/* Updating from a newer CD: the one hard disk holding Banana OS (1, *out),
+ * whether its system matches this CD's (1 same, 0 differs, <0 error), and
+ * rewriting its system from the CD - the files and settings stay. */
+int  fsdisk_find_install(ata_disk_t* out);
+int  fsdisk_compare_boot(void);
+int  fsdisk_update(void);
 
 #endif

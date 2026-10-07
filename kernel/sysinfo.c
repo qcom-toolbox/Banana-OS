@@ -1,4 +1,5 @@
 #include "sysinfo.h"
+#include "serial.h"
 #include "types.h"
 
 /* Multiboot info structure (partial) */
@@ -189,6 +190,16 @@ void sysinfo_init_mb2(uint32_t mb2_info_addr) {
         mb2_tag_t* t = (mb2_tag_t*)(uintptr_t)(mb2_info_addr + o);
         if (t->type == 0 || t->size < 8) break;
         if (t->type == 11 || t->type == 12) info.uefi = 1;
+        if (t->type == 1) {                      /* the command line */
+            const char* s = (const char*)t + 8;
+            uint32_t n = t->size - 8, i = 0;
+            for (; i < n && i < sizeof(info.cmdline) - 1 && s[i]; i++) info.cmdline[i] = s[i];
+            info.cmdline[i] = 0;
+        }
+        if (t->type == 5 && t->size >= 12) {     /* the BIOS boot device */
+            info.biosdev = *(const uint32_t*)((const uint8_t*)t + 8);
+            info.has_biosdev = 1;
+        }
         o += (t->size + 7u) & ~7u;
     }
 
@@ -229,6 +240,32 @@ void sysinfo_init_mb2(uint32_t mb2_info_addr) {
         if (adv < 8) adv = 8;
         off += adv;
     }
+}
+
+/* (called once at boot, for the log) */
+void sysinfo_log_boot(void) {
+    klog("boot: cmdline [%s], bios drive %s0x%x\n", info.cmdline, info.has_biosdev ? "" : "(none) ", info.biosdev);
+}
+
+int sysinfo_live_boot(void) {
+    /* GRUB's $root (grub.cfg): "cdN" for a CD/DVD under UEFI; under BIOS
+     * "hdN" with N = drive - 0x80, so a CD is hd96 (0xE0) while hard disks
+     * and USB sticks are hd0..hd15 */
+    for (const char* p = info.cmdline; *p; p++) {
+        if (!(p[0] == 'r' && p[1] == 'o' && p[2] == 'o' && p[3] == 't' && p[4] == '=')) continue;
+        const char* r = p + 5;
+        if (r[0] == '(') r++;
+        if (r[0] == 'c' && r[1] == 'd') return 1;
+        if (r[0] == 'h' && r[1] == 'd' && r[2] >= '0' && r[2] <= '9') {
+            int n = 0;
+            for (const char* q = r + 2; *q >= '0' && *q <= '9'; q++) n = n * 10 + (*q - '0');
+            return n >= 16;
+        }
+        break;
+    }
+    /* an older grub.cfg: the BIOS drive (hard disks are 0x80..0x8F) */
+    if (info.has_biosdev) return !(info.biosdev >= 0x80 && info.biosdev <= 0x8F);
+    return 0;
 }
 
 const sysinfo_t* sysinfo_get(void) {

@@ -14,10 +14,17 @@ typedef struct {
     uint32_t cpu_has_ht;        /* 1 if Hyper-Threading flag set */
     uint32_t mem_kb;            /* total memory in KiB from multiboot */
     int      uefi;              /* booted through UEFI firmware (else BIOS) */
+    char     cmdline[128];      /* from GRUB ("root=cd0") */
+    uint32_t biosdev;           /* BIOS boot drive (0x80.. = hard disk), if has_biosdev */
+    int      has_biosdev;
 } sysinfo_t;
 
 void sysinfo_init(uint32_t mb_info_addr);
 void sysinfo_init_mb2(uint32_t mb2_info_addr);
 const sysinfo_t* sysinfo_get(void);
+
+/* 1 when started from a CD/DVD (the live system), not from an installed disk */
+int sysinfo_live_boot(void);
+void sysinfo_log_boot(void);
 
 #endif

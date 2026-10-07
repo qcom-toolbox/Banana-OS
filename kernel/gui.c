@@ -857,7 +857,8 @@ static int tray_x(const fb_info_t* fi) {
     netif_t* nif = net_if();
     if (!nif->dev) kstrlcpy(net, "no network", sizeof(net));
     else ksnprintf(net, sizeof(net), "%s 255.255.255.255", nif->dev->ifname);
-    return (int)fi->width - 8 - 64 - 16 - (int)strlen(net) * 8;
+    int badge = sysinfo_live_boot() ? 8 * 8 + 18 : 0;     /* "LIVE CD" */
+    return (int)fi->width - 8 - 64 - 16 - (int)strlen(net) * 8 - badge;
 }
 
 static int tb_btn_w(const fb_info_t* fi) {
@@ -927,7 +928,14 @@ static void draw_taskbar_fb(const fb_info_t* fi) {
     gfx_fill_rect(clk_x - 10, bar_y + 6, 1, BAR_H - 12, 0x004F5A6Eu);
     gfx_draw_text(clk_x, bar_y + 10, clk, 0x00E8EEF6u, 0x00192026u);
     uint32_t col = net_if()->configured ? 0x008FE3A1u : 0x00C9A45Cu;
-    gfx_draw_text(clk_x - 18 - (int)strlen(net) * 8, bar_y + 10, net, col, 0x00192026u);
+    int net_x = clk_x - 18 - (int)strlen(net) * 8;
+    gfx_draw_text(net_x, bar_y + 10, net, col, 0x00192026u);
+    /* started from the CD: say so (nothing is kept unless installed) */
+    if (sysinfo_live_boot()) {
+        int bx = net_x - 14 - 7 * 8 - 8;
+        gfx_fill_rect(bx, bar_y + 5, 7 * 8 + 8, BAR_H - 10, 0x00D9822Bu);
+        gfx_draw_text(bx + 4, bar_y + 10, "LIVE CD", 0x00FFFFFFu, 0x00D9822Bu);
+    }
 }
 
 /* Everything that affects what the desktop looks like (besides

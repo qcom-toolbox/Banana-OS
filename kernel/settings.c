@@ -470,7 +470,15 @@ static void draw_about(void) {
     char res[32];
     const fb_info_t* fi = fb_info();
     ksnprintf(res, sizeof(res), "Screen: %ux%u", fi ? fi->width : 0, fi ? fi->height : 0);
-    label(x, ly, res, C_TEXT);
+    label(x, ly, res, C_TEXT); ly += 26;
+    if (sysinfo_live_boot())
+        label(x, ly, fsdisk_find_install(NULL)
+              ? "Running: the live CD (Banana OS is also installed here: 'update' updates it)"
+              : "Running: the live CD - changes are lost at shutdown ('install' to keep them)", 0x00FFB060u);
+    else if (fsdisk_is_installed())
+        label(x, ly, "Running: the installed system (changes are saved automatically)", 0x0080E080u);
+    else
+        label(x, ly, "Running: not installed - changes are lost at shutdown", 0x00FFB060u);
 }
 
 /* ── window ───────────────────────────────────────────────────────── */

@@ -781,6 +781,7 @@ static void cmd_help(void) {
         "  disks              list the IDE and SATA drives",
         "  install            install to a dedicated IDE or SATA disk (bootable, persistent)",
         "  sync               re-write filesystem to the installed disk now",
+        "  update             from a newer CD: update the installed system, keeping your files",
         "  time <command>     run a command and print how long it took",
         "",
         "Networking:",
@@ -1197,7 +1198,7 @@ static const char* const known_cmds[] = {
     "ls", "cd", "pwd", "mkdir", "rm", "touch", "cp", "mv", "edit", "cat", "run",
     "uptime", "top", "exit", "start", "stop", "startx", "stopx",
     "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
-    "hw_info", "shutdown", "reboot", "halt", "install", "sync", "disks", "history", "which", "type",
+    "hw_info", "shutdown", "reboot", "halt", "install", "sync", "update", "disks", "history", "which", "type",
     "alias", "unalias", "export", "unset", "env", "chsh",
     "grep", "wc", "head", "tail", "find", "time",
     /* shell/netcmds.c + shell/wpcmd.c */
@@ -1602,6 +1603,11 @@ static void cmd_install(void) {
         return;
     }
 
+    if (fsdisk_find_install(NULL))
+        terminal_write_color(
+            "This disk already has Banana OS on it, with your files. To get the new version\n"
+            "and KEEP them, answer N and run 'update' instead.\n",
+            VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     terminal_write_color("This will ERASE ", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     terminal_write(target.model[0] ? target.model : "the disk above");
     terminal_write_color(
@@ -1648,6 +1654,56 @@ static void cmd_install(void) {
         default:
             terminal_write_color("install: failed (disk I/O error).\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
             break;
+    }
+}
+
+/* `update`: from a (newer) Banana OS CD, rewrites the installed disk's
+ * system and leaves its files and settings alone */
+static void cmd_update(void) {
+    ata_disk_t d;
+    if (!fsdisk_find_install(&d)) {
+        terminal_write_color("update: no disk with Banana OS installed was found (use 'install').\n",
+                             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+    print_disk_line(&d);
+    terminal_writeln("update: comparing the installed system with this CD...");
+    terminal_flush();
+    int same = fsdisk_compare_boot();
+    if (same == FSDISK_ERR_NO_SOURCE) {
+        terminal_write_color("update: no Banana OS CD found - boot from (or insert) the CD with the new version.\n",
+                             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+    if (same < 0) {
+        terminal_write_color("update: could not read the disk or the CD.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
+    if (same == 1) {
+        terminal_write_color("update: the installed system is already the same as this CD - nothing to do.\n",
+                             VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        return;
+    }
+    terminal_write_color(
+        "Replace the Banana OS system on this disk with the one on the CD?\n"
+        "Your files, settings and password are kept. [y/N] ",
+        VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    if (!prompt_yes_no()) {
+        terminal_writeln("update: cancelled.");
+        return;
+    }
+    terminal_writeln("update: writing the new system, please wait (do not switch off)...");
+    terminal_flush();
+    int rc = fsdisk_update();
+    if (rc == FSDISK_OK) {
+        terminal_write_color(
+            "update: done. Remove the CD (or boot from the disk) and restart to use the new version.\n",
+            VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    } else if (rc == FSDISK_ERR_ISO_TOO_BIG) {
+        terminal_write_color("update: this CD's system is too big for the disk's boot area.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+    } else {
+        terminal_write_color("update: failed (disk I/O error). Your files are untouched; run 'update' again.\n",
+                             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     }
 }
 
@@ -2169,6 +2225,7 @@ static void dispatch_cmd(const char* raw_line, int persona) {
     if (k_strcmp(line, "disks")    == 0) { cmd_disks();       return; }
     if (k_strcmp(line, "install")  == 0) { cmd_install();     return; }
     if (k_strcmp(line, "sync")     == 0) { cmd_sync();        return; }
+    if (k_strcmp(line, "update")   == 0) { cmd_update();      return; }
     if (k_strncmp(line, "time ", 5) == 0) {
         /* bash-style `time`: wall-clock duration of one command */
         uint32_t t0 = timer_ms();
@@ -2334,7 +2391,10 @@ void shell_run(void) {
     /* If a dedicated ATA disk was previously `install`ed, load its saved
      * filesystem instead of reseeding the defaults - this is what makes
      * files persist across reboots. See kernel/fsdisk.c. */
-    int loaded = fsdisk_try_load();
+    /* Started from the CD: the live system, fresh - an installed disk is
+     * left alone (no login, no autosave onto it); `update` can update it. */
+    int live = sysinfo_live_boot();
+    int loaded = live ? 0 : fsdisk_try_load();
     if (loaded <= 0) {
         fs_init();
         examples_seed();          /* the SDK example apps in ~/Examples */
@@ -2345,6 +2405,17 @@ void shell_run(void) {
             "filesystem; the disk is not written to unless you run 'install' again.\n\n",
             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     fsdisk_start_autosave();      /* changes reach the installed disk by themselves */
+    if (live)
+        terminal_write_color("Running the LIVE CD.\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    else if (fsdisk_is_installed())
+        terminal_write_color("Running the installed system (from the disk).\n\n", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    if (live && !fsdisk_find_install(NULL))
+        terminal_writeln("Changes are lost at shutdown - type 'install' to put Banana OS on a disk.\n");
+    if (live && fsdisk_find_install(NULL))
+        terminal_write_color(
+            "Live CD - Banana OS is also installed on a disk here (its files are not used now).\n"
+            "Type 'update' to update that installation with this CD (files kept), or boot from the disk.\n\n",
+            VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
 
     /* saved network settings, services enabled at boot (shell/srvcmds.c) */
     services_boot();
