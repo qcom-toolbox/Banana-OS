@@ -1626,7 +1626,7 @@ static void cmd_install(void) {
     terminal_write_color("This will ERASE ", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     terminal_write(target.model[0] ? target.model : "the disk above");
     terminal_write_color(
-        " and make it directly bootable (copying the boot CD onto it, then\n"
+        " and make it directly bootable (copying the boot CD or USB stick onto it, then\n"
         "writing the current filesystem). This can take a little while. Continue? [y/N] ",
         VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     if (!prompt_yes_no()) {
@@ -1639,7 +1639,7 @@ static void cmd_install(void) {
     switch (rc) {
         case FSDISK_OK:
             terminal_write_color(
-                "install: done. This disk now boots Banana OS on its own - no CD needed\n"
+                "install: done. This disk now boots Banana OS on its own - no CD or stick needed\n"
                 "(e.g. `qemu-system-i386 -drive file=disk.img,format=raw,if=ide`).\n"
                 "Files and settings are saved to it automatically, a few seconds after\n"
                 "each change ('sync' saves right away).\n",
@@ -1647,8 +1647,8 @@ static void cmd_install(void) {
             break;
         case FSDISK_ERR_NO_SOURCE:
             terminal_write_color(
-                "install: could not read the boot CD. Make sure Banana OS was booted\n"
-                "from the ISO (not already from a previously installed disk).\n",
+                "install: no Banana OS CD or USB stick to copy the system from. Boot from the\n"
+                "ISO (a CD, or a USB stick it was written to) and leave it plugged in.\n",
                 VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
             break;
         case FSDISK_ERR_TOO_SMALL:
@@ -1682,16 +1682,16 @@ static void cmd_update(void) {
         return;
     }
     print_disk_line(&d);
-    terminal_writeln("update: comparing the installed system with this CD...");
+    terminal_writeln("update: comparing the installed system with this CD / USB stick...");
     terminal_flush();
     int same = fsdisk_compare_boot();
     if (same == FSDISK_ERR_NO_SOURCE) {
-        terminal_write_color("update: no Banana OS CD found - boot from (or insert) the CD with the new version.\n",
+        terminal_write_color("update: no Banana OS CD or USB stick found - plug in the one with the new version.\n",
                              VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }
     if (same < 0) {
-        terminal_write_color("update: could not read the disk or the CD.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_write_color("update: could not read the disk or the CD / USB stick.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }
     if (fsdisk_install_layout() == 3)

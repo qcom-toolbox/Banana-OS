@@ -161,7 +161,7 @@ static const char* result_text(int rc) {
     case FSDISK_OK:              return 0;
     case FSDISK_ERR_NO_TARGET:   return "No hard disk was found.";
     case FSDISK_ERR_AMBIGUOUS:   return "More than one hard disk: detach the others and try again.";
-    case FSDISK_ERR_NO_SOURCE:   return "The Banana OS CD could not be read.";
+    case FSDISK_ERR_NO_SOURCE:   return "No Banana OS CD or USB stick found to copy the system from.";
     case FSDISK_ERR_TOO_SMALL:   return "The disk is too small (256 MB or more is best).";
     case FSDISK_ERR_ISO_TOO_BIG: return "This CD's system does not fit the disk's boot area.";
     case FSDISK_ERR_FULL:        return "The files are too big for this disk.";

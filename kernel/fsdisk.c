@@ -9,6 +9,7 @@
 #include "serial.h"
 #include "timer.h"
 #include "task.h"
+#include "blockdev.h"
 
 #define FSDISK_MAGIC   0x414E4142u /* "BANA" */
 #define FSDISK_VERSION 3u   /* = FS_SNAPSHOT_V3; version 1 and 2 disks (Banana OS 0.4, 0.5) still load */
@@ -70,13 +71,67 @@ int fsdisk_find_target(ata_disk_t* out) {
     return -1;
 }
 
-/* the CD/DVD drive holding the Banana OS boot image */
-static int find_atapi_source(ata_disk_t* out) {
+/* ── where the boot image comes from: the CD, or the USB stick ────────
+ * Banana_OS.iso is a "hybrid" image: written as it is onto a USB stick
+ * (dd, Rufus in DD mode, Etcher) it boots like the CD - and the stick then
+ * holds the very same bytes from its first sector on. So install and update
+ * read the image from a CD/DVD drive, or failing that from a USB stick
+ * that holds one (512-byte sectors: one 2048-byte CD block is 4 of them). */
+typedef struct {
+    ata_disk_t  cd;
+    blockdev_t* usb;                 /* NULL: the CD drive */
+} img_src_t;
+
+static int src_read(const img_src_t* s, uint32_t blk, uint32_t n, void* buf) {
+    if (s->usb) return s->usb->present ? s->usb->read(s->usb, blk * 4u, n * 4u, buf) : -1;
+    return disk_cd_read(&s->cd, blk, n, buf);
+}
+
+/* the ISO9660 image's size, from its primary volume descriptor (block 16) */
+static int src_iso_size(const img_src_t* s, uint32_t* out_bytes) {
+    if (!s->usb) return disk_cd_iso_size(&s->cd, out_bytes);
+    uint8_t* pvd = (uint8_t*)kmalloc(2048);
+    if (!pvd) return -1;
+    int ok = src_read(s, 16, 1, pvd) == 0 && pvd[0] == 1 && memcmp(pvd + 1, "CD001", 5) == 0;
+    uint32_t blocks = ok ? ((uint32_t)pvd[80] | (uint32_t)pvd[81] << 8 | (uint32_t)pvd[82] << 16 | (uint32_t)pvd[83] << 24) : 0;
+    kfree(pvd);
+    if (!ok || !blocks || (uint64_t)blocks * 4u > s->usb->sectors) return -1;
+    *out_bytes = blocks * 2048u;
+    return 0;
+}
+
+/* a Banana OS image: GRUB's search for its build marker in the first 4 MB (its EFI program) */
+static int src_is_banana(const img_src_t* s, uint32_t iso_bytes) {
+    uint32_t blocks = iso_bytes / 2048u < 2048u ? iso_bytes / 2048u : 2048u;
+    uint8_t* b = (uint8_t*)kmalloc(blocks * 2048u);
+    if (!b) return 0;
+    int found = 0;
+    static const char KEY[] = "--file /.disk/";
+    if (src_read(s, 0, blocks, b) == 0)
+        for (uint32_t k = 0; k + sizeof(KEY) < blocks * 2048u && !found; k++)
+            if (b[k] == '-' && memcmp(b + k, KEY, sizeof(KEY) - 1) == 0) found = 1;
+    kfree(b);
+    return found;
+}
+
+/* the CD/DVD drive holding the Banana OS boot image - or else a USB stick holding it */
+static int find_source(img_src_t* out) {
     ata_disk_t all[DISK_MAX];
     int n = disk_probe(all, DISK_MAX);
     uint32_t bytes;
+    memset(out, 0, sizeof(*out));
     for (int i = 0; i < n; i++)
-        if (all[i].is_atapi && disk_cd_iso_size(&all[i], &bytes) == 0) { *out = all[i]; return 1; }
+        if (all[i].is_atapi && disk_cd_iso_size(&all[i], &bytes) == 0) { out->cd = all[i]; return 1; }
+    for (int i = 0; i < BLOCKDEV_MAX; i++) {
+        blockdev_t* bd = blockdev_get(i);
+        if (!bd || !bd->present || bd->sector_size != 512 || strcmp(bd->kind, "usb") != 0) continue;
+        out->usb = bd;
+        if (src_iso_size(out, &bytes) == 0 && src_is_banana(out, bytes)) {
+            klog("fsdisk: the Banana OS image on the USB stick %s (%s)\n", bd->name, bd->model);
+            return 1;
+        }
+    }
+    out->usb = NULL;
     return 0;
 }
 
@@ -96,12 +151,12 @@ static char     g_mark_old[64], g_mark_new[64];    /* "<build>.uuid" / "<build>.
 static uint32_t g_mark_len;
 
 /* finds the build marker in the CD's EFI program (in its first 4 MB) */
-static void find_marker(const ata_disk_t* src, uint32_t total_blocks) {
+static void find_marker(const img_src_t* src, uint32_t total_blocks) {
     g_mark_len = 0;
     uint32_t blocks = total_blocks < 2048u ? total_blocks : 2048u;
     uint8_t* b = (uint8_t*)kmalloc(blocks * 2048u);
     if (!b) return;
-    if (disk_cd_read(src, 0, blocks, b) == 0) {
+    if (src_read(src, 0, blocks, b) == 0) {
         static const char KEY[] = "--file /.disk/";
         uint32_t kl = sizeof(KEY) - 1, n = blocks * 2048u;
         for (uint32_t k = 0; k + kl + 8 < n; k++) {
@@ -161,7 +216,7 @@ static volatile uint32_t g_prog_done, g_prog_total;
 
 void fsdisk_progress(uint32_t* done, uint32_t* total) { *done = g_prog_done; *total = g_prog_total; }
 
-static int stream_image(const ata_disk_t* src, uint32_t iso_bytes, image_sink_t sink, void* ctx) {
+static int stream_image(const img_src_t* src, uint32_t iso_bytes, image_sink_t sink, void* ctx) {
     uint32_t total = iso_bytes / 2048u;
     g_prog_done = 0;
     g_prog_total = total + 1;
@@ -173,7 +228,7 @@ static int stream_image(const ata_disk_t* src, uint32_t iso_bytes, image_sink_t 
     while (done < total && rc == 0) {
         uint32_t chunk = total - done;
         if (chunk > FSDISK_COPY_CHUNK_BLOCKS) chunk = FSDISK_COPY_CHUNK_BLOCKS;
-        if (disk_cd_read(src, done, chunk, buf + CARRY) != 0) { rc = -1; break; }
+        if (src_read(src, done, chunk, buf + CARRY) != 0) { rc = -1; break; }
         uint8_t* start = have_carry ? buf : buf + CARRY;
         uint32_t len = chunk * 2048u + (have_carry ? CARRY : 0);
         uint32_t first = have_carry ? carry_blk : done;
@@ -201,7 +256,7 @@ static int sink_write(uint32_t blk, uint32_t nblk, const uint8_t* data, void* ct
 
 /* Copies the CD's boot image (block-exact, per the ISO9660 PVD) onto the
  * disk from LBA 0 - 2048-byte CD blocks become 4 disk sectors each. */
-static int copy_boot_image(const ata_disk_t* src, const ata_disk_t* dst, uint32_t iso_bytes) {
+static int copy_boot_image(const img_src_t* src, const ata_disk_t* dst, uint32_t iso_bytes) {
     return stream_image(src, iso_bytes, sink_write, (void*)dst);
 }
 
@@ -832,11 +887,11 @@ int fsdisk_install(void) {
     if (tr == 0) return FSDISK_ERR_NO_TARGET;
     if (tr < 0)  return FSDISK_ERR_AMBIGUOUS;
 
-    ata_disk_t source;
-    if (!find_atapi_source(&source)) return FSDISK_ERR_NO_SOURCE;
+    img_src_t source;
+    if (!find_source(&source)) return FSDISK_ERR_NO_SOURCE;
 
     uint32_t iso_bytes;
-    if (disk_cd_iso_size(&source, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
+    if (src_iso_size(&source, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
     if (iso_bytes > V4_BASE_LBA * FSDISK_SECTOR) return FSDISK_ERR_ISO_TOO_BIG;
 
     layout_t l;
@@ -1019,10 +1074,11 @@ static int sink_compare(uint32_t blk, uint32_t nblk, const uint8_t* data, void* 
 }
 
 int fsdisk_compare_boot(void) {
-    ata_disk_t dst, src;
+    ata_disk_t dst;
+    img_src_t src;
     uint32_t iso_bytes;
     if (!fsdisk_find_install(&dst)) return FSDISK_ERR_NO_INSTALL;
-    if (!find_atapi_source(&src) || disk_cd_iso_size(&src, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
+    if (!find_source(&src) || src_iso_size(&src, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
     int lay = fsdisk_install_layout();
     if (lay != (int)LAYOUT_V4 && lay != 5) return 0;            /* an old layout: always worth updating */
     cmp_ctx_t c = { &dst, (uint8_t*)kmalloc(FSDISK_COPY_BUF_BYTES + CARRY), 1 };
@@ -1070,10 +1126,11 @@ static int migrate_to_v4(const ata_disk_t* d) {
 }
 
 int fsdisk_update(void) {
-    ata_disk_t dst, src;
+    ata_disk_t dst;
+    img_src_t src;
     uint32_t iso_bytes;
     if (!fsdisk_find_install(&dst)) return FSDISK_ERR_NO_INSTALL;
-    if (!find_atapi_source(&src) || disk_cd_iso_size(&src, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
+    if (!find_source(&src) || src_iso_size(&src, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
     if (iso_bytes > V4_BASE_LBA * FSDISK_SECTOR) return FSDISK_ERR_ISO_TOO_BIG;
     int rc = migrate_to_v4(&dst);
     if (rc != FSDISK_OK) return rc;
