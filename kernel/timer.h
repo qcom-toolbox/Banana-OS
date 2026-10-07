@@ -5,7 +5,9 @@
 
 void     timer_init(void);          /* PIT channel 0 at 1 kHz, driven by IRQ0 */
 uint32_t timer_ticks(void);         /* 100 Hz ticks since init (10 ms each) */
-uint32_t timer_ms(void);            /* milliseconds since init */
+uint32_t timer_ms(void);            /* milliseconds since init (from the TSC when it is usable) */
+uint64_t timer_tsc_per_ms(void);    /* the TSC's rate, measured at init (0: not usable) */
+uint32_t timer_irq_count(void);     /* timer interrupts so far: do they arrive? */
 void     timer_poll(void);          /* kept for callers; a no-op under IRQs */
 void     timer_sleep_ms(uint32_t ms);
 

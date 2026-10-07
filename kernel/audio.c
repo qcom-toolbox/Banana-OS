@@ -27,9 +27,15 @@
 
 #define RATE        48000
 #define FRAME       4u                      /* bytes: 2 channels x 16 bits */
-#define RING        65536u                  /* the card's DMA ring */
+/* The ring is much bigger than what is written ahead of the card: the
+ * card's position is read as an offset in the ring, so a refill late by
+ * more than a whole ring would miscount how far it got - and write over
+ * sound not heard yet (it skips: "speeds up"). With 1.36 s of ring that
+ * takes a 1 s stall. AHEAD alone sets the latency (~300 ms). */
+#define RING        262144u                 /* the card's DMA ring (~1.36 s) */
 #define QUEUE       (RATE * FRAME * 4u)     /* 4 s queued at most */
-#define AHEAD       (RING - 8192u)          /* how far ahead of the card we write */
+#define AHEAD       57344u                  /* how far ahead of the card we write (~300 ms) */
+#define CLEAR_AHEAD 32768u                  /* played sound turned to silence past our writes */
 
 typedef struct {
     const char* name;
@@ -46,6 +52,7 @@ static volatile uint32_t g_qhead, g_qtail, g_qcount;
 static uint32_t      g_wp;                  /* next ring byte we write */
 static uint32_t      g_last_hw;
 static uint64_t      g_hw_abs, g_wr_abs, g_data_end;   /* absolute byte counts */
+static uint64_t      g_zero_abs;            /* the ring is silence up to here (past g_wr_abs) */
 static int           g_volume = 80;
 static volatile int  g_running;             /* the card plays: audio_tick() feeds it */
 
@@ -94,6 +101,17 @@ static void feed(void) {
         if (take < chunk) memset(g_ring + g_wp + take, 0, chunk - take);
         g_wp = (g_wp + chunk) % RING;
         g_wr_abs += chunk;
+    }
+    /* Past what we wrote is sound the card played a lap ago: it becomes
+     * silence, so a refill that comes too late gives a short gap - not old
+     * sound played again. (AHEAD + CLEAR_AHEAD < RING: only played sound.) */
+    if (g_zero_abs < g_wr_abs) g_zero_abs = g_wr_abs;
+    while (g_zero_abs < g_wr_abs + CLEAR_AHEAD) {
+        uint32_t zp = (g_wp + (uint32_t)(g_zero_abs - g_wr_abs)) % RING;
+        uint32_t n = RING - zp;
+        if (n > 4096) n = 4096;
+        memset(g_ring + zp, 0, n);
+        g_zero_abs += n;
     }
 }
 

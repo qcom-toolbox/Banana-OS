@@ -316,6 +316,7 @@ static void idle_entry(void) {
 
 /* the TSC's rate, against the 1 kHz timer: run times in cycles */
 static void calibrate_tsc(void) {
+    if (timer_tsc_per_ms()) { g_tsc_per_ms = timer_tsc_per_ms(); return; }   /* measured by timer_init */
     uint32_t t0 = timer_ms();
     while (timer_ms() == t0) timer_idle();
     uint64_t c0 = rdtsc();

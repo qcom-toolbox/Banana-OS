@@ -223,9 +223,9 @@ static int lapic_on(uint32_t madt_addr) {
     lapic_wr(LAPIC_SVR, 0x100u | SMP_VEC_SPURIOUS);
     __asm__ volatile("sti");
     /* does the timer still tick? (bounded: no hlt, it may not) */
-    uint32_t t0 = timer_ms();
-    for (uint32_t i = 0; i < 400000000u && timer_ms() - t0 < 3; i++) __asm__ volatile("pause");
-    int ok = timer_ms() - t0 >= 3;
+    uint32_t t0 = timer_irq_count();         /* (the interrupts themselves, not the clock) */
+    for (uint32_t i = 0; i < 400000000u && timer_irq_count() - t0 < 3; i++) __asm__ volatile("pause");
+    int ok = timer_irq_count() - t0 >= 3;
     if (!ok) {
         __asm__ volatile("cli");
         wrmsr(0x1B, lo & ~((1u << 11) | (1u << 10)), hi);
@@ -237,6 +237,8 @@ static int lapic_on(uint32_t madt_addr) {
 }
 
 void smp_init(void) {
+    /* "nosmp" on the kernel command line (GRUB): one core, the local APIC left off */
+    if (strstr(sysinfo_get()->cmdline, "nosmp")) { klog("smp: nosmp - using one core\n"); return; }
     uint32_t a = 1, b, c, d;
     __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
     /* (CPUID's APIC bit is clear now: kernel/idt.c switched the APIC off.
