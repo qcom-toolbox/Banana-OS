@@ -77,7 +77,16 @@ static void render_preset(const uint8_t* pixels, uint32_t* dst, int w, int h, in
     kfree(tmp);
 }
 
+static int set_file_at(const char* path, image_mode_t mode, int w, int h, char* err, uint32_t errlen, int persist);
+
 void wallpaper_render(uint32_t* dst, int w, int h, int stride) {
+    if (g_custom && (g_custom_w != w || g_custom_h != h)) {
+        /* another size (a new resolution): the picture again, at this one */
+        char path[FS_PATH_LEN], err[96];
+        kstrlcpy(path, g_file, sizeof(path));
+        if (set_file_at(path, g_mode, w, h, err, sizeof(err), 0) != 0)
+            klog("wallpaper: %s at %dx%d: %s\n", path, w, h, err);
+    }
     if (g_custom && g_custom_w == w && g_custom_h == h) {
         for (int y = 0; y < h; y++)
             memcpy(dst + y * stride, g_custom + y * w, (uint32_t)w * 4u);
@@ -111,19 +120,11 @@ void wallpaper_set_preset(int i) {
     save_config();
 }
 
-static int set_file(const char* path, image_mode_t mode, char* err, uint32_t errlen, int persist) {
+/* the picture in a file, rendered at w x h for the given mode */
+static int set_file_at(const char* path, image_mode_t mode, int w, int h, char* err, uint32_t errlen, int persist) {
     int idx = fs_find_file(path);
     if (idx < 0) { ksnprintf(err, errlen, "no such file: %s", path); return -1; }
     fs_file_t* f = fs_get_file(idx);
-
-    const fb_info_t* fi = fb_info();
-    int w = (int)fi->width, h = (int)fi->height;
-    if (!fb_available() || w <= 0 || h <= 0) {
-        ksnprintf(err, errlen, "no graphical framebuffer (wallpapers need the GUI)");
-        return -1;
-    }
-    if (w > 800) w = 800;     /* the desktop's backbuffers are 800x600 */
-    if (h > 600) h = 600;
 
     image_t img;
     if (image_decode((const uint8_t*)f->content, f->size, &img, err, errlen) != 0) return -1;
@@ -146,6 +147,19 @@ static int set_file(const char* path, image_mode_t mode, char* err, uint32_t err
     g_gen++;
     if (persist) save_config();
     return 0;
+}
+
+/* at the screen's size (the desktop's buffers follow it, up to 2560x1600) */
+static int set_file(const char* path, image_mode_t mode, char* err, uint32_t errlen, int persist) {
+    const fb_info_t* fi = fb_info();
+    if (!fb_available() || !fi || fi->width == 0 || fi->height == 0) {
+        ksnprintf(err, errlen, "no graphical framebuffer (wallpapers need the GUI)");
+        return -1;
+    }
+    int w = (int)fi->width, h = (int)fi->height;
+    if (w > 2560) w = 2560;
+    if (h > 1600) h = 1600;
+    return set_file_at(path, mode, w, h, err, errlen, persist);
 }
 
 int wallpaper_set_file(const char* path, image_mode_t mode, char* err, uint32_t errlen) {

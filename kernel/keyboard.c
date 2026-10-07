@@ -666,11 +666,16 @@ static char serial_key(void) {
     return (char)b;
 }
 
+/* while the screen is locked, only the lock screen's task gets keys */
+static int g_key_owner = -1;
+void keyboard_set_owner(int pid) { g_key_owner = pid; }
+
 char keyboard_try_getchar(void) {
     /* daemons have no keyboard; an SSH session's shell reads its client */
     if (task_is_background()) return 0;
     int tt = tty_current();
     if (tt >= 0) return tty_getkey(tt);
+    if (g_key_owner >= 0 && task_current_pid() != g_key_owner) return 0;
 
     usb_poll();           /* USB keyboards report through here */
     if (!q_empty()) return q_pop();

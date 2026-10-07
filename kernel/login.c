@@ -211,6 +211,7 @@ static void login_graphical(int locked, int* mouse_x, int* mouse_y) {
     login_view_t v;
     memset(&v, 0, sizeof(v));
     v.locked = locked;
+    keyboard_set_owner(task_current_pid());  /* no other task takes a key meanwhile */
     v.mx = mouse_x ? *mouse_x : g_w / 2;
     v.my = mouse_y ? *mouse_y : g_h / 2 + 120;
     int prev_left = 1;                       /* (the click that chose "Lock screen") */
@@ -264,6 +265,7 @@ static void login_graphical(int locked, int* mouse_x, int* mouse_y) {
     if (mouse_x) *mouse_x = v.mx;
     if (mouse_y) *mouse_y = v.my;
     memset(&v, 0, sizeof(v));
+    keyboard_set_owner(-1);
 
     fb_clear_backbuffer();
     kfree(back);

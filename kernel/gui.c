@@ -65,6 +65,7 @@ static int menu_idx(int slot) { return (!installer_available() && slot >= MENU_S
 
 static int g_menu_open = 0;
 static int g_lock_pending = 0;   /* "Lock screen" was chosen */
+static int g_in_lock = 0;        /* the lock screen is up (in some task's gui_poll) */
 static int g_cur_mx = 100, g_cur_my = 100;   /* the pointer, for the lock screen */
 static int g_mouse_from_lock = 0;           /* it moved there: take it back */
 static int g_menu_sel = 0;     /* an ACT_* */
@@ -1212,16 +1213,15 @@ int gui_appwin_focused(void) {
 void gui_poll(void) {
     /* the lock screen: while it is up, every other caller (the terminal
      * windows' shells poll too) leaves the screen and the keyboard to it */
-    static int in_lock = 0;
-    if (in_lock) return;
+    if (g_in_lock) return;
     /* (background tasks - the servers, app windows - call this too, but read no keys) */
     if (g_lock_pending && g_gui_enabled && !task_is_background()) {
         g_lock_pending = 0;
-        in_lock = 1;
+        g_in_lock = 1;
         g_menu_open = 0;
         login_lock(&g_cur_mx, &g_cur_my);
         g_mouse_from_lock = 1;
-        in_lock = 0;
+        g_in_lock = 0;
         keyboard_ctrl_alt_del_pending();   /* (a press while locked does nothing) */
         gui_screen_changed();              /* the desktop repaints everything */
     }
@@ -1229,6 +1229,9 @@ void gui_poll(void) {
     terminal_flush();
     timer_poll();
     task_yield();
+    /* another task may have locked the screen while this one waited here:
+     * no frame, no mouse, no keys from this caller now */
+    if (g_in_lock) return;
 
     /* Consume the Ctrl+Alt+Delete flag every cycle regardless of GUI
      * state, so a press while the GUI is off can't linger and fire the

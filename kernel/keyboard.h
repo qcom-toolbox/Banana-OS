@@ -19,5 +19,7 @@ int keyboard_ctrl_alt_del_pending(void);
 void keyboard_feed_scancode(uint8_t sc);
 /* queues text as typed input for whoever reads the keyboard next */
 void keyboard_inject(const char* s);
+/* only task `pid` reads the keyboard from now on (-1: everyone again) - the lock screen */
+void keyboard_set_owner(int pid);
 
 #endif
