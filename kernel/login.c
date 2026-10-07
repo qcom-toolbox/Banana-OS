@@ -34,6 +34,10 @@ int login_required(void) {
 
 /* ── drawing ── */
 
+static int g_locked;           /* the desktop is locked: nothing else reads the keyboard */
+
+int login_is_locked(void) { return g_locked; }
+
 static uint32_t* g_target;
 static int g_w, g_h, g_stride;
 
@@ -70,6 +74,7 @@ static void filled_circle(int cx, int cy, int r, uint32_t color) {
 }
 
 typedef struct {
+    int  locked;                /* unlocking the desktop (not the boot login) */
     char pw[64];
     const char* message;        /* under the field: an error, "Checking..." */
     uint32_t message_color;
@@ -124,7 +129,8 @@ static void draw(const uint32_t* bg, const login_view_t* v) {
 
     if (v->message) text_center(FONT_SANS, 14, cx, fy + fh + 24, v->message, v->message_color);
     else if (keyboard_caps_lock()) text_center(FONT_SANS, 14, cx, fy + fh + 24, "Caps Lock is on", 0x00FFD070u);
-    else text_center(FONT_SANS, 13, cx, fy + fh + 24, "Type your password and press Enter", 0x00C8D2E0u);
+    else text_center(FONT_SANS, 13, cx, fy + fh + 24,
+                     v->locked ? "Locked - type your password to unlock" : "Type your password and press Enter", 0x00C8D2E0u);
 
     text_center(FONT_SANS, 13, cx, g_h - 24, "Banana OS", 0x00C8D2E0u);
     fb_present();
@@ -147,7 +153,7 @@ static int take_keys(login_view_t* v, int* skip, int* changed) {
     }
 }
 
-static void login_graphical(void) {
+static void login_graphical(int locked) {
     const fb_info_t* fi = fb_info();
     int w = (int)fi->width, h = (int)fi->height;
     uint32_t* bg = (uint32_t*)kmalloc((uint32_t)w * (uint32_t)h * 4u);
@@ -166,6 +172,8 @@ static void login_graphical(void) {
 
     login_view_t v;
     memset(&v, 0, sizeof(v));
+    v.locked = locked;
+    while (keyboard_try_getchar()) {}        /* keys typed before it came up */
     int skip = 0, failures = 0, changed = 1;
     uint32_t last_blink = 0, last_min = 0xFFFFFFFFu;
     for (;;) {
@@ -198,7 +206,7 @@ static void login_graphical(void) {
     fb_clear_backbuffer();
     kfree(back);
     kfree(bg);
-    terminal_screen_changed();                   /* the console comes back */
+    if (!locked) terminal_screen_changed();      /* the console comes back (the desktop redraws itself) */
 }
 
 static void login_text(void) {
@@ -232,7 +240,17 @@ void login_screen(void) {
     if (!login_required()) return;
     const fb_info_t* fi = fb_info();
     if (fb_available() && fi && fi->bpp == 32 && fi->width >= 640 && fi->height >= 480 && font_available(FONT_SANS))
-        login_graphical();
+        login_graphical(0);
     else
         login_text();
+}
+
+int login_lock(void) {
+    if (!passwd_is_set(PASSWD_USER) || g_locked) return -1;
+    const fb_info_t* fi = fb_info();
+    if (!fb_available() || !fi || fi->bpp != 32 || !font_available(FONT_SANS)) return -1;
+    g_locked = 1;
+    login_graphical(1);
+    g_locked = 0;
+    return 0;
 }

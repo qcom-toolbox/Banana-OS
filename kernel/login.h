@@ -13,4 +13,8 @@ void login_set_enabled(int on);
 int  login_required(void);          /* switched on and a password is set */
 void login_screen(void);            /* returns once the password was right */
 
+/* locks the desktop until the password is typed (-1: no password set) */
+int  login_lock(void);
+int  login_is_locked(void);
+
 #endif

@@ -17,6 +17,8 @@
 #include "browser.h"
 #include "notepad.h"
 #include "clipboard.h"
+#include "passwd.h"
+#include "login.h"
 #include "utf8.h"
 #include "kheap.h"
 #include "appwin.h"
@@ -35,7 +37,7 @@
 
 /* the Start menu and the desktop shortcuts: the same entries */
 /* (About and Wallpaper live in Settings now: past MENU_ITEMS, reached from the desktop's menu) */
-enum { ACT_TERMINAL = 0, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_SETTINGS, ACT_QUIT, ACT_ABOUT, ACT_WALLPAPER };
+enum { ACT_TERMINAL = 0, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_SETTINGS, ACT_QUIT, ACT_ABOUT, ACT_WALLPAPER, ACT_LOCK };
 #define MENU_ITEMS 8
 static const char* const MENU_LABELS[MENU_ITEMS] = {
     "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Exit to shell",
@@ -52,6 +54,7 @@ static const char* const ICON_LABELS[MENU_ITEMS] = {
 #define ICON_STEP (ICON_H + 10)
 
 static int g_menu_open = 0;
+static int g_lock_pending = 0;   /* "Lock screen" was chosen */
 static int g_menu_sel = 0;     /* an ACT_* */
 /* The app windows (Files, Browser, Notepad, Apps, Task Manager and the
  * windows of installed apps) and the terminal windows share one stacking
@@ -1041,6 +1044,7 @@ static void open_desktop_menu(int mx, int my) {
         { "Change wallpaper...", ACT_WALLPAPER, 0 },
         { "About Banana OS", ACT_ABOUT, 0 },
         { CTX_SEP, 0, 0 },
+        { "Lock screen", ACT_LOCK, 0 },
         { "Exit to shell", ACT_QUIT, 0 },
     };
     ctxmenu_open(mx, my, items, (int)(sizeof(items) / sizeof(items[0])), desktop_menu_cb, NULL);
@@ -1056,7 +1060,7 @@ static void open_icon_menu(int slot, int mx, int my) {
 }
 
 /* taskbar: Task Manager & co, or one window's button */
-enum { TBM_TASKMGR = 1, TBM_SHOW_DESKTOP, TBM_RESTORE_ALL, TBM_RESTORE, TBM_MINIMIZE, TBM_CLOSE, TBM_QUIT, TBM_TERMINAL };
+enum { TBM_TASKMGR = 1, TBM_SHOW_DESKTOP, TBM_RESTORE_ALL, TBM_RESTORE, TBM_MINIMIZE, TBM_CLOSE, TBM_QUIT, TBM_TERMINAL, TBM_LOCK };
 static int g_tbmenu_win;
 
 static void taskbar_menu_cb(int id, void* arg) {
@@ -1070,6 +1074,7 @@ static void taskbar_menu_cb(int id, void* arg) {
     case TBM_CLOSE: if (win_exists(g_tbmenu_win)) win_close(g_tbmenu_win); break;
     case TBM_TERMINAL: do_action(ACT_TERMINAL); break;
     case TBM_QUIT: do_action(ACT_QUIT); break;
+    case TBM_LOCK: do_action(ACT_LOCK); break;
     }
 }
 
@@ -1096,9 +1101,10 @@ static void open_taskbar_menu(const fb_info_t* fi, int mx, int my) {
         { "Restore all windows", TBM_RESTORE_ALL, g_ntb == 0 },
         { CTX_SEP, 0, 0 },
         { "New terminal", TBM_TERMINAL, 0 },
+        { "Lock screen", TBM_LOCK, 0 },
         { "Exit to shell", TBM_QUIT, 0 },
     };
-    ctxmenu_open(mx, my, items, 7, taskbar_menu_cb, NULL);
+    ctxmenu_open(mx, my, items, (int)(sizeof(items) / sizeof(items[0])), taskbar_menu_cb, NULL);
 }
 
 /* a terminal window */
@@ -1172,6 +1178,19 @@ int gui_appwin_focused(void) {
 }
 
 void gui_poll(void) {
+    /* the lock screen: while it is up, every other caller (the terminal
+     * windows' shells poll too) leaves the screen and the keyboard to it */
+    static int in_lock = 0;
+    if (in_lock) return;
+    if (g_lock_pending && g_gui_enabled) {
+        g_lock_pending = 0;
+        in_lock = 1;
+        g_menu_open = 0;
+        login_lock();
+        in_lock = 0;
+        keyboard_ctrl_alt_del_pending();   /* (a press while locked does nothing) */
+        gui_screen_changed();              /* the desktop repaints everything */
+    }
     /* every idle/wait loop passes through here: paint pending console output */
     terminal_flush();
     timer_poll();
@@ -1525,6 +1544,7 @@ int gui_is_enabled(void) {
 }
 
 int gui_focused_vt(void) {
+    if (login_is_locked()) return -100;    /* the lock screen has the keyboard */
     /* an SSH session's shell always has the focus of its own terminal */
     int tt = tty_current();
     if (tt >= 0) return tty_vt(tt);
@@ -1576,6 +1596,16 @@ static void do_action(int act) {
     case ACT_SETTINGS: settings_open(); g_app_min[APP_SETTINGS] = 0; raise_app(APP_SETTINGS); break;
     case ACT_WALLPAPER: settings_open_page(SETTINGS_PAGE_DISPLAY); g_app_min[APP_SETTINGS] = 0; raise_app(APP_SETTINGS); break;
     case ACT_QUIT: gui_set_enabled(0); break;
+    case ACT_LOCK:
+        if (passwd_is_set(PASSWD_USER)) {
+            g_lock_pending = 1;            /* gui_poll() shows it, outside any menu */
+        } else {
+            settings_open_page(SETTINGS_PAGE_STARTUP);
+            settings_show_status("Set a password first to lock the screen");
+            g_app_min[APP_SETTINGS] = 0;
+            raise_app(APP_SETTINGS);
+        }
+        break;
     }
 }
 

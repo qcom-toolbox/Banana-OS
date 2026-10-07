@@ -615,6 +615,8 @@ void settings_mouse(int mx, int my, int left) {
 
 void settings_rclick(int mx, int my) { (void)mx; (void)my; }
 
+void settings_show_status(const char* msg) { kstrlcpy(g_status, msg, sizeof(g_status)); g_gen++; }
+
 void settings_open_page(int page) {
     settings_open();
     if (page >= 0 && page < PG_COUNT) g_page = page;
