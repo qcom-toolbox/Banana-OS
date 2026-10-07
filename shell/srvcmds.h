@@ -8,5 +8,6 @@ int srvcmd_dispatch(const char* line);
 /* Once the filesystem is loaded at boot: applies /etc/network.conf and
  * starts the services enabled in /etc/rc.conf. */
 void services_boot(void);
+int  services_desktop_at_boot(void);
 
 #endif

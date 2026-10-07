@@ -19,6 +19,7 @@
 #include "../net/sshd.h"
 #include "passwd.h"
 #include "fsdisk.h"
+#include "login.h"
 #include "utf8.h"
 
 #define TITLE_H  20
@@ -253,16 +254,20 @@ static void checkbox(int x, int y, int on) {
     if (on) { gfx_fill_rect(x + 3, y + 3, 8, 8, C_ACCENT); }
 }
 
-static void su_rows(int y, int* ry) { for (int i = 0; i < 3; i++) ry[i] = y + 44 + i * SU_ROW_H; }
-static int  su_pw_y(int y) { return y + 44 + 3 * SU_ROW_H + 14; }
+static void su_rows(int y, int* ry) { for (int i = 0; i < 4; i++) ry[i] = y + 44 + i * SU_ROW_H; }
+static int  su_pw_y(int y) { return y + 44 + 4 * SU_ROW_H + 14; }
 
 static void draw_startup(void) {
     int x = cx0(), y = cy0(), w = cw();
     label(x, y, "Startup", C_HEAD);
     label(x, y + 18, "Started by themselves when Banana OS boots:", C_DIM);
-    int ry[3];
+    int ry[4];
     su_rows(y, ry);
     char line[96];
+
+    checkbox(x, ry[3], login_enabled());
+    label(x + 24, ry[3] + 3, passwd_is_set(PASSWD_USER) ? "Ask for the password at boot (login screen)"
+                                                        : "Ask for the password at boot (set one below first)", C_TEXT);
 
     checkbox(x, ry[0], rc_on("desktop"));
     label(x + 24, ry[0] + 3, "Desktop (start the GUI instead of the text console)", C_TEXT);
@@ -322,7 +327,7 @@ static void su_submit_password(void) {
 
 static void click_startup(int mx, int my) {
     int x = cx0(), y = cy0(), w = cw();
-    int ry[3];
+    int ry[4];
     su_rows(y, ry);
     char err[96];
     err[0] = 0;
@@ -358,6 +363,14 @@ static void click_startup(int mx, int my) {
         kstrlcpy(g_status, !on ? "The SSH server no longer starts at boot"
                  : passwd_is_set(PASSWD_USER) ? "The SSH server starts at boot"
                  : "The SSH server starts at boot (set a password below)", sizeof(g_status));
+        return;
+    }
+    if (inside(mx, my, x, ry[3] - 4, w - 100, 24)) {
+        int on = !login_enabled();
+        login_set_enabled(on);
+        kstrlcpy(g_status, !on ? "No login screen at boot"
+                 : passwd_is_set(PASSWD_USER) ? "The password is asked at boot"
+                 : "The password will be asked at boot once one is set", sizeof(g_status));
         return;
     }
     /* the password fields and button */

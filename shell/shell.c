@@ -27,6 +27,7 @@
 #include "../kernel/tty.h"
 #include "../kernel/examples.h"
 #include "../kernel/settings.h"
+#include "../kernel/login.h"
 
 extern char _kernel_end[];   /* boot/linker.ld */
 
@@ -2352,6 +2353,9 @@ void shell_run(void) {
         if (settings_get("shell", sk, sizeof(sk)))
             g_default_shell_kind = persona = (k_strcmp(sk, "bash") == 0) ? SHELL_KIND_BASH : SHELL_KIND_SH;
     }
+
+    login_screen();               /* the password, when one is set */
+    if (services_desktop_at_boot()) gui_set_enabled(1);
 
     run_init_file(persona);
 

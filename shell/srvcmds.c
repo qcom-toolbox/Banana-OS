@@ -271,7 +271,10 @@ void services_boot(void) {
     port = 22;
     if (boot_enabled("sshd", &port) && sshd_start(port, e, sizeof(e)) != 0)
         say("sshd: could not start at boot: %s\n", e);
-    /* Settings > Startup: the desktop instead of the text console */
+}
+
+/* Settings > Startup: the desktop instead of the text console (after the login) */
+int services_desktop_at_boot(void) {
     char d[8];
-    if (cfg_get(CFG_SERVICES, "desktop", d, sizeof(d)) && strcmp(d, "yes") == 0) gui_set_enabled(1);
+    return cfg_get(CFG_SERVICES, "desktop", d, sizeof(d)) && strcmp(d, "yes") == 0;
 }
