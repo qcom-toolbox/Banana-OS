@@ -191,17 +191,14 @@ void terminal_flush(void) {
     if (!g_any_dirty && !g_pending_scroll && !cursor_moved) return;
 
     size_t rows = terminal_fb_rows();
-    int cell = 8 * (term_fb_scale < 1 ? 1 : term_fb_scale);
 
     if (g_pending_scroll) {
-        if (g_pending_scroll >= rows) {
-            mark_all_dirty();
-        } else {
-            /* all the scrolls since the last flush as one block move; the
-             * underline moved up with the pixels, so repaint where it went */
-            fb_scroll_up(0, (int)rows * cell, (int)g_pending_scroll * cell, 0);
-            if (g_ov_valid && g_ov_row >= g_pending_scroll) mark_dirty(g_ov_row - g_pending_scroll);
-        }
+        /* All the scrolls since the last flush: every row is painted again
+         * from the text grid. (Moving the pixels up instead reads the whole
+         * screen back from video memory - cheap in QEMU, but very slow on
+         * real graphics cards and VirtualBox, and the more pixels the
+         * slower: boot took ages at a resolution above 800x600.) */
+        mark_all_dirty();
         g_pending_scroll = 0;
         g_ov_valid = 0;
     }

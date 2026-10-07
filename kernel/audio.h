@@ -15,6 +15,7 @@
  */
 
 void        audio_init(void);                  /* PCI probe (kernel_main) */
+void        audio_tick(void);                  /* the timer interrupt: keeps the card fed */
 int         audio_available(void);             /* a sound card is driven */
 const char* audio_device_name(void);           /* "Intel HD Audio (QEMU)", "none" */
 

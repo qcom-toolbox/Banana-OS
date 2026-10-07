@@ -12,11 +12,17 @@
 /*
  * Sound: one output stream, 48 kHz, 16-bit, stereo.
  *
- * The card plays a 64 KiB ring (DMA) over and over. The "audiod" task
- * keeps the part the card has already played refilled - from the queue
- * audio_play() fills, or with silence - so no interrupts are needed: it
- * reads the card's play position every few milliseconds. The ring holds
- * ~340 ms, so the task's wake-ups have plenty of slack.
+ * The card plays a 64 KiB ring (DMA) over and over. The part it has
+ * already played is refilled - from the queue audio_play() fills, or with
+ * silence - from the timer interrupt every 2 ms (audio_tick): it reads the
+ * card's play position and copies. No task has to get the CPU for that, so
+ * nothing the rest of the system does (a big save, opening the browser, a
+ * busy desktop) can let the ring run dry; only an empty queue is silence.
+ * (This used to be the "audiod" task: anything holding the CPU for more
+ * than the ring's ~340 ms made the music stutter.)
+ *
+ * The queue: audio_play() (tasks) adds at g_qhead, the interrupt takes at
+ * g_qtail; g_qcount changes with atomic adds on both sides.
  */
 
 #define RATE        48000
@@ -41,7 +47,16 @@ static uint32_t      g_wp;                  /* next ring byte we write */
 static uint32_t      g_last_hw;
 static uint64_t      g_hw_abs, g_wr_abs, g_data_end;   /* absolute byte counts */
 static int           g_volume = 80;
-static int           g_task_pid = -1;
+static volatile int  g_running;             /* the card plays: audio_tick() feeds it */
+
+static inline uintptr_t irq_off(void) {
+    uintptr_t f;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(f) :: "memory");
+    return f;
+}
+static inline void irq_on(uintptr_t f) {
+    if (f & 0x200) __asm__ volatile("sti" ::: "memory");
+}
 
 /* 4 KiB-aligned zeroed memory for DMA (the heap is identity-mapped) */
 static void* dma_alloc(uint32_t size, uint32_t align) {
@@ -74,7 +89,7 @@ static void feed(void) {
             g_ring[g_wp + i] = g_queue[g_qtail];
             g_qtail = (g_qtail + 1) % QUEUE;
         }
-        g_qcount -= take;
+        __sync_fetch_and_sub(&g_qcount, take);
         if (take) g_data_end = g_wr_abs + take;
         if (take < chunk) memset(g_ring + g_wp + take, 0, chunk - take);
         g_wp = (g_wp + chunk) % RING;
@@ -82,12 +97,11 @@ static void feed(void) {
     }
 }
 
-static void audiod(void) {
-    task_set_background();
-    for (;;) {
-        feed();
-        task_sleep_ms(g_qcount || g_hw_abs < g_data_end ? 5 : 20);
-    }
+/* the timer interrupt, every millisecond (kernel/timer.c) */
+void audio_tick(void) {
+    static uint32_t n;
+    if (!g_running || ++n % 2) return;
+    feed();
 }
 
 /* ══ PC speaker ═══════════════════════════════════════════════════════ */
@@ -393,7 +407,7 @@ void audio_init(void) {
     g_last_hw = g_card->position();
     g_wp = g_last_hw;
     klog("audio: %s\n", g_card_name);
-    g_task_pid = task_create("audiod", audiod);
+    g_running = 1;                          /* audio_tick() keeps it fed from now on */
 }
 
 int audio_available(void) { return g_card != NULL; }
@@ -406,7 +420,7 @@ static void queue_frame(int16_t l, int16_t r) {
     q[g_qhead] = (uint8_t)l; q[(g_qhead + 1) % QUEUE] = (uint8_t)((uint16_t)l >> 8);
     q[(g_qhead + 2) % QUEUE] = (uint8_t)r; q[(g_qhead + 3) % QUEUE] = (uint8_t)((uint16_t)r >> 8);
     g_qhead = (g_qhead + 4) % QUEUE;
-    g_qcount += 4;
+    __sync_fetch_and_add(&g_qcount, 4);     /* (the interrupt takes from the other end) */
 }
 
 static int16_t sample_at(const uint8_t* p, int bits) {
@@ -426,10 +440,7 @@ int audio_play(const void* pcm, uint32_t bytes, int rate, int channels, int bits
     uint64_t pos = 0, end = (uint64_t)frames << 16;
     int vol = g_volume;
     while (pos < end) {
-        while (QUEUE - g_qcount < 4096) {              /* full: let it play */
-            if (task_current_pid() == g_task_pid) feed();
-            else task_sleep_ms(10);
-        }
+        while (QUEUE - g_qcount < 4096) task_sleep_ms(10);   /* full: let it play */
         for (int n = 0; n < 1024 && pos < end; n++, pos += step) {
             uint32_t i = (uint32_t)(pos >> 16), fr = (uint32_t)(pos & 0xFFFF);
             uint32_t j = i + 1 < frames ? i + 1 : i;
@@ -449,18 +460,26 @@ int audio_play(const void* pcm, uint32_t bytes, int rate, int channels, int bits
 /* how long until what is queued (and in the card's ring) has played */
 uint32_t audio_queued_ms(void) {
     if (!g_card) return 0;
+    uintptr_t f = irq_off();                /* (64-bit counts the interrupt updates) */
     uint64_t pending = g_qcount + (g_data_end > g_hw_abs ? g_data_end - g_hw_abs : 0);
+    irq_on(f);
     return (uint32_t)(pending / FRAME * 1000 / RATE);
 }
 
 int audio_busy(void) {
-    return g_card && (g_qcount > 0 || g_hw_abs < g_data_end);
+    if (!g_card) return 0;
+    uintptr_t f = irq_off();
+    int busy = g_qcount > 0 || g_hw_abs < g_data_end;
+    irq_on(f);
+    return busy;
 }
 
 void audio_stop(void) {
+    uintptr_t f = irq_off();
     g_qtail = g_qhead;
     g_qcount = 0;
     g_data_end = 0;
+    irq_on(f);
 }
 
 void audio_wait(void) {
