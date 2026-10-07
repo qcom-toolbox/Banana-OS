@@ -603,13 +603,13 @@ Bash-flavored extras (available in both personas, since they share one engine):
 By default Banana OS boots from the GRUB CD/ISO every time and its filesystem is in-memory only, reset on every reboot. `install` does a real install onto a **second, dedicated IDE or SATA hard disk** attached to the VM (never the boot CD - optical drives are detected and skipped; `disks` shows what was found):
 
 ```bash
-# QEMU: create a blank disk image (64 MB+; 32 MB is reserved for the boot
-# image, the rest holds your files - downloads and pictures included)
-qemu-img create -f raw disk.img 128M
+# QEMU: create a blank disk image (256 MB or more: the first 128 MB hold the
+# boot image, the rest of the disk holds your files)
+qemu-img create -f raw disk.img 1G
 qemu-system-i386 -cdrom Banana_OS.iso -m 256 -nic user,model=e1000 -drive file=disk.img,format=raw,if=ide
 ```
 
-In VirtualBox, attach a second blank virtual hard disk (IDE or SATA, 128 MB+) to the same VM that boots `Banana_OS.iso`.
+In VirtualBox or VMware, attach a second blank virtual hard disk (IDE or SATA, 256 MB or more) to the same VM that boots `Banana_OS.iso`.
 
 SATA (AHCI) works the same way - in QEMU with the q35 machine, whose disk controller is AHCI:
 
@@ -621,10 +621,12 @@ Then, inside Banana OS:
 
 ```
 install     # copies the boot image onto the disk and writes the current filesystem to it
-sync        # re-writes the filesystem on demand (also happens automatically on shutdown/reboot/halt)
+sync        # saves right away (changes are also saved by themselves, ~2 s after each one)
 ```
 
-`install` works because `grub-mkrescue` already builds `Banana_OS.iso` as a GRUB "hybrid" image - the same trick that lets Linux live ISOs be `dd`'d straight onto a USB stick or disk and boot with no CD. `install` raw-copies that already-bootable image from the CD onto the target disk via a small ATAPI driver, then writes the filesystem into a reserved region right after it - no custom bootloader needed.
+`install` works because `grub-mkrescue` already builds `Banana_OS.iso` as a GRUB "hybrid" image - the same trick that lets Linux live ISOs be `dd`'d straight onto a USB stick or disk and boot with no CD. `install` raw-copies that already-bootable image from the CD onto the target disk via a small ATAPI driver (renaming the boot marker its UEFI GRUB searches for, so the CD and the disk never pick each other's files), then writes the filesystem after it - no custom bootloader needed.
+
+Disk layout: the first **128 MB** are the boot area (room for the system to grow); the rest of the disk is split into **two save slots** written in turn, so a power cut during a save leaves the previous save intact (disks under ~193 MB get one slot). Settings > About and `sync` show how much of a slot your files use. The files are kept in memory while Banana OS runs, so the RAM also limits how much you can store.
 
 Once installed, the disk boots Banana OS **on its own** - drop `-cdrom Banana_OS.iso` entirely:
 
@@ -634,7 +636,9 @@ qemu-system-i386 -m 256 -nic user,model=e1000 -drive file=disk.img,format=raw,if
 
 Every boot after that loads the filesystem back from disk instead of reseeding the defaults, so your files persist too.
 
-**Upgrading from 0.4:** boot the 0.5 CD with your old disk attached (`-boot d` in QEMU, so the CD wins over the bootable disk). 0.5 reads the old 0.4 filesystem format, converts it, and writes it back in the new format. Run `install` from the 0.5 CD afterwards to update the disk's own boot image as well.
+Started from the CD, Banana OS is always the **live** system - fresh, with nothing loaded from or saved onto an installed disk ("Running the LIVE CD" at boot and a LIVE CD badge on the taskbar).
+
+**Updating an install:** boot the new CD with the installed disk attached and type `update`. It compares the disk's system with the CD's and rewrites only the system - your files, settings and password stay. Installs made with the earlier layout (a 32 MB boot area) are moved to the current one on the way. (`install` would erase the disk; it says so when the disk already holds Banana OS.)
 
 ## Build (Ubuntu/Debian)
 

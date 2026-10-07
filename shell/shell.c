@@ -1638,8 +1638,8 @@ static void cmd_install(void) {
             break;
         case FSDISK_ERR_TOO_SMALL:
             terminal_write_color(
-                "install: target disk is too small (need room for a ~32 MB boot image\n"
-                "reservation plus the filesystem). Recreate it bigger (64 MB+) and retry.\n",
+                "install: target disk is too small (need room for the 128 MB boot area\n"
+                "plus the files). Use a disk of 256 MB or more and retry.\n",
                 VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
             break;
         case FSDISK_ERR_ISO_TOO_BIG:
@@ -1649,7 +1649,7 @@ static void cmd_install(void) {
                 VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
             break;
         case FSDISK_ERR_FULL:
-            terminal_write_color("install: the files take more than 256 MB - delete some first.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            terminal_write_color("install: the files are too big for this disk - delete some first.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
             break;
         default:
             terminal_write_color("install: failed (disk I/O error).\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
@@ -1679,6 +1679,9 @@ static void cmd_update(void) {
         terminal_write_color("update: could not read the disk or the CD.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }
+    if (fsdisk_install_layout() == 3)
+        terminal_writeln("update: this install uses the old disk layout (32 MB boot area) - it will be\n"
+                         "        moved to the new one: a 128 MB boot area, your files using the whole disk.");
     if (same == 1) {
         terminal_write_color("update: the installed system is already the same as this CD - nothing to do.\n",
                              VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
@@ -1701,6 +1704,9 @@ static void cmd_update(void) {
             VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     } else if (rc == FSDISK_ERR_ISO_TOO_BIG) {
         terminal_write_color("update: this CD's system is too big for the disk's boot area.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+    } else if (rc == FSDISK_ERR_TOO_SMALL || rc == FSDISK_ERR_FULL) {
+        terminal_write_color("update: the disk is too small for the new layout (128 MB boot area + your files).\n"
+                             "        Nothing was changed.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     } else {
         terminal_write_color("update: failed (disk I/O error). Your files are untouched; run 'update' again.\n",
                              VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
@@ -1716,7 +1722,7 @@ static void cmd_sync(void) {
     int rc = fsdisk_sync();
     if (rc == FSDISK_ERR_TOO_SMALL || rc == FSDISK_ERR_FULL) {
         terminal_write_color(rc == FSDISK_ERR_FULL
-                             ? "sync: failed - the files take more than 256 MB (delete some).\n"
+                             ? "sync: failed - the files no longer fit in the disk's save area (delete some).\n"
                              : "sync: failed - the files no longer fit on the disk (delete some, or use a bigger disk).\n",
                              VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
@@ -1725,7 +1731,11 @@ static void cmd_sync(void) {
         terminal_write_color("sync: failed (disk I/O error).\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }
-    terminal_writeln("sync: filesystem written to disk.");
+    uint32_t used, cap;
+    fsdisk_space(&used, &cap);
+    char line[96];
+    ksnprintf(line, sizeof(line), "sync: filesystem written to disk (%u MB of %u MB).", (used + 1048575u) >> 20, cap >> 20);
+    terminal_writeln(line);
 }
 
 /* ── prompt ─────────────────────────────────────────────────────── */

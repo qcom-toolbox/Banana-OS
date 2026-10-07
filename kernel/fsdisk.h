@@ -17,10 +17,10 @@
 #define FSDISK_ERR_NO_TARGET   -1 /* no ATA hard disk found */
 #define FSDISK_ERR_AMBIGUOUS   -2 /* more than one ATA hard disk found */
 #define FSDISK_ERR_NO_SOURCE   -3 /* no ATAPI boot CD found to copy from */
-#define FSDISK_ERR_TOO_SMALL   -4 /* target disk too small for the boot region + filesystem */
+#define FSDISK_ERR_TOO_SMALL   -4 /* target disk too small for the 128 MB boot area + filesystem */
 #define FSDISK_ERR_ISO_TOO_BIG -5 /* boot image bigger than the reserved region (build issue) */
 #define FSDISK_ERR_IO          -6 /* a read or write failed */
-#define FSDISK_ERR_FULL        -7 /* the files are past the 256 MB a disk copy may hold */
+#define FSDISK_ERR_FULL        -7 /* the files are past what a slot on this disk holds */
 #define FSDISK_ERR_NO_INSTALL  -8 /* no disk holds an installed Banana OS */
 
 /* Looks for exactly one non-ATAPI ATA disk attached (any bus/position).
@@ -65,5 +65,10 @@ int  fsdisk_last_error(void);
 int  fsdisk_find_install(ata_disk_t* out);
 int  fsdisk_compare_boot(void);
 int  fsdisk_update(void);
+/* the installed disk's layout: 4 (128 MB boot area, slots over the whole
+ * disk), 3 (before: 32 MB, fixed slots - `update` moves it), 0 none */
+int  fsdisk_install_layout(void);
+/* the saved filesystem's size and what one slot of the disk holds */
+void fsdisk_space(uint32_t* used_bytes, uint32_t* capacity_bytes);
 
 #endif

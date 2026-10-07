@@ -475,8 +475,14 @@ static void draw_about(void) {
         label(x, ly, fsdisk_find_install(NULL)
               ? "Running: the live CD (Banana OS is also installed here: 'update' updates it)"
               : "Running: the live CD - changes are lost at shutdown ('install' to keep them)", 0x00FFB060u);
-    else if (fsdisk_is_installed())
+    else if (fsdisk_is_installed()) {
         label(x, ly, "Running: the installed system (changes are saved automatically)", 0x0080E080u);
+        uint32_t used, cap;
+        fsdisk_space(&used, &cap);
+        char d[96];
+        ksnprintf(d, sizeof(d), "Saved files: %u MB of %u MB", (used + 1048575u) >> 20, cap >> 20);
+        label(x, ly + 18, d, C_TEXT);
+    }
     else
         label(x, ly, "Running: not installed - changes are lost at shutdown", 0x00FFB060u);
 }
