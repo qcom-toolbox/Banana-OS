@@ -1569,7 +1569,7 @@ static void cmd_halt(void) {
 }
 
 /* ── install / sync (persistent disk) ──────────────────────────────
- * `install` formats a dedicated ATA hard disk (not the GRUB boot CD -
+ * `install` formats a dedicated ATA hard disk (not the boot CD -
  * ata_probe_disks() skips ATAPI drives) and writes the current in-memory
  * filesystem to it. Once installed, filesystem changes persist across
  * reboots: `sync` writes back on demand, and shutdown/reboot/halt do it
@@ -1627,7 +1627,7 @@ static void cmd_install(void) {
     if (found == 0) {
         terminal_write_color(
             "install: no ATA hard disk found. Attach a second (blank) IDE/ATA disk\n"
-            "to the VM - besides the GRUB boot CD - then try again.\n",
+            "to the VM - besides the boot CD - then try again.\n",
             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }

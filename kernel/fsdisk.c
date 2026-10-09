@@ -100,8 +100,15 @@ static int src_iso_size(const img_src_t* s, uint32_t* out_bytes) {
     return 0;
 }
 
-/* a Banana OS image: GRUB's search for its build marker in the first 4 MB (its EFI program) */
+/* a Banana OS image: its volume label (Banana Boot images), or GRUB's search
+ * for its build marker in the first 4 MB (its EFI program - images before) */
 static int src_is_banana(const img_src_t* s, uint32_t iso_bytes) {
+    uint8_t* pvd = (uint8_t*)kmalloc(2048);
+    if (pvd) {
+        int label = src_read(s, 16, 1, pvd) == 0 && memcmp(pvd + 40, "BANANA_OS ", 10) == 0;
+        kfree(pvd);
+        if (label) return 1;
+    }
     uint32_t blocks = iso_bytes / 2048u < 2048u ? iso_bytes / 2048u : 2048u;
     uint8_t* b = (uint8_t*)kmalloc(blocks * 2048u);
     if (!b) return 0;

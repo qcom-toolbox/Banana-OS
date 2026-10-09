@@ -1,6 +1,6 @@
 # 🍌 Banana OS 0.5
 
-Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux kernel, no external OS kernel) - a **64-bit (x86_64) kernel with a 32-bit fallback**, booting on **UEFI and BIOS** machines and in VirtualBox/QEMU via GRUB + Multiboot2 - now with **real networking**: its own drivers for the Intel e1000, AMD PCnet, virtio-net and Realtek RTL8139 network cards (every card VirtualBox offers) and its own TCP/IP stack, so `ping`, `curl` and `wget` talk to the actual Internet (HTTP and HTTPS).
+Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux kernel, no external OS kernel) - a **64-bit (x86_64) kernel with a 32-bit fallback**, booting on **UEFI and BIOS** machines and in VirtualBox/QEMU with **its own boot loader** (Banana Boot, Multiboot2) - now with **real networking**: its own drivers for the Intel e1000, AMD PCnet, virtio-net and Realtek RTL8139 network cards (every card VirtualBox offers) and its own TCP/IP stack, so `ping`, `curl` and `wget` talk to the actual Internet (HTTP and HTTPS).
 
 ```
   ____                               ____  ____
@@ -14,6 +14,7 @@ Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux k
 
 ## Latest additions
 
+- **Our own boot loader: Banana Boot** - GRUB is gone. One image boots on **legacy BIOS and UEFI**, from a **CD, a USB stick or a hard disk**, and starts the **64-bit or the 32-bit kernel** (the same menu as before, 64-bit by default when the CPU can). On BIOS: a 440-byte MBR or a 2 KiB El Torito entry loads a 10 KiB loader that runs in 32-bit protected mode and calls the BIOS through a real-mode thunk; it reads the kernel from the ISO9660 file system and sets the VBE graphics mode. On UEFI: `BOOTX64.EFI` (10 KiB, our C, no EDK2/gnu-efi) reads the kernel from its EFI partition, takes the GOP framebuffer and the firmware's memory map, leaves the firmware and steps down from 64-bit long mode to 32-bit protected mode. Both hand the kernels exactly what GRUB did (Multiboot2), so nothing changed for them - see [loader/](loader/)
 - **A much bigger filesystem** - up to 65,536 files and 16,384 folders (was 1,024 and 256), found by name through hash tables, so a folder of thousands of files lists and opens as fast as a small one; files up to 128 MB. On an installed disk, files are read in the first time they are used instead of all at boot: what you can store is no longer limited by the RAM, and boot does not slow down as the disk fills. IDE disks larger than 128 GB are used whole (48-bit addressing)
 - **File data is a cache** - like other systems, files in RAM are a cache of what is on the disk: when memory runs low, the files used longest ago are dropped from RAM (only once saved; a file in use is never dropped) and read in again when next used. Big files are read in pieces straight from the disk - apps and `play` never need a whole file in RAM (a song streams 64 KiB at a time) - and saving no longer copies a changed file first. `free` counts the droppable file data as "available"
 - **`df`, `free` and `htop`** - `df` shows the disk space (size, used, free; `-i` files and folders, USB sticks too), `free` the RAM, `htop` a colour `top` with a meter per processor core, memory and disk. `top` now counts the RAM correctly (it showed only the files' data as used)
@@ -137,7 +138,13 @@ Banana-OS/
 │   └── editor.c/h      # Nano-like text editor
 ├── sdk/                # The Linux SDK for apps: include/, lib/, banana.mk, tools/bpkg, examples/
 ├── third_party/        # stb_image (runtime image decoding), lodepng
-├── iso/boot/grub/grub.cfg
+├── loader/             # Banana Boot, the boot loader
+│   ├── mbr.asm         # the MBR of USB sticks and disks (loads bios.bin)
+│   ├── bios.asm/.c     # BIOS loader: CD entry, real-mode BIOS calls, menu, ISO9660, ELF, VBE, E820
+│   ├── efi.c, efi.h    # UEFI loader (BOOTX64.EFI): menu, FAT file, GOP, memory map, ExitBootServices
+│   ├── tramp.S         # UEFI: from 64-bit long mode to 32-bit protected mode
+│   └── common.h        # the menu, the command line, ELF and Multiboot2 for both
+├── tools/mkimage.py    # makes the ISO a hybrid CD/disk image (MBR, EFI partition)
 ├── Makefile
 ├── build.sh
 └── README.md
@@ -612,7 +619,7 @@ Bash-flavored extras (available in both personas, since they share one engine):
 
 ## Installing to a Hard Disk (`install` / `sync`)
 
-By default Banana OS boots from the GRUB CD/ISO every time and its filesystem is in-memory only, reset on every reboot. `install` does a real install onto a **second, dedicated IDE or SATA hard disk** attached to the VM (never the boot CD - optical drives are detected and skipped; `disks` shows what was found):
+By default Banana OS boots from the CD/ISO every time and its filesystem is in-memory only, reset on every reboot. `install` does a real install onto a **second, dedicated IDE or SATA hard disk** attached to the VM (never the boot CD - optical drives are detected and skipped; `disks` shows what was found):
 
 ```bash
 # QEMU: create a blank disk image (256 MB or more: the first 128 MB hold the
@@ -638,7 +645,7 @@ install     # copies the boot image onto the disk and writes the current filesys
 sync        # saves right away (changes are also saved by themselves, ~2 s after each one)
 ```
 
-`install` works because `grub-mkrescue` already builds `Banana_OS.iso` as a GRUB "hybrid" image - the same trick that lets Linux live ISOs be `dd`'d straight onto a USB stick or disk and boot with no CD. `install` raw-copies that already-bootable image from the CD onto the target disk via a small ATAPI driver (renaming the boot marker its UEFI GRUB searches for, so the CD and the disk never pick each other's files), then writes the filesystem after it - no custom bootloader needed.
+`install` works because `Banana_OS.iso` is a "hybrid" image - a CD and a disk at once, like Linux live ISOs that can be `dd`'d straight onto a USB stick: its first sector is Banana Boot's MBR, with one partition, the EFI system partition. `install` raw-copies that already-bootable image from the CD (or the USB stick) onto the target disk, with the boot loaders' `set banana_medium=live-cd` line changed to `install` (so the kernel knows which copy started), then writes the filesystem after it.
 
 Disk layout: the first **128 MB** are the boot area (room for the system to grow); the rest of the disk holds your files, each in a place of its own, with an index of them (names, folders, where each file is, a checksum) at the end of the disk. A save writes **only the files that changed** - each into a new place, never over the saved copy - and then the index, in the one of its two copies that does not hold the newest: a power cut during a save leaves the previous save intact. Renaming, moving or deleting writes nothing but the index. Saving happens in the background in 64 KiB pieces with the other tasks running in between, so the desktop never freezes while it saves. (Changing one line in a small file with 33 MB of other files on the disk: 5.9 s of frozen system before, a few ms now.) Disks installed by earlier versions are moved to this layout at their first boot, the old copy kept until the new one is complete. Settings > About, `sync` and `df` show how much of the disk your files use. A file is read from the disk the first time it is used and kept in RAM as a cache: when memory runs low, saved files not used for a while are dropped from RAM again, and big files are read in pieces (apps, `play`) - the RAM does not limit how much you can store or play. When the index outgrows its place at the end of the disk (thousands of files), it is written among the files, copy-on-write like them. Up to 65,536 files and 16,384 folders; disks up to 2 TB.
 
@@ -666,12 +673,12 @@ chmod +x build.sh
 ### Manual build
 
 ```bash
-sudo apt-get install nasm gcc-multilib grub-pc-bin grub-efi-amd64-bin grub-common xorriso mtools
+sudo apt-get install nasm gcc-multilib binutils xorriso mtools python3
 make
 # Output: Banana_OS.iso (kernel.bin = 32-bit, kernel64.bin = 64-bit inside)
 ```
 
-`grub-efi-amd64-bin` is what makes the ISO UEFI-bootable: `grub-mkrescue` adds the UEFI boot image when it finds those GRUB modules (without them the build still works, BIOS-only, with a warning).
+No GRUB: the boot loaders are built from `loader/` with the same tools as the kernel (`nasm`, `gcc`, `ld`; `objcopy` turns the UEFI one into a PE program), `mtools` makes the EFI partition, `xorriso` the ISO.
 
 ## Run in VirtualBox
 
@@ -697,20 +704,23 @@ qemu-system-x86_64 -cdrom Banana_OS.iso -m 256 -nic user,model=e1000 -serial std
 qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd -cdrom Banana_OS.iso -m 256 -nic user,model=e1000 -serial stdio
 ```
 
-The boot menu has both entries - **Banana OS 0.5 (64-bit)** and **(32-bit)**; the default is chosen with GRUB's `cpuid -l` (long mode available or not).
+The boot menu has both entries - **Banana OS 0.5 (64-bit)** and **(32-bit)**; the default is the 64-bit one when the CPU has long mode (CPUID), the 32-bit one otherwise.
 
-## 64-bit and UEFI: how it works
+## Banana Boot and 64-bit: how it works
 
-- **One ISO, two firmwares**: `grub-mkrescue` writes a hybrid image with a BIOS El Torito boot record and a UEFI one (`efi.img` with GRUB for x86_64-efi). Either GRUB loads the kernel with Multiboot2 and asks for an 800x600x32 framebuffer - VBE on BIOS, GOP on UEFI. Written to a disk by `install` (or with `dd` to a USB stick) it is bootable both ways too.
-- **Long mode**: GRUB starts a Multiboot2 kernel in 32-bit protected mode on both firmwares. `boot/boot64.asm` checks the CPU, builds page tables mapping the first 4 GiB 1:1 with 2 MiB pages (RAM, PCI device memory and the framebuffer all live there), enables PAE, long mode and paging, loads a 64-bit GDT and jumps to `kernel_main`.
+- **One image, two firmwares, three media**: `Banana_OS.iso` is an ISO9660 CD with two El Torito entries - the BIOS loader (`/boot/bios.bin`) and the EFI system partition (`/efi.img`: `EFI/BOOT/BOOTX64.EFI` and the two kernels) - and, for USB sticks and disks, an MBR (`tools/mkimage.py`): its code loads `/boot/bios.bin`, its one partition is `/efi.img`. Written to a disk by `install` (or with `dd` to a USB stick) it boots both ways.
+- **BIOS**: the MBR (or, from a CD, the first 2 KiB of `bios.bin`, which El Torito loads) brings the loader to 0x8000. It enables A20, switches to 32-bit protected mode and runs C; every BIOS service (disk reads, keyboard, VBE, E820) is a trip back to real mode through `bios_int`. It finds `/boot/kernel64.bin` in the ISO9660 directory, copies the ELF segments to 1 MiB, picks the VBE mode closest to what the kernel's Multiboot2 header asks for (800x600x32) and starts it.
+- **UEFI**: `BOOTX64.EFI` is position-independent C with its own UEFI definitions, linked to an ELF image that `objcopy` turns into a PE program with no relocations. It reads the kernel from its own partition, keeps the GOP mode the firmware set, converts and merges the memory map, calls ExitBootServices, and jumps through `tramp.S`: a 32-bit code segment, paging off, long mode off - the state a BIOS boot gives - so the same kernel entry serves both.
+- **The hand-over**: Multiboot2, as GRUB did it - EAX = 0x36D76289, EBX = the information: the command line (`medium=live-cd` or `install`, `nosmp`, `verbose`), the memory map, the framebuffer, the BIOS boot drive or the EFI system table, the ACPI RSDP.
+- **Long mode**: both kernels start in 32-bit protected mode on both firmwares. `boot/boot64.asm` checks the CPU, builds page tables mapping the first 4 GiB 1:1 with 2 MiB pages (RAM, PCI device memory and the framebuffer all live there), enables PAE, long mode and paging, loads a 64-bit GDT and jumps to `kernel_main`.
 - **Same C code**: both kernels are built from the same sources (`*.o` for i386, `*.o64` for x86_64: `-mcmodel=small -mno-red-zone`, no SSE). Pointer-sized types come from the compiler, the interrupt stubs (`isr64.asm`), the task switch (`task_switch64.asm`), the IDT gate format and the new-task stack frame have 64-bit versions; the heap stays below 3.5 GiB, so DMA addresses still fit the 32-bit registers of the older devices.
 - **UEFI quirk**: UEFI firmware leaves the CPU's local APIC enabled with the legacy PIC input masked (a BIOS sets it to pass-through); Banana OS drives interrupts with the 8259 PIC, so it switches the local APIC off at boot - without that, no timer or device interrupt would arrive.
 - **Several CPU cores**: the 64-bit kernel starts every core the ACPI tables list (up to 16). The kernel itself runs on the first core; apps run on all of them - an app's threads compute in parallel (`threads`, `mandel` in ~/Examples), and every system call an app makes on another core is carried out on the first one. Task Manager and `top` show which core each app runs on. The 32-bit kernel uses one core.
-- **Not (yet)**: Secure Boot (the GRUB on the ISO is unsigned), memory above 4 GiB (64-bit Banana OS uses at most 3.5 GiB of RAM), kernel code on more than one core.
+- **Not (yet)**: Secure Boot (Banana Boot is not signed: turn Secure Boot off), 32-bit UEFI firmware (a few old tablets), memory above 4 GiB (64-bit Banana OS uses at most 3.5 GiB of RAM), kernel code on more than one core.
 
 ## Technical Notes
 
-- **Bootloader**: GRUB 2 (Multiboot2), BIOS and UEFI
+- **Bootloader**: Banana Boot, our own (Multiboot2), BIOS and UEFI
 - **Architectures**: x86_64 (long mode) and i686 (protected mode), same sources
 - **Language**: freestanding C + NASM, no floating point (integer-only graphics and crypto)
 - **Graphics**: 32-bit framebuffer + 8x8 bitmap font; the console paints lazily (dirty rows, coalesced scrolling)
@@ -735,4 +745,4 @@ This project uses no existing OS kernel:
 - custom NIC drivers, TCP/IP stack and TLS
 - custom linker script and build chain
 
-The only third-party code is GRUB (bootloader) and the stb_image / lodepng image decoders - see `THIRD-PARTY-NOTICES`.
+The only third-party code is the stb_image / lodepng image decoders (the boot loader is ours now) - see `THIRD-PARTY-NOTICES`.

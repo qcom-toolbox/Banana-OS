@@ -1,10 +1,11 @@
 # Banana OS 0.5 Makefile
-# Requires: nasm, gcc-multilib, ld, python3 (the SDK packager), grub-pc-bin, grub-efi-amd64-bin,
-#           grub-common, xorriso, mtools
+# Requires: nasm, gcc-multilib, ld, objcopy, python3, xorriso, mtools
 #
 # Builds two kernels from the same sources - kernel.bin (i386, 32-bit) and
 # kernel64.bin (x86_64, long mode) - and one ISO that boots on BIOS and
-# UEFI machines; its GRUB menu starts the 64-bit kernel when the CPU can.
+# UEFI machines, from a CD, a USB stick or a hard disk, with Banana OS's own
+# boot loader (loader/: Banana Boot); its menu starts the 64-bit kernel
+# when the CPU can.
 
 CC      = gcc
 WARN    = -Wall -Wextra
@@ -81,11 +82,52 @@ kernel64.bin: $(OBJS64)
 
 # grub-mkrescue adds a UEFI boot image when the x86_64-efi GRUB modules
 # are installed (grub-efi-amd64-bin) - the ISO then boots BIOS and UEFI
-Banana_OS.iso: kernel.bin kernel64.bin iso/boot/grub/grub.cfg iso/boot/grub/medium.cfg
-	@test -d /usr/lib/grub/x86_64-efi || echo "warning: grub-efi-amd64-bin missing - the ISO will boot on BIOS only"
-	cp kernel.bin iso/boot/kernel.bin
-	cp kernel64.bin iso/boot/kernel64.bin
-	grub-mkrescue -o Banana_OS.iso iso
+# ── Banana Boot (loader/): the boot loader ──────────────────────────────
+# the MBR (USB sticks, hard disks)
+loader/mbr.bin: loader/mbr.asm
+	$(AS) -f bin $< -o $@
+
+# the BIOS loader: 16-bit entries + 32-bit C, one flat file loaded at 0x8000
+LOADER_CFLAGS32 = -m32 -march=i686 -Os -ffreestanding -fno-pic -fno-pie -fno-stack-protector \
+                  -fno-asynchronous-unwind-tables -mgeneral-regs-only -fno-delete-null-pointer-checks \
+                  --param=min-pagesize=0 $(WARN)
+loader/bios.bin: loader/bios.asm loader/bios.c loader/common.h loader/bios.ld
+	$(AS) -f elf32 loader/bios.asm -o loader/bios_asm.o
+	$(CC) $(LOADER_CFLAGS32) -c loader/bios.c -o loader/bios_c.o
+	ld -m elf_i386 -T loader/bios.ld -o $@ loader/bios_asm.o loader/bios_c.o
+
+# the UEFI loader: position-independent C turned into a PE32+ program; it
+# must have no relocations (it runs wherever the firmware puts it)
+LOADER_CFLAGS64 = -O2 -ffreestanding -fpie -fno-stack-protector -fno-stack-check -fshort-wchar \
+                  -mno-red-zone -mgeneral-regs-only -fno-asynchronous-unwind-tables -fvisibility=hidden $(WARN)
+loader/BOOTX64.EFI: loader/efi.c loader/efi.h loader/common.h loader/tramp.S loader/efi.lds
+	$(CC) $(LOADER_CFLAGS64) -c loader/efi.c -o loader/efi.o
+	$(CC) -c loader/tramp.S -o loader/tramp.o
+	ld -nostdlib -pie --no-dynamic-linker -z nocombreloc -T loader/efi.lds -o loader/bootx64.so loader/efi.o loader/tramp.o
+	@if readelf -r loader/bootx64.so | grep -q R_X86_64; then echo "loader/efi.c: relocations - it must be position-independent"; exit 1; fi
+	objcopy -j .text -j .reloc -j .data -j .dynamic -j .rela -j .dynsym --target efi-app-x86_64 --subsystem=10 \
+	    loader/bootx64.so $@
+
+# the EFI system partition: a FAT image with the UEFI loader and the kernels
+isoroot/efi.img: loader/BOOTX64.EFI kernel.bin kernel64.bin
+	mkdir -p isoroot
+	rm -f $@
+	kb=$$(( ($$(stat -c %s kernel.bin) + $$(stat -c %s kernel64.bin) + $$(stat -c %s loader/BOOTX64.EFI)) / 1024 + 2048 )); \
+	    dd if=/dev/zero of=$@ bs=1024 count=$$kb status=none
+	mformat -i $@ -v BANANA_EFI ::
+	mmd -i $@ ::/EFI ::/EFI/BOOT ::/boot
+	mcopy -i $@ loader/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
+	mcopy -i $@ kernel.bin kernel64.bin ::/boot/
+
+# the image: an ISO9660 CD (El Torito: the BIOS loader, and the EFI
+# partition for UEFI) that tools/mkimage.py makes a disk too (MBR)
+Banana_OS.iso: kernel.bin kernel64.bin loader/mbr.bin loader/bios.bin isoroot/efi.img tools/mkimage.py
+	mkdir -p isoroot/boot
+	cp kernel.bin kernel64.bin loader/bios.bin isoroot/boot/
+	xorriso -as mkisofs -quiet -o $@ -R -J -V BANANA_OS \
+	    -b boot/bios.bin -no-emul-boot -boot-load-size 4 -boot-info-table \
+	    -eltorito-alt-boot -e efi.img -no-emul-boot isoroot
+	python3 tools/mkimage.py $@ loader/mbr.bin
 
 run: Banana_OS.iso
 	$(QEMU) $(QEMU_BASE) $(QEMU_NET)
@@ -115,8 +157,9 @@ run-tap: Banana_OS.iso
 clean:
 	for e in $(EXAMPLES); do $(MAKE) -s -C sdk/examples/$$e clean; done
 	rm -f banana-sdk.tar.gz
-	rm -f $(OBJS) $(OBJS64) $(DEPS) kernel.bin kernel64.bin iso/boot/kernel.bin \
-	      iso/boot/kernel64.bin Banana_OS.iso
+	rm -f $(OBJS) $(OBJS64) $(DEPS) kernel.bin kernel64.bin Banana_OS.iso
+	rm -rf isoroot
+	rm -f loader/*.o loader/*.so loader/*.bin loader/BOOTX64.EFI
 
 
 # ── SDK: example apps (embedded in the kernel: ~/Examples) and the tarball ──

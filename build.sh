@@ -9,7 +9,7 @@ echo "========================="
 
 # ── Check dependencies ────────────────────────────────────────────
 MISSING=()
-for tool in nasm gcc ld grub-mkrescue xorriso mformat; do
+for tool in nasm gcc ld objcopy xorriso mformat python3; do
     if ! command -v "$tool" &>/dev/null; then
         MISSING+=("$tool")
     fi
@@ -18,13 +18,7 @@ done
 if [ ${#MISSING[@]} -ne 0 ]; then
     echo "Installing missing dependencies: ${MISSING[*]}"
     sudo apt-get update -qq
-    sudo apt-get install -y nasm gcc grub-pc-bin grub-efi-amd64-bin grub-common xorriso mtools
-fi
-
-# ── UEFI boot support (x86_64-efi GRUB modules) ─────────────────────
-if [ ! -d /usr/lib/grub/x86_64-efi ]; then
-    echo "Installing grub-efi-amd64-bin (makes the ISO bootable on UEFI too)..."
-    sudo apt-get install -y grub-efi-amd64-bin
+    sudo apt-get install -y nasm gcc binutils xorriso mtools python3
 fi
 
 # ── gcc multilib check ────────────────────────────────────────────

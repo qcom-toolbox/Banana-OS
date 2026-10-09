@@ -184,7 +184,7 @@ void sysinfo_init_mb2(uint32_t mb2_info_addr) {
     uint32_t total = mb2->total_size;
     uint32_t off = 8;
 
-    /* GRUB passes the EFI system table (tag 11/12) only when it was
+    /* the boot loader passes the EFI system table (tag 11/12) only when it was
      * started by UEFI firmware */
     for (uint32_t o = 8; o + 8 <= total;) {
         mb2_tag_t* t = (mb2_tag_t*)(uintptr_t)(mb2_info_addr + o);
@@ -253,8 +253,9 @@ void sysinfo_log_boot(void) {
     klog("boot: cmdline [%s], bios drive %s0x%x\n", info.cmdline, info.has_biosdev ? "" : "(none) ", info.biosdev);
 }
 
-/* "medium=live-cd" / "medium=install" (grub.cfg sources /boot/grub/medium.cfg,
- * which the disk's copy has rewritten) - the copy GRUB really started,
+/* "medium=live-cd" / "medium=install" (the boot loader's line "set banana_medium=",
+ * which the disk's copy has rewritten - GRUB's medium.cfg before Banana Boot) -
+ * the copy that really started,
  * whatever names the firmware gave the drives */
 static int medium_is(const char* word) {
     for (const char* p = info.cmdline; *p; p++) {
