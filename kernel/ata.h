@@ -15,7 +15,7 @@ typedef struct {
     int      is_atapi;  /* CD/DVD (ATAPI) - never a valid install target */
     int      bus;        /* ATA_BUS_PRIMARY / ATA_BUS_SECONDARY */
     int      is_slave;
-    uint32_t sectors;    /* 28-bit LBA sector count (0 if unknown/ATAPI) */
+    uint32_t sectors;    /* sector count (0 if unknown/ATAPI); up to 2 TB */
     char     model[41];  /* IDENTIFY model string, NUL-terminated */
     int      ahci_port;  /* SATA (kernel/ahci.c) device index, or -1 for an IDE drive */
     int      nvme;       /* NVMe drive (kernel/nvme.c) index + 1, or 0 */

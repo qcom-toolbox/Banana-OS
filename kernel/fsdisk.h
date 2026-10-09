@@ -68,8 +68,10 @@ int  fsdisk_update(void);
 /* the installed disk's layout: 4 (128 MB boot area, slots over the whole
  * disk), 3 (before: 32 MB, fixed slots - `update` moves it), 0 none */
 int  fsdisk_install_layout(void);
-/* the saved filesystem's size and what one slot of the disk holds */
-void fsdisk_space(uint32_t* used_bytes, uint32_t* capacity_bytes);
+/* the space the saved files take on the disk, and the space for them */
+void fsdisk_space(uint64_t* used_bytes, uint64_t* capacity_bytes);
+/* the installed disk's name ("SATA port 0") and model, for df ("" if none) */
+void fsdisk_describe(char* out, int cap);
 /* how far an install / update / comparison is (done of total) */
 void fsdisk_progress(uint32_t* done, uint32_t* total);
 

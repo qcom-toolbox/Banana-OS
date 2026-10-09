@@ -146,6 +146,8 @@ typedef struct {
     volatile uint32_t since;      /* timer_ms() when the task got it */
     volatile int     used;        /* has run app code: 1, logged: 2 */
     struct task*     first;       /* the first task it ran */
+    volatile uint32_t busy_ms;    /* time running tasks since the last sysmon sample */
+    volatile uint32_t counted;    /* the running task's time is in busy_ms up to here */
 } ap_t;
 
 #define AP_REQUEUE 1              /* others are waiting: back into the queue */
@@ -154,6 +156,7 @@ typedef struct {
 #define AP_HOME_MS  100           /* the boot core sees each task this often (Ctrl+C, End task, painting) */
 
 static ap_t g_ap[SMP_MAX_CPUS];
+static uint32_t g_core_pct[SMP_MAX_CPUS];   /* per core, from sysmon's last sample */
 
 /* an idle core is woken for it (interrupts off) */
 static void q_push(task_t* t) {
@@ -487,15 +490,32 @@ static void recompute_cpu_window(void) {
     uint32_t total = now - last_sample_ms;
     last_sample_ms = now;
     if (total == 0) total = 1;
+    uint32_t boot_ms = 0;
     for (int i = 0; i < g_count; i++) {
         task_t* t = &g_tasks[i];
         uint32_t away = __sync_fetch_and_and(&t->away_window_ms, 0);
         t->away_life_ms += away;
-        uint32_t ms = (uint32_t)(t->window_cyc / g_tsc_per_ms) + away;
+        uint32_t here = (uint32_t)(t->window_cyc / g_tsc_per_ms);
+        boot_ms += here;
+        uint32_t ms = here + away;
         t->window_cyc = 0;
         uint32_t pct = ms * 100u / total;
         t->cpu_pct = pct > 100 ? 100 : pct;
     }
+    /* each core: the time it ran tasks (the boot core's idle loop and halts count as idle) */
+    g_core_pct[0] = boot_ms * 100u / total > 100 ? 100 : boot_ms * 100u / total;
+    for (int c = 1; c < cpu_count() && c < SMP_MAX_CPUS; c++) {
+        uint32_t ms = __sync_fetch_and_and(&g_ap[c].busy_ms, 0);
+        if (g_ap[c].task) {                                    /* (still running one) */
+            uint32_t from = g_ap[c].counted;
+            if ((int32_t)(now - from) > 0) { ms += now - from; g_ap[c].counted = now; }
+        }
+        g_core_pct[c] = ms * 100u / total > 100 ? 100 : ms * 100u / total;
+    }
+}
+
+uint32_t task_core_pct(int cpu) {
+    return cpu >= 0 && cpu < SMP_MAX_CPUS ? g_core_pct[cpu] : 0;
 }
 
 static void sysmon_entry(void) {
@@ -579,6 +599,7 @@ void task_ap_loop(int cpu) {
         }
         a->idle = 0;
         a->since = timer_ms();
+        a->counted = a->since;
         t->cpu = cpu;
         a->task = t;
         if (!a->used) { a->first = t; a->used = 1; }   /* sysmon logs it (the kernel is not ours here) */
@@ -590,6 +611,7 @@ void task_ap_loop(int cpu) {
         /* t stopped: a system call, its turn ended, or a fault */
         a->task = NULL;
         __sync_fetch_and_add(&t->away_window_ms, timer_ms() - a->since);
+        __sync_fetch_and_add(&a->busy_ms, timer_ms() - a->counted);
         if (a->reason == AP_REQUEUE) {
             t->cpu = -1;
             q_push(t);

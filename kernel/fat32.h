@@ -22,4 +22,8 @@ int fat32_mount(blockdev_t* bd, const char* path, char* err, int errcap);
 /* for `mount`: one line about mount id mnt into out (0 if not FAT32) */
 int fat32_describe(int mnt, char* out, int cap);
 
+/* for `df`: the volume's size and free space (0 if mnt is not FAT32);
+ * the first call on a stick counts its free clusters */
+int fat32_space(int mnt, uint64_t* total, uint64_t* free_bytes);
+
 #endif

@@ -23,6 +23,7 @@
 #include "netcmds.h"
 #include "srvcmds.h"
 #include "syscmds.h"
+#include "moncmds.h"
 #include "../kernel/serial.h"
 #include "../kernel/kstring.h"
 #include "../kernel/kheap.h"
@@ -30,6 +31,7 @@
 #include "../kernel/examples.h"
 #include "../kernel/settings.h"
 #include "../kernel/login.h"
+#include "../kernel/meminfo.h"
 
 extern char _kernel_end[];   /* boot/linker.ld */
 
@@ -450,15 +452,15 @@ static void cmd_proc_info(const char* args) {
 }
 
 static void cmd_ram_info(const char* args) {
-    const sysinfo_t* si = sysinfo_get();
-    uint32_t total_kb = si->mem_kb;
-    /* everything below the end of the kernel image (low memory + the
-     * image with its static buffers) plus what the heap has handed out
-     * (file contents, network buffers, decoded images...) */
-    uint32_t used_bytes = (uint32_t)(uintptr_t)_kernel_end + kheap_used_bytes();
-    uint32_t used_kb = (used_bytes + 1023u) / 1024u;
-    uint32_t free_kb = (total_kb > used_kb) ? (total_kb - used_kb) : 0;
-    uint32_t pct = (total_kb > 0) ? ((used_kb * 100u) / total_kb) : 0;
+    /* kernel/meminfo.h: the kernel image plus what the heap handed out
+     * (file contents, network buffers, decoded images...), of the RAM
+     * Banana OS runs in - the same numbers as `free` and `top` */
+    meminfo_t mi;
+    meminfo_get(&mi);
+    uint32_t total_kb = mi.total_kb;
+    uint32_t used_kb = mi.used_kb;
+    uint32_t free_kb = mi.free_kb;
+    uint32_t pct = (total_kb > 0) ? (used_kb * 100u) / total_kb : 0;   /* (fits: under 3.5 GB) */
     int show_all = (!args || !*k_skip_spaces(args));
     char b[16];
 
@@ -617,7 +619,7 @@ static void cmd_top(void) {
         terminal_clear();
 
         /* ── HEADER ───────────────────────────── */
-        terminal_write_color("Banana OS 0.5 htop - press q to quit\n",
+        terminal_write_color("Banana OS 0.5 top - press q to quit (htop: the colour version)\n",
                              VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
         terminal_writeln("--------------------------------------------");
 
@@ -637,10 +639,13 @@ static void cmd_top(void) {
         terminal_write(b1);
         terminal_writeln(cpu_count() > 1 ? " (kernel on core 0, app code on every core)" : " in use");
 
-        /* RAM USAGE */
-        uint32_t total_mb = (si->mem_kb / 1024u) + 1u;
-        uint32_t used_mb  = (fs_ram_used_bytes() + 1024u*1024u - 1u) / (1024u*1024u);
-        uint32_t free_mb  = (total_mb > used_mb) ? (total_mb - used_mb) : 0;
+        /* RAM USAGE (kernel/meminfo.h: the same numbers as `free`) - it
+         * used to count only the files' data as used, against all the RAM */
+        meminfo_t mi;
+        meminfo_get(&mi);
+        uint32_t total_mb = (mi.total_kb + 1023u) / 1024u;
+        uint32_t used_mb  = (mi.used_kb + 1023u) / 1024u;
+        uint32_t free_mb  = mi.free_kb / 1024u;
 
         terminal_write_color("RAM: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
         fmt_u32(b1, sizeof(b1), used_mb);
@@ -648,14 +653,14 @@ static void cmd_top(void) {
         fmt_u32(b3, sizeof(b3), free_mb);
 
         terminal_write(b1);
-        terminal_write(" MB / ");
+        terminal_write(" MB used / ");
         terminal_write(b2);
         terminal_write(" MB (free ");
         terminal_write(b3);
         terminal_writeln(" MB)");
 
         terminal_write("      [");
-        draw_bar(used_mb, total_mb);
+        draw_bar(mi.used_kb, mi.total_kb);
         terminal_writeln("]");
 
         terminal_writeln("--------------------------------------------");
@@ -777,6 +782,9 @@ static void cmd_help(void) {
         "  run <file.sh>      run script file line by line",
         "  uptime             print current uptime",
         "  top                live system monitor (press q to quit)",
+        "  htop               colour monitor: per-core meters (q quits, P/N/T sort)",
+        "  free [-h|-m|-k]    RAM: total, used, free",
+        "  df [-h|-k] [-i]    disk space: size, used, free (-i: files and folders)",
         "  exit               close this GUI terminal window",
         "  start              alias of startx",
         "  stop               alias of stopx",
@@ -1220,7 +1228,9 @@ static const char* const known_cmds[] = {
     "ifconfig", "dhcp", "ping", "nslookup", "host", "netstat", "arp", "curl", "wget",
     "cryptotest", "wallpaper", "lsusb", "usb", "httpd", "sshd", "passwd", "files", "browser", "notepad",
     /* shell/syscmds.c */
-    "mount", "umount", "eject", "pkg", "apps", "taskmgr", "settings", "play", "beep", "volume", "lsaudio", (void*)0
+    "mount", "umount", "eject", "pkg", "apps", "taskmgr", "settings", "play", "beep", "volume", "lsaudio",
+    /* shell/moncmds.c */
+    "free", "df", "htop", (void*)0
 };
 
 static void cmd_which(const char* args) {
@@ -1746,10 +1756,11 @@ static void cmd_sync(void) {
         terminal_write_color("sync: failed (disk I/O error).\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }
-    uint32_t used, cap;
+    uint64_t used, cap;
     fsdisk_space(&used, &cap);
     char line[96];
-    ksnprintf(line, sizeof(line), "sync: filesystem written to disk (%u MB of %u MB).", (used + 1048575u) >> 20, cap >> 20);
+    ksnprintf(line, sizeof(line), "sync: filesystem written to disk (%u MB of %u MB).",
+              (uint32_t)((used + 1048575u) >> 20), (uint32_t)(cap >> 20));
     terminal_writeln(line);
 }
 
@@ -2317,6 +2328,7 @@ static void dispatch_cmd(const char* raw_line, int persona) {
 
     /* network commands (shell/netcmds.c) */
     if (syscmd_dispatch(line)) return;
+    if (moncmd_dispatch(line)) return;
     if (srvcmd_dispatch(line)) return;
     if (netcmd_dispatch(line)) return;
 

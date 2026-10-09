@@ -590,10 +590,11 @@ void terminal_writeln(const char* str) {
 }
 
 void terminal_write_color(const char* str, uint8_t fg, uint8_t bg) {
-    uint8_t saved = term_color;
+    uint8_t saved = term_color, saved_vt = vt_color[vt_active];
     terminal_setcolor(fg, bg);
     terminal_write(str);
     term_color = saved;
+    vt_color[vt_active] = saved_vt;     /* (terminal_clear paints with it) */
 }
 
 void terminal_cursor_left(void) {

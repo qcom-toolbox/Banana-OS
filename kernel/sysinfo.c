@@ -217,18 +217,17 @@ void sysinfo_init_mb2(uint32_t mb2_info_addr) {
         if (tag->type == 6 && tag->size >= sizeof(mb2_tag_mmap_t)) {
             mb2_tag_mmap_t* mm = (mb2_tag_mmap_t*)tag;
             if (mm->entry_size >= sizeof(mb2_mmap_entry_t)) {
-                uint64_t max_end = 0;
+                /* the usable RAM: all the "available" ranges added up (the
+                 * highest address would count the PCI hole below 4 GB too) */
+                uint64_t usable = 0;
                 uint32_t pos = sizeof(mb2_tag_mmap_t);
                 while (pos + mm->entry_size <= mm->size) {
                     mb2_mmap_entry_t* e = (mb2_mmap_entry_t*)((uintptr_t)mm + pos);
-                    if (e->type == 1) {
-                        uint64_t end = e->base_addr + e->length;
-                        if (end > max_end) max_end = end;
-                    }
+                    if (e->type == 1) usable += e->length;
                     pos += mm->entry_size;
                 }
-                if (max_end > 0) {
-                    info.mem_kb = (uint32_t)(max_end / 1024u);
+                if (usable > 0) {
+                    info.mem_kb = (uint32_t)(usable >> 10);
                     return;
                 }
             }

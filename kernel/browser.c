@@ -592,7 +592,7 @@ static int fetch_file(const char* path, char** data, uint32_t* len, char* ctype,
     sb_str(&b, "</h2><table>");
     const char* slash = strcmp(p, "/") == 0 ? "" : "/";
     if (strcmp(p, "/") != 0) sb_str(&b, "<tr class=\"d\"><td><a href=\"..\">..</a></td><td></td></tr>");
-    int idx[FS_MAX_FILES > FS_MAX_DIRS ? FS_MAX_FILES : FS_MAX_DIRS];
+    static int idx[FS_MAX_FILES > FS_MAX_DIRS ? FS_MAX_FILES : FS_MAX_DIRS];   /* (too big for a task's stack) */
     int nd = fs_list_dirs(p, idx, FS_MAX_DIRS);
     int row = 0;
     for (int i = 0; i < nd; i++, row++) {

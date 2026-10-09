@@ -4,6 +4,7 @@
 #include "kstring.h"
 #include "rtc.h"
 #include "serial.h"
+#include "task.h"
 
 /*
  * FAT32, read and write, with long file names (VFAT).
@@ -51,6 +52,8 @@ typedef struct {
     uint32_t fsinfo;               /* absolute sector of FSInfo, 0 = none */
     int      fsinfo_done;
     uint32_t hint;                 /* where the next free-cluster search starts */
+    uint32_t nfree;                /* free clusters, once known (FSInfo, or counted for df) */
+    int      nfree_ok;
     char     label[12];
     uint32_t cache_idx[FATC];
     int      cache_ok[FATC], cache_dirty[FATC];
@@ -127,8 +130,13 @@ static int fat_set(fvol_t* v, uint32_t c, uint32_t val) {
     uint8_t* s = fat_sector(v, c * 4 / SEC, &slot);
     if (!s) return -1;
     uint8_t* p = s + (c * 4) % SEC;
+    uint32_t old = rd32(p) & FAT_MASK;
     wr32(p, (rd32(p) & ~FAT_MASK) | (val & FAT_MASK));
     v->cache_dirty[slot] = 1;
+    if (v->nfree_ok) {                   /* the free count follows (df) */
+        if (!old && (val & FAT_MASK) && v->nfree) v->nfree--;
+        else if (old && !(val & FAT_MASK)) v->nfree++;
+    }
     return 0;
 }
 
@@ -855,9 +863,14 @@ int fat32_mount(blockdev_t* bd, const char* path, char* err, int errcap) {
         return -1;
     }
     /* start looking for free clusters where the last session stopped */
-    if (v->fsinfo && dev_read(v, v->fsinfo, 1, v->sec) == 0 && rd32(v->sec) == 0x41615252u &&
-        valid_clus(v, rd32(v->sec + 492)))
-        v->hint = rd32(v->sec + 492);
+    if (v->fsinfo && dev_read(v, v->fsinfo, 1, v->sec) == 0 && rd32(v->sec) == 0x41615252u) {
+        if (valid_clus(v, rd32(v->sec + 492))) v->hint = rd32(v->sec + 492);
+        /* the free count the last system kept there, if it kept one */
+        if (rd32(v->sec + 484) == 0x61417272u && rd32(v->sec + 488) <= v->nclusters) {
+            v->nfree = rd32(v->sec + 488);
+            v->nfree_ok = 1;
+        }
+    }
     v->cbuf = (uint8_t*)kmalloc(v->clus_bytes);
     int root = new_node(v);
     if (!v->cbuf || root != 0) { kstrlcpy(err, "out of memory", (size_t)errcap); kfree(v->cbuf); kfree(v->nodes); kfree(v); return -1; }
@@ -886,6 +899,33 @@ int fat32_mount(blockdev_t* bd, const char* path, char* err, int errcap) {
     klog("fat32: %s (%s) mounted at %s - %u clusters of %u bytes%s\n", bd->name, v->label[0] ? v->label : "no label",
          where, v->nclusters, v->clus_bytes, v->skipped ? " (some entries did not fit)" : "");
     return mnt;
+}
+
+int fat32_space(int mnt, uint64_t* total, uint64_t* free_bytes) {
+    if (mnt <= 0 || mnt > FS_MAX_MOUNTS || !g_vols[mnt]) return 0;
+    fvol_t* v = g_vols[mnt];
+    if (!v->nfree_ok) {
+        /* count the free clusters once, 32 KiB of FAT at a time; kept up to date after that */
+        if (fat_flush(v) != 0) return 0;
+        uint8_t* buf = (uint8_t*)kmalloc(64 * SEC);
+        if (!buf) return 0;
+        uint32_t n = 0, last = v->nclusters + 1;
+        for (uint32_t sec = 0; sec * (SEC / 4) <= last; sec += 64) {
+            uint32_t cnt = v->fat_sectors - sec < 64 ? v->fat_sectors - sec : 64;
+            if (!cnt || dev_read(v, v->fat_lba + sec, cnt, buf) != 0) { kfree(buf); return 0; }
+            for (uint32_t k = 0; k < cnt * (SEC / 4); k++) {
+                uint32_t c = sec * (SEC / 4) + k;
+                if (c >= 2 && c <= last && (rd32(buf + k * 4) & FAT_MASK) == 0) n++;
+            }
+            task_maybe_yield();
+        }
+        kfree(buf);
+        v->nfree = n;
+        v->nfree_ok = 1;
+    }
+    *total = (uint64_t)v->nclusters * v->clus_bytes;
+    *free_bytes = (uint64_t)v->nfree * v->clus_bytes;
+    return 1;
 }
 
 int fat32_describe(int mnt, char* out, int cap) {

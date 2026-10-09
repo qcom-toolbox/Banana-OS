@@ -22,9 +22,14 @@ static inline void     outw(uint16_t p, uint16_t v) { __asm__ volatile("outw %0,
 #define ATA_SR_BSY  0x80
 
 #define ATA_CMD_READ_SECTORS  0x20
+#define ATA_CMD_READ_EXT      0x24
 #define ATA_CMD_WRITE_SECTORS 0x30
+#define ATA_CMD_WRITE_EXT     0x34
 #define ATA_CMD_CACHE_FLUSH   0xE7
+#define ATA_CMD_FLUSH_EXT     0xEA
 #define ATA_CMD_IDENTIFY      0xEC
+
+static uint8_t g_lba48[2][2];      /* [bus][slave]: the drive takes 48-bit LBAs */
 
 static uint16_t bus_io(int bus)   { return (bus == ATA_BUS_PRIMARY) ? 0x1F0 : 0x170; }
 static uint16_t bus_ctrl(int bus) { return (bus == ATA_BUS_PRIMARY) ? 0x3F6 : 0x376; }
@@ -115,6 +120,15 @@ static int identify_one(int bus, int is_slave, ata_disk_t* out) {
     out->present  = 1;
     out->is_atapi = 0;
     out->sectors  = ((uint32_t)ident[61] << 16) | ident[60]; /* LBA28 total sectors */
+    /* 48-bit addressing (word 83 bit 10): disks past 128 GB, whole (up to 2 TB here) */
+    g_lba48[bus & 1][is_slave & 1] = 0;
+    if ((ident[83] & (1u << 10)) && (ident[83] & 0xC000) == 0x4000) {
+        uint64_t s48 = (uint64_t)ident[100] | (uint64_t)ident[101] << 16 | (uint64_t)ident[102] << 32 | (uint64_t)ident[103] << 48;
+        if (s48 > out->sectors) {
+            out->sectors = s48 > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)s48;
+            g_lba48[bus & 1][is_slave & 1] = 1;
+        }
+    }
 
     for (int i = 0; i < 20; i++) {
         uint16_t w = ident[27 + i];
@@ -151,11 +165,36 @@ static void setup_lba28(int bus, int is_slave, uint32_t lba, uint8_t count) {
     outb(io + ATA_REG_LBA2, (uint8_t)((lba >> 16) & 0xFF));
 }
 
+/* LBA48: the high bytes go first into the same registers (they are FIFOs) */
+static void setup_lba48(int bus, int is_slave, uint32_t lba, uint8_t count) {
+    uint16_t io = bus_io(bus);
+    select_drive(bus, is_slave);
+    outb(io + ATA_REG_HDDEVSEL, (uint8_t)(0x40 | (is_slave ? 0x10 : 0x00)));
+    outb(io + ATA_REG_SECCOUNT0, 0);                         /* count bits 8-15 */
+    outb(io + ATA_REG_LBA0, (uint8_t)(lba >> 24));
+    outb(io + ATA_REG_LBA1, 0);                              /* LBA bits 32-47 */
+    outb(io + ATA_REG_LBA2, 0);
+    outb(io + ATA_REG_SECCOUNT0, count);
+    outb(io + ATA_REG_LBA0, (uint8_t)(lba & 0xFF));
+    outb(io + ATA_REG_LBA1, (uint8_t)((lba >> 8) & 0xFF));
+    outb(io + ATA_REG_LBA2, (uint8_t)((lba >> 16) & 0xFF));
+}
+
+/* past the 28-bit range (128 GB) with a drive that has 48-bit commands */
+static int use48(int bus, int is_slave, uint32_t lba, uint8_t count) {
+    return g_lba48[bus & 1][is_slave & 1] && (uint64_t)lba + count > 0x0FFFFFFFu;
+}
+
 int ata_read_sectors(int bus, int is_slave, uint32_t lba, uint8_t count, void* buf) {
     if (count == 0 || !buf) return -1;
     uint16_t io = bus_io(bus);
-    setup_lba28(bus, is_slave, lba, count);
-    outb(io + ATA_REG_COMMAND, ATA_CMD_READ_SECTORS);
+    if (use48(bus, is_slave, lba, count)) {
+        setup_lba48(bus, is_slave, lba, count);
+        outb(io + ATA_REG_COMMAND, ATA_CMD_READ_EXT);
+    } else {
+        setup_lba28(bus, is_slave, lba, count);
+        outb(io + ATA_REG_COMMAND, ATA_CMD_READ_SECTORS);
+    }
 
     uint16_t* dst = (uint16_t*)buf;
     for (int s = 0; s < count; s++) {
@@ -168,8 +207,14 @@ int ata_read_sectors(int bus, int is_slave, uint32_t lba, uint8_t count, void* b
 int ata_write_sectors(int bus, int is_slave, uint32_t lba, uint8_t count, const void* buf) {
     if (count == 0 || !buf) return -1;
     uint16_t io = bus_io(bus);
-    setup_lba28(bus, is_slave, lba, count);
-    outb(io + ATA_REG_COMMAND, ATA_CMD_WRITE_SECTORS);
+    int ext = use48(bus, is_slave, lba, count);
+    if (ext) {
+        setup_lba48(bus, is_slave, lba, count);
+        outb(io + ATA_REG_COMMAND, ATA_CMD_WRITE_EXT);
+    } else {
+        setup_lba28(bus, is_slave, lba, count);
+        outb(io + ATA_REG_COMMAND, ATA_CMD_WRITE_SECTORS);
+    }
 
     const uint16_t* src = (const uint16_t*)buf;
     for (int s = 0; s < count; s++) {
@@ -177,7 +222,7 @@ int ata_write_sectors(int bus, int is_slave, uint32_t lba, uint8_t count, const 
         for (int w = 0; w < 256; w++) outw(io + ATA_REG_DATA, src[s * 256 + w]);
     }
 
-    outb(io + ATA_REG_COMMAND, ATA_CMD_CACHE_FLUSH);
+    outb(io + ATA_REG_COMMAND, ext ? ATA_CMD_FLUSH_EXT : ATA_CMD_CACHE_FLUSH);
     if (wait_not_busy(io, 1000000) < 0) return -1;
     return 0;
 }

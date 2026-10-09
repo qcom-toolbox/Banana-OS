@@ -3,13 +3,14 @@
 
 #include "types.h"
 
-#define FS_MAX_FILES     1024
-#define FS_MAX_DIRS      256
+/* The tables grow as they fill (256 entries at a time), up to these. */
+#define FS_MAX_FILES     65536
+#define FS_MAX_DIRS      16384
 #define FS_NAME_LEN      32
 #define FS_PATH_LEN      128
-/* Largest single file (downloads, images). File data lives on the
- * kernel heap, so the practical limit is free RAM. */
-#define FS_MAX_FILE_SIZE (32u * 1024u * 1024u)
+/* Largest single file (downloads, images, videos). The data of a file in
+ * use lives on the kernel heap, so the practical limit is free RAM. */
+#define FS_MAX_FILE_SIZE (128u * 1024u * 1024u)
 
 typedef struct {
     char     name[FS_NAME_LEN];
@@ -19,9 +20,12 @@ typedef struct {
     int      used;
     int      parent_dir; /* index into dirs[] */
     uint16_t mnt;        /* 0, or the mount (USB stick, ...) the file lives on */
-    uint8_t  loaded;     /* mounted files: content read in yet */
+    uint8_t  loaded;     /* content read in yet (files on a stick or the installed disk: on first use) */
+    uint8_t  loading;    /* being read in right now */
     uint32_t node;       /* the mount driver's handle for it */
     uint32_t data_gen;   /* fs_generation() of the last change to its data (kernel/fsdisk.c) */
+    int32_t  hnext;      /* next in its name-hash bucket (-2: not linked) */
+    int32_t  sib;        /* next file in the same folder */
 } fs_file_t;
 
 typedef struct {
@@ -30,6 +34,10 @@ typedef struct {
     int      parent_dir; /* -1 = root */
     uint16_t mnt;        /* 0, or the mount it belongs to (its root dir included) */
     uint32_t node;
+    int32_t  hnext;      /* next in its name-hash bucket (-2: not linked) */
+    int32_t  sib;        /* next folder in the same folder */
+    int32_t  kid_dir, last_dir;     /* its subfolders, in creation order */
+    int32_t  kid_file, last_file;   /* its files */
 } fs_dir_t;
 
 void fs_init(void);
@@ -88,7 +96,11 @@ uint32_t fs_used_files(void);
 uint32_t fs_used_dirs(void);
 uint32_t fs_max_files(void);
 uint32_t fs_max_dirs(void);
+/* file data held in RAM right now, and the tables */
 uint32_t fs_ram_used_bytes(void);
+/* table slots made so far: valid indexes are below these */
+int fs_file_slots(void);
+int fs_dir_slots(void);
 
 /* ── on-disk persistence (see kernel/fsdisk.c) ──────────────────────
  * Serialize/restore the whole tree as an opaque blob - fsdisk.c writes/
@@ -118,7 +130,11 @@ int  fs_home_dir(void);
 void fs_restore_begin(void);
 void fs_restore_dir(int idx, const char* name, int parent);
 int  fs_restore_file(int idx, const char* name, int parent, const void* data, uint32_t size);
+/* the same with the data left on the disk: read in on first use */
+int  fs_restore_file_lazy(int idx, const char* name, int parent, uint32_t size);
 void fs_restore_end(int home);
+/* reads the saved data of file idx (size bytes) into buf: 0, or -1 (damaged, I/O) */
+void fs_set_disk_reader(int (*read)(int idx, uint8_t* buf, uint32_t size));
 
 /* ── mounts (kernel/fat32.c) ─────────────────────────────────────────
  * Another filesystem's tree is mirrored under a directory: its folders
