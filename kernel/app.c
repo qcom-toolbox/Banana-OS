@@ -407,13 +407,10 @@ static long a_read(int fd, void* buf, unsigned long len) {
     }
     afd_t* f = get_fd(p, fd);
     if (!f) return -1;
-    fs_file_t* ff = fs_get_file(f->fidx);
-    if (!ff) return -1;
-    if (f->pos >= ff->size) return 0;
-    uint32_t n = ff->size - f->pos;
-    if (n > len) n = (uint32_t)len;
-    memcpy(buf, ff->content + f->pos, n);
-    f->pos += n;
+    /* the part asked for only: a big file on the disk is not read whole */
+    int n = fs_read(f->fidx, f->pos, buf, len > 0x7FFFFFFFul ? 0x7FFFFFFFu : (uint32_t)len);
+    if (n < 0) return -1;
+    f->pos += (uint32_t)n;
     breathe(p, 0);
     return (long)n;
 }
@@ -1196,8 +1193,10 @@ static app_proc_t* prepare(const char* path, int argc, char** argv, char* err, i
     p->id = id;
     fs_file_t* f = fs_get_file(fi);
     if (!f) { kstrlcpy(err, "cannot read it", (size_t)ecap); return NULL; }
-    if (load_elf((const uint8_t*)f->content, f->size, &p->image, &p->entry, &p->base, &p->code_lo, &p->code_hi, err, ecap) != 0)
-        return NULL;
+    fs_pin(fi);
+    int bad = load_elf((const uint8_t*)f->content, f->size, &p->image, &p->entry, &p->base, &p->code_lo, &p->code_hi, err, ecap) != 0;
+    fs_unpin(fi);
+    if (bad) return NULL;
     p->stack_mem = (uint8_t*)kmalloc(APP_GUARD + APP_STACK + 4096);
     if (p->stack_mem) {
         p->guard = (uint8_t*)(((uintptr_t)p->stack_mem + 4095) & ~(uintptr_t)4095);

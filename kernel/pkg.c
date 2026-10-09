@@ -110,7 +110,10 @@ int pkg_inspect(const char* bpk_path, pkg_info_t* out, char* err, int ecap) {
     if (fi < 0) { kstrlcpy(err, "no such file", (size_t)ecap); return -1; }
     fs_file_t* f = fs_get_file(fi);
     if (!f) { kstrlcpy(err, "cannot read the file", (size_t)ecap); return -1; }
-    return inspect_data((const uint8_t*)f->content, f->size, out, err, ecap);
+    fs_pin(fi);
+    int rc = inspect_data((const uint8_t*)f->content, f->size, out, err, ecap);
+    fs_unpin(fi);
+    return rc;
 }
 
 static void app_dir(const char* name, char* out, int cap) {

@@ -26,6 +26,8 @@ typedef struct {
     uint32_t data_gen;   /* fs_generation() of the last change to its data (kernel/fsdisk.c) */
     int32_t  hnext;      /* next in its name-hash bucket (-2: not linked) */
     int32_t  sib;        /* next file in the same folder */
+    uint32_t last_use;   /* timer_ms() it was last used (eviction takes the oldest first) */
+    uint16_t pins;       /* held by someone for a while (fs_pin): never evicted */
 } fs_file_t;
 
 typedef struct {
@@ -133,8 +135,36 @@ int  fs_restore_file(int idx, const char* name, int parent, const void* data, ui
 /* the same with the data left on the disk: read in on first use */
 int  fs_restore_file_lazy(int idx, const char* name, int parent, uint32_t size);
 void fs_restore_end(int home);
-/* reads the saved data of file idx (size bytes) into buf: 0, or -1 (damaged, I/O) */
-void fs_set_disk_reader(int (*read)(int idx, uint8_t* buf, uint32_t size));
+/* the installed disk (kernel/fsdisk.c): read reads the saved data of file
+ * idx (size bytes, checked), read_range a part of it, clean says whether
+ * the saved copy is the file as it is now (data_gen) - 0 / -1, 1 / 0 */
+void fs_set_disk_ops(int (*read)(int idx, uint8_t* buf, uint32_t size),
+                     int (*read_range)(int idx, uint32_t off, uint8_t* buf, uint32_t len),
+                     int (*clean)(int idx, uint32_t data_gen));
+
+/* ── files bigger than the RAM, and a cache that gives memory back ─────
+ * Like other systems, Banana OS keeps file data in RAM as a cache: a file
+ * is read in when used, and when memory runs low the files used longest
+ * ago are dropped from RAM again - only files whose copy on the disk or
+ * the stick is up to date (a changed file is saved first), never one
+ * pinned. A dropped file is read in again the next time it is used. */
+
+/* len bytes at off into buf: the bytes read (0 at the end), or -1. A big
+ * file on the installed disk is read in pieces, straight from the disk -
+ * it never has to fit in RAM (apps, the music player). */
+int  fs_read(int idx, uint32_t off, void* buf, uint32_t len);
+/* while pinned, a file's data (fs_get_file()->content) is not dropped:
+ * for those who hold it while other tasks run (decoding a picture, a
+ * web server sending it) */
+void fs_pin(int idx);
+void fs_unpin(int idx);
+/* drops files unused for min_idle_ms, oldest first, until want bytes are
+ * free in one block (kheap_largest_free); returns the bytes dropped */
+uint32_t fs_evict(uint32_t want, uint32_t min_idle_ms);
+/* called now and then (the autosave task): keeps some RAM free */
+void fs_trim(void);
+/* file data in RAM that could be dropped right now (for "available") */
+uint32_t fs_evictable_bytes(void);
 
 /* ── mounts (kernel/fat32.c) ─────────────────────────────────────────
  * Another filesystem's tree is mirrored under a directory: its folders

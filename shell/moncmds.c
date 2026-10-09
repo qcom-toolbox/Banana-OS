@@ -55,7 +55,7 @@ static void cmd_free(int argc, char** argv) {
     amount((uint64_t)m.used_kb << 10, shift, u, sizeof(u));
     amount((uint64_t)m.free_kb << 10, shift, f, sizeof(f));
     amount((uint64_t)m.files_kb << 10, shift, fi, sizeof(fi));
-    amount((uint64_t)m.free_kb << 10, shift, a, sizeof(a));
+    amount((uint64_t)m.avail_kb << 10, shift, a, sizeof(a));
     terminal_write_color("               total        used        free       files   available\n",
                          VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     ksnprintf(line, sizeof(line), "Mem:    %12s%12s%12s%12s%12s", t, u, f, fi, a);

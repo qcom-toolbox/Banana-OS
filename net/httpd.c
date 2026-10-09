@@ -308,7 +308,9 @@ static void handle(tcp_conn_t* c) {
             } else if (fidx >= 0) {
                 fs_file_t* f = fs_get_file(fidx);
                 code = 200;
+                fs_pin(fidx);              /* (kept in RAM while it is sent) */
                 send_response(c, head_only, 200, "OK", content_type(f->name, fidx), f->content, f->size, NULL);
+                fs_unpin(fidx);
             } else if (fs_find_dir(fspath) >= 0) {
                 if (path[strlen(path) - 1] != '/') {
                     /* folder without the trailing slash: relative links need it */
@@ -327,7 +329,9 @@ static void handle(tcp_conn_t* c) {
                         code = serve_php(c, head_only, req, method, target, path, pindex, ipstr);
                     } else if (iidx >= 0) {
                         fs_file_t* f = fs_get_file(iidx);
+                        fs_pin(iidx);
                         send_response(c, head_only, 200, "OK", "text/html; charset=utf-8", f->content, f->size, NULL);
+                        fs_unpin(iidx);
                     } else {
                         send_listing(c, head_only, path, fspath);
                     }

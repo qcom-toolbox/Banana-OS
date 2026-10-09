@@ -1,5 +1,6 @@
 #include "kheap.h"
 #include "kstring.h"
+#include "smp.h"
 
 /* Every block (free or used) starts with this header; blocks tile the
  * whole heap in address order, so neighbours are found through prev/next
@@ -130,9 +131,7 @@ static void merge_next(block_t* b) {
     if (n->next) n->next->prev = b;
 }
 
-void* kmalloc(size_t size) {
-    if (!g_head || size == 0 || size > 0xF0000000u) return NULL;
-    uint32_t need = align_up((uint32_t)size, ALIGN);
+static void* find_fit(uint32_t need) {
     for (block_t* b = g_head; b; b = b->next) {
         if (b->used || b->size < need) continue;
         split(b, need);
@@ -141,6 +140,32 @@ void* kmalloc(size_t size) {
         return (uint8_t*)b + HDR;
     }
     return NULL;
+}
+
+/* what gives memory back when it runs out: files cached in RAM (fs.c) */
+static uint32_t (*g_reclaim)(uint32_t need);
+static int g_reclaiming;
+void kheap_set_reclaim(uint32_t (*reclaim)(uint32_t need)) { g_reclaim = reclaim; }
+
+/* only from ordinary kernel code on the boot core: not in an interrupt
+ * handler (interrupts off), where the file tables may be half-changed */
+static int may_reclaim(void) {
+    uintptr_t fl;
+    __asm__ volatile("pushf; pop %0" : "=r"(fl));
+    return g_reclaim && !g_reclaiming && (fl & 0x200) && cpu_id() == 0;
+}
+
+void* kmalloc(size_t size) {
+    if (!g_head || size == 0 || size > 0xF0000000u) return NULL;
+    uint32_t need = align_up((uint32_t)size, ALIGN);
+    void* p = find_fit(need);
+    if (!p && may_reclaim()) {
+        g_reclaiming = 1;
+        g_reclaim(need + HDR);
+        g_reclaiming = 0;
+        p = find_fit(need);
+    }
+    return p;
 }
 
 void* kzalloc(size_t size) {

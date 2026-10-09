@@ -852,6 +852,55 @@ static int v5_read_file(int idx, uint8_t* buf, uint32_t size) {
     return 0;
 }
 
+/* Part of a file, straight from its extent (big files: apps, music). Read
+ * 64 KiB at a time into a read-ahead buffer, so reading a file in small
+ * steps costs one disk command per 64 KiB. (The file's checksum covers it
+ * whole: a part cannot be checked.) */
+#define RA_BYTES (64u * 1024u)
+static uint8_t* g_ra;
+static int      g_ra_idx = -1;
+static uint32_t g_ra_lba, g_ra_off, g_ra_len;
+
+static int v5_read_range(int idx, uint32_t off, uint8_t* buf, uint32_t len) {
+    if (!g_v5 || !g_have_target || idx < 0 || idx >= g_nrecs) return -1;
+    v5_rec_t r = g_rec[idx];
+    if (!r.valid || off > r.size || len > r.size - off) return -1;
+    if (!g_ra && !(g_ra = (uint8_t*)kmalloc(RA_BYTES))) return -1;
+    while (len) {
+        if (g_ra_idx == idx && g_ra_lba == r.lba && off >= g_ra_off && off < g_ra_off + g_ra_len) {
+            uint32_t n = g_ra_off + g_ra_len - off;
+            if (n > len) n = len;
+            memcpy(buf, g_ra + (off - g_ra_off), n);
+            buf += n;
+            off += n;
+            len -= n;
+            continue;
+        }
+        /* the 64 KiB from the sector holding off (the extent is whole 4 KiB blocks) */
+        uint32_t start = off & ~(FSDISK_SECTOR - 1u), n = r.size - start;
+        if (n > RA_BYTES) n = RA_BYTES;
+        g_ra_idx = -1;
+        dlock();
+        int rc = disk_read(&g_target, r.lba + start / FSDISK_SECTOR, bytes_to_sectors(n), g_ra);
+        dunlock();
+        if (rc != 0) return -1;
+        g_ra_idx = idx;
+        g_ra_lba = r.lba;
+        g_ra_off = start;
+        g_ra_len = n;
+    }
+    return 0;
+}
+
+/* the saved copy is the file as it is now: its RAM copy can be dropped */
+static int v5_clean(int idx, uint32_t data_gen) {
+    return g_v5 && idx >= 0 && idx < g_nrecs && g_rec[idx].valid && g_rec[idx].gen == data_gen;
+}
+
+static void set_disk_ops(void) {
+    fs_set_disk_ops(v5_read_file, v5_read_range, v5_clean);
+}
+
 /* A layout-5 disk: the newest good metadata (and every file) loaded.
  * 1 loaded, 0 not layout 5, -1 layout 5 but no metadata could be read. */
 static int v5_try_load(const ata_disk_t* d) {
@@ -878,7 +927,7 @@ static int v5_try_load(const ata_disk_t* d) {
     for (int s = 0; s < 2; s++) if (body[s]) kfree(body[s]);
     if (rc == 1) {
         g_v5 = 1;
-        fs_set_disk_reader(v5_read_file);
+        set_disk_ops();
     }
     return rc;
 }
@@ -890,7 +939,16 @@ static int v5_write_file(const ata_disk_t* d, v5_rec_t* rec, const uint8_t* data
     if (!rec->sectors) { rec->lba = 0; return FSDISK_OK; }
     rec->lba = ext_alloc(rec->sectors);
     if (!rec->lba) { rec->sectors = 0; return FSDISK_ERR_FULL; }
-    return write_chunked(d, rec->lba, rec->sectors, data) == 0 ? FSDISK_OK : FSDISK_ERR_IO;
+    /* the data's own sectors (not a byte past it: it is the file's buffer), the last one padded */
+    uint32_t full = rec->size / FSDISK_SECTOR, tail = rec->size % FSDISK_SECTOR;
+    if (full && write_chunked(d, rec->lba, full, data) != 0) return FSDISK_ERR_IO;
+    if (tail) {
+        uint8_t sec[FSDISK_SECTOR];
+        memset(sec, 0, sizeof(sec));
+        memcpy(sec, data + full * FSDISK_SECTOR, tail);
+        if (locked_write(d, rec->lba + full, 1, sec) != 0) return FSDISK_ERR_IO;
+    }
+    return FSDISK_OK;
 }
 
 /* A save: the changed files, then the metadata (see above). The tree is
@@ -902,10 +960,9 @@ static int v5_sync(const ata_disk_t* d) {
     uint32_t body_sect = bytes_to_sectors(4u + (uint32_t)nds * V5_DIR_REC + 8u + (uint32_t)nfs * V5_FILE_REC);
     if (rec_grow(nfs) != 0) return FSDISK_ERR_IO;
     uint8_t* meta = (uint8_t*)kzalloc((1u + body_sect) * FSDISK_SECTOR);
-    uint8_t** copy = (uint8_t**)kzalloc((size_t)(nfs + 1) * sizeof(uint8_t*));
     uint32_t* rec_off = (uint32_t*)kzalloc((size_t)(nfs + 1) * sizeof(uint32_t));
     v5_rec_t* g_nrec = (v5_rec_t*)kzalloc((size_t)(nfs + 1) * sizeof(v5_rec_t));   /* the save being written */
-    if (!meta || !copy || !rec_off || !g_nrec) { kfree(meta); kfree(copy); kfree(rec_off); kfree(g_nrec); return FSDISK_ERR_IO; }
+    if (!meta || !rec_off || !g_nrec) { kfree(meta); kfree(rec_off); kfree(g_nrec); return FSDISK_ERR_IO; }
     uint8_t* b = meta + FSDISK_SECTOR;
     int rc = FSDISK_OK;
 
@@ -934,16 +991,9 @@ static int v5_sync(const ata_disk_t* d) {
         } else if (!f->loaded) {
             continue;                                       /* (no data to save: never read in) */
         } else {
-            n->valid = 1;
+            n->valid = 1;                                   /* changed: written in step 2 */
             n->gen = f->data_gen;
             n->size = f->size;
-            uint32_t sectors = v5_sectors_for(f->size);
-            if (sectors) {
-                copy[i] = (uint8_t*)kmalloc(sectors * FSDISK_SECTOR);
-                if (!copy[i]) { rc = FSDISK_ERR_IO; break; }
-                memcpy(copy[i], f->content, f->size);
-                memset(copy[i] + f->size, 0, sectors * FSDISK_SECTOR - f->size);
-            }
         }
         uint8_t* r = b + off;
         wr32(r, (uint32_t)i);
@@ -957,11 +1007,25 @@ static int v5_sync(const ata_disk_t* d) {
     wr32(b + nf_off, nf);
     uint32_t body_bytes = off;
 
-    /* 2. the changed files, each into a new extent (the other tasks run in between) */
+    /* 2. the changed files, each into a new extent (the other tasks run in
+     * between). Written straight from the file's RAM - no copy, which would
+     * need as much memory again: while one is written it counts as being
+     * loaded, so a change to it waits (reading it does not). */
     for (int i = 0; i < nfs && rc == FSDISK_OK; i++) {
         v5_rec_t* n = &g_nrec[i];
         if (!n->valid || (g_rec[i].valid && g_rec[i].gen == n->gen)) continue;
-        rc = v5_write_file(d, n, copy[i] ? copy[i] : (const uint8_t*)"");
+        fs_file_t* f = fs_file_info(i);
+        if (!f || !f->used || f->mnt || !f->loaded || f->loading || f->data_gen != n->gen) {
+            /* changed again (or deleted) while the files before it were written:
+             * this save keeps its last saved copy, the next one writes it */
+            if (g_rec[i].valid) *n = g_rec[i];
+            else { n->size = 0; n->gen = 0; rc = v5_write_file(d, n, (const uint8_t*)""); }
+        } else {
+            f->loading = 1;
+            rc = v5_write_file(d, n, (const uint8_t*)f->content);
+            f->loading = 0;
+        }
+        wr32(b + rec_off[i] + 4 + FS_NAME_LEN + 4, n->size);
         task_yield();
     }
     uint32_t new_body_lba = 0, new_body_sect = 0;
@@ -1036,13 +1100,12 @@ static int v5_sync(const ata_disk_t* d) {
         } else if (fresh) {
             ext_remove(n->lba, n->sectors);
         }
-        if (copy[i]) kfree(copy[i]);
     }
-    kfree(copy);
     kfree(rec_off);
     kfree(g_nrec);
     kfree(meta);
     if (rc == FSDISK_OK) g_synced_gen = gen;
+    g_ra_idx = -1;                          /* (extents were freed: the read-ahead may be stale) */
     return rc;
 }
 
@@ -1071,7 +1134,7 @@ static int v5_format(const ata_disk_t* d, uint32_t keep_lba, uint32_t keep_sect)
     memcpy(zero, &m, sizeof(m));
     if (disk_write(d, V4_BASE_LBA, 1, zero) != 0 || disk_flush(d) != 0) return FSDISK_ERR_IO;
     g_v5 = 1;
-    fs_set_disk_reader(v5_read_file);
+    set_disk_ops();
     return FSDISK_OK;
 }
 
@@ -1182,11 +1245,18 @@ static void autosave_task(void) {
     int warned = 0;
     for (;;) {
         task_sleep_ms(500);
+        fs_trim();                              /* RAM low: cached file data goes */
         if (!g_have_target) continue;
         uint32_t gen = fs_generation();
         if (gen == g_synced_gen) { warned = 0; continue; }
-        if (gen != seen) { seen = gen; changed_at = timer_ms(); continue; }   /* still changing */
-        if (timer_ms() - changed_at < AUTOSAVE_QUIET_MS) continue;
+        /* RAM running low: save now, even while things change - a saved file's
+         * RAM can be given back, an unsaved one's cannot (a long download) */
+        uint32_t total = kheap_total_bytes();
+        int low = total - kheap_used_bytes() < total / 8;
+        if (!low) {
+            if (gen != seen) { seen = gen; changed_at = timer_ms(); continue; }   /* still changing */
+            if (timer_ms() - changed_at < AUTOSAVE_QUIET_MS) continue;
+        }
         if ((int32_t)(timer_ms() - retry_at) < 0) continue;
         int rc = fsdisk_sync();
         if (rc != FSDISK_OK) {

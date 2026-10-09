@@ -127,7 +127,10 @@ static int set_file_at(const char* path, image_mode_t mode, int w, int h, char* 
     fs_file_t* f = fs_get_file(idx);
 
     image_t img;
-    if (image_decode((const uint8_t*)f->content, f->size, &img, err, errlen) != 0) return -1;
+    fs_pin(idx);                         /* (decoding a big photo takes a while) */
+    int bad = image_decode((const uint8_t*)f->content, f->size, &img, err, errlen) != 0;
+    fs_unpin(idx);
+    if (bad) return -1;
     uint32_t* px = (uint32_t*)kmalloc((uint32_t)w * (uint32_t)h * 4u);
     if (!px) {
         image_free(&img);

@@ -708,23 +708,28 @@ int audio_play_wav(const char* path, char* err, int ecap) {
     if (!g_card) { kstrlcpy(err, "no sound card (try QEMU -device intel-hda -device hda-output, or -device AC97)", (size_t)ecap); return -1; }
     int fi = fs_find_file(path);
     if (fi < 0) { kstrlcpy(err, "no such file", (size_t)ecap); return -1; }
-    fs_file_t* f = fs_get_file(fi);
+    fs_file_t* f = fs_file_info(fi);
     if (!f) { kstrlcpy(err, "cannot read it", (size_t)ecap); return -1; }
-    const uint8_t* d = (const uint8_t*)f->content;
     uint32_t size = f->size;
-    if (size < 12 || memcmp(d, "RIFF", 4) != 0 || memcmp(d + 8, "WAVE", 4) != 0) { kstrlcpy(err, "not a .wav file", (size_t)ecap); return -1; }
+    uint8_t h[24];
+    if (size < 12 || fs_read(fi, 0, h, 12) != 12 || memcmp(h, "RIFF", 4) != 0 || memcmp(h + 8, "WAVE", 4) != 0) {
+        kstrlcpy(err, "not a .wav file", (size_t)ecap);
+        return -1;
+    }
+    /* the chunks, read one header at a time */
     int ch = 0, bits = 0, rate = 0, fmt = 0;
-    const uint8_t* data = NULL;
-    uint32_t dlen = 0;
+    uint32_t data = 0, dlen = 0;
     for (uint32_t off = 12; off + 8 <= size;) {
-        uint32_t clen = rd32(d + off + 4);
-        if (memcmp(d + off, "fmt ", 4) == 0 && clen >= 16 && off + 8 + 16 <= size) {
-            fmt = rd16(d + off + 8);
-            ch = rd16(d + off + 10);
-            rate = (int)rd32(d + off + 12);
-            bits = rd16(d + off + 22);
-        } else if (memcmp(d + off, "data", 4) == 0) {
-            data = d + off + 8;
+        if (fs_read(fi, off, h, 8) != 8) break;
+        uint32_t clen = rd32(h + 4);
+        if (memcmp(h, "fmt ", 4) == 0 && clen >= 16 && off + 8 + 16 <= size) {
+            if (fs_read(fi, off + 8, h + 8, 16) != 16) break;
+            fmt = rd16(h + 8);
+            ch = rd16(h + 10);
+            rate = (int)rd32(h + 12);
+            bits = rd16(h + 22);
+        } else if (memcmp(h, "data", 4) == 0) {
+            data = off + 8;
             dlen = clen > size - off - 8 ? size - off - 8 : clen;
             break;
         }
@@ -732,12 +737,21 @@ int audio_play_wav(const char* path, char* err, int ecap) {
     }
     if (fmt != 1) { kstrlcpy(err, "only uncompressed PCM .wav files", (size_t)ecap); return -1; }
     if (!data || (bits != 8 && bits != 16) || ch < 1 || ch > 2) { kstrlcpy(err, "8/16-bit mono/stereo PCM only", (size_t)ecap); return -1; }
-    /* the file may change while it plays (it is queued in pieces): copy it */
-    uint8_t* copy = (uint8_t*)kmalloc(dlen);
-    if (!copy) { kstrlcpy(err, "out of memory", (size_t)ecap); return -1; }
-    memcpy(copy, data, dlen);
-    int rc = audio_play(copy, dlen, rate, ch, bits);
-    kfree(copy);
+    /* Streamed, 64 KiB at a time: a song of any length plays without being
+     * read whole into RAM (audio_play returns once a piece is queued, so
+     * the next is read while the sound card plays the one before). */
+    uint32_t fsz = (uint32_t)(ch * bits / 8), piece = (65536u / fsz) * fsz;
+    uint8_t* buf = (uint8_t*)kmalloc(piece);
+    if (!buf) { kstrlcpy(err, "out of memory", (size_t)ecap); return -1; }
+    int rc = 0;
+    for (uint32_t done = 0; done < dlen && rc == 0;) {
+        uint32_t n = dlen - done < piece ? dlen - done : piece;
+        int got = fs_read(fi, data + done, buf, n);
+        if (got <= 0) { if (got < 0) { kstrlcpy(err, "cannot read it", (size_t)ecap); rc = -1; } break; }
+        rc = audio_play(buf, (uint32_t)got, rate, ch, bits);
+        done += (uint32_t)got;
+    }
+    kfree(buf);
     return rc;
 }
 

@@ -980,8 +980,10 @@ static void cmd_cat(const char* name) {
         terminal_writeln(" bytes) - not printed");
         return;
     }
+    fs_pin(idx);                   /* (a long file prints for a while: kept in RAM meanwhile) */
     terminal_write(f->content);
     if (f->content[f->size - 1] != '\n') terminal_putchar('\n');
+    fs_unpin(idx);
 }
 
 static void cmd_run(const char* name, int persona) {
@@ -1001,7 +1003,9 @@ static void cmd_run(const char* name, int persona) {
         return;
     }
     fs_file_t* f = fs_get_file(idx);
+    fs_pin(idx);                   /* the script stays in RAM while its commands run */
     run_script_text(f->content, persona);
+    fs_unpin(idx);
 }
 
 /* ── text-processing / discovery utilities ─────────────────────── */
@@ -1108,8 +1112,10 @@ static void cmd_head(const char* args) {
         return;
     }
     fs_file_t* f = fs_get_file(idx);
+    fs_pin(idx);
     uint32_t total = count_lines(f->content);
     print_line_range(f->content, 0, (n < total) ? n : total);
+    fs_unpin(idx);
 }
 
 static void cmd_tail(const char* args) {
@@ -1138,9 +1144,11 @@ static void cmd_tail(const char* args) {
         return;
     }
     fs_file_t* f = fs_get_file(idx);
+    fs_pin(idx);
     uint32_t total = count_lines(f->content);
     uint32_t from = (total > n) ? total - n : 0;
     print_line_range(f->content, from, total);
+    fs_unpin(idx);
 }
 
 static void cmd_grep(const char* args) {
@@ -1165,6 +1173,7 @@ static void cmd_grep(const char* args) {
         return;
     }
     fs_file_t* f = fs_get_file(idx);
+    fs_pin(idx);
 
     char line[256];
     int lp = 0;
@@ -1188,6 +1197,7 @@ static void cmd_grep(const char* args) {
         }
         if (lp < (int)sizeof(line) - 1) line[lp++] = ch;
     }
+    fs_unpin(idx);
 }
 
 static void cmd_find(const char* args) {
@@ -2411,7 +2421,9 @@ static void run_init_file(int persona) {
         return;
     }
     fs_file_t* f = fs_get_file(idx);
+    fs_pin(idx);
     if (f && f->content) run_script_text(f->content, persona);
+    fs_unpin(idx);
 }
 
 /* ── entry ──────────────────────────────────────────────────────── */

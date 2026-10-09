@@ -13,6 +13,7 @@ void meminfo_get(meminfo_t* m) {
     m->used_kb = m->kernel_kb + ((heap_used + 1023u) >> 10);
     m->free_kb = (heap_total - heap_used) >> 10;
     m->files_kb = (fs_ram_used_bytes() + 1023u) >> 10;
+    m->avail_kb = m->free_kb + (fs_evictable_bytes() >> 10);
     m->largest_kb = kheap_largest_free() >> 10;
     m->installed_kb = sysinfo_get()->mem_kb;
     if (m->installed_kb < m->total_kb) m->installed_kb = m->total_kb;

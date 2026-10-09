@@ -19,4 +19,8 @@ uint32_t kheap_total_bytes(void);
 uint32_t kheap_used_bytes(void);
 uint32_t kheap_largest_free(void);
 
+/* called when an allocation finds no room, to free some (need: bytes in
+ * one block) before it tries again - fs.c drops cached file data */
+void kheap_set_reclaim(uint32_t (*reclaim)(uint32_t need));
+
 #endif

@@ -52,7 +52,7 @@ static void cmd_list(void) {
     int idx[64];
     int n = fs_list_files(WALLPAPER_DIR, idx, 64), shown = 0;
     for (int i = 0; i < n && i < 64; i++) {
-        fs_file_t* f = fs_get_file(idx[i]);
+        fs_file_t* f = fs_file_info(idx[i]);           /* (name and size: the picture is not read) */
         if (!wallpaper_is_image_name(f->name)) continue;
         char path[FS_PATH_LEN];
         fs_file_path(idx[i], path, sizeof(path));

@@ -5,6 +5,7 @@
 #include "kstring.h"
 #include "serial.h"
 #include "task.h"
+#include "timer.h"
 
 #define FS_HOME_PATH "/home/banana"
 
@@ -276,9 +277,20 @@ static void settle(fs_file_t* f) {
     while (f->loading) task_sleep_ms(1);
 }
 
-/* reads a file kept on the installed disk (kernel/fsdisk.c) */
+/* files kept on the installed disk (kernel/fsdisk.c) */
 static int (*g_disk_read)(int idx, uint8_t* buf, uint32_t size);
-void fs_set_disk_reader(int (*read)(int idx, uint8_t* buf, uint32_t size)) { g_disk_read = read; }
+static int (*g_disk_read_range)(int idx, uint32_t off, uint8_t* buf, uint32_t len);
+static int (*g_disk_clean)(int idx, uint32_t data_gen);
+void fs_set_disk_ops(int (*read)(int idx, uint8_t* buf, uint32_t size),
+                     int (*read_range)(int idx, uint32_t off, uint8_t* buf, uint32_t len),
+                     int (*clean)(int idx, uint32_t data_gen)) {
+    g_disk_read = read;
+    g_disk_read_range = read_range;
+    g_disk_clean = clean;
+}
+
+/* the file is in use: the last to be dropped from RAM */
+static void used_now(fs_file_t* f) { f->last_use = timer_ms(); }
 
 /* bumped by every change to the tree or a file (the disk autosave watches it) */
 static uint32_t g_fs_gen = 1;
@@ -332,6 +344,7 @@ static void free_file(int i) {
     F(i).mnt = 0;
     F(i).loaded = 0;
     F(i).node = 0;
+    F(i).pins = 0;
 }
 
 /* deletes a file, on its volume too */
@@ -365,6 +378,7 @@ static int ensure_loaded(fs_file_t* f) {
     if (f->loaded) return 0;
     mount_t* m = mount_of(f->mnt);
     if (!m && (f->mnt || !g_disk_read)) return -1;
+    used_now(f);
     if (reserve(f, f->size) != 0) return -1;
     f->loading = 1;                       /* (the read lets the other tasks run) */
     int rc = m ? m->ops->read(m->ctx, f->node, (uint8_t*)f->content, f->size)
@@ -406,6 +420,8 @@ static int create_file_in(int parent, const char* name_in) {
     F(i).loaded     = 1;
     F(i).node       = node;
     F(i).data_gen   = g_fs_gen;
+    F(i).pins       = 0;
+    used_now(&F(i));
     k_strcpy(F(i).name, name, FS_NAME_LEN);
     link_file(i);
     return i;
@@ -416,6 +432,7 @@ int fs_write(int idx, const void* data, uint32_t len) {
     fs_file_t* f = fs_file_info(idx);
     if (!f || !f->used) return -1;
     settle(f);
+    used_now(f);
     if (reserve(f, len) != 0) return -1;
     f->data_gen = g_fs_gen;
     mount_t* m = mount_of(f->mnt);
@@ -445,6 +462,7 @@ int fs_append(int idx, const void* data, uint32_t len) {
     touched();
     fs_file_t* f = fs_file_info(idx);
     if (!f || !f->used) return -1;
+    used_now(f);
     f->data_gen = g_fs_gen;
     if (ensure_loaded(f) != 0) return -1;
     if (reserve(f, f->size + len) != 0) return -1;
@@ -736,6 +754,7 @@ fs_file_t* fs_file_info(int idx) {
 fs_file_t* fs_get_file(int idx) {
     if (idx < 0 || idx >= g_fslots) return (void*)0;
     fs_file_t* f = &F(idx);
+    if (f->used) used_now(f);
     if (f->used && !f->loaded && ensure_loaded(f) != 0) {
         /* unreadable (stick pulled out...): callers get zeros, not garbage */
         if (reserve(f, f->size) != 0) return (void*)0;
@@ -1439,4 +1458,109 @@ const fs_dir_t* fs_get_dir(int idx) {
 
 int fs_is_ready(void) {
     return g_ready;
+}
+
+/* ── file data as a cache (see fs.h) ────────────────────────────────── */
+
+/* bigger than this, a file on the disk is read in pieces rather than whole */
+#define STREAM_MIN (256u * 1024u)
+
+int fs_read(int idx, uint32_t off, void* buf, uint32_t len) {
+    fs_file_t* f = fs_file_info(idx);
+    if (!f || !f->used) return -1;
+    if (!f->loaded) settle(f);          /* (in RAM: readable even while being saved) */
+    if (off >= f->size) return 0;
+    if (len > f->size - off) len = f->size - off;
+    used_now(f);
+    if (!f->loaded && !f->mnt && g_disk_read_range && f->size > STREAM_MIN) {
+        f->loading = 1;                     /* (a write or a delete waits for it) */
+        int rc = g_disk_read_range(idx, off, (uint8_t*)buf, len);
+        f->loading = 0;
+        return rc == 0 ? (int)len : -1;
+    }
+    if (!f->loaded && ensure_loaded(f) != 0) return -1;
+    memcpy(buf, f->content + off, len);
+    return (int)len;
+}
+
+void fs_pin(int idx) {
+    fs_file_t* f = fs_file_info(idx);
+    if (f && f->used) f->pins++;
+}
+
+void fs_unpin(int idx) {
+    fs_file_t* f = fs_file_info(idx);
+    if (f && f->pins) f->pins--;
+}
+
+/* in RAM, and its copy elsewhere is the same: it can be read in again */
+static int droppable(int i) {
+    fs_file_t* f = &F(i);
+    if (!f->used || !f->loaded || f->loading || f->pins || !f->content || f->cap < 4096) return 0;
+    if (f->mnt) return mount_of(f->mnt) != NULL;          /* sticks are written through */
+    return g_disk_clean && g_disk_clean(i, f->data_gen);  /* the installed disk: once saved */
+}
+
+static void drop(int i) {
+    fs_file_t* f = &F(i);
+    kfree(f->content);
+    f->content = NULL;
+    f->cap = 0;
+    f->loaded = 0;
+}
+
+uint32_t fs_evict(uint32_t want, uint32_t min_idle_ms) {
+    uint32_t now = timer_ms(), dropped = 0;
+    while (kheap_largest_free() < want) {
+        int best = -1;
+        uint32_t best_age = 0;
+        for (int i = 0; i < g_fslots; i++) {
+            if (!F(i).used || !F(i).loaded) continue;
+            uint32_t age = now - F(i).last_use;
+            if (age < min_idle_ms || (best >= 0 && age <= best_age) || !droppable(i)) continue;
+            best = i;
+            best_age = age;
+        }
+        if (best < 0) break;                               /* nothing more to give */
+        dropped += F(best).cap;
+        drop(best);
+    }
+    return dropped;
+}
+
+uint32_t fs_evictable_bytes(void) {
+    uint32_t n = 0;
+    for (int i = 0; i < g_fslots; i++) if (F(i).used && F(i).loaded && droppable(i)) n += F(i).cap;
+    return n;
+}
+
+/* Out of memory (kheap.c, nothing found for an allocation): files not used
+ * for a few seconds make room. Not the ones just used: their data may be
+ * what the caller is working with right now. */
+static uint32_t reclaim(uint32_t need) {
+    return fs_evict(need, 3000);
+}
+
+void fs_trim(void) {
+    static int hooked;
+    if (!hooked) { kheap_set_reclaim(reclaim); hooked = 1; }
+    /* below 1/8 of the RAM free: files idle for 10 s go until 1/5 is free */
+    uint32_t total = kheap_total_bytes(), free = total - kheap_used_bytes();
+    if (free >= total / 8) return;
+    uint32_t want = total / 5 - free, now = timer_ms(), got = 0;
+    while (got < want) {
+        int best = -1;
+        uint32_t best_age = 0;
+        for (int i = 0; i < g_fslots; i++) {
+            if (!F(i).used || !F(i).loaded) continue;
+            uint32_t age = now - F(i).last_use;
+            if (age < 10000u || (best >= 0 && age <= best_age) || !droppable(i)) continue;
+            best = i;
+            best_age = age;
+        }
+        if (best < 0) break;
+        got += F(best).cap;
+        drop(best);
+    }
+    if (got) klog("fs: memory low - %u KiB of file data dropped from RAM (still on the disk)\n", got / 1024u);
 }

@@ -180,9 +180,27 @@ static void go_up(void) {
     go(p);
 }
 
+/* The start of the selected file, for the preview: a big file (a video...)
+ * is not read whole just to show its first lines. Kept until it changes. */
+static char     g_peek[8193];
+static int      g_peek_for = -1, g_peek_len;
+static uint32_t g_peek_gen;
+
+static void peek(int fidx) {
+    fs_file_t* f = fs_file_info(fidx);
+    if (!f || !f->used) { g_peek_len = 0; g_peek[0] = 0; return; }
+    if (g_peek_for == fidx && g_peek_gen == f->data_gen) return;
+    int n = fs_read(fidx, 0, g_peek, sizeof(g_peek) - 1);
+    g_peek_len = n > 0 ? n : 0;
+    g_peek[g_peek_len] = 0;
+    g_peek_for = fidx;
+    g_peek_gen = f->data_gen;
+}
+
 static int is_text_file(int fidx) {
-    fs_file_t* f = fs_get_file(fidx);
-    return f && f->used && !fs_is_binary(fidx);
+    peek(fidx);
+    for (int i = 0; i < g_peek_len; i++) if (!g_peek[i]) return 0;
+    return 1;
 }
 
 static int is_image_file(int fidx) {
@@ -688,7 +706,10 @@ static void make_thumb(int fidx) {
     fs_file_t* f = fs_get_file(fidx);
     image_t img;
     char err[64];
-    if (image_decode((const uint8_t*)f->content, f->size, &img, err, sizeof(err)) != 0) {
+    fs_pin(fidx);
+    int bad = image_decode((const uint8_t*)f->content, f->size, &img, err, sizeof(err)) != 0;
+    fs_unpin(fidx);
+    if (bad) {
         kstrlcpy(g_thumb_err, err, sizeof(g_thumb_err));
         return;
     }
@@ -744,7 +765,7 @@ static void draw_preview(int px, int py, int ph) {
         gfx_draw_text(x, y + 16, line, C_DIM, C_LIST);
         action = "Open";
     } else {
-        fs_file_t* f = fs_get_file(it->idx);
+        fs_file_t* f = fs_file_info(it->idx);
         char size[24];
         human_size(f->size, size, sizeof(size));
         int img = is_image_file(it->idx), txt = !img && is_text_file(it->idx);
@@ -758,7 +779,7 @@ static void draw_preview(int px, int py, int ph) {
             else draw_clip(x, top, g_thumb_err[0] ? g_thumb_err : "no preview", cols, C_WARN, C_LIST);
         } else if (txt) {
             /* the first lines of the file */
-            const char* s = f->content;
+            const char* s = g_peek;
             int max_lines = (ph - 36 - 60) / 10;
             for (int ln = 0; ln < max_lines && *s; ln++) {
                 int n = 0;
