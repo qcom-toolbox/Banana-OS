@@ -1,19 +1,31 @@
-/* Banana Boot - the UEFI loader (BOOTX64.EFI, 64-bit).
+/* Banana Boot - the UEFI loader: BOOTX64.EFI for 64-bit firmware, and the
+ * same source as BOOTIA32.EFI for 32-bit UEFI firmware (tablets and early
+ * UEFI PCs, often with a 64-bit processor).
  *
  * It shows the menu, reads the chosen kernel from its own FAT partition
  * (/boot/kernel.bin or /boot/kernel64.bin, next to it in the image's EFI
  * system partition), copies it where its ELF headers say, hands the
  * firmware's memory map, the GOP framebuffer and the ACPI and EFI tables
  * to it as Multiboot2 information, leaves the firmware (ExitBootServices),
- * and starts it as GRUB did: through tramp.S, from 64-bit long mode down
- * to 32-bit protected mode with paging off - for both kernels.
+ * and starts it as GRUB did - in 32-bit protected mode with paging off,
+ * through tramp.S (down from 64-bit long mode) or tramp32.S.
  *
- * Built position-independent with no relocations (efi.lds; the Makefile
- * checks): it runs wherever the firmware puts it. */
+ * The menu also offers the next boot option, the firmware's settings
+ * screen, and - in Secure Boot's setup mode - enrolling Banana OS's key.
+ * Under Secure Boot it starts only the kernels it was built with (their
+ * SHA-256 is in it: kernel_hashes.h), so the chain of trust reaches them.
+ *
+ * Built position-independent with no relocations (efi.lds / efi32.lds;
+ * the Makefile checks): it runs wherever the firmware puts it. */
 #include "efi.h"
+#include "sha256.h"
+#include "kernel_hashes.h"
 
 static EFI_SYSTEM_TABLE*  ST;
 static EFI_BOOT_SERVICES* BS;
+static EFI_RUNTIME_SERVICES* RT;
+static EFI_HANDLE g_image;
+static EFI_FILE* g_root;                       /* the EFI partition we came from */
 
 void* memcpy(void* d, const void* s, unsigned long n) { u8* a = d; const u8* b = s; while (n--) *a++ = *b++; return d; }
 void* memset(void* d, int c, unsigned long n) { u8* a = d; while (n--) *a++ = (u8)c; return d; }
@@ -24,6 +36,14 @@ static const EFI_GUID FILE_INFO_GUID    = { 0x09576E92, 0x6D3F, 0x11D2, { 0x8E, 
 static const EFI_GUID GOP_GUID          = { 0x9042A9DE, 0x23DC, 0x4A38, { 0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A } };
 static const EFI_GUID ACPI20_GUID       = { 0x8868E871, 0xE4F1, 0x11D3, { 0xBC, 0x22, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81 } };
 static const EFI_GUID ACPI10_GUID       = { 0xEB9D2D30, 0x2D88, 0x11D3, { 0x9A, 0x16, 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D } };
+static const EFI_GUID GLOBAL_VAR_GUID   = { 0x8BE4DF61, 0x93CA, 0x11D2, { 0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C } };
+static const EFI_GUID IMAGE_SECURITY_DB_GUID = { 0xD719B2CB, 0x3D3A, 0x4596, { 0xA3, 0xBC, 0xDA, 0xD0, 0x0E, 0x67, 0x65, 0x6F } };
+
+#ifdef __x86_64__
+#define FIRMWARE_NAME "UEFI, 64-bit"
+#else
+#define FIRMWARE_NAME "UEFI, 32-bit"
+#endif
 
 static int guid_eq(const EFI_GUID* a, const EFI_GUID* b) {
     const u8* x = (const u8*)a; const u8* y = (const u8*)b;
@@ -32,11 +52,15 @@ static int guid_eq(const EFI_GUID* a, const EFI_GUID* b) {
 }
 
 /* ── text ─────────────────────────────────────────────────────────────── */
+static void wide(const char* s, CHAR16* out, int cap) {
+    int n = 0;
+    while (*s && n < cap - 1) out[n++] = (CHAR16)(u8)*s++;
+    out[n] = 0;
+}
+
 static void print_at(int col, int row, const char* s, int attr) {
     CHAR16 buf[100];
-    int n = 0;
-    while (*s && n < 99) buf[n++] = (CHAR16)(u8)*s++;
-    buf[n] = 0;
+    wide(s, buf, 100);
     if (col >= 0) ST->ConOut->SetCursorPosition(ST->ConOut, (UINTN)col, (UINTN)row);
     ST->ConOut->SetAttribute(ST->ConOut, (UINTN)attr);
     ST->ConOut->OutputString(ST->ConOut, buf);
@@ -50,38 +74,112 @@ static void u32_str(u32 v, char* out) {
     *out = 0;
 }
 
+static EFI_INPUT_KEY wait_key(void) {
+    EFI_INPUT_KEY k;
+    while (ST->ConIn->ReadKeyStroke(ST->ConIn, &k) != EFI_SUCCESS) BS->Stall(20000);
+    return k;
+}
+
 static void halt(const char* why) __attribute__((noreturn));
 static void halt(const char* why) {
     print("\r\nBanana Boot: ");
     print(why);
-    print("\r\n");
+    print("\r\nPress a key to restart the computer.\r\n");
+    wait_key();
+    RT->ResetSystem(EfiResetCold, 0, 0, 0);
     for (;;) BS->Stall(1000000);
 }
 
-/* ── the menu ─────────────────────────────────────────────────────────── */
-static void draw_menu(int sel, int secs) {
-    print_at(2, 1, "Banana Boot  (UEFI)", 0x0E);
-    for (int i = 0; i < ENTRIES; i++) {
-        char line[60] = " ";                    /* the label in a bar 56 wide */
-        c_strcat(line, entry_label(i));
-        for (u32 n = c_strlen(line); n < 56; n++) line[n] = ' ';
-        line[56] = 0;
-        print_at(3, 3 + i, line, i == sel ? 0x70 : 0x07);
+/* ── firmware variables ──────────────────────────────────────────────── */
+static int var_u8(const char* name, const EFI_GUID* g, u8* out) {
+    CHAR16 n[32];
+    wide(name, n, 32);
+    UINTN sz = 1;
+    return RT->GetVariable(n, g, 0, &sz, out) == EFI_SUCCESS && sz == 1;
+}
+static u64 var_u64(const char* name) {
+    CHAR16 n[32];
+    wide(name, n, 32);
+    u64 v = 0;
+    UINTN sz = 8;
+    if (RT->GetVariable(n, &GLOBAL_VAR_GUID, 0, &sz, &v) != EFI_SUCCESS) return 0;
+    return v;
+}
+
+static int g_secure;                           /* Secure Boot is enforcing */
+static int g_setup;                            /* no platform key yet: keys can be enrolled */
+static int g_fw_ui;                            /* the firmware can be asked to open its settings */
+static int g_enroll;                           /* setup mode, and Banana OS's signed keys are here */
+
+/* ── files on our partition ──────────────────────────────────────────── */
+static u8* read_file(const char* path, UINTN* size, int must) {
+    EFI_FILE* f;
+    CHAR16 p[64];
+    wide(path, p, 64);
+    if (g_root->Open(g_root, &f, p, 1, 0) != EFI_SUCCESS) {
+        if (must) halt("a file is missing from my partition");
+        return 0;
     }
-    print_at(4, 10, "Up / Down choose, Enter starts.", 0x08);
-    print_at(4, 11, "                                                ", 0x07);
-    if (secs >= 0) {
-        char line[64] = "Starting the highlighted entry in ";
-        char n[12];
-        u32_str((u32)secs, n);
-        c_strcat(line, n);
-        c_strcat(line, " s.");
-        print_at(4, 11, line, 0x08);
+    u8 info[512];
+    UINTN isz = sizeof(info);
+    if (f->GetInfo(f, &FILE_INFO_GUID, &isz, info) != EFI_SUCCESS) { f->Close(f); if (must) halt("cannot read a file"); return 0; }
+    *size = (UINTN)((EFI_FILE_INFO*)info)->FileSize;
+    u8* buf;
+    if (BS->AllocatePool(EfiLoaderData, *size + 1, (void**)&buf) != EFI_SUCCESS) halt("out of memory");
+    UINTN got = *size;
+    if (f->Read(f, &got, buf) != EFI_SUCCESS || got != *size) { f->Close(f); if (must) halt("cannot read a file"); return 0; }
+    f->Close(f);
+    buf[*size] = 0;
+    return buf;
+}
+
+static void open_partition(void) {
+    EFI_LOADED_IMAGE* li;
+    EFI_SIMPLE_FILE_SYSTEM* fs;
+    if (BS->HandleProtocol(g_image, &LOADED_IMAGE_GUID, (void**)&li) != EFI_SUCCESS) halt("no loaded-image protocol");
+    if (BS->HandleProtocol(li->DeviceHandle, &SIMPLE_FS_GUID, (void**)&fs) != EFI_SUCCESS) halt("cannot read my partition");
+    if (fs->OpenVolume(fs, &g_root) != EFI_SUCCESS) halt("cannot open my partition");
+}
+
+/* ── the menu: the kernels, then what else the firmware can do ───────── */
+enum { X_NEXT, X_FIRMWARE, X_ENROLL, X_RESTART };
+static int g_extra[4], g_nextra;               /* the extra entries shown, in order */
+
+static const char* extra_label(int x) {
+    switch (x) {
+    case X_NEXT:     return "Boot the next boot option";
+    case X_FIRMWARE: return "UEFI firmware settings";
+    case X_ENROLL:   return "Enroll Banana OS's Secure Boot keys";
+    default:         return "Restart the computer";
     }
 }
 
-static int menu(void) {
-    int sel = 0, ticks = 30;                    /* 3 s, by 100 ms */
+static void draw_menu(int sel, int secs) {
+    print_at(2, 1, "Banana Boot  (" FIRMWARE_NAME ")", 0x0E);
+    print_at(48, 1, g_secure ? "Secure Boot: on   " : g_setup ? "Secure Boot: setup" : "Secure Boot: off  ", g_secure ? 0x0A : 0x08);
+    int n = KERNEL_ENTRIES + g_nextra;
+    for (int i = 0; i < n; i++) {
+        char line[60] = " ";                    /* the label in a bar 56 wide */
+        c_strcat(line, i < KERNEL_ENTRIES ? entry_label(i) : extra_label(g_extra[i - KERNEL_ENTRIES]));
+        for (u32 k = c_strlen(line); k < 56; k++) line[k] = ' ';
+        line[56] = 0;
+        print_at(3, i < KERNEL_ENTRIES ? 3 + i : 4 + i, line, i == sel ? 0x70 : 0x07);
+    }
+    int r = 5 + n;
+    print_at(4, r, "Up / Down choose, Enter starts.", 0x08);
+    print_at(4, r + 1, "                                                ", 0x07);
+    if (secs >= 0) {
+        char line[64] = "Starting the highlighted entry in ";
+        char num[12];
+        u32_str((u32)secs, num);
+        c_strcat(line, num);
+        c_strcat(line, " s.");
+        print_at(4, r + 1, line, 0x08);
+    }
+}
+
+static int menu(int def) {
+    int sel = def, ticks = 30, n = KERNEL_ENTRIES + g_nextra;   /* 3 s, by 100 ms */
     ST->ConOut->ClearScreen(ST->ConOut);
     ST->ConOut->EnableCursor(ST->ConOut, 0);
     draw_menu(sel, 3);
@@ -89,8 +187,8 @@ static int menu(void) {
         EFI_INPUT_KEY k;
         if (ST->ConIn->ReadKeyStroke(ST->ConIn, &k) == EFI_SUCCESS) {
             ticks = -1;
-            if (k.ScanCode == 1) sel = (sel + ENTRIES - 1) % ENTRIES;
-            else if (k.ScanCode == 2) sel = (sel + 1) % ENTRIES;
+            if (k.ScanCode == 1) sel = (sel + n - 1) % n;
+            else if (k.ScanCode == 2) sel = (sel + 1) % n;
             else if (k.UnicodeChar == '\r') return sel;
             draw_menu(sel, -1);
             continue;
@@ -106,31 +204,54 @@ static int menu(void) {
     }
 }
 
-/* ── the kernel file, from the partition this program came from ──────── */
-static u8* read_kernel(EFI_HANDLE image, int is64, UINTN* size) {
-    EFI_LOADED_IMAGE* li;
-    EFI_SIMPLE_FILE_SYSTEM* fs;
-    EFI_FILE *root, *f;
-    if (BS->HandleProtocol(image, &LOADED_IMAGE_GUID, (void**)&li) != EFI_SUCCESS) halt("no loaded-image protocol");
-    if (BS->HandleProtocol(li->DeviceHandle, &SIMPLE_FS_GUID, (void**)&fs) != EFI_SUCCESS) halt("cannot read my partition");
-    if (fs->OpenVolume(fs, &root) != EFI_SUCCESS) halt("cannot open my partition");
-    CHAR16 path[24];
-    const char* p = is64 ? "\\boot\\kernel64.bin" : "\\boot\\kernel.bin";
-    int n = 0;
-    while (*p) path[n++] = (CHAR16)*p++;
-    path[n] = 0;
-    if (root->Open(root, &f, path, 1, 0) != EFI_SUCCESS) halt("the kernel is not in my partition (/boot)");
-    u8 info[512];
-    UINTN isz = sizeof(info);
-    if (f->GetInfo(f, &FILE_INFO_GUID, &isz, info) != EFI_SUCCESS) halt("cannot read the kernel");
-    *size = (UINTN)((EFI_FILE_INFO*)info)->FileSize;
-    u8* buf;
-    if (BS->AllocatePool(EfiLoaderData, *size, (void**)&buf) != EFI_SUCCESS) halt("out of memory");
-    UINTN got = *size;
-    if (f->Read(f, &got, buf) != EFI_SUCCESS || got != *size) halt("cannot read the kernel");
-    f->Close(f);
-    root->Close(root);
-    return buf;
+/* the firmware opens its settings at the next start (OsIndications bit 0) */
+static void firmware_settings(void) {
+    u64 ind = var_u64("OsIndications") | 1;
+    CHAR16 n[16];
+    wide("OsIndications", n, 16);
+    if (RT->SetVariable(n, &GLOBAL_VAR_GUID, EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                        EFI_VARIABLE_RUNTIME_ACCESS, 8, &ind) != EFI_SUCCESS)
+        halt("the firmware refused to open its settings");
+    RT->ResetSystem(EfiResetCold, 0, 0, 0);
+    halt("the firmware did not restart");
+}
+
+/* Setup mode (no platform key): Banana OS's keys become the computer's -
+ * its certificate is added to db (what may boot) and KEK, then becomes the
+ * platform key (PK), which ends setup mode. The files are signed at build
+ * time (the Makefile, efitools); the firmware checks them. */
+static void enroll_keys(void) {
+    ST->ConOut->ClearScreen(ST->ConOut);
+    print_at(2, 1, "Enroll Banana OS's Secure Boot keys", 0x0E);
+    print_at(2, 3, "This computer's Secure Boot is in setup mode: it has no platform key.", 0x07);
+    print_at(2, 4, "Enrolling makes Banana OS's certificate the platform key (PK), and adds it", 0x07);
+    print_at(2, 5, "to KEK and to the list of what may start (db) - what db holds stays.", 0x07);
+    print_at(2, 6, "Secure Boot then starts Banana OS, and whatever else db allows.", 0x07);
+    print_at(2, 9, "Press Y to enroll, any other key to go back.", 0x0F);
+    EFI_INPUT_KEY k = wait_key();
+    if (k.UnicodeChar != 'y' && k.UnicodeChar != 'Y') return;
+    for (int i = 0; i < 3; i++) {
+        /* (no table of strings: it would need relocations) */
+        const char* file = i == 0 ? "\\EFI\\BananaOS\\db.auth" : i == 1 ? "\\EFI\\BananaOS\\KEK.auth" : "\\EFI\\BananaOS\\PK.auth";
+        const char* var = i == 0 ? "db" : i == 1 ? "KEK" : "PK";
+        /* NV BS RT, time-authenticated; db and KEK appended to; PK last: it ends setup mode */
+        u32 attr = i < 2 ? 0x67 : 0x27;
+        UINTN sz;
+        u8* data = read_file(file, &sz, 1);
+        CHAR16 n[8];
+        wide(var, n, 8);
+        EFI_STATUS s = RT->SetVariable(n, i == 0 ? &IMAGE_SECURITY_DB_GUID : &GLOBAL_VAR_GUID, attr, sz, data);
+        BS->FreePool(data);
+        if (s != EFI_SUCCESS) {
+            print_at(2, 11, "The firmware refused the key: ", 0x0C);
+            print(var);
+            halt("the keys were not enrolled");
+        }
+    }
+    print_at(2, 11, "Done. Turn Secure Boot on in the firmware settings if it is not on by itself.", 0x0A);
+    print_at(2, 12, "Press a key to restart.", 0x07);
+    wait_key();
+    RT->ResetSystem(EfiResetCold, 0, 0, 0);
 }
 
 /* ── the memory map: UEFI's, as Multiboot2 types, sorted and merged ──── */
@@ -189,19 +310,60 @@ static void map_tags(mb2_t* m, u8* map, UINTN size, UINTN dsize) {
     *(u32*)(basic + 12) = (u32)(upper >> 10);
 }
 
-extern u8 tramp_start[], tramp_end[], tramp_gdtr_base[], tramp_gdt[];
+/* hidden: reached relative to the code - through the GOT they would need relocations */
+#define HIDDEN __attribute__((visibility("hidden")))
+extern HIDDEN u8 tramp_start[], tramp_end[], tramp_gdtr_base[], tramp_gdt[];
+
+#define PTR(x) ((void*)(UINTN)(x))                     /* a physical address as a pointer */
 
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     ST = st;
     BS = st->BootServices;
+    RT = st->RuntimeServices;
+    g_image = image;
     BS->SetWatchdogTimer(0, 0, 0, 0);
+    open_partition();
 
-    int entry = menu();
+    /* what the firmware can do, for the menu */
+    u8 v;
+    g_secure = var_u8("SecureBoot", &GLOBAL_VAR_GUID, &v) && v == 1;
+    g_setup = var_u8("SetupMode", &GLOBAL_VAR_GUID, &v) && v == 1;
+    g_fw_ui = (var_u64("OsIndicationsSupported") & 1) != 0;
+    if (g_setup) {
+        UINTN sz;
+        u8* f = read_file("\\EFI\\BananaOS\\PK.auth", &sz, 0);
+        if (f) { g_enroll = 1; BS->FreePool(f); }
+    }
+    g_extra[g_nextra++] = X_NEXT;
+    if (g_fw_ui) g_extra[g_nextra++] = X_FIRMWARE;
+    if (g_enroll) g_extra[g_nextra++] = X_ENROLL;
+    g_extra[g_nextra++] = X_RESTART;
+
+    int entry;
+    for (;;) {
+        entry = menu(has_long_mode() ? 0 : 2);
+        if (entry < KERNEL_ENTRIES) break;
+        int x = g_extra[entry - KERNEL_ENTRIES];
+        ST->ConOut->ClearScreen(ST->ConOut);
+        if (x == X_NEXT) return EFI_ABORTED;          /* the firmware tries the next boot option */
+        if (x == X_FIRMWARE) firmware_settings();
+        if (x == X_ENROLL) enroll_keys();
+        if (x == X_RESTART) RT->ResetSystem(EfiResetCold, 0, 0, 0);
+    }
     ST->ConOut->ClearScreen(ST->ConOut);
-    print(entry_is64(entry) ? "Loading Banana OS (64-bit)...\r\n" : "Loading Banana OS (32-bit)...\r\n");
+    int is64 = entry_is64(entry);
+    print(is64 ? "Loading Banana OS (64-bit)...\r\n" : "Loading Banana OS (32-bit)...\r\n");
 
     UINTN fsize;
-    u8* file = read_kernel(image, entry_is64(entry), &fsize);
+    u8* file = read_file(is64 ? "\\boot\\kernel64.bin" : "\\boot\\kernel.bin", &fsize, 1);
+    /* Secure Boot vouched for this program; it vouches for the kernel */
+    u8 sum[32];
+    sha256(file, fsize, sum);
+    const u8* want = is64 ? KERNEL64_SHA256 : KERNEL32_SHA256;
+    int same = 1;
+    for (int i = 0; i < 32; i++) if (sum[i] != want[i]) same = 0;
+    if (!same && g_secure) halt("Secure Boot: the kernel is not the one this loader was built with");
+
     seg_t segs[16];
     u64 kentry;
     int ns = elf_segments(file, fsize > 65536 ? 65536 : (u32)fsize, segs, 16, &kentry);
@@ -231,23 +393,31 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     if (!reserved) {
         EFI_LOADED_IMAGE* li;
         BS->HandleProtocol(image, &LOADED_IMAGE_GUID, (void**)&li);
-        u64 sp = (u64)&sp;
-        u64 r[5][2] = { { (u64)file, fsize }, { info, 65536 }, { tramp, 4096 },
-                        { (u64)li->ImageBase, li->ImageSize }, { sp - 65536, 65536 + 4096 } };
+        u64 sp = (u64)(UINTN)&sp;
+        u64 r[5][2] = { { (u64)(UINTN)file, fsize }, { info, 65536 }, { tramp, 4096 },
+                        { (u64)(UINTN)li->ImageBase, li->ImageSize }, { sp - 65536, 65536 + 4096 } };
         for (int i = 0; i < 5; i++)
             if (r[i][0] < hi && r[i][0] + r[i][1] > lo) halt("the kernel's place is taken by the firmware");
     }
-    memcpy((void*)tramp, tramp_start, (UINTN)(tramp_end - tramp_start));
-    *(u64*)(tramp + (UINTN)(tramp_gdtr_base - tramp_start)) = tramp + (u64)(tramp_gdt - tramp_start);
+    memcpy(PTR(tramp), tramp_start, (UINTN)(tramp_end - tramp_start));
+    *(u64*)PTR(tramp + (UINTN)(tramp_gdtr_base - tramp_start)) = tramp + (u64)(tramp_gdt - tramp_start);
 
     mb2_t m;
-    mb2_begin(&m, (u8*)info);
-    char cmd[96];
-    build_cmdline(cmd, entry);
+    mb2_begin(&m, (u8*)PTR(info));
+    char medium[16], cmd[96];
+    UINTN msz;
+    u8* mfile = read_file("\\EFI\\BananaOS\\medium.cfg", &msz, 0);
+    medium_value(mfile ? (const char*)mfile : "", mfile ? (u32)msz : 0, medium, sizeof(medium));
+    build_cmdline(cmd, entry, medium);
     mb2_string(&m, 1, cmd);
-    mb2_string(&m, 2, "Banana Boot (UEFI)");
+    mb2_string(&m, 2, "Banana Boot (" FIRMWARE_NAME ")");
+#ifdef __x86_64__
     u8* t = mb2_tag(&m, 12, 16);                     /* the EFI system table: the kernel knows it is UEFI */
-    *(u64*)(t + 8) = (u64)st;
+    *(u64*)(t + 8) = (u64)(UINTN)st;
+#else
+    u8* t = mb2_tag(&m, 11, 12);
+    *(u32*)(t + 8) = (u32)(UINTN)st;
+#endif
     /* the ACPI RSDP: the ACPI 2 one, else the ACPI 1 one */
     const u8* rsdp = 0;
     for (UINTN i = 0; i < st->NumberOfTableEntries; i++) {
@@ -265,7 +435,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
         if (gi->PixelFormat == 2) {
             u32 masks[3] = { gi->RedMask, gi->GreenMask, gi->BlueMask };
             u8 pos[3] = { 0, 0, 0 };
-            for (int k = 0; k < 3; k++) { u32 v = masks[k]; while (v && !(v & 1)) { v >>= 1; pos[k]++; } }
+            for (int k = 0; k < 3; k++) { u32 mv = masks[k]; while (mv && !(mv & 1)) { mv >>= 1; pos[k]++; } }
             rp = pos[0]; gp = pos[1]; bp = pos[2];
         }
         mb2_framebuffer(&m, gop->Mode->FrameBufferBase, gi->PixelsPerScanLine * 4, gi->HorizontalResolution,
@@ -274,21 +444,21 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
 
     if (reserved) {
         for (int i = 0; i < ns; i++) {
-            memcpy((void*)segs[i].paddr, file + segs[i].offset, (UINTN)segs[i].filesz);
-            memset((void*)(segs[i].paddr + segs[i].filesz), 0, (UINTN)(segs[i].memsz - segs[i].filesz));
+            memcpy(PTR(segs[i].paddr), file + segs[i].offset, (UINTN)segs[i].filesz);
+            memset(PTR(segs[i].paddr + segs[i].filesz), 0, (UINTN)(segs[i].memsz - segs[i].filesz));
         }
     }
 
     /* the memory map last, then leave the firmware (again if the map changed meanwhile) */
-    UINTN msize = 0, key, dsize;
+    UINTN size = 0, key, dsize;
     u32 dver;
-    BS->GetMemoryMap(&msize, 0, &key, &dsize, &dver);
-    msize += 64 * 64;
+    BS->GetMemoryMap(&size, 0, &key, &dsize, &dver);
+    size += 64 * 64;
     u8* map;
-    if (BS->AllocatePool(EfiLoaderData, msize, (void**)&map) != EFI_SUCCESS) halt("out of memory");
+    if (BS->AllocatePool(EfiLoaderData, size, (void**)&map) != EFI_SUCCESS) halt("out of memory");
     u32 before_map = m.off;
     for (int tries = 0;; tries++) {
-        UINTN sz = msize;
+        UINTN sz = size;
         if (BS->GetMemoryMap(&sz, (EFI_MEMORY_DESCRIPTOR*)map, &key, &dsize, &dver) != EFI_SUCCESS) halt("no memory map");
         m.off = before_map;
         map_tags(&m, map, sz, dsize);
@@ -300,10 +470,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     /* the firmware is gone: no more calls to it */
     if (!reserved) {
         for (int i = 0; i < ns; i++) {
-            memcpy((void*)segs[i].paddr, file + segs[i].offset, (UINTN)segs[i].filesz);
-            memset((void*)(segs[i].paddr + segs[i].filesz), 0, (UINTN)(segs[i].memsz - segs[i].filesz));
+            memcpy(PTR(segs[i].paddr), file + segs[i].offset, (UINTN)segs[i].filesz);
+            memset(PTR(segs[i].paddr + segs[i].filesz), 0, (UINTN)(segs[i].memsz - segs[i].filesz));
         }
     }
-    ((void (*)(u64, u64))tramp)(kentry, info);
+    ((void (*)(UINTN, UINTN))PTR(tramp))((UINTN)kentry, (UINTN)info);
     for (;;) __asm__ volatile("hlt");
 }

@@ -51,7 +51,7 @@ tramp_gdtr_base:
     .quad 0
 tramp_end:
 
-    .section .reloc, "a"
+    .section .peloc, "a"
     .long 0                             /* page RVA */
     .long 10                            /* block size */
     .word 0                             /* IMAGE_REL_BASED_ABSOLUTE: nothing */

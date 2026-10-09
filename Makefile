@@ -96,27 +96,71 @@ loader/bios.bin: loader/bios.asm loader/bios.c loader/common.h loader/bios.ld
 	$(CC) $(LOADER_CFLAGS32) -c loader/bios.c -o loader/bios_c.o
 	ld -m elf_i386 -T loader/bios.ld -o $@ loader/bios_asm.o loader/bios_c.o
 
-# the UEFI loader: position-independent C turned into a PE32+ program; it
-# must have no relocations (it runs wherever the firmware puts it)
-LOADER_CFLAGS64 = -O2 -ffreestanding -fpie -fno-stack-protector -fno-stack-check -fshort-wchar \
-                  -mno-red-zone -mgeneral-regs-only -fno-asynchronous-unwind-tables -fvisibility=hidden $(WARN)
-loader/BOOTX64.EFI: loader/efi.c loader/efi.h loader/common.h loader/tramp.S loader/efi.lds
-	$(CC) $(LOADER_CFLAGS64) -c loader/efi.c -o loader/efi.o
-	$(CC) -c loader/tramp.S -o loader/tramp.o
-	ld -nostdlib -pie --no-dynamic-linker -z nocombreloc -T loader/efi.lds -o loader/bootx64.so loader/efi.o loader/tramp.o
-	@if readelf -r loader/bootx64.so | grep -q R_X86_64; then echo "loader/efi.c: relocations - it must be position-independent"; exit 1; fi
-	objcopy -j .text -j .reloc -j .data -j .dynamic -j .rela -j .dynsym --target efi-app-x86_64 --subsystem=10 \
-	    loader/bootx64.so $@
+# the UEFI loaders: position-independent C turned into PE programs - for
+# 64-bit (BOOTX64.EFI) and 32-bit (BOOTIA32.EFI) firmware. They must have no
+# relocations (they run wherever the firmware puts them), must not hold the
+# "set banana_medium" line (`install` patches that, and the Secure Boot
+# signature covers every byte: it is in EFI/BananaOS/medium.cfg), and they
+# hold the SHA-256 of both kernels (under Secure Boot they start no other).
+LOADER_CFLAGS_EFI = -O2 -ffreestanding -fpie -fno-stack-protector -fno-stack-check -fshort-wchar \
+                    -mgeneral-regs-only -fno-asynchronous-unwind-tables -fvisibility=hidden $(WARN)
+EFI_DEPS = loader/efi.c loader/efi.h loader/common.h loader/sha256.h loader/kernel_hashes.h
 
-# the EFI system partition: a FAT image with the UEFI loader and the kernels
-isoroot/efi.img: loader/BOOTX64.EFI kernel.bin kernel64.bin
+loader/kernel_hashes.h: kernel.bin kernel64.bin
+	{ echo "/* made by the Makefile: the kernels this loader starts under Secure Boot */"; \
+	  echo "static const u8 KERNEL32_SHA256[32] = { $$(sha256sum kernel.bin | cut -c1-64 | sed 's/../0x&,/g') };"; \
+	  echo "static const u8 KERNEL64_SHA256[32] = { $$(sha256sum kernel64.bin | cut -c1-64 | sed 's/../0x&,/g') };"; } > $@
+
+# Secure Boot: signed with Banana OS's key when it is here (CI: a secret);
+# without it the loaders are built unsigned and boot with Secure Boot off
+SB_KEY  ?= $(HOME)/.banana-secureboot/banana-sb.key
+SB_CERT  = loader/keys/banana-sb.crt
+define efi_finish
+	python3 tools/efi_relocs.py $(1)
+	objcopy -j .text -j .reloc -j .got -j .data -j .dynamic -j .rela -j .rel -j .dynsym --target $(2) --subsystem=10 $(1) $@.unsigned
+	@if grep -q "set banana_medium" $@.unsigned; then echo "$@ holds the medium line: install would break its signature"; exit 1; fi
+	@if [ -f "$(SB_KEY)" ]; then sbsign --key "$(SB_KEY)" --cert $(SB_CERT) --output $@ $@.unsigned; \
+	 else cp $@.unsigned $@; echo "note: no Secure Boot key at $(SB_KEY) - $@ is not signed"; fi
+endef
+
+loader/BOOTX64.EFI: $(EFI_DEPS) loader/tramp.S loader/efi.lds
+	$(CC) -m64 -mno-red-zone $(LOADER_CFLAGS_EFI) -c loader/efi.c -o loader/efi64.o
+	$(CC) -m64 -c loader/tramp.S -o loader/tramp64.o
+	ld -m elf_x86_64 -nostdlib -pie --no-dynamic-linker -z nocombreloc -T loader/efi.lds -o loader/bootx64.so loader/efi64.o loader/tramp64.o
+	$(call efi_finish,loader/bootx64.so,efi-app-x86_64)
+
+loader/BOOTIA32.EFI: $(EFI_DEPS) loader/tramp32.S loader/efi32.lds
+	$(CC) -m32 -malign-double $(LOADER_CFLAGS_EFI) -c loader/efi.c -o loader/efi32.o
+	$(CC) -m32 -c loader/tramp32.S -o loader/tramp32.o
+	ld -m elf_i386 -nostdlib -pie --no-dynamic-linker -z nocombreloc -T loader/efi32.lds -o loader/bootia32.so loader/efi32.o loader/tramp32.o
+	$(call efi_finish,loader/bootia32.so,efi-app-ia32)
+
+# Banana OS's keys as signed UEFI variables (efitools), for the menu's
+# "Enroll" in Secure Boot's setup mode: db and KEK appended to, then PK
+SB_OWNER = 9a5f3e1c-62b4-4d2a-b6f1-ba5a5a0b0057
+loader/keys/PK.auth: $(SB_CERT)
+	@if [ -f "$(SB_KEY)" ]; then \
+	    cert-to-efi-sig-list -g $(SB_OWNER) $(SB_CERT) loader/keys/banana.esl && \
+	    sign-efi-sig-list -a -k "$(SB_KEY)" -c $(SB_CERT) db  loader/keys/banana.esl loader/keys/db.auth && \
+	    sign-efi-sig-list -a -k "$(SB_KEY)" -c $(SB_CERT) KEK loader/keys/banana.esl loader/keys/KEK.auth && \
+	    sign-efi-sig-list    -k "$(SB_KEY)" -c $(SB_CERT) PK  loader/keys/banana.esl $@; \
+	 else rm -f $@; touch loader/keys/.nokey; fi
+
+# the EFI system partition: a FAT image with both UEFI loaders, the kernels,
+# the medium line, Banana OS's certificate (to enroll it by hand in the
+# firmware's settings) and its signed keys (to enroll from the menu)
+isoroot/efi.img: loader/BOOTX64.EFI loader/BOOTIA32.EFI kernel.bin kernel64.bin loader/keys/PK.auth loader/keys/BananaOS.cer
 	mkdir -p isoroot
 	rm -f $@
-	kb=$$(( ($$(stat -c %s kernel.bin) + $$(stat -c %s kernel64.bin) + $$(stat -c %s loader/BOOTX64.EFI)) / 1024 + 2048 )); \
+	printf 'set banana_medium=live-cd\n' > isoroot/medium.cfg
+	kb=$$(( ($$(stat -c %s kernel.bin) + $$(stat -c %s kernel64.bin) + 2 * $$(stat -c %s loader/BOOTX64.EFI)) / 1024 + 2048 )); \
 	    dd if=/dev/zero of=$@ bs=1024 count=$$kb status=none
 	mformat -i $@ -v BANANA_EFI ::
-	mmd -i $@ ::/EFI ::/EFI/BOOT ::/boot
+	mmd -i $@ ::/EFI ::/EFI/BOOT ::/EFI/BananaOS ::/boot
 	mcopy -i $@ loader/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
+	mcopy -i $@ loader/BOOTIA32.EFI ::/EFI/BOOT/BOOTIA32.EFI
+	mcopy -i $@ isoroot/medium.cfg loader/keys/BananaOS.cer ::/EFI/BananaOS/
+	if [ -f loader/keys/PK.auth ]; then mcopy -i $@ loader/keys/PK.auth loader/keys/KEK.auth loader/keys/db.auth ::/EFI/BananaOS/; fi
 	mcopy -i $@ kernel.bin kernel64.bin ::/boot/
 
 # the image: an ISO9660 CD (El Torito: the BIOS loader, and the EFI
@@ -159,7 +203,8 @@ clean:
 	rm -f banana-sdk.tar.gz
 	rm -f $(OBJS) $(OBJS64) $(DEPS) kernel.bin kernel64.bin Banana_OS.iso
 	rm -rf isoroot
-	rm -f loader/*.o loader/*.so loader/*.bin loader/BOOTX64.EFI
+	rm -f loader/*.o loader/*.so loader/*.bin loader/*.EFI loader/*.unsigned loader/kernel_hashes.h \
+	      loader/keys/*.esl loader/keys/*.auth loader/keys/.nokey
 
 
 # ── SDK: example apps (embedded in the kernel: ~/Examples) and the tarball ──

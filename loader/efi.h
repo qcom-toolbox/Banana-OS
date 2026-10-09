@@ -1,20 +1,28 @@
-/* The parts of the UEFI specification Banana Boot uses (no EDK2/gnu-efi). */
+/* The parts of the UEFI specification Banana Boot uses (no EDK2/gnu-efi).
+ * For x64 firmware (BOOTX64.EFI: the Microsoft calling convention) and IA32
+ * firmware (BOOTIA32.EFI: cdecl; built with -malign-double so 64-bit
+ * fields sit where the specification puts them). */
 #ifndef LOADER_EFI_H
 #define LOADER_EFI_H
 
 #include "common.h"
 
+#ifdef __x86_64__
 #define EFIAPI __attribute__((ms_abi))
-typedef unsigned long long UINTN;
+#else
+#define EFIAPI
+#endif
+typedef unsigned long UINTN;            /* the native size: 8 bytes on x64, 4 on IA32 */
 typedef UINTN EFI_STATUS;
 typedef void* EFI_HANDLE;
 typedef void* EFI_EVENT;
 typedef unsigned short CHAR16;
 typedef u64 EFI_PHYSICAL_ADDRESS;
 
+#define EFI_ERR(n)             (((UINTN)1 << (sizeof(UINTN) * 8 - 1)) | (n))
 #define EFI_SUCCESS            0
-#define EFI_BUFFER_TOO_SMALL   (0x8000000000000000ull | 5)
-#define EFI_ERROR(s)           ((long long)(s) < 0)
+#define EFI_ABORTED            EFI_ERR(21)
+#define EFI_ERROR(s)           ((s) != 0 && ((s) >> (sizeof(UINTN) * 8 - 1)))
 
 typedef struct { u32 d1; u16 d2, d3; u8 d4[8]; } EFI_GUID;
 
@@ -81,7 +89,7 @@ typedef struct {
     void* InstallConfigurationTable;
     void* LoadImage;
     void* StartImage;
-    void* Exit;
+    EFI_STATUS (EFIAPI *Exit)(EFI_HANDLE, EFI_STATUS, UINTN, CHAR16*);
     void* UnloadImage;
     EFI_STATUS (EFIAPI *ExitBootServices)(EFI_HANDLE, UINTN MapKey);
     void* GetNextMonotonicCount;
@@ -97,6 +105,29 @@ typedef struct {
     EFI_STATUS (EFIAPI *LocateProtocol)(const EFI_GUID*, void* Registration, void** Interface);
 } EFI_BOOT_SERVICES;
 
+/* variable attributes */
+#define EFI_VARIABLE_NON_VOLATILE                          0x01
+#define EFI_VARIABLE_BOOTSERVICE_ACCESS                    0x02
+#define EFI_VARIABLE_RUNTIME_ACCESS                        0x04
+#define EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACCESS 0x20
+#define EFI_VARIABLE_APPEND_WRITE                          0x40
+#define EfiResetCold 0
+
+typedef struct {
+    EFI_TABLE_HEADER Hdr;
+    void* GetTime;
+    void* SetTime;
+    void* GetWakeupTime;
+    void* SetWakeupTime;
+    void* SetVirtualAddressMap;
+    void* ConvertPointer;
+    EFI_STATUS (EFIAPI *GetVariable)(const CHAR16* Name, const EFI_GUID* Vendor, u32* Attributes, UINTN* Size, void* Data);
+    void* GetNextVariableName;
+    EFI_STATUS (EFIAPI *SetVariable)(const CHAR16* Name, const EFI_GUID* Vendor, u32 Attributes, UINTN Size, const void* Data);
+    void* GetNextHighMonotonicCount;
+    void (EFIAPI *ResetSystem)(UINTN Type, EFI_STATUS Status, UINTN DataSize, void* Data);
+} EFI_RUNTIME_SERVICES;
+
 typedef struct { EFI_GUID VendorGuid; void* VendorTable; } EFI_CONFIGURATION_TABLE;
 
 typedef struct {
@@ -109,7 +140,7 @@ typedef struct {
     EFI_SIMPLE_TEXT_OUTPUT* ConOut;
     EFI_HANDLE StandardErrorHandle;
     EFI_SIMPLE_TEXT_OUTPUT* StdErr;
-    void* RuntimeServices;
+    EFI_RUNTIME_SERVICES* RuntimeServices;
     EFI_BOOT_SERVICES* BootServices;
     UINTN NumberOfTableEntries;
     EFI_CONFIGURATION_TABLE* ConfigurationTable;

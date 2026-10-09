@@ -18,12 +18,25 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y nasm gcc-multilib binutils xorriso mtools python3
+          sudo apt-get install -y nasm gcc-multilib binutils xorriso mtools python3 sbsigntool efitools
+
+      # Secure Boot: the loaders are signed with the Banana OS key (a repository
+      # secret); without it (forks) they are built unsigned
+      - name: Secure Boot key
+        env:
+          SB_KEY_PEM: ${{ secrets.BANANA_SB_KEY }}
+        run: |
+          if [ -n "$SB_KEY_PEM" ]; then
+            mkdir -p ~/.banana-secureboot && chmod 700 ~/.banana-secureboot
+            printf '%s\n' "$SB_KEY_PEM" > ~/.banana-secureboot/banana-sb.key
+            chmod 600 ~/.banana-secureboot/banana-sb.key
+          fi
 
       - name: Build Banana_OS.iso
         run: |
           make clean
           make
+          rm -f ~/.banana-secureboot/banana-sb.key
 
       - name: Set release tag
         id: tag

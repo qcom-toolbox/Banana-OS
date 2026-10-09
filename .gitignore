@@ -12,7 +12,12 @@ isoroot/
 loader/*.o
 loader/*.so
 loader/*.bin
-loader/BOOTX64.EFI
+loader/*.EFI
+loader/*.unsigned
+loader/kernel_hashes.h
+loader/keys/*.esl
+loader/keys/*.auth
+loader/keys/.nokey
 
 # SDK build outputs
 sdk/examples/*/build/

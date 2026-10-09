@@ -14,17 +14,20 @@ typedef unsigned long long u64;
 #define MB2_HEADER_MAGIC 0xE85250D6u
 #define MB2_BOOT_MAGIC   0x36D76289u
 
-/* `install` / `update` copy the image onto the disk with this line changed
- * to "...=install" (kernel/fsdisk.c, patch_marker): the copy the loader ran
- * from tells the kernel whether it is the live CD or the installed system. */
-static const char MEDIUM_LINE[] = "set banana_medium=live-cd";
+/* `install` / `update` copy the image onto the disk with the line
+ * "set banana_medium=live-cd" changed to "...=install" (kernel/fsdisk.c,
+ * patch_marker): the copy the loader ran from tells the kernel whether it is
+ * the live CD or the installed system. The BIOS loader holds that line
+ * itself; the UEFI one reads it from EFI/BananaOS/medium.cfg - it must not
+ * hold it, its Secure Boot signature covers all of its bytes. */
 
 /* ── small string helpers (no C library here) ─────────────────────── */
 static u32 c_strlen(const char* s) { u32 n = 0; while (s[n]) n++; return n; }
 static void c_strcat(char* d, const char* s) { d += c_strlen(d); while (*s) *d++ = *s++; *d = 0; }
 
-/* ── the menu: the entries GRUB's menu had ──────────────────────────── */
-#define ENTRIES 5
+/* ── the menu: the entries GRUB's menu had (each loader adds its own after
+ *    these: the next boot device, the firmware's settings...) ──────── */
+#define KERNEL_ENTRIES 5
 static __attribute__((unused)) const char* entry_label(int i) {
     switch (i) {
     case 0: return "Banana OS 0.5 (64-bit)";
@@ -36,16 +39,31 @@ static __attribute__((unused)) const char* entry_label(int i) {
 }
 static int entry_is64(int i) { return i == 0 || i == 1 || i == 3; }
 
+/* the value of a "set banana_medium=..." line ("live-cd", "install") */
+static __attribute__((unused)) void medium_value(const char* line, u32 len, char* out, u32 cap) {
+    u32 i = 0, n = 0;
+    while (i < len && line[i] != '=') i++;
+    if (i < len) i++;
+    while (i < len && n + 1 < cap && line[i] > ' ') out[n++] = line[i++];
+    out[n] = 0;
+    if (!n) { const char* d = "live-cd"; while (*d) out[n++] = *d++; out[n] = 0; }
+}
+
 /* "medium=live-cd nosmp" ... */
-static __attribute__((unused)) void build_cmdline(char* out, int entry) {
+static __attribute__((unused)) void build_cmdline(char* out, int entry, const char* medium) {
     out[0] = 0;
     c_strcat(out, "medium=");
-    const char* v = MEDIUM_LINE;
-    while (*v && *v != '=') v++;
-    if (*v) v++;
-    c_strcat(out, v);
+    c_strcat(out, medium);
     if (entry == 1) c_strcat(out, " nosmp");
     if (entry == 3 || entry == 4) c_strcat(out, " verbose");
+}
+
+static __attribute__((unused)) int has_long_mode(void) {
+    u32 a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000000u));
+    if (a < 0x80000001u) return 0;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000001u));
+    return (d >> 29) & 1;
 }
 
 /* ── ELF (32- or 64-bit): the PT_LOAD segments ─────────────────────── */

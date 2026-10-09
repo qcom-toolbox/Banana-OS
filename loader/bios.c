@@ -347,34 +347,41 @@ static const u8* find_rsdp(void) {
     return 0;
 }
 
-static int has_long_mode(void) {
-    u32 a, b, c, d;
-    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000000u));
-    if (a < 0x80000001u) return 0;
-    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000001u));
-    return (d >> 29) & 1;
-}
+/* The line `install` rewrites in the disk's copy of this file (see common.h). */
+static const char MEDIUM_LINE[] = "set banana_medium=live-cd";
 
-/* ── the menu ─────────────────────────────────────────────────────────── */
+/* ── the menu: the kernels, then what else the BIOS can do ─────────────── */
+#define ENTRY_NEXT    (KERNEL_ENTRIES)       /* the next boot device (INT 18h) */
+#define ENTRY_RESTART (KERNEL_ENTRIES + 1)
+#define ENTRIES       (KERNEL_ENTRIES + 2)
+
+static const char* label(int i) {
+    if (i == ENTRY_NEXT) return "Boot from the next device";
+    if (i == ENTRY_RESTART) return "Restart the computer";
+    return entry_label(i);
+}
+static int row_of(int i) { return i < KERNEL_ENTRIES ? 4 + i : 5 + i; }   /* a gap before the extras */
+
 static void draw_menu(int sel, int secs) {
     fill_row(1, 0x1E);
     put_at(1, 2, "Banana Boot", 0x1E);
     put_at(1, 62, g_cd ? "(CD/DVD)" : "(disk / USB)", 0x1B);
     for (int i = 0; i < ENTRIES; i++) {
-        fill_row(4 + i, 0x07);
-        put_at(4 + i, 4, entry_label(i), i == sel ? 0x70 : 0x07);
-        if (i == sel) { VGA[(4 + i) * 80 + 3] = (u16)(' ' | 0x70 << 8); for (int c = 4 + (int)c_strlen(entry_label(i)); c < 60; c++) VGA[(4 + i) * 80 + c] = (u16)(' ' | 0x70 << 8); }
+        int r = row_of(i);
+        fill_row(r, 0x07);
+        put_at(r, 4, label(i), i == sel ? 0x70 : 0x07);
+        if (i == sel) { VGA[r * 80 + 3] = (u16)(' ' | 0x70 << 8); for (int c = 4 + (int)c_strlen(label(i)); c < 60; c++) VGA[r * 80 + c] = (u16)(' ' | 0x70 << 8); }
     }
-    fill_row(11, 0x07);
-    put_at(11, 4, "Up / Down choose, Enter starts.", 0x08);
-    fill_row(12, 0x07);
+    fill_row(15, 0x07);
+    put_at(15, 4, "Up / Down choose, Enter starts.", 0x08);
+    fill_row(16, 0x07);
     if (secs >= 0) {
         char line[64] = "Starting the highlighted entry in ";
         char n[12];
         u32_str((u32)secs, n);
         c_strcat(line, n);
         c_strcat(line, " s.");
-        put_at(12, 4, line, 0x08);
+        put_at(16, 4, line, 0x08);
     }
 }
 
@@ -428,6 +435,17 @@ void loader_main(u32 drive, u32 cd) {
 
     int entry = menu(has_long_mode() ? 0 : 2);
     cls();
+    if (entry == ENTRY_NEXT) {
+        /* the BIOS boots the next device in its boot order (or says there is none) */
+        rm_regs_t r = {0};
+        bios_int(0x18, &r);
+        fail("Banana Boot: the BIOS has no other device to boot");
+    }
+    if (entry == ENTRY_RESTART) {
+        kbc_wait();
+        __asm__ volatile("outb %0, $0x64" : : "a"((u8)0xFE));
+        for (;;) __asm__ volatile("hlt");
+    }
     g_msg_row = 2;
     message(entry_is64(entry) ? "Loading Banana OS (64-bit)..." : "Loading Banana OS (32-bit)...");
 
@@ -454,7 +472,9 @@ void loader_main(u32 drive, u32 cd) {
     mb2_t m;
     mb2_begin(&m, MB2_INFO);
     char cmd[96];
-    build_cmdline(cmd, entry);
+    char medium[16];
+    medium_value(MEDIUM_LINE, sizeof(MEDIUM_LINE) - 1, medium, sizeof(medium));
+    build_cmdline(cmd, entry, medium);
     mb2_string(&m, 1, cmd);
     mb2_string(&m, 2, "Banana Boot");
     u8* bootdev = mb2_tag(&m, 5, 20);
