@@ -137,7 +137,13 @@ static void feed(void) {
 /* the timer interrupt, every millisecond (kernel/timer.c) */
 void audio_tick(void) {
     static uint32_t n;
-    if (!g_running || ++n % 2) return;
+    static int awake;
+    if (++n % 2) return;
+    /* in a virtual machine, while there is sound to play: the processor
+     * stays awake when idle, or the emulated card falls behind (timer.c) */
+    int want = g_running && (g_qcount > 0 || g_hw_abs < g_data_end) && timer_in_vm();
+    if (want != awake) { awake = want; timer_stay_awake(want); }
+    if (!g_running) return;
     feed();
 }
 

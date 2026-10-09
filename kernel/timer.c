@@ -125,7 +125,33 @@ uint32_t timer_ticks(void) {
 void timer_poll(void) {
 }
 
+/* A virtual machine playing sound: its emulated sound card (VirtualBox's HDA
+ * and AC'97) is moved along by the hypervisor's timers, which run late while
+ * the virtual processor is halted - the sound played slower, and caught up
+ * in bursts whenever the mouse moved (each of its interrupts woke the
+ * processor). While sound plays there (audio.c says so), the idle loop waits
+ * for the next interrupt awake instead of halting. Real hardware halts. */
+static volatile int g_awake;
+static int g_in_vm = -1;
+
+int timer_in_vm(void) {
+    if (g_in_vm < 0) {
+        uint32_t a, b, c, d;
+        cpuid(1, &a, &b, &c, &d);
+        g_in_vm = (c >> 31) & 1;
+    }
+    return g_in_vm;
+}
+
+void timer_stay_awake(int on) { g_awake = on; }
+
 void timer_idle(void) {
+    if (g_awake) {
+        uint32_t t = g_ms;
+        __asm__ volatile("sti" ::: "memory");
+        while (g_ms == t && g_awake) __asm__ volatile("pause" ::: "memory");
+        return;
+    }
     /* sti's one-instruction shadow makes "sti; hlt" atomic: an interrupt
      * can't sneak in between and leave us halted with nothing to wake us */
     __asm__ volatile("sti; hlt" ::: "memory");
