@@ -15,9 +15,5 @@ void     timer_sleep_ms(uint32_t ms);
  * every idle wait loop instead of spinning, so an idle Banana OS no
  * longer pins its host CPU core at 100%. */
 void     timer_idle(void);
-/* in a virtual machine (CPUID's hypervisor bit) */
-int      timer_in_vm(void);
-/* timer_idle() waits awake instead of halting (audio.c: sound playing in a VM) */
-void     timer_stay_awake(int on);
 
 #endif

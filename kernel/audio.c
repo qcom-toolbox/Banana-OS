@@ -8,6 +8,7 @@
 #include "terminal.h"
 #include "serial.h"
 #include "fs.h"
+#include "idt.h"
 
 /*
  * Sound: one output stream, 48 kHz, 16-bit, stereo.
@@ -93,6 +94,15 @@ static void flush(const uint8_t* p, uint32_t n) {
         __asm__ volatile("clflush (%0)" :: "r"(a) : "memory");
 }
 
+/* What lsaudio shows, to tell where trouble comes from: the rate the card
+ * really plays at (over the last 2 s of playing), refills that came too
+ * late (the card had played everything written), the longest time between
+ * two refills, and the card's own interrupts. */
+static uint32_t g_rate;                     /* bytes per second, measured */
+static uint32_t g_late, g_gap_max, g_card_irqs;
+static uint32_t g_win_ms, g_last_feed_ms;
+static uint64_t g_win_hw;
+
 static void feed(void) {
     if (!g_card) return;
     if (g_card->tick) g_card->tick();
@@ -100,8 +110,22 @@ static void feed(void) {
     uint32_t moved = (hw - g_last_hw + RING) % RING;
     g_last_hw = hw;
     g_hw_abs += moved;
+    uint32_t now = timer_ms();
+    int playing = g_hw_abs < g_data_end;
+    if (playing && g_last_feed_ms && now - g_last_feed_ms > g_gap_max) g_gap_max = now - g_last_feed_ms;
+    g_last_feed_ms = now;
+    if (!playing) { g_win_ms = now; g_win_hw = g_hw_abs; }
+    else if (now - g_win_ms >= 2000) {
+        g_rate = (uint32_t)((g_hw_abs - g_win_hw) * 1000u / (now - g_win_ms));
+        g_win_ms = now;
+        g_win_hw = g_hw_abs;
+    }
     /* we are never more than AHEAD in front of the card */
-    if (g_wr_abs < g_hw_abs) { g_wr_abs = g_hw_abs; g_wp = hw; }   /* fell behind (a long stall) */
+    if (g_wr_abs < g_hw_abs) {                /* fell behind (a long stall) */
+        if (g_hw_abs < g_data_end) g_late++;
+        g_wr_abs = g_hw_abs;
+        g_wp = hw;
+    }
     while (g_wr_abs - g_hw_abs < AHEAD) {
         uint32_t room = AHEAD - (uint32_t)(g_wr_abs - g_hw_abs);
         uint32_t chunk = RING - g_wp;           /* up to the end of the ring */
@@ -137,13 +161,7 @@ static void feed(void) {
 /* the timer interrupt, every millisecond (kernel/timer.c) */
 void audio_tick(void) {
     static uint32_t n;
-    static int awake;
-    if (++n % 2) return;
-    /* in a virtual machine, while there is sound to play: the processor
-     * stays awake when idle, or the emulated card falls behind (timer.c) */
-    int want = g_running && (g_qcount > 0 || g_hw_abs < g_data_end) && timer_in_vm();
-    if (want != awake) { awake = want; timer_stay_awake(want); }
-    if (!g_running) return;
+    if (!g_running || ++n % 2) return;
     feed();
 }
 
@@ -185,17 +203,30 @@ static void ac97_tick(void) {
     if (sr & 1) outb(g_nabm + 0x1B, 0x01);              /* halted: run again */
 }
 
+/* The card's own interrupt, at the end of each of its 32 buffers (~42 ms):
+ * the refill comes when the card has moved on, not only when the timer
+ * says - the way other systems drive the card, and what emulated cards
+ * (VirtualBox) are made for. The timer refill stays as a backup. */
+static void ac97_irq(void) {
+    if (!g_nabm) return;
+    uint16_t sr = inw(g_nabm + 0x16);
+    if (!(sr & 0x1C)) return;                            /* not ours (a shared line) */
+    outw(g_nabm + 0x16, sr & 0x1C);
+    g_card_irqs++;
+    if (g_running) feed();
+}
+
 static int ac97_start(void) {
     outb(g_nabm + 0x1B, 0x02);                           /* reset the PCM out registers */
     for (int i = 0; i < 100 && (inb(g_nabm + 0x1B) & 0x02); i++) timer_sleep_ms(1);
     for (int i = 0; i < 32; i++) {
         g_ac_bdl[i * 2] = (uint32_t)(uintptr_t)(g_ring + i * AC_SEG);
-        g_ac_bdl[i * 2 + 1] = (AC_SEG / 2);              /* samples, no interrupts */
+        g_ac_bdl[i * 2 + 1] = (AC_SEG / 2) | (1u << 31);  /* samples, an interrupt at the end */
     }
     flush((const uint8_t*)g_ac_bdl, 32 * 8);
     outl(g_nabm + 0x10, (uint32_t)(uintptr_t)g_ac_bdl);
     outb(g_nabm + 0x15, 30);
-    outb(g_nabm + 0x1B, 0x01);                           /* run */
+    outb(g_nabm + 0x1B, 0x01 | 0x10);                    /* run, interrupt on completion */
     return 0;
 }
 
@@ -225,6 +256,7 @@ static int ac97_init(const pci_dev_t* pd) {
     if (!g_ac_bdl) return -1;
     ksnprintf(g_card_name, sizeof(g_card_name), "Intel AC'97 (%04x:%04x)", pd->vendor, pd->device);
     g_card = &g_ac97;
+    if (pd->irq_line > 0 && pd->irq_line < 16) irq_install(pd->irq_line, ac97_irq);
     return 0;
 }
 
@@ -235,7 +267,10 @@ static uint32_t* g_corb;
 static uint64_t* g_rirb;
 static uint16_t  g_corb_wp, g_rirb_rp;
 static uint32_t  g_sd;                  /* the output stream descriptor's offset */
+static int       g_sidx;                /* its number among all streams (INTCTL / INTSTS bit) */
+static int       g_hda_irq;             /* its interrupt line is ours */
 static uint64_t* g_hda_bdl;
+#define HDA_BUFS 32                     /* buffer descriptors over the ring */
 static int       g_cad;                 /* codec address */
 
 static uint32_t hr32(uint32_t o) { return *(volatile uint32_t*)(g_hda + o); }
@@ -358,19 +393,32 @@ static int hda_start(void) {
     for (int i = 0; i < 100 && !(hr8(g_sd) & 1); i++) timer_sleep_ms(1);
     hw8(g_sd + 0x00, hr8(g_sd) & ~1);
     for (int i = 0; i < 100 && (hr8(g_sd) & 1); i++) timer_sleep_ms(1);
-    for (int i = 0; i < 2; i++) {
-        g_hda_bdl[i * 2] = (uint64_t)(uintptr_t)(g_ring + i * (RING / 2));
-        g_hda_bdl[i * 2 + 1] = RING / 2;          /* length, no interrupt */
+    /* 32 buffers of 8 KiB (~42 ms each), an interrupt at the end of each -
+     * as other systems set it up, and what emulated cards are made for: two
+     * 128 KiB buffers without interrupts (before) VirtualBox played unevenly */
+    for (int i = 0; i < HDA_BUFS; i++) {
+        g_hda_bdl[i * 2] = (uint64_t)(uintptr_t)(g_ring + i * (RING / HDA_BUFS));
+        g_hda_bdl[i * 2 + 1] = (uint64_t)(RING / HDA_BUFS) | (1ull << 32);   /* length, interrupt on completion */
     }
-    flush((const uint8_t*)g_hda_bdl, 32);           /* (the list, out to RAM before the chip reads it) */
+    flush((const uint8_t*)g_hda_bdl, HDA_BUFS * 16);   /* (the list, out to RAM before the chip reads it) */
     hw32(g_sd + 0x18, (uint32_t)(uintptr_t)g_hda_bdl);
     hw32(g_sd + 0x1C, 0);
     hw32(g_sd + 0x08, RING);
-    hw16(g_sd + 0x0C, 1);
+    hw16(g_sd + 0x0C, HDA_BUFS - 1);
     hw16(g_sd + 0x12, 0x0011);                   /* 48 kHz, 16-bit, 2 channels */
     hw8(g_sd + 0x02, 1 << 4);                    /* stream tag 1 */
-    hw8(g_sd + 0x00, hr8(g_sd) | 2);             /* run */
+    hw8(g_sd + 0x03, 0x1C);                      /* status bits cleared */
+    if (g_hda_irq) hw32(0x20, (1u << 31) | (1u << g_sidx));   /* INTCTL: global + this stream */
+    hw8(g_sd + 0x00, hr8(g_sd) | 2 | (g_hda_irq ? 4 : 0));    /* run, interrupt on completion */
     return 0;
+}
+
+/* the card's interrupt: a buffer played (see ac97_irq) */
+static void hda_irq(void) {
+    if (!g_hda || !(hr32(0x24) & (1u << g_sidx))) return;   /* INTSTS: not ours (a shared line) */
+    hw8(g_sd + 0x03, 0x1C);                      /* BCIS, FIFO error, descriptor error: cleared */
+    g_card_irqs++;
+    if (g_running) feed();
 }
 
 static const card_t g_hdac = { "HDA", hda_start, hda_position, NULL };
@@ -516,11 +564,12 @@ static int hda_init(const pci_dev_t* pd) {
     int iss = (gcap >> 8) & 0xF, oss = (gcap >> 12) & 0xF;
     if (!oss) { klog("hda: no output stream\n"); return -1; }
     g_sd = 0x80 + (uint32_t)iss * 0x20;
+    g_sidx = iss;                                     /* (input streams come first) */
 
     /* CORB / RIRB: the biggest size the controller offers (256 entries on most) */
     g_corb = (uint32_t*)dma_alloc(1024, 128);
     g_rirb = (uint64_t*)dma_alloc(2048, 128);
-    g_hda_bdl = (uint64_t*)dma_alloc(64, 128);
+    g_hda_bdl = (uint64_t*)dma_alloc(HDA_BUFS * 16, 128);
     if (!g_corb || !g_rirb || !g_hda_bdl) return -1;
     hw8(0x4C, 0);                                     /* stop the CORB */
     hw8(0x5C, 0);
@@ -560,6 +609,7 @@ static int hda_init(const pci_dev_t* pd) {
     ksnprintf(g_card_name, sizeof(g_card_name), "HD Audio %04x:%04x, %s (%s)", pd->vendor, pd->device,
               g_codec_name, g_outputs);
     g_card = &g_hdac;
+    if (pd->irq_line > 0 && pd->irq_line < 16) { irq_install(pd->irq_line, hda_irq); g_hda_irq = 1; }
     return 0;
 }
 
@@ -768,6 +818,14 @@ void audio_list(void) {
     if (g_card) {
         ksnprintf(line, sizeof(line), "output:     48000 Hz, 16-bit stereo, volume %d%%%s", g_volume,
                   audio_busy() ? ", playing" : "");
+        terminal_writeln(line);
+        /* where trouble comes from: the card playing at the wrong speed, or
+         * refills coming too late (see feed) */
+        if (g_rate) ksnprintf(line, sizeof(line), "card speed: %u Hz measured (should be 48000)", g_rate / FRAME);
+        else kstrlcpy(line, "card speed: (measured while something plays)", sizeof(line));
+        terminal_writeln(line);
+        ksnprintf(line, sizeof(line), "refills:    %u late, longest gap %u ms, card interrupts %u%s", g_late, g_gap_max,
+                  g_card_irqs, (g_hda_irq || g_card == &g_ac97) ? "" : " (none: no line)");
         terminal_writeln(line);
     }
     terminal_writeln("PC speaker: yes (beep)");
