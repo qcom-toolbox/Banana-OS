@@ -1,5 +1,39 @@
 #ifndef _STDINT_H
 #define _STDINT_H
+#if defined(__TINYC__) && !defined(__INT8_TYPE__)   /* TinyCC: what gcc predefines */
+#define __INT8_TYPE__    signed char
+#define __INT16_TYPE__   short
+#ifndef __INT32_TYPE__
+#define __INT32_TYPE__   int
+#endif
+#define __UINT8_TYPE__   unsigned char
+#define __UINT16_TYPE__  unsigned short
+#define __UINT32_TYPE__  unsigned int
+#define __UINT64_TYPE__  unsigned __INT64_TYPE__
+#define __INTMAX_TYPE__  __INT64_TYPE__
+#define __UINTMAX_TYPE__ unsigned __INT64_TYPE__
+#define __INT_LEAST8_TYPE__   signed char
+#define __INT_LEAST16_TYPE__  short
+#define __INT_LEAST32_TYPE__  int
+#define __INT_LEAST64_TYPE__  __INT64_TYPE__
+#define __UINT_LEAST8_TYPE__  unsigned char
+#define __UINT_LEAST16_TYPE__ unsigned short
+#define __UINT_LEAST32_TYPE__ unsigned int
+#define __UINT_LEAST64_TYPE__ unsigned __INT64_TYPE__
+#define __INT_FAST8_TYPE__    signed char
+#define __INT_FAST16_TYPE__   __PTRDIFF_TYPE__
+#define __INT_FAST32_TYPE__   __PTRDIFF_TYPE__
+#define __INT_FAST64_TYPE__   __INT64_TYPE__
+#define __UINT_FAST8_TYPE__   unsigned char
+#define __UINT_FAST16_TYPE__  unsigned __PTRDIFF_TYPE__
+#define __UINT_FAST32_TYPE__  unsigned __PTRDIFF_TYPE__
+#define __UINT_FAST64_TYPE__  unsigned __INT64_TYPE__
+#if __SIZEOF_POINTER__ == 8
+#define __SIZE_MAX__ 18446744073709551615UL
+#else
+#define __SIZE_MAX__ 4294967295U
+#endif
+#endif
 typedef __INT8_TYPE__    int8_t;
 typedef __INT16_TYPE__   int16_t;
 typedef __INT32_TYPE__   int32_t;

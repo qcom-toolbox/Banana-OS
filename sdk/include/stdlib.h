@@ -34,5 +34,8 @@ void*  bsearch(const void* key, const void* base, size_t n, size_t size, int (*c
 char*  (getenv)(const char* name);    /* (in parentheses: a program may define getenv as a macro) */
 double strtod(const char* s, char** end);
 float  strtof(const char* s, char** end);
+long double strtold(const char* s, char** end);   /* (double precision) */
+/* the absolute path, without . and .. (resolved may be NULL: malloc'd) */
+char*  realpath(const char* path, char* resolved);
 double atof(const char* s);
 #endif

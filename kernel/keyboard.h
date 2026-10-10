@@ -14,6 +14,8 @@ int keyboard_caps_lock(void);    /* 1 while Caps Lock is on */
 
 /* One-shot: 1 exactly once per Ctrl+Alt+Delete press, then clears. */
 int keyboard_ctrl_alt_del_pending(void);
+/* the modifiers held now: 1 shift, 2 ctrl, 4 alt */
+int keyboard_mods(void);
 
 /* USB HID keyboards feed set-1 scancodes through the PS/2 decoder */
 void keyboard_feed_scancode(uint8_t sc);

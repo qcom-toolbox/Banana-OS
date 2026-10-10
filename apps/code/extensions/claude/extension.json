@@ -1,0 +1,18 @@
+{
+  "id": "claude",
+  "name": "Claude",
+  "version": "1.0",
+  "publisher": "Banana OS",
+  "description": "Chat with Claude about your code: explain it, fix build errors, port programs to Banana OS",
+  "icon": "C",
+  "color": "#D97757",
+  "view": "panel.html",
+  "commands": [
+    { "command": "claude.ask", "title": "Claude: Open Chat" },
+    { "command": "claude.explain", "title": "Claude: Explain the Selection (or the File)" },
+    { "command": "claude.fix", "title": "Claude: Fix the Build Errors" },
+    { "command": "claude.port", "title": "Claude: Help Port This File to Banana OS" },
+    { "command": "claude.improve", "title": "Claude: Review and Improve the Selection" },
+    { "command": "claude.setKey", "title": "Claude: Set the API Key" }
+  ]
+}

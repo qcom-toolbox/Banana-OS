@@ -13,6 +13,29 @@
 #define M_PI_2     1.57079632679489661923
 #define M_PI_4     0.78539816339744830962
 #define M_SQRT2    1.41421356237309504880
+#ifdef __TINYC__
+/* TinyCC (the on-device compiler) has none of gcc's classification builtins */
+int __banana_fpclassify(double x);
+int __banana_signbit(double x);
+#ifndef __builtin_huge_val
+#define __builtin_huge_val()    (1e500)
+#endif
+#ifndef __builtin_huge_valf
+#define __builtin_huge_valf()   ((float)1e500)
+#endif
+#ifndef __builtin_nanf
+#define __builtin_nanf(s)       (0.0F / 0.0F)
+#endif
+#define __builtin_inff()        (__builtin_huge_valf())
+#define __builtin_isnan(x)      ((x) != (x))
+#define __builtin_isinf(x)      (__banana_fpclassify(x) == 1)
+#define __builtin_isfinite(x)   (__banana_fpclassify(x) > 1)
+#define __builtin_signbit(x)    __banana_signbit(x)
+#define __builtin_isnormal(x)   (__banana_fpclassify(x) == 4)
+#define __builtin_fpclassify(a, b, c, d, e, x) \
+    (__banana_fpclassify(x) == 0 ? (a) : __banana_fpclassify(x) == 1 ? (b) : \
+     __banana_fpclassify(x) == 4 ? (c) : __banana_fpclassify(x) == 3 ? (d) : (e))
+#endif
 #define HUGE_VAL   (__builtin_huge_val())
 #define INFINITY   (__builtin_inff())
 #define NAN        (__builtin_nanf(""))
@@ -107,6 +130,7 @@ float sinhf(float x);
 float coshf(float x);
 float tanhf(float x);
 float ldexpf(float x, int e);
+long double ldexpl(long double x, int e);   /* (computed in double precision) */
 float frexpf(float x, int* e);
 
 #endif

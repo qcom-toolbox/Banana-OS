@@ -47,3 +47,13 @@ License: public domain - https://tweetnacl.cr.yp.to/
 The Banana-OS kernel and all original Banana-OS source code (including
 the network stack, TLS and crypto code) remain licensed under the BSD
 2-Clause License.
+
+TinyCC (Tiny C Compiler) - ports/tcc, built into Banana Code (apps/code)
+Copyright (c) 2001-2004 Fabrice Bellard and the TinyCC contributors
+License: GNU Lesser General Public License, version 2.1 or later
+Source: https://github.com/TinyCC/tinycc, commit
+43c7708b85681a2fd4451c8a541af4494a8919b2, used unchanged except for its
+configuration (ports/tcc/config.h) and one line of tcc.h that turns off
+"-run" (ports/tcc/build.sh shows both). You may rebuild Banana Code with
+another version of TinyCC: run ports/tcc/build.sh with it, then make in
+apps/code. The LGPL's text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt

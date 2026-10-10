@@ -518,6 +518,14 @@ static void open_picture(const char* path, const char* name) {
     gui_open_browser(path);
 }
 
+/* Banana Code (the built-in editor app): a folder or a file */
+static int has_code(void) { pkg_info_t pi; return pkg_get("code", &pi) == 0; }
+static void open_in_code(const char* path) {
+    char err[96], msg[112];
+    char* argv[2] = { (char*)"code", (char*)path };
+    if (pkg_run("code", 2, argv, 1, err, sizeof(err)) < 0) { ksnprintf(msg, sizeof(msg), "Banana Code: %s", err); set_status_c(msg, 1); }
+}
+
 static int is_font_name(const char* name) { return has_ext(name, ".ttf") || has_ext(name, ".TTF"); }
 
 static void install_font(const char* path) {
@@ -699,7 +707,7 @@ static void properties(void) {
 
 enum { M_OPEN = 1, M_EDIT, M_INSTALL, M_PLAY, M_WALLPAPER, M_COPY, M_CUT, M_PASTE, M_RENAME, M_DELETE,
        M_NEWFOLDER, M_NEWFILE, M_TERMINAL, M_REFRESH, M_USB, M_EJECT, M_PROPS, M_CLOSE, M_VIEW_DETAILS, M_VIEW_ICONS,
-       M_SELECT_NONE, M_BROWSER, M_FONT };
+       M_SELECT_NONE, M_BROWSER, M_FONT, M_CODE };
 
 static void menu_cb(int id, void* arg) {
     (void)arg;
@@ -716,6 +724,7 @@ static void menu_cb(int id, void* arg) {
     case M_PLAY: if (path[0] && g_sel >= 0 && !open_media(path, item_name(&g_items[g_sel]))) play_sound(path); break;
     case M_WALLPAPER: if (path[0]) set_wallpaper(path, item_name(&g_items[g_sel])); break;
     case M_FONT: if (path[0]) install_font(path); break;
+    case M_CODE: if (path[0]) open_in_code(path); break;
     case M_COPY: clip_selected(0); break;
     case M_CUT: clip_selected(1); break;
     case M_PASTE: paste_here(); break;
@@ -753,8 +762,10 @@ static void item_menu(int mx, int my, int row) {
             if (has_ext(name, ".html") || has_ext(name, ".htm") || has_ext(name, ".svg") || is_image_file(it->idx))
                 items[n++] = (ctx_item_t){ "Open in Browser", M_BROWSER, 0 };
             items[n++] = (ctx_item_t){ "Edit in Notepad", M_EDIT, 0 };
+            if (has_code()) items[n++] = (ctx_item_t){ "Open in Banana Code", M_CODE, 0 };
         } else {
             items[n++] = (ctx_item_t){ "Open in a terminal", M_TERMINAL, 0 };
+            if (has_code()) items[n++] = (ctx_item_t){ "Open in Banana Code", M_CODE, 0 };
         }
         items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
         items[n++] = (ctx_item_t){ "Cut", M_CUT, 0 };

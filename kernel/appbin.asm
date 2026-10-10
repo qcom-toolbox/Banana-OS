@@ -1,8 +1,8 @@
 ; kernel/appbin.asm - the apps that come with Banana OS (Media Player,
-; Music, Amethyst, Photos): their packages for this kernel's CPU, zlib-compressed, built by
+; Music, Amethyst, Photos, Banana Code): their packages for this kernel's CPU, zlib-compressed, built by
 ; the Makefile (apps/*/). kernel/builtin_apps.c installs them at boot.
 
-global app_mediaplayer, app_mediaplayer_end, app_music, app_music_end, app_amethyst, app_amethyst_end, app_photos, app_photos_end
+global app_mediaplayer, app_mediaplayer_end, app_music, app_music_end, app_amethyst, app_amethyst_end, app_photos, app_photos_end, app_code, app_code_end
 
 section .rodata
 align 16
@@ -18,6 +18,9 @@ app_amethyst_end:
 align 16
 app_photos: incbin "apps/photos/photos-x86_64.bpk.z"
 app_photos_end:
+align 16
+app_code: incbin "apps/code/code-x86_64.bpk.z"
+app_code_end:
 %else
 app_mediaplayer: incbin "apps/mediaplayer/mediaplayer-i686.bpk.z"
 app_mediaplayer_end:
@@ -30,4 +33,7 @@ app_amethyst_end:
 align 16
 app_photos: incbin "apps/photos/photos-i686.bpk.z"
 app_photos_end:
+align 16
+app_code: incbin "apps/code/code-i686.bpk.z"
+app_code_end:
 %endif

@@ -250,6 +250,32 @@ python3 tools/bpkg check myapp.bpk
 The format: `"BPK1"`, a little-endian `uint32` file count, then per file
 `{ char name[56]; uint32 offset; uint32 size; }`, then the data.
 
+### Tools: any HTTP request, modifier keys, the wheel, installing apps
+
+Since API version 10: `banana_http_fetch(&req, &resp)` makes any request
+(`req.method`, `req.url`, `req.headers` - lines of `"Name: value\r\n"` -,
+`req.body`, `req.content_type`, `req.timeout_ms`) and returns the answer
+whatever its status (`resp.status`, `resp.data` - free() it). `banana_key_mods()`
+tells which of Shift, Ctrl and Alt are held; `bwin_wheel(&win)` makes the
+mouse wheel come as `BANANA_EV_WHEEL` (`ev.y` notches) instead of Up / Down
+keys; `banana_pkg_install(path, msg, cap)` installs a `.bpk` and
+`banana_app_run(name, argc, argv, err, cap)` starts an installed app. Banana
+Code (`apps/code`) is built on them.
+
+The C library also has `setjmp` / `longjmp`, `gettimeofday` (`<sys/time.h>`),
+`realpath`, `strtold` and `ldexpl`.
+
+### Building on Banana OS: TinyCC
+
+Banana Code has TinyCC inside (`ports/tcc/build.sh` fetches a fixed commit and
+builds it): apps can be written, built and run on Banana OS itself. The same
+headers are used there (`/apps/code/tcc/include`); they also work with TinyCC on
+Linux (`ports/tcc/src/host/x86_64-tcc -nostdinc -I sdk/include ...`). TinyCC's
+programs are linked with `-shared -Wl,-e,_banana_start` against
+`libbanana.a` (this C library, built by TinyCC) and `libtcc1.a`; Banana OS
+resolves their GOT / PLT relocations against their own symbols when it loads
+them.
+
 ### The ABI
 
 Banana OS loads the ELF, applies its relocations, and calls

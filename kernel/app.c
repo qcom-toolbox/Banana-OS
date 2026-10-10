@@ -20,6 +20,7 @@
 #include "smp.h"
 #include "webview.h"
 #include "font.h"
+#include "pkg.h"
 #include "wallpaper.h"
 #include "image.h"
 
@@ -591,6 +592,7 @@ static void a_win_close(int win) { app_proc_t* p = cur(); if (p) appwin_close(wi
 static void a_win_set_title(int win, const char* t) { app_proc_t* p = cur(); if (p) appwin_set_title(win, p->id, t); }
 static void a_win_size(int win, int* w, int* h) { app_proc_t* p = cur(); appwin_size(win, p ? p->id : -1, w, h); }
 static void a_win_media_keys(int win) { app_proc_t* p = cur(); if (p) appwin_set_media(win, p->id); }
+static void a_win_wheel(int win) { app_proc_t* p = cur(); if (p) appwin_set_wheel(win, p->id); }
 static void a_win_set_resizable(int win, int mw, int mh) { app_proc_t* p = cur(); if (p) appwin_set_resizable(win, p->id, mw, mh); }
 
 /* web views (webview.c): each belongs to the app that opened it */
@@ -747,6 +749,61 @@ static int a_http_request(const char* method, const char* url, const char* body,
     *data = b.buf;
     if (len) *len = b.n;
     return 0;
+}
+
+/* any request, any answer (version 10) */
+static int a_http_fetch(const banana_http_req_t* rq, banana_http_resp_t* out) {
+    if (!rq || !out || !rq->url) return -1;
+    memset(out, 0, sizeof(*out));
+    hbody_t b = { 0, 0, 0, 0 };
+    http_request_t req;
+    memset(&req, 0, sizeof(req));
+    req.method = rq->method && rq->method[0] ? rq->method : "GET";
+    if (rq->body) {
+        req.body = rq->body;
+        req.body_len = (uint32_t)rq->body_len;
+        req.content_type = rq->content_type && rq->content_type[0] ? rq->content_type : "application/json";
+    }
+    req.extra_headers = rq->headers;
+    req.follow_redirects = 1;
+    req.max_redirects = 10;
+    req.timeout_ms = rq->timeout_ms > 0 ? (uint32_t)rq->timeout_ms : 20000;
+    req.user_agent = "BananaOS-App/1.0";
+    req.ctx = &b;
+    req.on_body = h_body;
+    http_response_t* resp = (http_response_t*)kmalloc(sizeof(http_response_t));
+    if (!resp) { kstrlcpy(out->err, "out of memory", sizeof(out->err)); return -1; }
+    char e[128];
+    int rc = http_fetch(rq->url, &req, resp, e, sizeof(e));
+    if (rc != NET_OK || b.oom) {
+        kstrlcpy(out->err, b.oom ? "too big (16 MiB max)" : e, sizeof(out->err));
+        if (b.buf) a_free(b.buf);
+        kfree(resp);
+        return -1;
+    }
+    out->status = resp->status;
+    kstrlcpy(out->content_type, resp->content_type, sizeof(out->content_type));
+    kfree(resp);
+    if (!b.buf) { b.buf = (char*)a_malloc(1); if (b.buf) b.buf[0] = 0; }
+    out->data = b.buf;
+    out->len = b.n;
+    return 0;
+}
+
+static int a_key_mods(void) { return keyboard_mods(); }
+
+static int a_pkg_install(const char* path, char* msg, int mcap) {
+    char m[160];
+    if (!msg || mcap <= 0) { msg = m; mcap = sizeof(m); }
+    if (!path) return -1;
+    return pkg_install(path, msg, mcap) == 0 ? 0 : -1;
+}
+
+static int a_app_run(const char* name, int argc, char** argv, char* err, int ecap) {
+    char e[128];
+    if (!err || ecap <= 0) { err = e; ecap = sizeof(e); }
+    if (!name) return -1;
+    return pkg_run(name, argc, argv, 1, err, ecap) < 0 ? -1 : 0;
 }
 
 static int a_http_get(const char* url, char** data, unsigned long* len, char* ctype, int ccap, char* err, int ecap) {
@@ -1048,6 +1105,11 @@ static void api_init(void) {
     g_api.http_request = G(a_http_request);
     g_api.image_load = G(a_image_load);
     g_api.set_wallpaper = G(a_set_wallpaper);
+    g_api.http_fetch = G(a_http_fetch);
+    g_api.key_mods = G(a_key_mods);
+    g_api.win_wheel = G(a_win_wheel);
+    g_api.pkg_install = G(a_pkg_install);
+    g_api.app_run = G(a_app_run);
 }
 
 /* ── the ELF loader ────────────────────────────────────────────────── */
@@ -1061,6 +1123,12 @@ static void api_init(void) {
 #define DT_REL     17
 #define DT_RELSZ   18
 #define DT_RELENT  19
+#define DT_PLTRELSZ 2
+#define DT_STRTAB  5
+#define DT_SYMTAB  6
+#define DT_SYMENT  11
+#define DT_PLTREL  20
+#define DT_JMPREL  23
 #define R_X86_64_NONE     0
 #define R_X86_64_RELATIVE 8
 #define R_386_NONE        0
@@ -1117,9 +1185,12 @@ static int load_elf(const uint8_t* f, uint32_t size, uint8_t** image_out, banana
         if (ph[i].type == PT_LOAD) memcpy((void*)(base + (uintptr_t)ph[i].vaddr), f + ph[i].offset, (size_t)ph[i].filesz);
         if (ph[i].type == PT_DYNAMIC) dyn = (const dyn_t*)(base + (uintptr_t)ph[i].vaddr);
     }
-    /* relocations: a static PIE only has "base + addend" ones */
+    /* relocations: the SDK's static PIEs only have "base + addend" ones;
+     * TinyCC's programs (-shared, built on Banana OS) also refer to their
+     * own symbols - through the GOT and PLT, and (i386) in their code */
     if (dyn) {
         uintptr_t rel = 0, relsz = 0, relent = 0, rela = 0, relasz = 0, relaent = 0;
+        uintptr_t symtab = 0, syment = 0, strtab = 0, jmprel = 0, pltrelsz = 0, pltrel = 0;
         for (const dyn_t* d = dyn; d->tag != DT_NULL && (const uint8_t*)d < mem + span; d++) {
             switch (d->tag) {
             case DT_RELA: rela = (uintptr_t)d->val; break;
@@ -1128,39 +1199,94 @@ static int load_elf(const uint8_t* f, uint32_t size, uint8_t** image_out, banana
             case DT_REL: rel = (uintptr_t)d->val; break;
             case DT_RELSZ: relsz = (uintptr_t)d->val; break;
             case DT_RELENT: relent = (uintptr_t)d->val; break;
+            case DT_SYMTAB: symtab = (uintptr_t)d->val; break;
+            case DT_SYMENT: syment = (uintptr_t)d->val; break;
+            case DT_STRTAB: strtab = (uintptr_t)d->val; break;
+            case DT_JMPREL: jmprel = (uintptr_t)d->val; break;
+            case DT_PLTRELSZ: pltrelsz = (uintptr_t)d->val; break;
+            case DT_PLTREL: pltrel = (uintptr_t)d->val; break;
             }
         }
+#define IN_IMAGE(a, n) ((a) >= lo && (a) - lo + (n) <= span)
+        int bad = 0;
+        char why[96] = "";
 #ifdef __x86_64__
         (void)rel; (void)relsz; (void)relent;
-        if (rela && relaent == 24) {
-            for (uintptr_t o = 0; o + 24 <= relasz; o += 24) {
-                const uint64_t* r = (const uint64_t*)(base + rela + o);
-                uint32_t type = (uint32_t)r[1];
+        if (!syment) syment = 24;
+        uintptr_t tabs[2][2] = { { rela, relasz }, { pltrel == DT_RELA ? jmprel : 0, pltrelsz } };
+        if (rela && relaent && relaent != 24) bad = 1;
+        for (int t = 0; t < 2 && !bad; t++) {
+            if (!tabs[t][0]) continue;
+            if (!IN_IMAGE(tabs[t][0], tabs[t][1])) { bad = 1; break; }
+            for (uintptr_t o = 0; o + 24 <= tabs[t][1]; o += 24) {
+                const uint64_t* r = (const uint64_t*)(base + tabs[t][0] + o);
+                uint32_t type = (uint32_t)r[1], si = (uint32_t)(r[1] >> 32);
                 if (type == R_X86_64_NONE) continue;
-                if (type != R_X86_64_RELATIVE || r[0] - lo + 8 > span) {
-                    ksnprintf(err, (size_t)ecap, "unsupported relocation type %u (link it with the SDK)", type);
-                    kfree(raw);
-                    return -1;
+                if (!IN_IMAGE(r[0], 8)) { bad = 1; break; }
+                uint64_t* P = (uint64_t*)(base + r[0]);
+                if (type == R_X86_64_RELATIVE) { *P = base + r[2]; continue; }
+                /* a symbol of the program itself */
+                uintptr_t sa = symtab + (uintptr_t)si * syment;
+                if (!symtab || !IN_IMAGE(sa, 24)) { bad = 1; break; }
+                const uint8_t* sym = (const uint8_t*)(base + sa);
+                uint16_t shndx = *(const uint16_t*)(sym + 6);
+                uint64_t val = *(const uint64_t*)(sym + 8);
+                if (!shndx) {
+                    uint32_t nm = *(const uint32_t*)sym;
+                    ksnprintf(why, sizeof(why), "it needs %s, which Banana OS does not have",
+                              strtab && IN_IMAGE(strtab + nm, 1) ? (const char*)(base + strtab + nm) : "a missing function");
+                    bad = 2;
+                    break;
                 }
-                *(uint64_t*)(base + r[0]) = base + r[2];
+                uint64_t S = base + val;
+                if (type == 1) *P = S + r[2];                          /* R_X86_64_64 */
+                else if (type == 6 || type == 7) *P = S;               /* GLOB_DAT, JUMP_SLOT */
+                else if (type == 2) *(uint32_t*)P = (uint32_t)(S + r[2] - (uint64_t)(uintptr_t)P);   /* PC32 */
+                else { ksnprintf(why, sizeof(why), "unsupported relocation type %u", type); bad = 2; break; }
             }
         }
 #else
         (void)rela; (void)relasz; (void)relaent;
-        if (rel && relent == 8) {
-            for (uintptr_t o = 0; o + 8 <= relsz; o += 8) {
-                const uint32_t* r = (const uint32_t*)(base + rel + o);
-                uint32_t type = r[1] & 0xFF;
+        if (!syment) syment = 16;
+        uintptr_t tabs[2][2] = { { rel, relsz }, { pltrel == DT_REL ? jmprel : 0, pltrelsz } };
+        if (rel && relent && relent != 8) bad = 1;
+        for (int t = 0; t < 2 && !bad; t++) {
+            if (!tabs[t][0]) continue;
+            if (!IN_IMAGE(tabs[t][0], tabs[t][1])) { bad = 1; break; }
+            for (uintptr_t o = 0; o + 8 <= tabs[t][1]; o += 8) {
+                const uint32_t* r = (const uint32_t*)(base + tabs[t][0] + o);
+                uint32_t type = r[1] & 0xFF, si = r[1] >> 8;
                 if (type == R_386_NONE) continue;
-                if (type != R_386_RELATIVE || r[0] - lo + 4 > span) {
-                    ksnprintf(err, (size_t)ecap, "unsupported relocation type %u (link it with the SDK)", type);
-                    kfree(raw);
-                    return -1;
+                if (!IN_IMAGE(r[0], 4)) { bad = 1; break; }
+                uint32_t* P = (uint32_t*)(base + r[0]);
+                if (type == R_386_RELATIVE) { *P += base; continue; }
+                uintptr_t sa = symtab + (uintptr_t)si * syment;
+                if (!symtab || !IN_IMAGE(sa, 16)) { bad = 1; break; }
+                const uint8_t* sym = (const uint8_t*)(base + sa);
+                uint32_t val = *(const uint32_t*)(sym + 4);
+                uint16_t shndx = *(const uint16_t*)(sym + 14);
+                if (!shndx) {
+                    uint32_t nm = *(const uint32_t*)sym;
+                    ksnprintf(why, sizeof(why), "it needs %s, which Banana OS does not have",
+                              strtab && IN_IMAGE(strtab + nm, 1) ? (const char*)(base + strtab + nm) : "a missing function");
+                    bad = 2;
+                    break;
                 }
-                *(uint32_t*)(base + r[0]) += base;
+                uint32_t S = (uint32_t)base + val;
+                if (type == 1) *P += S;                                /* R_386_32 */
+                else if (type == 2) *P += S - (uint32_t)(uintptr_t)P;  /* R_386_PC32 */
+                else if (type == 6 || type == 7) *P = S;               /* GLOB_DAT, JMP_SLOT */
+                else { ksnprintf(why, sizeof(why), "unsupported relocation type %u", type); bad = 2; break; }
             }
         }
 #endif
+#undef IN_IMAGE
+        if (bad) {
+            if (bad == 1) kstrlcpy(err, "damaged relocations (link it with the SDK or tcc)", (size_t)ecap);
+            else kstrlcpy(err, why, (size_t)ecap);
+            kfree(raw);
+            return -1;
+        }
     }
     *image_out = raw;
     *entry = (banana_entry_t)(base + (uintptr_t)eh->entry);

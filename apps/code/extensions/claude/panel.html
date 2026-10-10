@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Claude</title>
+<style>
+  body { background: #1e1e1e; color: #d4d4d4; font-family: sans-serif; font-size: 13px; margin: 0; padding: 10px 12px; }
+  h2 { font-size: 15px; color: #ffffff; margin: 4px 0 8px 0; }
+  p { margin: 4px 0 8px 0; }
+  .dim { color: #8b8b8b; font-size: 12px; }
+  .bar { margin: 0 0 8px 0; }
+  button { background: #3a3d41; color: #ffffff; border: 1px solid #3a3d41; padding: 4px 9px; margin: 0 4px 4px 0; font-size: 12px; }
+  button.primary { background: #0e639c; border-color: #0e639c; }
+  button.on { background: #d97757; border-color: #d97757; }
+  input, textarea { background: #3c3c3c; color: #e0e0e0; border: 1px solid #555555; padding: 5px; font-size: 13px; width: 94%; }
+  textarea { height: 64px; }
+  .msg { margin: 0 0 12px 0; padding: 8px 10px; }
+  .user { background: #2b2d31; border-left: 3px solid #0e639c; }
+  .claude { background: #252526; border-left: 3px solid #d97757; }
+  .who { font-weight: bold; color: #ffffff; margin-bottom: 4px; font-size: 12px; }
+  .code { background: #111111; color: #d4d4d4; padding: 8px; font-family: monospace; font-size: 12px; margin: 6px 0 4px 0; }
+  .err { color: #f48771; }
+  .busy { color: #d97757; }
+</style>
+</head>
+<body>
+
+<div id="setup" style="display:none">
+  <h2>Claude</h2>
+  <p>Claude reads the code you are working on and helps you write it, fix build errors and port programs to Banana OS.</p>
+  <p>It talks to the Anthropic API with <b>your own API key</b> (from console.anthropic.com, Settings &gt; API Keys).
+     The key is kept only on this computer, in ~/.bcode/state/claude, and sent only to api.anthropic.com.</p>
+  <input id="key" type="password" placeholder="sk-ant-...">
+  <p><button class="primary" id="saveKey">Save the key</button> <button id="cancelKey">Cancel</button></p>
+  <p class="dim" id="setupMsg"></p>
+</div>
+
+<div id="chat" style="display:none">
+  <div class="bar">
+    <span class="dim">Model:</span>
+    <button id="m0">Opus 5.5</button><button id="m1">Sonnet 5.5</button><button id="m2">Haiku 5.5</button>
+  </div>
+  <div class="bar">
+    <button id="aExplain">Explain</button><button id="aFix">Fix build errors</button><button id="aPort">Port to Banana OS</button><button id="aImprove">Review</button>
+  </div>
+  <div id="log"></div>
+  <div id="status" class="dim"></div>
+  <textarea id="prompt" placeholder="Ask Claude about your code..."></textarea>
+  <p>
+    <button class="primary" id="send">Send</button>
+    <button id="withFile" class="on">Include the file</button>
+    <button id="clear">New chat</button>
+    <button id="changeKey">API key</button>
+  </p>
+  <p class="dim">Code blocks in answers have buttons to put them into the editor.</p>
+</div>
+
+<script>
+const MODELS = [
+  { id: "claude-opus-5-5", name: "Opus 5.5" },
+  { id: "claude-sonnet-5-5", name: "Sonnet 5.5" },
+  { id: "claude-haiku-5-5", name: "Haiku 5.5" }
+];
+
+const SYSTEM = `You are Claude, an AI assistant built into Banana Code, the code editor of Banana OS.
+Banana OS is a hobby x86 operating system written from scratch (32-bit i686 and 64-bit x86_64).
+Apps are C programs built with the Banana OS SDK and run in ring 0 with no memory protection.
+Inside Banana Code, apps are compiled by TinyCC (C99 plus common GNU extensions; no C++).
+A project is a folder with banana.json: {"name","title","version","type":"console"|"gui","sources":[...],"cflags","data":[...]}.
+F7 builds a .bpk package for the computer's CPU; F5 builds, installs and runs it.
+
+The SDK's C library has: stdio (printf, FILE*, fopen, fgets...), stdlib (malloc, qsort, strtol, getenv returns NULL),
+string, ctype, math, time (time, localtime, strftime), setjmp, errno, and POSIX-style open/read/write/close/lseek/stat/mkdir/unlink/getcwd/chdir.
+It does NOT have: fork/exec/wait, signals, pipes, sockets (BSD), pthreads, mmap, dlopen, terminal ioctl/termios, select/poll, getopt (write a small loop).
+Banana OS's own API is in <banana.h>:
+- windows: bwin_open(&win, title, w, h), bwin_clear, bwin_fill_rect, bwin_rect, bwin_line, bwin_circle, bwin_fill_circle,
+  bwin_text (8x8 font), bwin_font(&win, x, y, BANANA_FONT_SANS|_SANS_BOLD|_MONO, size, text, color), bwin_button, bwin_blit,
+  bwin_update, bwin_event / bwin_wait_event(&win, &ev, timeout_ms) with ev.type BANANA_EV_KEY (ev.key, BANANA_KEY_UP...),
+  BANANA_EV_MOUSE_DOWN/UP/MOVE (ev.x, ev.y, ev.button), BANANA_EV_CLOSE, BANANA_EV_RESIZE (after bwin_resizable); win.px is the 0x00RRGGBB pixel buffer.
+- console: banana_key(), banana_try_key(), banana_color(fg, bg), banana_clear_screen(), banana_cursor(row, col), banana_term_size().
+- time: banana_ticks() ms since boot, banana_sleep(ms), banana_time(&t).
+- threads: banana_thread(fn, arg), banana_join(id), banana_lock/unlock (banana_mutex_t), banana_cond_*.
+- network: banana_http_get(url, &data, &len, err, cap), banana_http_post, banana_http_fetch (any method and headers).
+- sound: banana_audio_play(pcm, bytes, rate, channels, bits), banana_beep(hz, ms).
+- pictures: banana_image_load(path, &w, &h, err, cap) gives 0x00RRGGBB pixels.
+When porting a program, replace what Banana OS lacks with what it has, and keep changes small and clear.
+Answer concisely. Put code in fenced blocks with the language (\`\`\`c). When you change a file, give the whole changed function or file.`;
+
+let apiKey = "";
+let model = 0;
+let withFile = true;
+let history = [];           // {role, content}
+let pending = null;         // the request waiting for the editor's context
+let busy = false;
+let reqId = 0;
+let started = 0;
+
+function $(id) { return document.getElementById(id); }
+function post(o) { banana.postMessage(JSON.stringify(o)); }
+
+function esc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+/* text that wraps at the panel's edge: line breaks as <br> */
+function para(s) { return esc(s).replace(/\n/g, "<br>"); }
+/* code: its indentation kept, long lines wrapped */
+function codeHtml(s) {
+  return s.split("\n").map(function (l) {
+    const m = l.match(/^[ \t]*/)[0];
+    const ind = m.replace(/\t/g, "    ").replace(/ /g, "&nbsp;");
+    return ind + esc(l.slice(m.length));
+  }).join("<br>");
+}
+
+function showSetup(msg) {
+  $("setup").style.display = "block";
+  $("chat").style.display = "none";
+  $("setupMsg").textContent = msg || "";
+}
+function showChat() {
+  $("setup").style.display = "none";
+  $("chat").style.display = "block";
+  paintModels();
+}
+
+function paintModels() {
+  for (let i = 0; i < 3; i++) $("m" + i).className = i === model ? "on" : "";
+  $("withFile").className = withFile ? "on" : "";
+}
+
+function setStatus(text, cls) {
+  $("status").className = cls || "dim";
+  $("status").textContent = text;
+}
+
+/* an answer: text, and code blocks with buttons */
+let blocks = [];
+function render(text) {
+  let html = "";
+  const parts = text.split("```");
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) {
+      if (parts[i].trim()) html += '<div class="text">' + para(parts[i].replace(/^\n+|\n+$/g, "")) + "</div>";
+    } else {
+      let code = parts[i];
+      let lang = "";
+      const nl = code.indexOf("\n");
+      if (nl >= 0 && nl < 20 && code.slice(0, nl).trim().indexOf(" ") < 0) { lang = code.slice(0, nl).trim(); code = code.slice(nl + 1); }
+      code = code.replace(/\n+$/, "");
+      const n = blocks.length;
+      blocks.push({ code: code, lang: lang });
+      html += '<div class="code">' + codeHtml(code) + "</div>" +
+        '<div><button data-act="insert" data-n="' + n + '">Insert at cursor</button>' +
+        '<button data-act="replace" data-n="' + n + '">Replace selection</button>' +
+        '<button data-act="newfile" data-n="' + n + '">New file</button></div>';
+    }
+  }
+  return html;
+}
+
+function addMessage(who, text, isError) {
+  const d = document.createElement("div");
+  d.className = "msg " + (who === "You" ? "user" : "claude");
+  d.innerHTML = '<div class="who">' + esc(who) + "</div>" +
+    (isError ? '<div class="text err">' + para(text) + "</div>" : (who === "You" ? '<div class="text">' + para(text) + "</div>" : render(text)));
+  $("log").appendChild(d);
+  try { window.scrollTo(0, document.body.scrollHeight); } catch (e) {}
+}
+
+/* asking: first the editor's context, then the API */
+function ask(text, opts) {
+  if (busy) { setStatus("Claude is still answering...", "busy"); return; }
+  if (!apiKey) { showSetup("Set your API key first."); return; }
+  pending = { text: text, opts: opts || {} };
+  post({ type: "getContext" });
+}
+
+function clip(s, n) { return s.length > n ? s.slice(0, n) + "\n... (cut: " + (s.length - n) + " more characters)" : s; }
+
+function withContext(ctx) {
+  const p = pending;
+  pending = null;
+  let content = p.text;
+  const extra = [];
+  const name = ctx.file ? ctx.file : "(an unsaved file)";
+  if (ctx.selection && (p.opts.selection || !withFile)) extra.push("Selected code in " + name + ":\n```\n" + clip(ctx.selection, 30000) + "\n```");
+  if ((withFile || p.opts.file) && ctx.text) extra.push("The file " + name + " (" + ctx.language + ", cursor on line " + ctx.line + "):\n```\n" + clip(ctx.text, 60000) + "\n```");
+  if (p.opts.problems) extra.push("Build output:\n```\n" + clip(ctx.output || "(none)", 20000) + "\n```\nProblems:\n" + (ctx.problems || "(none)"));
+  if (ctx.project) extra.push("The project folder is " + ctx.project + ". This computer is " + ctx.arch + ".");
+  if (extra.length) content = content + "\n\n" + extra.join("\n\n");
+  addMessage("You", p.text);
+  history.push({ role: "user", content: content });
+  while (history.length > 12) history.shift();
+  /* the older turns keep only their question: the context is the newest */
+  const msgs = history.map(function (m, i) {
+    return { role: m.role, content: i === history.length - 1 ? m.content : (m.short || m.content) };
+  });
+  history[history.length - 1].short = p.text;
+  busy = true;
+  started = Date.now();
+  setStatus("Claude is thinking...", "busy");
+  reqId++;
+  post({
+    type: "http", id: "r" + reqId, method: "POST", url: "https://api.anthropic.com/v1/messages",
+    headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+    body: JSON.stringify({ model: MODELS[model].id, max_tokens: 4096, system: SYSTEM, messages: msgs })
+  });
+}
+
+function onAnswer(m) {
+  busy = false;
+  const secs = Math.round((Date.now() - started) / 100) / 10;
+  if (m.error) { setStatus(""); addMessage("Claude", "Could not reach the Anthropic API: " + m.error, true); history.pop(); return; }
+  let data = null;
+  try { data = JSON.parse(m.body); } catch (e) {}
+  if (m.status !== 200 || !data) {
+    let why = data && data.error && data.error.message ? data.error.message : ("HTTP " + m.status);
+    if (m.status === 401) why += " - check your API key (API key button).";
+    setStatus("");
+    addMessage("Claude", why, true);
+    history.pop();
+    return;
+  }
+  let text = "";
+  (data.content || []).forEach(function (b) { if (b.type === "text") text += b.text; });
+  history.push({ role: "assistant", content: text });
+  const u = data.usage || {};
+  setStatus(MODELS[model].name + " - " + secs + " s" + (u.output_tokens ? ", " + u.input_tokens + " tokens in, " + u.output_tokens + " out" : ""));
+  addMessage("Claude", text || "(no text)");
+  post({ type: "status", text: "Claude answered" });
+}
+
+function onCommand(c) {
+  showChat();
+  if (c === "claude.explain") ask("Explain this code: what it does and how.", { selection: true });
+  else if (c === "claude.fix") ask("The build failed. Find the cause of these errors and give the fixed code.", { problems: true, file: true });
+  else if (c === "claude.port") ask("Help me port this file to Banana OS: list what will not build or work there, and give the changed code.", { file: true });
+  else if (c === "claude.improve") ask("Review this code: bugs, unclear parts, and improvements. Give the improved version.", { selection: true });
+  else if (c === "claude.setKey") showSetup("");
+  else $("prompt").focus && $("prompt").focus();
+}
+
+/* the editor's messages */
+window.addEventListener("message", function (e) {
+  let m;
+  try { m = JSON.parse(e.data); } catch (x) { return; }
+  if (m.type === "state") {
+    if (m.key === "apiKey") { apiKey = m.value || ""; if (apiKey) showChat(); else showSetup(""); }
+    if (m.key === "model" && m.value) { model = parseInt(m.value, 10) || 0; paintModels(); }
+  } else if (m.type === "context") {
+    if (pending) withContext(m);
+  } else if (m.type === "httpResponse") {
+    onAnswer(m);
+  } else if (m.type === "command") {
+    onCommand(m.command);
+  }
+});
+
+/* clicks */
+document.addEventListener("click", function (e) {
+  const t = e.target;
+  if (!t || !t.getAttribute) return;
+  const act = t.getAttribute("data-act");
+  if (act) {
+    const b = blocks[parseInt(t.getAttribute("data-n"), 10)];
+    if (!b) return;
+    if (act === "insert") post({ type: "insertText", text: b.code + "\n" });
+    else if (act === "replace") post({ type: "replaceSelection", text: b.code });
+    else if (act === "newfile") {
+      const ext = b.lang === "c" || b.lang === "C" ? ".c" : b.lang === "json" ? ".json" : b.lang === "js" || b.lang === "javascript" ? ".js" : b.lang === "html" ? ".html" : ".txt";
+      post({ type: "newFile", name: "claude" + Math.floor(Date.now() / 1000 % 100000) + ext, text: b.code + "\n" });
+    }
+  }
+});
+
+$("saveKey").addEventListener("click", function () {
+  const k = $("key").value.trim();
+  if (!k) {
+    apiKey = "";
+    post({ type: "setState", key: "apiKey", value: "" });
+    $("setupMsg").textContent = "The key was removed from this computer.";
+    return;
+  }
+  if (k.indexOf("sk-") !== 0) { $("setupMsg").textContent = "That does not look like an Anthropic API key (sk-ant-...)."; return; }
+  apiKey = k;
+  $("key").value = "";
+  post({ type: "setState", key: "apiKey", value: k });
+  showChat();
+  setStatus("Key saved. Ask anything about your code.");
+});
+$("cancelKey").addEventListener("click", function () { if (apiKey) showChat(); });
+$("changeKey").addEventListener("click", function () { showSetup("Enter a new key, or leave it empty and Save to remove it."); });
+for (let i = 0; i < 3; i++) {
+  $("m" + i).addEventListener("click", function () { model = i; paintModels(); post({ type: "setState", key: "model", value: String(i) }); });
+}
+$("withFile").addEventListener("click", function () { withFile = !withFile; paintModels(); });
+$("clear").addEventListener("click", function () { history = []; blocks = []; $("log").innerHTML = ""; setStatus("New chat."); });
+$("send").addEventListener("click", function () {
+  const t = $("prompt").value.trim();
+  if (!t) return;
+  $("prompt").value = "";
+  ask(t, {});
+});
+$("aExplain").addEventListener("click", function () { onCommand("claude.explain"); });
+$("aFix").addEventListener("click", function () { onCommand("claude.fix"); });
+$("aPort").addEventListener("click", function () { onCommand("claude.port"); });
+$("aImprove").addEventListener("click", function () { onCommand("claude.improve"); });
+
+/* the saved key and model, then: ready */
+post({ type: "ready" });
+post({ type: "getState", key: "model" });
+post({ type: "getState", key: "apiKey" });
+</script>
+</body>
+</html>

@@ -53,7 +53,7 @@ APP_LDFLAGS = -pie --no-dynamic-linker -z noexecstack -z norelro -z max-page-siz
               -z noseparate-code --hash-style=sysv -e _banana_start -s $(LDFLAGS)
 
 LIBC_SRCS = $(BANANA_SDK)/lib/crt0.c $(BANANA_SDK)/lib/libc.c $(BANANA_SDK)/lib/stdio.c $(BANANA_SDK)/lib/banana.c \
-            $(BANANA_SDK)/lib/math.c $(BANANA_SDK)/lib/posix.c
+            $(BANANA_SDK)/lib/math.c $(BANANA_SDK)/lib/posix.c $(BANANA_SDK)/lib/setjmp.c
 LIBC_i686   = $(LIBC_SRCS) $(BANANA_SDK)/lib/divdi3.c
 LIBC_x86_64 = $(LIBC_SRCS)
 

@@ -1,0 +1,73 @@
+/* Banana OS SDK: setjmp / longjmp (the callee-saved registers, the stack
+ * pointer and the return address), for both CPUs; gcc and TinyCC alike. */
+#include <setjmp.h>
+
+#ifdef __x86_64__
+/* jmp_buf: rbx rbp r12 r13 r14 r15 rsp rip */
+__asm__(
+    ".text\n"
+    ".globl setjmp\n"
+    ".hidden setjmp\n"
+    "setjmp:\n"
+    "    movq %rbx, 0(%rdi)\n"
+    "    movq %rbp, 8(%rdi)\n"
+    "    movq %r12, 16(%rdi)\n"
+    "    movq %r13, 24(%rdi)\n"
+    "    movq %r14, 32(%rdi)\n"
+    "    movq %r15, 40(%rdi)\n"
+    "    leaq 8(%rsp), %rdx\n"
+    "    movq %rdx, 48(%rdi)\n"
+    "    movq (%rsp), %rdx\n"
+    "    movq %rdx, 56(%rdi)\n"
+    "    xorl %eax, %eax\n"
+    "    ret\n"
+    ".globl longjmp\n"
+    ".hidden longjmp\n"
+    "longjmp:\n"
+    "    movl %esi, %eax\n"
+    "    testl %eax, %eax\n"
+    "    jnz 1f\n"
+    "    incl %eax\n"
+    "1:  movq 0(%rdi), %rbx\n"
+    "    movq 8(%rdi), %rbp\n"
+    "    movq 16(%rdi), %r12\n"
+    "    movq 24(%rdi), %r13\n"
+    "    movq 32(%rdi), %r14\n"
+    "    movq 40(%rdi), %r15\n"
+    "    movq 48(%rdi), %rsp\n"
+    "    jmp *56(%rdi)\n"
+);
+#else
+/* jmp_buf: ebx esi edi ebp esp eip */
+__asm__(
+    ".text\n"
+    ".globl setjmp\n"
+    ".hidden setjmp\n"
+    "setjmp:\n"
+    "    movl 4(%esp), %eax\n"
+    "    movl %ebx, 0(%eax)\n"
+    "    movl %esi, 4(%eax)\n"
+    "    movl %edi, 8(%eax)\n"
+    "    movl %ebp, 12(%eax)\n"
+    "    leal 4(%esp), %ecx\n"
+    "    movl %ecx, 16(%eax)\n"
+    "    movl (%esp), %ecx\n"
+    "    movl %ecx, 20(%eax)\n"
+    "    xorl %eax, %eax\n"
+    "    ret\n"
+    ".globl longjmp\n"
+    ".hidden longjmp\n"
+    "longjmp:\n"
+    "    movl 4(%esp), %edx\n"
+    "    movl 8(%esp), %eax\n"
+    "    testl %eax, %eax\n"
+    "    jnz 1f\n"
+    "    incl %eax\n"
+    "1:  movl 0(%edx), %ebx\n"
+    "    movl 4(%edx), %esi\n"
+    "    movl 8(%edx), %edi\n"
+    "    movl 12(%edx), %ebp\n"
+    "    movl 16(%edx), %esp\n"
+    "    jmp *20(%edx)\n"
+);
+#endif

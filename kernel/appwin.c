@@ -33,6 +33,7 @@ typedef struct {
     int       pending, pw, ph;     /* a new client size, applied when the app reads BANANA_EV_RESIZE */
     int       maxed, sx, sy, sw, sh;
     uint32_t  title_ms;
+    int       wheel;               /* wants BANANA_EV_WHEEL (win_wheel) */
 } awin_t;
 
 #define GRIP 14
@@ -465,6 +466,7 @@ void appwin_focus(int focused) {
 void appwin_wheel(int mx, int my, int dz) {
     int id = win_at(mx, my);
     if (id < 0 || !dz) return;
+    if (g_w[id].wheel) { push_simple(&g_w[id], BANANA_EV_WHEEL, mx - g_w[id].x, dz, 0, 0); return; }
     int n = (dz < 0 ? -dz : dz) * 3;
     if (n > 30) n = 30;
     for (int i = 0; i < n; i++) push_simple(&g_w[id], BANANA_EV_KEY, 0, 0, 0, dz > 0 ? BANANA_KEY_DOWN : BANANA_KEY_UP);
@@ -562,6 +564,11 @@ void appwin_fkey(int k) {
 /* the window that gets the media keys (play / pause, next...) wherever
  * the focus is: the last one that asked (a music player) */
 static int g_media_win = -1, g_media_owner = -1;
+
+void appwin_set_wheel(int id, int owner) {
+    awin_t* w = get(id, owner);
+    if (w) w->wheel = 1;
+}
 
 void appwin_set_media(int id, int owner) {
     if (get(id, owner)) { g_media_win = id; g_media_owner = owner; }

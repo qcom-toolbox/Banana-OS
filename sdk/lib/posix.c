@@ -4,6 +4,7 @@
 #include <banana.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/time.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -98,3 +99,45 @@ int __aligned_block(void* p, void** raw, size_t* size) {
 
 intmax_t strtoimax(const char* s, char** end, int base) { return strtoll(s, end, base); }
 uintmax_t strtoumax(const char* s, char** end, int base) { return strtoull(s, end, base); }
+
+/* seconds from the clock chip, the sub-second part from the uptime counter */
+int gettimeofday(struct timeval* tv, void* tz) {
+    (void)tz;
+    if (tv) { tv->tv_sec = (long)time(0); tv->tv_usec = (long)(__banana->ticks_ms() % 1000u) * 1000; }
+    return 0;
+}
+
+char* realpath(const char* path, char* resolved) {
+    char buf[1024];
+    if (!path || !*path) { errno = ENOENT; return NULL; }
+    if (path[0] == '/') buf[0] = 0;
+    else if (!getcwd(buf, sizeof(buf))) return NULL;
+    size_t n = strlen(buf);
+    /* each part: "." stays, ".." goes up one */
+    const char* p = path;
+    while (*p) {
+        while (*p == '/') p++;
+        const char* e = p;
+        while (*e && *e != '/') e++;
+        size_t l = (size_t)(e - p);
+        if (l == 0) break;
+        if (l == 1 && p[0] == '.') { p = e; continue; }
+        if (l == 2 && p[0] == '.' && p[1] == '.') {
+            while (n > 0 && buf[n - 1] != '/') n--;
+            if (n > 0) n--;
+            buf[n] = 0;
+            p = e;
+            continue;
+        }
+        if (n + 1 + l + 1 > sizeof(buf)) { errno = ENAMETOOLONG; return NULL; }
+        buf[n++] = '/';
+        memcpy(buf + n, p, l);
+        n += l;
+        buf[n] = 0;
+        p = e;
+    }
+    if (!n) { buf[0] = '/'; buf[1] = 0; }
+    if (!resolved) return strdup(buf);
+    strcpy(resolved, buf);
+    return resolved;
+}

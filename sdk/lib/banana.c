@@ -219,6 +219,21 @@ int  banana_thread_id(void) { return has_threads() ? __banana->thread_id() : 0; 
 void banana_thread_exit(int ret) { if (has_threads()) __banana->thread_exit(ret); __banana->exit(ret); }
 int  banana_cpus(void) { return has_threads() ? __banana->cpu_count() : 1; }
 
+#ifdef __TINYC__
+/* TinyCC has no __sync builtins: the same with x86 instructions */
+static int tcc_xchg(volatile int* p, int v) { __asm__ volatile("xchgl %0, %1" : "+r"(v), "+m"(*p) : : "memory"); return v; }
+static int tcc_xadd(volatile int* p, int v) { __asm__ volatile("lock xaddl %0, %1" : "+r"(v), "+m"(*p) : : "memory"); return v; }
+static int tcc_cas(volatile int* p, int o, int n) {
+    int prev;
+    __asm__ volatile("lock cmpxchgl %2, %1" : "=a"(prev), "+m"(*p) : "r"(n), "0"(o) : "memory");
+    return prev == o;
+}
+#define __sync_lock_test_and_set(p, v)        tcc_xchg((volatile int*)(p), (v))
+#define __sync_lock_release(p)                (*(volatile int*)(p) = 0)
+#define __sync_fetch_and_add(p, v)            tcc_xadd((volatile int*)(p), (v))
+#define __sync_bool_compare_and_swap(p, o, n) tcc_cas((volatile int*)(p), (o), (n))
+#endif
+
 int banana_trylock(banana_mutex_t* m) { return __sync_lock_test_and_set(m, 1) == 0; }
 
 void banana_lock(banana_mutex_t* m) {
@@ -391,4 +406,25 @@ unsigned int* banana_image_load(const char* path, int* w, int* h, char* err, int
 int banana_set_wallpaper(const char* path, int mode, char* err, int errcap) {
     if (!has_v9()) { too_old(err, errcap); return -1; }
     return __banana->set_wallpaper(path, mode, err, errcap);
+}
+
+static int has_v10(void) {
+    return __banana->version >= 10 && __banana->size >= __builtin_offsetof(banana_api_t, app_run) + sizeof(void*);
+}
+int banana_http_fetch(const banana_http_req_t* req, banana_http_resp_t* resp) {
+    if (!has_v10()) {
+        if (resp) { resp->status = 0; resp->data = 0; resp->len = 0; too_old(resp->err, sizeof(resp->err)); }
+        return -1;
+    }
+    return __banana->http_fetch(req, resp);
+}
+int  banana_key_mods(void) { return has_v10() ? __banana->key_mods() : 0; }
+void bwin_wheel(bwin_t* win) { if (has_v10()) __banana->win_wheel(win->id); }
+int  banana_pkg_install(const char* path, char* msg, int mcap) {
+    if (!has_v10()) { too_old(msg, mcap); return -1; }
+    return __banana->pkg_install(path, msg, mcap);
+}
+int  banana_app_run(const char* name, int argc, char** argv, char* err, int ecap) {
+    if (!has_v10()) { too_old(err, ecap); return -1; }
+    return __banana->app_run(name, argc, argv, err, ecap);
 }

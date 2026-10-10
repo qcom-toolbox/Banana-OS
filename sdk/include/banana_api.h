@@ -17,7 +17,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 9u
+#define BANANA_API_VERSION 10u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -41,6 +41,12 @@
 #define BANANA_EV_FOCUS       6    /* x = 1 gained / 0 lost */
 #define BANANA_EV_RESIZE      7    /* (resizable windows) x, y = the new size: fetch
                                       win_pixels() again and redraw */
+#define BANANA_EV_WHEEL       8    /* (after win_wheel) y = notches, + = toward the user */
+
+/* key_mods() */
+#define BANANA_MOD_SHIFT 1
+#define BANANA_MOD_CTRL  2
+#define BANANA_MOD_ALT   4
 
 #define BANANA_KEY_UP     0x101
 #define BANANA_KEY_DOWN   0x102
@@ -97,6 +103,25 @@ typedef struct {
     int hour, minute, second;
     int weekday;              /* 0 = Sunday */
 } banana_time_t;
+
+/* http_fetch(): any request, any answer (API version 10) */
+typedef struct {
+    const char*   method;        /* "GET", "POST", ... (NULL: GET) */
+    const char*   url;           /* http:// or https:// */
+    const char*   headers;       /* extra header lines, each "Name: value\r\n" (NULL: none) */
+    const char*   body;          /* NULL: none */
+    unsigned long body_len;
+    const char*   content_type;  /* of the body (NULL: application/json) */
+    int           timeout_ms;    /* per wait for the server (0: 20 s) */
+} banana_http_req_t;
+
+typedef struct {
+    int           status;        /* 200, 401, ... */
+    char*         data;          /* the body, NUL-terminated (free() it) */
+    unsigned long len;
+    char          content_type[96];
+    char          err[128];      /* why it failed (-1) */
+} banana_http_resp_t;
 
 typedef struct banana_api {
     unsigned int magic;       /* BANANA_API_MAGIC */
@@ -256,6 +281,19 @@ typedef struct banana_api {
     /* makes it the desktop's wallpaper - mode 0 fill, 1 fit, 2 stretch,
      * 3 center - and adds it to Settings' pictures; 0, or -1 with err */
     int   (*set_wallpaper)(const char* path, int mode, char* err, int ecap);
+
+    /* ── version 10: for tools (Banana Code) ──────────────── */
+    /* a request with any method and headers; the answer whatever its
+     * status (resp->data even for 4xx / 5xx): 0, or -1 if the server could
+     * not be reached (resp->err) */
+    int   (*http_fetch)(const banana_http_req_t* req, banana_http_resp_t* resp);
+    int   (*key_mods)(void);           /* BANANA_MOD_* held now */
+    /* the mouse wheel comes as BANANA_EV_WHEEL instead of Up / Down keys */
+    void  (*win_wheel)(int win);
+    /* installs a .bpk (like `pkg install`): 0, or -1 - msg says what happened */
+    int   (*pkg_install)(const char* path, char* msg, int mcap);
+    /* starts an installed app (a console app in a terminal window of its own) */
+    int   (*app_run)(const char* name, int argc, char** argv, char* err, int ecap);
 } banana_api_t;
 
 /* the app's entry point (the SDK's crt0 provides it) */

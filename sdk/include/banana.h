@@ -80,6 +80,15 @@ int  banana_has_fonts(void);
 unsigned int* banana_image_load(const char* path, int* w, int* h, char* err, int errcap);
 /* the desktop's wallpaper: mode 0 fill, 1 fit, 2 stretch, 3 center */
 int  banana_set_wallpaper(const char* path, int mode, char* err, int errcap);
+
+/* ── tools (API version 10) ────────────────────────────────────────── */
+/* any HTTP request (method, headers, body); the answer whatever its status:
+ * 0 (resp->status, resp->data - free() it), or -1 (resp->err) */
+int  banana_http_fetch(const banana_http_req_t* req, banana_http_resp_t* resp);
+int  banana_key_mods(void);                /* BANANA_MOD_SHIFT / _CTRL / _ALT held */
+void bwin_wheel(bwin_t* win);              /* the wheel as BANANA_EV_WHEEL (ev.y notches) */
+int  banana_pkg_install(const char* path, char* msg, int mcap);
+int  banana_app_run(const char* name, int argc, char** argv, char* err, int ecap);
 /* a bevelled button-looking box with a centered label */
 void bwin_button(bwin_t* win, int x, int y, int w, int h, const char* label, int pressed);
 /* copies a w*h image (0x00RRGGBB) into the window at x, y */

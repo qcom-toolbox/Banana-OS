@@ -869,3 +869,5 @@ void keyboard_readline(char* buf, int maxlen) {
 void keyboard_inject(const char* s) {
     while (*s) q_push(*s++);
 }
+
+int keyboard_mods(void) { return (shift_held ? 1 : 0) | (ctrl_held ? 2 : 0) | (alt_held ? 4 : 0); }

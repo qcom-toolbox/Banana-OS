@@ -285,3 +285,21 @@ float tanhf(float x) { return (float)tanh(x); }
 float ldexpf(float x, int e) { return (float)ldexp(x, e); }
 float frexpf(float x, int* e) { return (float)frexp(x, e); }
 long long llrintf(float x) { return llrint(x); }
+
+/* for TinyCC's math.h: 0 nan, 1 infinite, 2 zero, 3 subnormal, 4 normal */
+int __banana_fpclassify(double x) {
+    union { double d; unsigned long long u; } b;
+    b.d = x;
+    unsigned e = (unsigned)(b.u >> 52) & 0x7FF;
+    unsigned long long m = b.u & 0xFFFFFFFFFFFFFull;
+    if (e == 0x7FF) return m ? 0 : 1;
+    if (e == 0) return m ? 3 : 2;
+    return 4;
+}
+int __banana_signbit(double x) {
+    union { double d; unsigned long long u; } b;
+    b.d = x;
+    return (int)(b.u >> 63);
+}
+
+long double ldexpl(long double x, int e) { return (long double)ldexp((double)x, e); }

@@ -441,3 +441,4 @@ double strtod(const char* s, char** end) {
 
 double atof(const char* s) { return strtod(s, NULL); }
 float  strtof(const char* s, char** end) { return (float)strtod(s, end); }
+long double strtold(const char* s, char** end) { return (long double)strtod(s, end); }
