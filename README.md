@@ -89,7 +89,9 @@ Banana-OS/
 │   ├── terminal.c/h    # Terminal (VGA + framebuffer + virtual terminals), deferred painting
 │   ├── fb.c, gfx.c     # Framebuffer + 2D drawing
 │   ├── gui.c/h         # Desktop GUI (taskbar/start menu/windows/wallpaper app)
-│   ├── explorer.c      # "Files" window (file explorer)
+│   ├── explorer.c      # "Files" window (file explorer, Windows 7 layout)
+│   ├── startmenu.c     # the Start menu (Windows 7 layout)
+│   ├── fileicons.c     # icons of folders, kinds of files, disks and libraries
 │   ├── browser.c       # "Browser" window with tabs (runs web/ in its own task)
 │   ├── notepad.c       # "Notepad" window (GUI text editor)
 │   ├── winframe.c      # Window moving / resizing / maximizing, shared by the windows
@@ -213,7 +215,7 @@ Banana-OS/
   - network status (`eth0 10.0.2.15`)
   - `Quit` button
   - live clock
-- Start menu (Windows 95 style): **Programs** (a submenu with every installed app, and *All apps...*), Terminal, Files, Browser, Notepad, Apps, Task Manager, Settings, and **Shut down** (a submenu: *Restart*, *Shut down*, *Lock the screen*, *Exit to the shell*); submenus open when the pointer rests on their entry
+- Start menu, Windows 7 style (the round orb on the taskbar, the Windows key or Ctrl+T): on the left the programs with big icons (Browser and Files pinned on top, then Terminal, Notepad, Task Manager and the installed apps), **All Programs** (every program A-Z, scrolls with the wheel) and the **search box** - just type: programs and files of the home folder show up as you type, Enter opens the first; on the right the user's picture (it shows the icon of the place under the pointer), *banana* (home), Documents, Pictures, Music, Downloads, Computer, Settings, Task Manager, Apps (and *Install Banana OS* on the live CD), and **Shut down** with its arrow (*Restart*, *Lock*, *Exit to the shell*)
 - Desktop icons like on Windows: the icon with its name under it, straight on the wallpaper (no box behind the text, a shadow keeps it readable); every installed app gets its own icon too. Click selects, double-click opens, right-click an app's icon for *Open* / *Remove this app*
 - Files - the file explorer (below)
 - Browser - the web browser (below)
@@ -344,12 +346,16 @@ With a bridged network (VirtualBox "Bridged Adapter", QEMU tap) the machine has 
 
 Open it from the desktop (`startx`): the **Files** icon or Start menu entry, or `files [folder]` in a terminal.
 
-- Click selects, double-click opens a folder; **Up** / **Home** navigate
-- The right pane previews the selection: text files show their first lines, pictures a thumbnail, folders their size
-- **Edit** (text) opens the file in Notepad; **Set as wallpaper** (pictures); double-click does the same
-- The window resizes from its bottom-right corner
-- **New folder**, **Delete** (click twice to confirm; folders are deleted with their contents), **Terminal** opens a terminal in the current folder, **Refresh**
-- The window can be dragged by its title bar, and stacks with the terminal windows
+Laid out like Windows 7's Explorer:
+
+- **Back / Forward** (round buttons; Backspace goes back), the **address bar** as a breadcrumb (*Computer > home > banana*: click a part to go there, click beside the parts - or Ctrl+L / F4 - to type a path), and the **search box** (click it, Ctrl+F or F3): the folder shows only what matches as you type, Esc clears it
+- The command bar: **Organize** (cut, copy, paste, delete, rename, new text document, properties, refresh, close), **New folder** (named right away), **Open in terminal**, **Up**, and the views **Details** (Name, Type, Size - click a column heading to sort, again to reverse) or **Icons** (large icons)
+- The **navigation pane**: Favorites (Downloads, the home folder), Libraries (Documents, Music, Pictures, Videos - made when first opened), Computer (the whole disk, a USB stick when one is in)
+- The **details pane** at the bottom: the selected item's icon (a thumbnail for pictures), type and size - or the folder's item count and total size; messages show there too
+- Icons by kind of file (pictures, songs, videos, apps, archives, programs, web pages, PDFs, source code...)
+- Click selects, double-click (or Enter) opens: folders, apps (.bpk) install, songs and videos play in their app, web pages and SVG open in the Browser, pictures become the wallpaper, text opens in Notepad; typing a letter jumps to the next item starting with it
+- Right-click an item or the empty space for its menu; F2 renames, Delete deletes (twice to confirm; folders with their contents), Ctrl+C / Ctrl+X / Ctrl+V copy / move, Ctrl+N new folder, F5 refresh
+- The window can be dragged by its title bar, resized from its bottom-right corner, and stacks with the terminal windows
 
 ## Web Browser ("Browser")
 
@@ -457,7 +463,7 @@ QEMU: `-audiodev pa,id=snd0 -device intel-hda -device hda-output,audiodev=snd0` 
 - **Taskbar**: the **banana** button opens the Start menu; every open window has a button - click it to bring the window to the front, click again to minimize it (every window also has **_** minimize, maximize / restore and **x** close buttons); the right side shows the network status and the clock. Right-click the taskbar for **Task Manager**, **Show the desktop** and **Restore all windows**; right-click a window's button to restore, minimize or close it.
 - **Task Manager**: *Apps & windows* (Switch to / End task, also on right-click), *Processes* (the kernel's tasks, their state, CPU use and priority - right-click one to change it), *Performance* (CPU and memory graphs, uptime, files, network, sound). Open it from its desktop icon, the Start menu, the taskbar's right-click menu, or `taskmgr`.
 - **Right-click menus**: the desktop (open any app, wallpaper, exit), terminals (copy, paste, clear, new, minimize, close), Files (open, install app, play, set as wallpaper, edit, cut / copy / paste, rename, delete, properties, new folder / text file, terminal here, eject), the browser (open a link / in a new tab, save it, copy its address, back, forward, reload, copy, paste, save page, page source, Downloads folder), Notepad (cut, copy, paste, select all, find, open, save), Apps (open, details, uninstall).
-- Files also takes the keyboard while it is in front: arrows, Enter, Backspace (up), Delete, Ctrl+C / Ctrl+X / Ctrl+V, Ctrl+R (rename), Ctrl+N (new folder).
+- Files also takes the keyboard while it is in front: arrows (and left / right in the Icons view), Enter, Backspace (back), Delete, Ctrl+C / Ctrl+X / Ctrl+V, F2 / Ctrl+R (rename), Ctrl+N (new folder), Ctrl+F (search), Ctrl+L (address), a letter (jump to an item).
 
 ## Wallpapers
 

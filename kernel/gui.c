@@ -34,6 +34,8 @@
 #include "app.h"
 #include "../net/net.h"
 #include "../shell/shell.h"
+#include "startmenu.h"
+#include "fileicons.h"
 
 #define VGA_WIDTH  80
 #define VGA_HEIGHT 25
@@ -82,6 +84,7 @@ static uint32_t    g_desk_sig, g_desk_checked, g_last_click_ms;
 static int         g_sub_slot = -1;     /* the Start menu item whose submenu is open */
 
 static int g_menu_open = 0;
+static int g_start_hover;         /* the pointer is on the Start orb */
 static int g_lock_pending = 0;   /* "Lock screen" was chosen */
 static int g_in_lock = 0;        /* the lock screen is up (in some task's gui_poll) */
 /* The pointer. The desktop loop moves it, and so does the timer interrupt
@@ -306,14 +309,14 @@ static void draw_icon_install(int x, int y, uint32_t bg) {
     IR(10, 11, 2, 2, 0x0080E080u);
 }
 
-static void draw_icon_power(int x, int y, uint32_t bg) {
+static __attribute__((unused)) void draw_icon_power(int x, int y, uint32_t bg) {
     (void)bg;
     icon_bevel(x, y, 12, 12, 0x00412A2Au, 0x00764A4Au, 0x00170D0Du);
     gfx_draw_text_scaled(x + 3 * g_is, y + 2 * g_is, g_is, "o", 0x00FFFFFFu, 0x00412A2Au);
 }
 
 /* Programs: a folder with app tiles in it */
-static void draw_icon_programs(int x, int y, uint32_t bg) {
+static __attribute__((unused)) void draw_icon_programs(int x, int y, uint32_t bg) {
     (void)bg;
     IR(0, 1, 6, 2, 0x00D9B44Au);
     IR(0, 3, 14, 10, 0x00D9B44Au);
@@ -1018,7 +1021,7 @@ static void win_close(int h) {
 /* taskbar geometry: Start button, window buttons, then the tray */
 #define BAR_H     28
 #define START_X   4
-#define START_W   88
+#define START_W   STARTMENU_ORB_W
 #define TB_X      (START_X + START_W + 8)
 #define TB_BTN_W  150
 
@@ -1068,12 +1071,8 @@ static void draw_win_glyph(int h, int x, int y, uint32_t bg) {
 static void draw_taskbar_fb(const fb_info_t* fi) {
     int bar_y = (int)fi->height - BAR_H;
     draw_bevel_box(0, bar_y, (int)fi->width, BAR_H, 0x00192026u, 0x004F5A6Eu, 0x0010141Bu);
-    /* Start */
-    uint32_t sbg = g_menu_open ? 0x002E4A70u : 0x00354463u;
-    draw_bevel_box(START_X, bar_y + 3, START_W, BAR_H - 6, sbg, 0x006B7892u, 0x00111824u);
-    gfx_fill_rect(START_X + 8, bar_y + 9, 10, 10, 0x00F4D35Eu);
-    gfx_fill_rect(START_X + 10, bar_y + 11, 6, 6, 0x00C9A227u);
-    gfx_draw_text(START_X + 26, bar_y + 10, "banana", 0x00FFFFFFu, sbg);
+    /* Start: the orb */
+    startmenu_draw_orb(START_X, bar_y, BAR_H, g_menu_open, g_start_hover);
     /* one button per window */
     int bw = tb_btn_w(fi), front = win_front();
     for (int j = 0; j < g_ntb; j++) {
@@ -1151,30 +1150,15 @@ static void capture_view(gui_view_t* v, uint32_t sec) {
         v->app_sig[a] = g_apps[a].signature();
         v->app_min[a] = g_app_min[a];
     }
-    v->ctx_sig = ctxmenu_signature();
+    v->ctx_sig = ctxmenu_signature() ^ (g_menu_open ? startmenu_signature() : 0) ^ (uint32_t)g_start_hover * 0x9E37u;
     v->tb_gen = g_tb_gen;
 }
 
 static gui_view_t g_last_view;
 static int        g_force_redraw = 1;
 
-static void (*const g_menu_icons[MENU_ITEMS_MAX])(int, int, uint32_t) = {
-    draw_icon_programs, draw_icon_terminal, draw_icon_files, draw_icon_browser, draw_icon_notepad,
-    draw_icon_apps, draw_icon_taskmgr, draw_icon_settings, draw_icon_install, draw_icon_power,
-};
 
 static int start_menu_y(const fb_info_t* fi) { return (int)fi->height - BAR_H - START_MENU_H - 4; }
-
-/* the Start menu item under (mx, my), or -1 */
-static int start_item_at(const fb_info_t* fi, int mx, int my) {
-    if (!g_menu_open || mx < START_X + 24 || mx >= START_X + START_MENU_W - 8) return -1;
-    int menu_y = start_menu_y(fi);
-    for (int i = 0; i < MENU_ITEMS; i++) {
-        int y0 = menu_y + 8 + i * 28;
-        if (my >= y0 && my < y0 + 24) return i;
-    }
-    return -1;
-}
 
 /* ── the desktop's icons ─────────────────────────────────────────────── */
 
@@ -1266,6 +1250,83 @@ static void do_action(int act);
 static void run_app(const char* name);
 static char g_prog_names[CTX_MAX_ITEMS][PKG_NAME_MAX];
 
+/* ── the Start menu (kernel/startmenu.c) asks for these ──────────── */
+
+static void sm_action(int sm) {
+    int act = -1;
+    switch (sm) {
+    case SM_TERMINAL: act = ACT_TERMINAL; break;
+    case SM_FILES:    act = ACT_FILES; break;
+    case SM_BROWSER:  act = ACT_BROWSER; break;
+    case SM_NOTEPAD:  act = ACT_NOTEPAD; break;
+    case SM_APPS:     act = ACT_APPS; break;
+    case SM_TASKMGR:  act = ACT_TASKMGR; break;
+    case SM_SETTINGS: act = ACT_SETTINGS; break;
+    case SM_INSTALL:  act = ACT_INSTALL; break;
+    case SM_SHUTDOWN: act = ACT_SHUTDOWN; break;
+    case SM_RESTART:  act = ACT_RESTART; break;
+    case SM_LOCK:     act = ACT_LOCK; break;
+    case SM_QUIT:     act = ACT_QUIT; break;
+    }
+    g_menu_open = 0;
+    g_force_redraw = 1;
+    if (act >= 0) do_action(act);
+}
+
+static void sm_run_app(const char* name) { g_force_redraw = 1; run_app(name); }
+
+/* a folder opens in Files; a file: its folder, with it selected */
+static void sm_open_path(const char* path) {
+    g_menu_open = 0;
+    g_force_redraw = 1;
+    if (strcmp(path, "/") == 0 || fs_find_dir(path) >= 0) {
+        explorer_open(path);
+    } else {
+        char dir[FS_PATH_LEN];
+        kstrlcpy(dir, path, sizeof(dir));
+        char* sl = strrchr(dir, '/');
+        if (!sl) return;
+        if (sl == dir) sl[1] = 0; else *sl = 0;
+        explorer_open(dir);
+        explorer_select(strrchr(path, '/') + 1);
+    }
+    g_app_min[APP_FILES] = 0;
+    raise_app(APP_FILES);
+}
+
+static void sm_close(void) { g_menu_open = 0; g_force_redraw = 1; }
+
+static void sm_program_icon(int sm, const char* app, int x, int y, int big, uint32_t bg) {
+    g_is = big ? 2 : 1;
+    switch (sm) {
+    case SM_TERMINAL: draw_icon_terminal(x, y, bg); break;
+    case SM_FILES:    draw_icon_files(x, y, bg); break;
+    case SM_BROWSER:  draw_icon_browser(x, y, bg); break;
+    case SM_NOTEPAD:  draw_icon_notepad(x, y, bg); break;
+    case SM_APPS:     draw_icon_apps(x, y, bg); break;
+    case SM_TASKMGR:  draw_icon_taskmgr(x, y, bg); break;
+    case SM_SETTINGS: draw_icon_settings(x, y, bg); break;
+    case SM_INSTALL:  draw_icon_install(x, y, bg); break;
+    default:          g_app_icon_name = app ? app : ""; draw_icon_app(x, y, bg); break;
+    }
+    g_is = 1;
+}
+
+/* the Start menu opens (graphics mode) */
+static void start_open(void) {
+    static int ready;
+    if (!ready) {
+        startmenu_host_t h = { sm_action, sm_run_app, sm_open_path, sm_close, sm_program_icon, installer_available };
+        startmenu_init(&h);
+        ready = 1;
+    }
+    ctxmenu_close();
+    g_sub_slot = -1;
+    startmenu_reset();
+    g_menu_open = 1;
+    g_force_redraw = 1;
+}
+
 static void programs_cb(int id, void* arg) {
     (void)arg;
     g_sub_slot = -1;
@@ -1333,13 +1394,8 @@ static void close_front_window(const fb_info_t* fi) {
     }
     int t = front_term();
     if (t >= 0) { g_terms[t].open = 0; g_terms[t].minimized = 0; g_tb_gen++; return; }
-    for (int i = 0; i < MENU_ITEMS; i++)
-        if (MENU_ACTS[menu_idx(i)] == ACT_POWER) {
-            g_menu_open = 1;
-            g_menu_sel = i;
-            open_submenu(fi, i);
-            g_force_redraw = 1;
-        }
+    (void)fi;
+    start_open();
 }
 
 static void toggle_max_term(const fb_info_t* fi, term_win_t* w) {
@@ -1428,21 +1484,7 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
     draw_taskbar_fb(fi);
 
     /* the Start menu */
-    if (g_menu_open) {
-        int menu_x = START_X, menu_y = start_menu_y(fi);
-        draw_bevel_box(menu_x, menu_y, START_MENU_W, START_MENU_H, 0x001D232Cu, 0x00505E74u, 0x0010151Du);
-        gfx_fill_rect(menu_x + 2, menu_y + 2, 18, START_MENU_H - 4, 0x00354463u);
-        gfx_draw_text(menu_x + 5, menu_y + 8, "B", 0x00F4F8FFu, 0x00354463u);
-        for (int i = 0; i < MENU_ITEMS; i++) {
-            uint32_t bg = (g_menu_sel == i || g_sub_slot == i) ? 0x003A4A66u : 0x001D232Cu;
-            if (MENU_ACTS[menu_idx(i)] == ACT_POWER)                 /* a line above Shut down */
-                gfx_fill_rect(menu_x + 24, menu_y + 5 + i * 28, START_MENU_W - 32, 1, 0x00404B5Cu);
-            gfx_fill_rect(menu_x + 24, menu_y + 8 + i * 28, START_MENU_W - 32, 24, bg);
-            g_menu_icons[menu_idx(i)](menu_x + 28, menu_y + 14 + i * 28, bg);
-            gfx_draw_text(menu_x + 48, menu_y + 16 + i * 28, MENU_LABELS[menu_idx(i)], 0x00E8EEF6u, bg);
-            if (menu_has_sub(i)) gfx_draw_text(menu_x + START_MENU_W - 22, menu_y + 16 + i * 28, ">", 0x00B8C4D6u, bg);
-        }
-    }
+    if (g_menu_open) startmenu_draw(fi);
 
     draw_volume_osd(fi);
     ctxmenu_draw();
@@ -1683,6 +1725,18 @@ static void gui_poll_body(void) {
             for (int k = 0; k < 64; k++) {
                 char c = keyboard_try_getchar();
                 if (!c) break;
+                if (g_menu_open && c == 27) {
+                    char c2 = keyboard_try_getchar();
+                    if (c2 == '[') {
+                        char c3 = keyboard_try_getchar();
+                        if (c3 >= '0' && c3 <= '9') keyboard_try_getchar();   /* '~' */
+                        gui_handle_arrow(c3);
+                    } else {
+                        gui_handle_key(27);
+                        if (c2) gui_handle_key(c2);
+                    }
+                    continue;
+                }
                 if (g_menu_open || c == 20) { gui_handle_key(c); continue; }
                 if (g_front_app == APP_NOTEPAD) notepad_key(c);
                 else if (g_front_app == APP_APPWIN) appwin_key(c);
@@ -1719,7 +1773,9 @@ static void gui_poll_body(void) {
         mx = g_cur_mx;
         my = g_cur_my;
         if (fl & 0x200) __asm__ volatile("sti" ::: "memory");
-        if (ms.dz) {
+        if (ms.dz && g_menu_open && startmenu_contains(fi, mx, my)) {
+            startmenu_wheel(ms.dz);
+        } else if (ms.dz) {
             /* the wheel scrolls the window under the mouse */
             int a = (g_front_app >= 0 && app_visible(g_front_app) && g_apps[g_front_app].contains(mx, my)) ? g_front_app : app_at(mx, my, 0);
             if (a >= 0 && g_app_wheel[a]) g_app_wheel[a](mx, my, ms.dz);
@@ -1746,19 +1802,10 @@ static void gui_poll_body(void) {
         /* the Start menu follows the pointer, and its submenus open by
          * themselves under it - Windows 95 style */
         if (!ctxmenu_is_open()) g_sub_slot = -1;
-        if (g_menu_open && !ctxmenu_contains(mx, my)) {
-            static int hover_slot = -1;
-            static uint32_t hover_since;
-            int si = start_item_at(fi, mx, my);
-            if (si != hover_slot) { hover_slot = si; hover_since = timer_ms(); }
-            /* with a submenu open, another item takes over only once the
-             * pointer rests on it (0.3 s): on the way to the submenu it may
-             * cross the items below or above */
-            if (si >= 0 && (g_sub_slot < 0 || timer_ms() - hover_since >= 300)) {
-                g_menu_sel = si;
-                if (menu_has_sub(si)) { if (g_sub_slot != si) open_submenu(fi, si); }
-                else if (g_sub_slot >= 0) { ctxmenu_close(); g_sub_slot = -1; }
-            }
+        if (g_menu_open && !ctxmenu_contains(mx, my)) startmenu_hover(fi, mx, my);
+        {
+            int sh = my >= bar_y && mx >= START_X && mx < START_X + START_W;
+            if (sh != g_start_hover) g_start_hover = sh;
         }
 
         if (rclick) {
@@ -1796,8 +1843,8 @@ static void gui_poll_body(void) {
             /* the taskbar: Start, a window's button */
             if (click && my >= bar_y) {
                 if (mx >= START_X && mx < START_X + START_W) {
-                    g_menu_open = !g_menu_open;
-                    if (g_menu_open) g_menu_sel = 0;
+                    if (g_menu_open) g_menu_open = 0;
+                    else start_open();
                 } else {
                     int j = tb_button_at(fi, mx, my);
                     if (j >= 0) {
@@ -1814,15 +1861,7 @@ static void gui_poll_body(void) {
 
             /* click in menu items (the open menu is above every window) */
             if (click && g_menu_open) {
-                int si = start_item_at(fi, mx, my);
-                if (si >= 0) {
-                    g_menu_sel = si;
-                    menu_activate();
-                    click = 0;
-                } else if (mx >= START_X && mx < START_X + START_MENU_W && my >= start_menu_y(fi) &&
-                           my < start_menu_y(fi) + START_MENU_H) {
-                    click = 0;                /* the menu's own margin */
-                }
+                if (startmenu_contains(fi, mx, my)) { startmenu_click(fi, mx, my); click = 0; }
                 if (!g_gui_enabled) return;
                 if (click) g_menu_open = 0;   /* a click elsewhere closes the menu */
             }
@@ -2222,6 +2261,7 @@ int gui_browser_focused(void) {
 
 int gui_handle_arrow(char esc_code) {
     if (!g_menu_open) return 0;
+    if (gfx_available() && g_gui_enabled) { startmenu_arrow(esc_code); return 1; }
     if (esc_code == 'A') { /* up */
         if (g_menu_sel > 0) g_menu_sel--;
         draw_menu();
@@ -2239,6 +2279,12 @@ int gui_handle_key(char c) {
     if (gfx_available() && !g_gui_enabled) return 0;
     /* Ctrl+T toggles Start menu */
     if (c == 20) {
+        if (gfx_available()) {
+            if (g_menu_open) g_menu_open = 0;
+            else start_open();
+            g_force_redraw = 1;
+            return 1;
+        }
         g_menu_open = !g_menu_open;
         if (g_menu_open) {
             g_menu_sel = 0;
@@ -2258,6 +2304,12 @@ int gui_handle_key(char c) {
         return 1;
     }
     if (!g_menu_open) return 0;
+    if (gfx_available()) {                      /* the Windows 7 menu: typing searches */
+        if (c == 27) startmenu_escape();
+        else startmenu_key(c);
+        g_force_redraw = 1;
+        return 1;
+    }
 
     if (c == '\n') {
         menu_activate();

@@ -13,6 +13,7 @@
 
 void explorer_open(const char* path);   /* NULL: home folder */
 void explorer_close(void);
+void explorer_select(const char* name);  /* selects that item of the folder shown */
 int  explorer_is_open(void);
 
 void explorer_draw(const fb_info_t* fi);
