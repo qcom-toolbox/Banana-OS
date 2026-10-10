@@ -19,7 +19,8 @@ typedef struct {
     char      title[64];
     int       x, y;                /* outer top-left */
     int       cw, ch;              /* client (pixel buffer) size */
-    uint32_t* px;
+    uint32_t* px;                  /* what the app draws into */
+    uint32_t* shown;               /* what the desktop shows: px as of the last win_update */
     banana_event_t q[EVQ];
     int       qh, qt;
     int       dragging, ddx, ddy;
@@ -117,12 +118,15 @@ int appwin_open(int owner, const char* title, int w, int h) {
         awin_t* a = &g_w[i];
         if (a->used) continue;
         uint32_t* px = (uint32_t*)kmalloc((uint32_t)w * (uint32_t)h * 4);
-        if (!px) return -1;
+        uint32_t* shown = (uint32_t*)kmalloc((uint32_t)w * (uint32_t)h * 4);
+        if (!px || !shown) { kfree(px); kfree(shown); return -1; }
         memset(a, 0, sizeof(*a));
         memset32(px, 0x00FFFFFFu, (size_t)w * (size_t)h);
+        memset32(shown, 0x00FFFFFFu, (size_t)w * (size_t)h);
         a->used = 1;
         a->owner = owner;
         a->px = px;
+        a->shown = shown;
         a->cw = w;
         a->ch = h;
         kstrlcpy(a->title, title && *title ? title : "App", sizeof(a->title));
@@ -147,9 +151,14 @@ uint32_t* appwin_pixels(int id, int owner) {
     return w ? w->px : NULL;
 }
 
+/* the frame the app finished becomes the one shown: the desktop never
+ * shows a picture the app is still drawing (no flashing while it redraws) */
 void appwin_update(int id, int owner) {
     awin_t* w = get(id, owner);
-    if (w) { w->gen++; g_gen++; }
+    if (!w) return;
+    if (w->shown) memcpy(w->shown, w->px, (size_t)w->cw * (size_t)w->ch * 4);
+    w->gen++;
+    g_gen++;
 }
 
 /* the pending size takes effect: a new pixel buffer, the old picture
@@ -159,12 +168,16 @@ static void apply_resize(awin_t* w) {
     w->pending = 0;
     if (w->pw == w->cw && w->ph == w->ch) return;
     uint32_t* np = (uint32_t*)kmalloc((uint32_t)w->pw * (uint32_t)w->ph * 4);
-    if (!np) return;                         /* no memory: stays as it is */
+    uint32_t* ns = (uint32_t*)kmalloc((uint32_t)w->pw * (uint32_t)w->ph * 4);
+    if (!np || !ns) { kfree(np); kfree(ns); return; }   /* no memory: stays as it is */
     memset32(np, 0x00FFFFFFu, (size_t)w->pw * (size_t)w->ph);
     int cw = w->cw < w->pw ? w->cw : w->pw, ch = w->ch < w->ph ? w->ch : w->ph;
-    for (int y = 0; y < ch; y++) memcpy(np + (size_t)y * (size_t)w->pw, w->px + (size_t)y * (size_t)w->cw, (size_t)cw * 4);
+    for (int y = 0; y < ch; y++) memcpy(np + (size_t)y * (size_t)w->pw, w->shown + (size_t)y * (size_t)w->cw, (size_t)cw * 4);
+    memcpy(ns, np, (size_t)w->pw * (size_t)w->ph * 4);
     kfree(w->px);
+    kfree(w->shown);
     w->px = np;
+    w->shown = ns;
     w->cw = w->pw;
     w->ch = w->ph;
     w->gen++;
@@ -213,7 +226,8 @@ static void destroy(int id) {
     awin_t* w = &g_w[id];
     if (!w->used) return;
     kfree(w->px);
-    w->px = NULL;
+    kfree(w->shown);
+    w->px = w->shown = NULL;
     w->used = 0;
     unlink_order(id);
     g_gen++;
@@ -290,7 +304,7 @@ static void blit(const awin_t* w, int x0, int y0) {
         if (ty < 0 || ty >= th) continue;
         int xs = x0 < 0 ? -x0 : 0;
         int xe = x0 + w->cw > tw ? tw - x0 : w->cw;
-        if (xe > xs) memcpy(dst + (size_t)ty * (size_t)stride + x0 + xs, w->px + (size_t)y * (size_t)w->cw + xs,
+        if (xe > xs) memcpy(dst + (size_t)ty * (size_t)stride + x0 + xs, w->shown + (size_t)y * (size_t)w->cw + xs,
                             (size_t)(xe - xs) * 4);
     }
 }
