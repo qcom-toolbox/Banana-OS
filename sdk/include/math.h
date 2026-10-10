@@ -95,6 +95,7 @@ float log10f(float x);
 float truncf(float x);
 float rintf(float x);
 long  lrintf(float x);
+long long llrintf(float x);
 float cbrtf(float x);
 float hypotf(float x, float y);
 float copysignf(float x, float y);

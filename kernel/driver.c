@@ -356,11 +356,10 @@ void drivers_load_installed(void) {
 
 void drivers_list(void) {
     char line[200];
-    terminal_writeln("Built in:");
     gpu_t* g = gpu_active();
-    ksnprintf(line, sizeof(line), "  display   %s", g ? g->name : "firmware framebuffer (no driver)");
+    ksnprintf(line, sizeof(line), "Display: %s (driver %s)", g ? g->name : "the firmware's framebuffer", g ? g->driver : "none");
     terminal_writeln(line);
-    terminal_writeln("  (and sound, network, USB, storage: see lsaudio, ifconfig, lsusb, disks)");
+    terminal_writeln("Built-in drivers also run sound, network, USB and storage: see lsaudio, ifconfig, lsusb, disks");
     terminal_writeln(g_nmods ? "Driver modules:" : "Driver modules: none (pkg install a driver .bpk; see sdk/driver)");
     for (int i = 0; i < g_nmods; i++) {
         ksnprintf(line, sizeof(line), "  %-14s %s%s", g_mods[i].name, g_mods[i].status == 0 ? "loaded" : "failed to start",

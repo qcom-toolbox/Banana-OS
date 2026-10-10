@@ -284,3 +284,4 @@ float coshf(float x) { return (float)cosh(x); }
 float tanhf(float x) { return (float)tanh(x); }
 float ldexpf(float x, int e) { return (float)ldexp(x, e); }
 float frexpf(float x, int* e) { return (float)frexp(x, e); }
+long long llrintf(float x) { return llrint(x); }
