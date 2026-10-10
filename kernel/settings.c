@@ -48,15 +48,15 @@ void shell_power(int reboot);
 #define C_ACCENT 0x003A7BD5u
 #define C_SEL    0x002C3E5Cu
 
-enum { PG_DISPLAY = 0, PG_FONTS, PG_SCREEN, PG_SOUND, PG_KEYBOARD, PG_MOUSE, PG_NETWORK, PG_TIME, PG_STARTUP, PG_ABOUT, PG_COUNT };
-static const char* const PAGE_NAMES[PG_COUNT] = { "Wallpaper", "Fonts", "Screen", "Sound", "Keyboard", "Mouse", "Network", "Date & time", "Startup", "About" };
+enum { PG_DISPLAY = 0, PG_FONTS, PG_SCREEN, PG_TASKBAR, PG_SOUND, PG_KEYBOARD, PG_MOUSE, PG_NETWORK, PG_TIME, PG_STARTUP, PG_ABOUT, PG_COUNT };
+static const char* const PAGE_NAMES[PG_COUNT] = { "Wallpaper", "Fonts", "Screen", "Taskbar", "Sound", "Keyboard", "Mouse", "Network", "Date & time", "Startup", "About" };
 
 static const char* const LAYOUTS[] = { "EN (Default)", "fr_CH", "FR", "DE", "de_CH", "BEPO" };
 #define NLAYOUTS ((int)(sizeof(LAYOUTS) / sizeof(LAYOUTS[0])))
 
 static int        g_open;
 static kbnav_t    g_nav;              /* keyboard focus: what the page drew */
-static win_geom_t g_win = { .x = 100, .y = 40, .w = 640, .h = 470, .min_w = 580, .min_h = 440 };
+static win_geom_t g_win = { .x = 100, .y = 40, .w = 640, .h = 490, .min_w = 580, .min_h = 470 };
 static int        g_page;
 static uint32_t   g_gen;
 static char       g_status[96];
@@ -560,6 +560,31 @@ static void click_screen_boot(int mx, int my) {
     }
 }
 
+/* Taskbar: how the windows' buttons look */
+static const char* const TB_STYLES[3] = { "Icons and titles", "Icons only", "Titles only" };
+static void draw_taskbar_page(void) {
+    int x = cx0(), y = cy0();
+    label(x, y, "Taskbar buttons", C_HEAD);
+    label(x, y + 18, "How the open windows show on the taskbar:", C_DIM);
+    int cur = gui_taskbar_style();
+    for (int i = 0; i < 3; i++) {
+        int ry = y + 44 + i * ITEM_H;
+        kbnav_add(&g_nav, x, ry - 2, 260, 18);
+        bevel(x, ry, 14, 14, 0x00141920u, 0x0010141Cu, 0x00404B5Cu);
+        if (i == cur) gfx_fill_rect(x + 4, ry + 4, 6, 6, C_ACCENT);
+        label(x + 24, ry + 3, TB_STYLES[i], i == cur ? C_HEAD : C_TEXT);
+        /* a small preview */
+        int px = x + 200, py = ry - 2;
+        gfx_fill_rect(px, py, 110, 18, 0x00192026u);
+        if (i != 2) gfx_fill_rect(px + (i == 1 ? 10 : 4), py + 4, 10, 10, 0x00D0A030u);
+        if (i != 1) gfx_fill_rect(px + (i == 2 ? 6 : 18), py + 8, 70, 2, 0x00E8EEF6u);
+    }
+    label(x, y + 44 + 3 * ITEM_H + 20, "Pinned apps", C_HEAD);
+    label(x, y + 44 + 3 * ITEM_H + 40, "Right-click a window's taskbar button or an", C_DIM);
+    label(x, y + 44 + 3 * ITEM_H + 56, "app's desktop icon: Pin to taskbar.", C_DIM);
+    label(x, y + 44 + 3 * ITEM_H + 72, "Right-click a pinned app to unpin it.", C_DIM);
+}
+
 /* Screen: the resolution */
 static void draw_screen(void) {
     if (!display_can_change()) { draw_screen_boot(); return; }
@@ -895,6 +920,7 @@ void settings_draw(const fb_info_t* fi) {
     case PG_DISPLAY:  draw_display(); break;
     case PG_FONTS:    draw_fonts(); break;
     case PG_SCREEN:   draw_screen(); break;
+    case PG_TASKBAR:  draw_taskbar_page(); break;
     case PG_SOUND:    draw_sound(); break;
     case PG_KEYBOARD: draw_keyboard(); break;
     case PG_MOUSE:    draw_mouse(); break;
@@ -1014,6 +1040,13 @@ void settings_click(int mx, int my) {
                 return;
             }
         }
+    } else if (g_page == PG_TASKBAR) {
+        for (int i = 0; i < 3; i++)
+            if (inside(mx, my, x, y + 44 + i * ITEM_H - 4, 280, ITEM_H - 2)) {
+                gui_set_taskbar_style(i);
+                ksnprintf(g_status, sizeof(g_status), "Taskbar: %s", TB_STYLES[i]);
+                return;
+            }
     } else if (g_page == PG_KEYBOARD) {
         for (int i = 0; i < NLAYOUTS; i++) {
             int ry = y + 44 + i * ITEM_H;

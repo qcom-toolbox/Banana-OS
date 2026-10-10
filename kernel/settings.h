@@ -20,8 +20,9 @@
 void settings_open(void);
 #define SETTINGS_PAGE_DISPLAY 0
 #define SETTINGS_PAGE_FONTS   1
-#define SETTINGS_PAGE_STARTUP 8
-#define SETTINGS_PAGE_ABOUT   9
+#define SETTINGS_PAGE_TASKBAR 3
+#define SETTINGS_PAGE_STARTUP 9
+#define SETTINGS_PAGE_ABOUT   10
 void settings_show_status(const char* msg);
 void settings_open_page(int page);
 void settings_close(void);

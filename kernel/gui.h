@@ -1,6 +1,8 @@
 #ifndef GUI_H
 #define GUI_H
 
+#include "fs.h"
+
 #include "types.h"
 
 void gui_init(void);
@@ -46,7 +48,16 @@ int gui_open_taskmgr(void);
 int gui_open_settings(void);   /* the Settings window (0 without the desktop) */
 void gui_raise_files(void);
 int  gui_open_installer(void);       /* the live CD's installer window; 0 if not here */
-void gui_text_changed(void);         /* the text size / interface font (Settings > Fonts) */
+void gui_text_changed(void);
+/* drag and drop: Files (and the desktop) hand the desktop what is dragged;
+ * it follows the mouse and lands where the button comes up */
+#define GUI_DRAG_FILES   1
+#define GUI_DRAG_DESKTOP 2
+void gui_drag_begin(const char (*paths)[FS_PATH_LEN], int n, int source);
+int  gui_drag_has(const char* dir, const char* name);   /* dir/name is being dragged */
+/* the taskbar: 0 icons and titles, 1 icons only, 2 titles only */
+void gui_set_taskbar_style(int style);
+int  gui_taskbar_style(void);         /* the text size / interface font (Settings > Fonts) */
 void gui_screen_changed(void);       /* a new resolution (kernel/display.c) */
 
 /* the open windows (taskbar order), for the Task Manager */

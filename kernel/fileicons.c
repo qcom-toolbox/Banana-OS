@@ -212,6 +212,17 @@ void fileicon_draw(fileicon_t k, int x, int y, int size) {
         R(7, 11, 2, 1, 0x002E9E3Eu);
         break;
     case FI_FAVORITES: star(4, 4); break;
+    case FI_TRASH: case FI_TRASH_FULL:
+        /* a waste basket: the lid with its handle, the body with ribs; full: paper in it */
+        if (k == FI_TRASH_FULL) { R(5, 1, 3, 4, 0x00F4F4F4u); R(8, 2, 3, 3, 0x00E2E8F0u); R(6, 2, 1, 1, 0x009AA5B1u); }
+        R(6, 2, 4, 1, 0x00707C8Au);
+        R(2, 3, 12, 2, 0x008C98A6u);
+        R(2, 4, 12, 1, 0x00606C7Au);
+        R(3, 5, 10, 10, 0x00B4C0CEu);
+        R(3, 5, 10, 1, 0x00D6DEE8u);
+        R(5, 7, 1, 7, 0x00808C9Au); R(8, 7, 1, 7, 0x00808C9Au); R(11, 7, 1, 7, 0x00808C9Au);
+        R(3, 14, 10, 1, 0x00707C8Au);
+        break;
     case FI_LIBRARY:
         R(2, 3, 3, 12, 0x003C6FB5u); R(5, 2, 3, 13, 0x00C8352Fu); R(8, 4, 3, 11, 0x004E9A45u);
         R(11, 3, 3, 12, 0x00E3B24Au); R(1, 15, 14, 1, 0x006B4A2Au);

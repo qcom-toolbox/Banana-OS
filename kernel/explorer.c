@@ -41,6 +41,8 @@
 #include "ctxmenu.h"
 #include "blockdev.h"
 #include "fileicons.h"
+#include "fileops.h"
+#include "keyboard.h"
 #include "rtc.h"
 
 #define HOME      "/home/banana"
@@ -97,6 +99,14 @@ static item_t   g_items[MAX_ITEMS];
 static int      g_count;
 static int      g_scroll;               /* first visible row (Details) / row of cells (Icons) */
 static int      g_sel = -1, g_hover = -1;
+/* more than one selected: g_mark (Ctrl / Shift + click, a box dragged
+ * over them, Ctrl+A); g_sel is the focused one, always selected */
+static uint8_t  g_mark[MAX_ITEMS];
+static int      g_anchor = -1;          /* Shift+click selects from here */
+/* the mouse: pressed on an item (it may become a drag), or a selection box */
+static int      g_press = -1, g_press_x, g_press_y, g_press_collapse;
+static int      g_band, g_band_x0, g_band_y0, g_band_x1, g_band_y1;
+static int      g_drop_row = -1, g_drop_place = -1;   /* where a drag would land (drawn) */
 static int      g_confirm_delete;
 static uint32_t g_last_click_ms;
 static int      g_last_click_row = -1;
@@ -105,6 +115,7 @@ static int      g_status_warn;
 static uint32_t g_gen;                  /* bumped on every state change */
 
 static int      g_view_icons;           /* 0 Details, 1 Large icons */
+static int      g_show_hidden;          /* names starting with a dot */
 static int      g_sort = 0, g_sort_desc;  /* 0 name, 1 date modified, 2 type, 3 size */
 
 /* history */
@@ -292,12 +303,16 @@ static void scan(void) {
     if (nd > FS_MAX_DIRS) nd = FS_MAX_DIRS;
     if (nf > FS_MAX_FILES) nf = FS_MAX_FILES;
     g_count = 0;
+    /* names starting with a dot are hidden (settings, the Recycle Bin's
+     * folder), like Windows' hidden files - unless Organize shows them */
     for (int i = 0; i < nd && g_count < MAX_ITEMS; i++) {
         item_t it = { 1, d[i] };
+        if (item_name(&it)[0] == '.' && !g_show_hidden) continue;
         if (matches(item_name(&it), g_search)) g_items[g_count++] = it;
     }
     for (int i = 0; i < nf && g_count < MAX_ITEMS; i++) {
         item_t it = { 0, f[i] };
+        if (item_name(&it)[0] == '.' && !g_show_hidden) continue;
         if (matches(item_name(&it), g_search)) g_items[g_count++] = it;
     }
     for (int i = 1; i < g_count; i++) {             /* insertion sort: a few hundred at most */
@@ -308,7 +323,24 @@ static void scan(void) {
     }
     if (g_sel >= g_count) g_sel = -1;
     if (g_hover >= g_count) g_hover = -1;
+    memset(g_mark, 0, sizeof(g_mark));
     clamp_scroll();
+}
+
+static int is_marked(int i) { return i >= 0 && i < g_count && (g_mark[i] || i == g_sel); }
+static int nmarked(void) { int n = 0; for (int i = 0; i < g_count; i++) n += is_marked(i); return n; }
+static void mark_only(int i) { memset(g_mark, 0, sizeof(g_mark)); g_sel = i; g_anchor = i; }
+
+/* the selected items' paths (up to max) */
+static int marked_paths(char (*out)[FS_PATH_LEN], int max) {
+    int n = 0;
+    for (int i = 0; i < g_count && n < max; i++)
+        if (is_marked(i)) {
+            if (!strcmp(g_path, "/")) ksnprintf(out[n], FS_PATH_LEN, "/%s", item_name(&g_items[i]));
+            else ksnprintf(out[n], FS_PATH_LEN, "%s/%s", g_path, item_name(&g_items[i]));
+            n++;
+        }
+    return n;
 }
 
 /* to path; `record`: the folder left goes into the back history */
@@ -428,14 +460,57 @@ static void new_folder(void) {
     }
 }
 
+static void delete_for_good(void);
+
+/* Delete: to the Recycle Bin (Shift+Delete, the Recycle Bin itself and USB
+ * sticks: for good, after asking) */
 static void delete_selected(void) {
-    if (g_sel < 0) return;
+    if (g_sel < 0 && !nmarked()) return;
+    int forever = (keyboard_mods() & 1) || in_trash(g_path) || !strcmp(g_path, TRASH_FILES) || fileops_on_usb(g_path);
+    if (forever) { delete_for_good(); return; }
+    static char paths[64][FS_PATH_LEN];
+    int n = marked_paths(paths, 64), done = 0;
+    char cwd[FS_PATH_LEN], msg[112];
+    fs_cwd_path(cwd, sizeof(cwd));
+    for (int i = 0; i < n; i++) {
+        size_t pl = strlen(paths[i]);
+        if (strncmp(cwd, paths[i], pl) == 0 && (cwd[pl] == '\0' || cwd[pl] == '/')) continue;   /* a terminal is in it */
+        if (trash_put(paths[i]) == 0) done++;
+    }
+    drop_thumb();
+    g_sel = -1;
+    scan();
+    if (done == 1 && n == 1) ksnprintf(msg, sizeof(msg), "\"%s\" is in the Recycle Bin", fileops_base(paths[0]));
+    else ksnprintf(msg, sizeof(msg), "%d item%s moved to the Recycle Bin%s", done, done == 1 ? "" : "s", done < n ? " (some could not be)" : "");
+    set_status_c(msg, done < n);
+}
+
+static void delete_for_good(void) {
+    if (nmarked() > 1) {
+        static char paths[64][FS_PATH_LEN];
+        int n = marked_paths(paths, 64);
+        char msg[112];
+        if (!g_confirm_delete) {
+            g_confirm_delete = 1;
+            ksnprintf(msg, sizeof(msg), "Delete these %d items for good? Press Delete again (Esc: no)", n);
+            set_status_c(msg, 1);
+            return;
+        }
+        g_confirm_delete = 0;
+        for (int i = 0; i < n; i++) fileops_delete(paths[i]);
+        drop_thumb();
+        g_sel = -1;
+        scan();
+        ksnprintf(msg, sizeof(msg), "Deleted %d items", n);
+        set_status(msg);
+        return;
+    }
     char name[FS_NAME_LEN], path[FS_PATH_LEN], cwd[FS_PATH_LEN], msg[112];
     kstrlcpy(name, item_name(&g_items[g_sel]), sizeof(name));
     child_path(name, path, sizeof(path));
     if (!g_confirm_delete) {
         g_confirm_delete = 1;
-        ksnprintf(msg, sizeof(msg), "Delete \"%s\"%s? Press Delete again (Esc: no)", name,
+        ksnprintf(msg, sizeof(msg), "Delete \"%s\"%s for good? Press Delete again (Esc: no)", name,
                   g_items[g_sel].is_dir ? " and all it contains" : "");
         set_status_c(msg, 1);
         return;
@@ -593,15 +668,28 @@ static int copy_tree(const char* src, const char* dst, int depth) {
 }
 
 static void clip_selected(int cut) {
-    if (g_sel < 0) return;
-    child_path(item_name(&g_items[g_sel]), g_clip, sizeof(g_clip));
-    g_clip_cut = cut;
+    static char paths[CLIP_MAX][FS_PATH_LEN];
+    int n = marked_paths(paths, CLIP_MAX);
+    if (!n) return;
+    const char* ptrs[CLIP_MAX];
+    for (int i = 0; i < n; i++) ptrs[i] = paths[i];
+    fileops_clip_set(ptrs, n, cut);
+    g_clip[0] = 0;
     char msg[112];
-    ksnprintf(msg, sizeof(msg), "%s \"%s\" - paste it in another folder (Ctrl+V)", cut ? "Cut" : "Copied", item_name(&g_items[g_sel]));
+    if (n == 1) ksnprintf(msg, sizeof(msg), "%s \"%s\" - paste it in another folder (Ctrl+V)", cut ? "Cut" : "Copied", fileops_base(paths[0]));
+    else ksnprintf(msg, sizeof(msg), "%s %d items - paste them in another folder (Ctrl+V)", cut ? "Cut" : "Copied", n);
     set_status(msg);
 }
 
 static void paste_here(void) {
+    if (fileops_clip_count()) {
+        char msg[112];
+        set_status("Copying...");
+        fileops_paste(g_path, msg, sizeof(msg));
+        scan();
+        set_status(msg);
+        return;
+    }
     if (!g_clip[0]) return;
     const char* base = strrchr(g_clip, '/');
     base = base ? base + 1 : g_clip;
@@ -707,7 +795,7 @@ static void properties(void) {
 
 enum { M_OPEN = 1, M_EDIT, M_INSTALL, M_PLAY, M_WALLPAPER, M_COPY, M_CUT, M_PASTE, M_RENAME, M_DELETE,
        M_NEWFOLDER, M_NEWFILE, M_TERMINAL, M_REFRESH, M_USB, M_EJECT, M_PROPS, M_CLOSE, M_VIEW_DETAILS, M_VIEW_ICONS,
-       M_SELECT_NONE, M_BROWSER, M_FONT, M_CODE };
+       M_SELECT_NONE, M_BROWSER, M_FONT, M_CODE, M_RESTORE, M_EMPTY_TRASH, M_DELETE_FOREVER, M_SELECT_ALL, M_HIDDEN };
 
 static void menu_cb(int id, void* arg) {
     (void)arg;
@@ -715,7 +803,7 @@ static void menu_cb(int id, void* arg) {
     if (g_sel >= 0 && g_sel < g_count) child_path(item_name(&g_items[g_sel]), path, sizeof(path));
     else path[0] = 0;
     g_gen++;
-    if (id != M_DELETE) g_confirm_delete = 0;
+    if (id != M_DELETE && id != M_EMPTY_TRASH && id != M_DELETE_FOREVER) g_confirm_delete = 0;
     switch (id) {
     case M_OPEN: if (g_sel >= 0) open_item(g_sel); break;
     case M_EDIT: if (path[0]) gui_open_notepad(path); break;
@@ -740,7 +828,32 @@ static void menu_cb(int id, void* arg) {
     case M_CLOSE: explorer_close(); break;
     case M_VIEW_DETAILS: g_view_icons = 0; g_scroll = 0; break;
     case M_VIEW_ICONS: g_view_icons = 1; g_scroll = 0; break;
-    case M_SELECT_NONE: g_sel = -1; break;
+    case M_SELECT_NONE: g_sel = -1; memset(g_mark, 0, sizeof(g_mark)); break;
+    case M_HIDDEN: g_show_hidden = !g_show_hidden; scan(); set_status(g_show_hidden ? "Hidden items are shown" : "Hidden items are hidden"); break;
+    case M_SELECT_ALL: for (int i = 0; i < g_count; i++) g_mark[i] = 1; if (g_sel < 0 && g_count) g_sel = 0; break;
+    case M_DELETE_FOREVER: g_confirm_delete = 1; delete_for_good(); break;
+    case M_RESTORE: {
+        static char paths[64][FS_PATH_LEN];
+        int n = marked_paths(paths, 64), done = 0;
+        for (int i = 0; i < n; i++) if (trash_restore(paths[i]) == 0) done++;
+        g_sel = -1;
+        scan();
+        char msg[112];
+        ksnprintf(msg, sizeof(msg), "Restored %d item%s to where %s came from", done, done == 1 ? "" : "s", done == 1 ? "it" : "they");
+        set_status(msg);
+        break;
+    }
+    case M_EMPTY_TRASH: {
+        if (!g_confirm_delete) { g_confirm_delete = 2; set_status_c("Empty the Recycle Bin for good? Choose it again to confirm", 1); break; }
+        g_confirm_delete = 0;
+        int n = trash_empty();
+        g_sel = -1;
+        scan();
+        char msg[112];
+        ksnprintf(msg, sizeof(msg), "Emptied the Recycle Bin (%d item%s)", n, n == 1 ? "" : "s");
+        set_status(msg);
+        break;
+    }
     }
 }
 
@@ -748,8 +861,39 @@ static void item_menu(int mx, int my, int row) {
     ctx_item_t items[CTX_MAX_ITEMS];
     int n = 0;
     g_renaming = -1;
-    if (row >= 0) {
+    int trash_view = !strcmp(g_path, TRASH_FILES);
+    if (trash_view) {
+        if (row >= 0) {
+            if (!is_marked(row)) mark_only(row); else g_sel = row;
+            items[n++] = (ctx_item_t){ "Restore", M_RESTORE, 0 };
+            items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
+            items[n++] = (ctx_item_t){ "Delete for good", M_DELETE_FOREVER, 0 };
+            items[n++] = (ctx_item_t){ "Properties", M_PROPS, 0 };
+        } else {
+            items[n++] = (ctx_item_t){ "Empty Recycle Bin", M_EMPTY_TRASH, g_count == 0 };
+            items[n++] = (ctx_item_t){ "Select all", M_SELECT_ALL, g_count == 0 };
+            items[n++] = (ctx_item_t){ "Refresh", M_REFRESH, 0 };
+        }
+        g_gen++;
+        ctxmenu_open(mx, my, items, n, menu_cb, NULL);
+        return;
+    }
+    if (row >= 0 && nmarked() > 1 && is_marked(row)) {     /* several: what applies to them all */
         g_sel = row;
+        char t[40];
+        ksnprintf(t, sizeof(t), "%d items selected", nmarked());
+        items[n++] = (ctx_item_t){ t, 0, 1 };
+        items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
+        items[n++] = (ctx_item_t){ "Cut", M_CUT, 0 };
+        items[n++] = (ctx_item_t){ "Copy", M_COPY, 0 };
+        items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
+        items[n++] = (ctx_item_t){ "Delete", M_DELETE, 0 };
+        g_gen++;
+        ctxmenu_open(mx, my, items, n, menu_cb, NULL);
+        return;
+    }
+    if (row >= 0) {
+        mark_only(row);
         g_confirm_delete = 0;
         const item_t* it = &g_items[row];
         const char* name = item_name(it);
@@ -780,7 +924,8 @@ static void item_menu(int mx, int my, int row) {
         items[n++] = (ctx_item_t){ g_view_icons ? "View: Details" : "View: Large icons", g_view_icons ? M_VIEW_DETAILS : M_VIEW_ICONS, 0 };
         items[n++] = (ctx_item_t){ "Refresh", M_REFRESH, 0 };
         items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
-        items[n++] = (ctx_item_t){ "Paste", M_PASTE, g_clip[0] == 0 };
+        items[n++] = (ctx_item_t){ "Paste", M_PASTE, g_clip[0] == 0 && fileops_clip_count() == 0 };
+        items[n++] = (ctx_item_t){ "Select all", M_SELECT_ALL, g_count == 0 };
         items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
         items[n++] = (ctx_item_t){ "New folder", M_NEWFOLDER, 0 };
         items[n++] = (ctx_item_t){ "New text document", M_NEWFILE, 0 };
@@ -810,6 +955,7 @@ static void organize_menu(int mx, int my) {
     items[n++] = (ctx_item_t){ "Refresh", M_REFRESH, 0 };
     items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
     items[n++] = (ctx_item_t){ "Close", M_CLOSE, 0 };
+    items[n++] = (ctx_item_t){ g_show_hidden ? "Hide hidden items" : "Show hidden items", M_HIDDEN, 0 };
     ctxmenu_open(mx, my, items, n, menu_cb, NULL);
 }
 
@@ -869,6 +1015,7 @@ static const place_t PLACES[] = {
     { "Computer", FI_COMPUTER, "/", 1 },
     { "Local Disk (/)", FI_DISK, "/", 0 },
     { "USB stick", FI_USB, "/mnt/usb", 0 },
+    { "Recycle Bin", FI_TRASH, TRASH_FILES, 1 },
 };
 #define NPLACES (int)(sizeof(PLACES) / sizeof(PLACES[0]))
 #define NAV_ROW 22
@@ -900,6 +1047,7 @@ static int place_at(int mx, int my) {
 static void open_place(int i) {
     const place_t* p = &PLACES[i];
     if (!p->path) return;
+    if (!strcmp(p->path, TRASH_FILES)) { fs_mkdir_p(TRASH_FILES); fs_mkdir_p(TRASH_INFO); go(TRASH_FILES); return; }
     if (strncmp(p->path, HOME "/", strlen(HOME) + 1) == 0) go_library(p->path + strlen(HOME) + 1);
     else go(p->path);
 }
@@ -944,6 +1092,12 @@ static void build_crumbs(int x_start, int x_end) {
     kstrlcpy(g_crumb[0].path, "/", FS_PATH_LEN);
     kstrlcpy(g_crumb[0].label, "Computer", sizeof(g_crumb[0].label));
     g_ncrumb = 1;
+    if (!strcmp(g_path, TRASH_FILES)) {
+        kstrlcpy(g_crumb[1].path, TRASH_FILES, FS_PATH_LEN);
+        kstrlcpy(g_crumb[1].label, "Recycle Bin", sizeof(g_crumb[0].label));
+        g_ncrumb = 2;
+        p = "";
+    }
     while (*p && g_ncrumb < CRUMBS) {
         while (*p == '/') p++;
         if (!*p) break;
@@ -990,6 +1144,7 @@ static void ensure_visible(void) {
 
 static void move_sel(int d) {
     if (!g_count) return;
+    memset(g_mark, 0, sizeof(g_mark));
     if (g_sel < 0) g_sel = 0;
     else g_sel += d;
     if (g_sel < 0) g_sel = 0;
@@ -1044,6 +1199,7 @@ void explorer_key(char c) {
         if (esc) return;
         g_confirm_delete = 0;               /* a lone Esc */
         g_status[0] = 0;
+        if (nmarked() > 1) mark_only(g_sel);
     } else if (esc == 2) {
         esc = 0;
         int step = g_view_icons ? per_row() : 1;
@@ -1053,13 +1209,14 @@ void explorer_key(char c) {
         else if (c == 'D' && g_view_icons) move_sel(-1);
         else if (c == 'H') { g_sel = g_count ? 0 : -1; ensure_visible(); }
         else if (c == 'F') { g_sel = g_count - 1; ensure_visible(); }
-        else if (c == 'P' && g_sel >= 0) delete_selected();          /* Delete */
+        else if (c == 'P' && (g_sel >= 0 || nmarked())) delete_selected();          /* Delete */
         return;
     }
     switch (c) {
     case 27: esc = 1; return;
     case '\n': if (g_sel >= 0) open_item(g_sel); return;
     case '\b': if (g_nback) go_back(); else go_up(); return;
+    case 1: for (int i = 0; i < g_count; i++) g_mark[i] = 1; if (g_sel < 0 && g_count) g_sel = 0; return;   /* Ctrl+A */
     case 3: clip_selected(0); return;            /* Ctrl+C */
     case 24: clip_selected(1); return;           /* Ctrl+X */
     case 22: paste_here(); return;               /* Ctrl+V */
@@ -1199,20 +1356,98 @@ void explorer_click(int mx, int my) {
 
     /* the items */
     int row = item_at(mx, my);
-    if (row == -1) { g_sel = -1; g_confirm_delete = 0; g_status[0] = 0; return; }
+    int mods = keyboard_mods();
+    if (row == -1) {
+        /* the empty part: a selection box starts (Ctrl: added to the selection) */
+        if (!(mods & 2)) { g_sel = -1; memset(g_mark, 0, sizeof(g_mark)); }
+        g_confirm_delete = 0;
+        g_status[0] = 0;
+        g_band = 1;
+        g_band_x0 = g_band_x1 = mx;
+        g_band_y0 = g_band_y1 = my;
+        return;
+    }
     if (row >= 0) {
         uint32_t now = timer_ms();
-        int dbl = row == g_last_click_row && now - g_last_click_ms < 500;
+        int dbl = row == g_last_click_row && now - g_last_click_ms < 500 && !(mods & 3);
         g_last_click_row = row;
         g_last_click_ms = now;
-        if (row != g_sel) { g_sel = row; g_confirm_delete = 0; g_status[0] = '\0'; }
-        if (dbl) { g_last_click_row = -1; open_item(row); }
+        g_confirm_delete = 0;
+        g_status[0] = '\0';
+        if (mods & 2) {                                  /* Ctrl: one more, or one less */
+            if (is_marked(row) && nmarked() > 1) { g_mark[row] = 0; if (g_sel == row) { g_sel = -1; for (int i = 0; i < g_count; i++) if (g_mark[i]) { g_sel = i; break; } } }
+            else { if (g_sel >= 0) g_mark[g_sel] = 1; g_mark[row] = 1; g_sel = row; }
+            g_anchor = row;
+        } else if (mods & 1) {                           /* Shift: from the anchor to here */
+            int a = g_anchor >= 0 ? g_anchor : (g_sel >= 0 ? g_sel : row);
+            memset(g_mark, 0, sizeof(g_mark));
+            for (int i = a < row ? a : row; i <= (a < row ? row : a); i++) g_mark[i] = 1;
+            g_sel = row;
+        } else {
+            /* a click on one of several selected: they stay (to be dragged)
+             * unless the mouse comes up without moving */
+            g_press_collapse = is_marked(row) && nmarked() > 1;
+            if (!g_press_collapse) mark_only(row);
+            g_press = row;
+            g_press_x = mx;
+            g_press_y = my;
+        }
+        if (dbl) { g_last_click_row = -1; g_press = -1; open_item(row); }
     }
+}
+
+/* the item's rectangle on the screen; 0 if it is not shown */
+static int item_rect(int i, int* x, int* y, int* w, int* h) {
+    if (g_view_icons) {
+        int pr = per_row(), r = i / pr - g_scroll, c = i % pr;
+        if (r < 0 || r >= content_rows()) return 0;
+        *x = g_x + content_x() + 6 + c * CELL_W + 2; *y = g_y + list_top() + r * CELL_H; *w = CELL_W - 4; *h = CELL_H - 4;
+    } else {
+        int r = i - g_scroll;
+        if (r < 0 || r >= content_rows()) return 0;
+        *x = g_x + content_x() + 2; *y = g_y + list_top() + r * ROW_H; *w = content_w() - SB_W - 4; *h = ROW_H;
+    }
+    return 1;
 }
 
 void explorer_mouse(int mx, int my, int left) {
     if (win_mouse(&g_win, mx, my, left)) { g_gen++; clamp_scroll(); return; }
     if (!g_open) return;
+    if (g_band) {
+        if (!left) { g_band = 0; g_gen++; return; }
+        g_band_x1 = mx; g_band_y1 = my;
+        int x0 = g_band_x0 < mx ? g_band_x0 : mx, x1 = g_band_x0 < mx ? mx : g_band_x0;
+        int y0 = g_band_y0 < my ? g_band_y0 : my, y1 = g_band_y0 < my ? my : g_band_y0;
+        int first = -1;
+        for (int i = 0; i < g_count; i++) {
+            int x, y, w, h;
+            if (!item_rect(i, &x, &y, &w, &h)) { continue; }
+            /* (Details: the name's part of the row) */
+            if (!g_view_icons) w = 200;
+            int hit = x < x1 && x + w > x0 && y < y1 && y + h > y0;
+            if (hit) { g_mark[i] = 1; if (first < 0) first = i; }
+            else if (!(keyboard_mods() & 2)) g_mark[i] = 0;
+        }
+        g_sel = first;
+        if (first >= 0) g_mark[first] = 1;
+        g_gen++;
+        return;
+    }
+    if (g_press >= 0) {
+        if (!left) {                                    /* up without moving: only that one */
+            if (g_press_collapse) mark_only(g_press);
+            g_press = -1;
+            g_gen++;
+        } else if ((mx - g_press_x) * (mx - g_press_x) + (my - g_press_y) * (my - g_press_y) > 36) {
+            /* it moved: a drag of what is selected (the desktop carries it) */
+            static char paths[64][FS_PATH_LEN];
+            int n = marked_paths(paths, 64);
+            g_press = -1;
+            if (n) gui_drag_begin(paths, n, GUI_DRAG_FILES);
+            g_gen++;
+        }
+        return;
+    }
     int over = explorer_contains(mx, my);
     int h = over ? item_at(mx, my) : -2;
     int hn = over ? place_at(mx, my) : -1;
@@ -1343,7 +1578,7 @@ static void draw_toolbars(void) {
         }
     } else {
         char ph[64];
-        ksnprintf(ph, sizeof(ph), "Search %s", strcmp(g_path, "/") == 0 ? "Computer" : base_name(g_path));
+        ksnprintf(ph, sizeof(ph), "Search %s", strcmp(g_path, "/") == 0 ? "Computer" : !strcmp(g_path, TRASH_FILES) ? "Recycle Bin" : base_name(g_path));
         draw_clip(sx + 6, sy + 7, ph, cols, 0x008C99A8u, C_WHITE);
     }
 
@@ -1420,7 +1655,7 @@ static void draw_details_view(void) {
         const item_t* it = &g_items[i];
         int ry = top + r * ROW_H;
         uint32_t bg = C_WHITE;
-        if (i == g_sel) { frame(x + 2, ry, w - 4, ROW_H, C_SEL, C_SEL_B); bg = C_SEL; }
+        if (is_marked(i) || i == g_drop_row) { frame(x + 2, ry, w - 4, ROW_H, C_SEL, C_SEL_B); bg = C_SEL; }
         else if (i == g_hover) { frame(x + 2, ry, w - 4, ROW_H, C_HOVER, C_HOVER_B); bg = C_HOVER; }
         fileicon_draw(icon_of(it), x + 6, ry + 2, 16);
         if (i == g_renaming) draw_rename_box(x + 26, ry + 1, name_end - 30);
@@ -1455,7 +1690,7 @@ static void draw_icons_view(void) {
             const item_t* it = &g_items[i];
             int cx = x + 6 + c * CELL_W, cy = top + r * CELL_H;
             uint32_t bg = C_WHITE;
-            if (i == g_sel) { frame(cx + 2, cy, CELL_W - 4, CELL_H - 4, C_SEL, C_SEL_B); bg = C_SEL; }
+            if (is_marked(i) || i == g_drop_row) { frame(cx + 2, cy, CELL_W - 4, CELL_H - 4, C_SEL, C_SEL_B); bg = C_SEL; }
             else if (i == g_hover) { frame(cx + 2, cy, CELL_W - 4, CELL_H - 4, C_HOVER, C_HOVER_B); bg = C_HOVER; }
             fileicon_draw(icon_of(it), cx + (CELL_W - 48) / 2, cy + 6, 48);
             if (i == g_renaming) { draw_rename_box(cx + 2, cy + 58, CELL_W - 4); continue; }
@@ -1559,7 +1794,7 @@ void explorer_draw(const fb_info_t* fi) {
     gfx_fill_rect(x + 3, y + 3, WIN_W - 6, TITLE_H - 1, C_TITLE);
     fileicon_draw(FI_FOLDER, x + 7, y + 4, 16);
     char title[64];
-    ksnprintf(title, sizeof(title), "%s", strcmp(g_path, "/") == 0 ? "Computer" : base_name(g_path));
+    ksnprintf(title, sizeof(title), "%s", strcmp(g_path, "/") == 0 ? "Computer" : !strcmp(g_path, TRASH_FILES) ? "Recycle Bin" : base_name(g_path));
     draw_clip(x + 28, y + 8, title, (WIN_W - 120) / 8, 0x00FFFFFFu, C_TITLE);
     win_draw_buttons(&g_win, 4, 12);
 
@@ -1572,4 +1807,92 @@ void explorer_draw(const fb_info_t* fi) {
     draw_scrollbar();
     draw_details_pane();
     gfx_draw_grip(x + WIN_W, y + WIN_H);
+    /* the selection box: a blue outline over a light blue tint */
+    if (g_band) {
+        int x0 = g_band_x0 < g_band_x1 ? g_band_x0 : g_band_x1, x1 = g_band_x0 < g_band_x1 ? g_band_x1 : g_band_x0;
+        int y0 = g_band_y0 < g_band_y1 ? g_band_y0 : g_band_y1, y1 = g_band_y0 < g_band_y1 ? g_band_y1 : g_band_y0;
+        int cx0 = g_x + content_x(), cy0 = g_y + BODY_Y, cx1 = cx0 + content_w() - SB_W, cy1 = g_y + BODY_Y + body_h();
+        if (x0 < cx0) x0 = cx0;
+        if (y0 < cy0) y0 = cy0;
+        if (x1 > cx1) x1 = cx1;
+        if (y1 > cy1) y1 = cy1;
+        if (x1 > x0 && y1 > y0) {
+            int stride, tw, th;
+            uint32_t* t = fb_target(&stride, &tw, &th);
+            for (int yy = y0; t && yy < y1 && yy < th; yy++)
+                for (int xx = x0; xx < x1 && xx < tw; xx++) {
+                    uint32_t p = t[yy * stride + xx];
+                    t[yy * stride + xx] = ((p & 0x00FEFEFEu) >> 1) + ((0x00CFE3F8u & 0x00FEFEFEu) >> 1);   /* half and half */
+                }
+            gfx_fill_rect(x0, y0, x1 - x0, 1, 0x003399FFu); gfx_fill_rect(x0, y1 - 1, x1 - x0, 1, 0x003399FFu);
+            gfx_fill_rect(x0, y0, 1, y1 - y0, 0x003399FFu); gfx_fill_rect(x1 - 1, y0, 1, y1 - y0, 0x003399FFu);
+        }
+    }
 }
+
+/* ── dragging onto Files ──────────────────────────────────────────── */
+
+/* where a drop at (mx, my) goes: a folder row (not one being dragged), a
+ * place of the navigation pane, else the folder shown; "" if nowhere */
+static void drop_target(int mx, int my, char* out, int cap, int* row, int* place) {
+    *row = -1; *place = -1;
+    out[0] = 0;
+    if (!g_open || !explorer_contains(mx, my)) return;
+    int pl = place_at(mx, my);
+    if (pl >= 0) { *place = pl; kstrlcpy(out, PLACES[pl].path, (size_t)cap); return; }
+    int r = item_at(mx, my);
+    if (r >= 0 && g_items[r].is_dir && !gui_drag_has(g_path, item_name(&g_items[r]))) {
+        *row = r;
+        child_path(item_name(&g_items[r]), out, cap);
+        return;
+    }
+    if (r != -2 || my - g_y >= BODY_Y) kstrlcpy(out, g_path, (size_t)cap);
+}
+
+void explorer_drag_over(int mx, int my) {
+    char t[FS_PATH_LEN];
+    int r, p;
+    drop_target(mx, my, t, sizeof(t), &r, &p);
+    if (r != g_drop_row || p != g_drop_place) { g_drop_row = r; g_drop_place = p; g_gen++; }
+}
+
+int explorer_drop(const char (*paths)[FS_PATH_LEN], int n, int mx, int my, int copy) {
+    g_drop_row = g_drop_place = -1;
+    g_gen++;
+    char dst[FS_PATH_LEN];
+    int r, p;
+    drop_target(mx, my, dst, sizeof(dst), &r, &p);
+    if (!dst[0]) return 0;
+    int done = 0, trash = !strcmp(dst, TRASH_FILES);
+    char err[64] = "", msg[112];
+    for (int i = 0; i < n; i++) {
+        if (trash) { if (trash_put(paths[i]) == 0) done++; continue; }
+        if (fileops_transfer(paths[i], dst, copy, NULL, 0, err, sizeof(err)) == 0) done++;
+    }
+    scan();
+    if (trash) ksnprintf(msg, sizeof(msg), "%d item%s moved to the Recycle Bin", done, done == 1 ? "" : "s");
+    else if (done == n) ksnprintf(msg, sizeof(msg), "%s %d item%s to %s", copy ? "Copied" : "Moved", done, done == 1 ? "" : "s", fileops_base(dst));
+    else ksnprintf(msg, sizeof(msg), "%d of %d could not be %s: %s", n - done, n, copy ? "copied" : "moved", err);
+    set_status_c(msg, done < n);
+    return 1;
+}
+
+/* opens a path as a double click in Files would (the desktop's files) */
+void explorer_launch(const char* path) {
+    if (fs_find_dir(path) >= 0) { explorer_open(path); gui_raise_files(); return; }
+    char dir[FS_PATH_LEN];
+    fileops_parent(path, dir, sizeof(dir));
+    kstrlcpy(g_path, dir, sizeof(g_path));
+    g_search[0] = 0;
+    scan();
+    int keep_open = g_open;
+    for (int i = 0; i < g_count; i++)
+        if (!g_items[i].is_dir && !strcmp(item_name(&g_items[i]), fileops_base(path))) {
+            g_sel = i;
+            open_item(i);
+            break;
+        }
+    if (!keep_open) g_open = 0;
+}
+
+void explorer_refresh(void) { if (g_open) { scan(); g_gen++; } }
