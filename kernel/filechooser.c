@@ -5,6 +5,7 @@
 #include "kstring.h"
 #include "timer.h"
 #include "fileicons.h"
+#include "kbnav.h"
 
 #define C_BG     0x001D232Cu
 #define C_LIST   0x00141920u
@@ -227,6 +228,34 @@ void fc_wheel(int dz) {
     if (g_top > max) g_top = max;
     if (g_top < 0) g_top = 0;
     g_gen++;
+}
+
+int fc_nav(int code) {
+    if (!g_on) return 0;
+    int r = rows();
+    switch (code) {
+    case KB_UP: if (g_sel > 0) g_sel--; else g_sel = 0; break;
+    case KB_DOWN: if (g_sel < g_n - 1) g_sel++; break;
+    case KB_PGUP: g_sel -= r; if (g_sel < 0) g_sel = 0; break;
+    case KB_PGDN: g_sel += r; if (g_sel >= g_n) g_sel = g_n - 1; break;
+    case KB_HOME: g_sel = 0; break;
+    case KB_END: g_sel = g_n - 1; break;
+    case KB_LEFT: up(); return 1;
+    case KB_RIGHT: case KB_ENTER: choose(); return 1;
+    case KB_ESC: fc_close(); return 1;
+    case KB_TAB: case KB_BACKTAB: {                 /* the places, in turn */
+        static int place;
+        place = (place + (code == KB_TAB ? 1 : NPLACES - 1)) % NPLACES;
+        load(PLACES[place].path);
+        return 1;
+    }
+    default: return 0;
+    }
+    if (g_sel < g_top) g_top = g_sel;
+    if (g_sel >= g_top + r) g_top = g_sel - r + 1;
+    if (g_top < 0) g_top = 0;
+    g_gen++;
+    return 1;
 }
 
 void fc_key(char c) {

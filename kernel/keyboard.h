@@ -6,6 +6,7 @@
 void keyboard_init(void);
 char keyboard_getchar(void);
 char keyboard_try_getchar(void); /* non-blocking: returns 0 if no key */
+void keyboard_unget(char c);     /* puts a character back in front */
 void keyboard_readline(char* buf, int maxlen);
 const char* keyboard_layout_name(void);
 const char* keyboard_layouts_help(void);
@@ -37,6 +38,17 @@ void keyboard_set_owner(int pid);
 #define KEYF_STOP    20
 #define KEYF_NEXT    21
 #define KEYF_PREV    22
+#define KEYF_TAB     23          /* Alt+Tab (with KEYF_ALT, KEYF_SHIFT): the window switcher */
+#define KEYF_ALTUP   24          /* Alt let go after an Alt+Tab */
+#define KEYF_MENU    25          /* the Menu key (or Shift+F10): a context menu */
+/* the Windows key held with another key: KEYF_WINKEY | that key - a
+ * small letter or digit, '\t', or one of KEYW_* (the Windows key alone,
+ * pressed and let go, is KEYF_WIN) */
+#define KEYF_WINKEY  0x800
+#define KEYW_UP      0x81
+#define KEYW_DOWN    0x82
+#define KEYW_RIGHT   0x83
+#define KEYW_LEFT    0x84
 #define KEYF_SHIFT   0x100       /* held with an F-key */
 #define KEYF_CTRL    0x200
 #define KEYF_ALT     0x400

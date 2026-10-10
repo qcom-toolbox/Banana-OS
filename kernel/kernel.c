@@ -82,6 +82,8 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     klog("heap: %u KiB free\n", kheap_total_bytes() / 1024u);
     paging_guard_null();      /* NULL pointers fault (64-bit), after every Multiboot2 reader */
     gpu_init();               /* graphics drivers: one may set the screen up (kernel/gpu.h) */
+    paging_pat_init();        /* write-combining (64-bit): a framebuffer without a driver gets it */
+    gpu_firmware_init();      /* AMD, NVIDIA, Intel Arc / Xe without a driver: named, faster screen */
 
     terminal_init();
     /* "verbose" (GRUB's "boot messages" entry): no boot screen, every step on

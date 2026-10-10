@@ -21,4 +21,6 @@ void taskmgr_mouse(int mx, int my, int left);
 void taskmgr_rclick(int mx, int my);
 uint32_t taskmgr_signature(void);
 
+int  taskmgr_navkey(int code);       /* kbnav.h keys */
+
 #endif

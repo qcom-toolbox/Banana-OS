@@ -143,8 +143,9 @@ static int list_cb(const pci_dev_t* d, void* ctx) {
         if (g_gpus[i]->pci.bus == d->bus && g_gpus[i]->pci.dev == d->dev && g_gpus[i]->pci.fn == d->fn) g = g_gpus[i];
     char line[200];
     const char* vn = vendor_name(d->vendor);
+    const char* fam = gpu_family_name(d->vendor, d->device);
     ksnprintf(line, sizeof(line), "%02x:%02x.%u  %04x:%04x  %s%s%s", d->bus, d->dev, d->fn, d->vendor, d->device,
-              g ? g->name : vn, g ? "" : (vn[0] ? " display controller" : "display controller"),
+              g ? g->name : fam ? fam : vn, g || fam ? "" : (vn[0] ? " display controller" : "display controller"),
               g == g_active && g ? "  [active]" : "");
     terminal_writeln(line);
     if (!g) {

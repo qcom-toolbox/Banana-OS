@@ -2,6 +2,7 @@
 #include "gfx.h"
 #include "fb.h"
 #include "kstring.h"
+#include "kbnav.h"
 
 #define ITEM_H 20
 #define SEP_H  7
@@ -111,10 +112,46 @@ void ctxmenu_draw(void) {
     }
 }
 
+/* Up / Down choose, Enter (or Space, Right) does it, Esc (or Left) closes */
+int ctxmenu_key(int code) {
+    if (!g_open) return 0;
+    if (code == KB_UP || code == KB_DOWN || code == KB_TAB || code == KB_BACKTAB || code == KB_HOME || code == KB_END) {
+        int dir = code == KB_UP || code == KB_BACKTAB || code == KB_END ? -1 : 1;
+        int i = g_hover;
+        if (code == KB_HOME) i = -1;
+        if (code == KB_END) i = g_n;
+        for (int k = 0; k < g_n; k++) {
+            i += dir;
+            if (i < 0) i = g_n - 1;
+            if (i >= g_n) i = 0;
+            if (!is_sep(i) && !g_dis[i]) break;
+        }
+        g_hover = i;
+        g_gen++;
+        return 1;
+    }
+    if (code == KB_ENTER || code == KB_SPACE || code == KB_RIGHT) {
+        if (g_hover < 0 || is_sep(g_hover) || g_dis[g_hover]) return 1;
+        ctx_cb_t cb = g_cb;
+        void* arg = g_arg;
+        int id = g_id[g_hover];
+        ctxmenu_close();
+        if (cb) cb(id, arg);
+        return 1;
+    }
+    if (code == KB_ESC || code == KB_LEFT) { ctxmenu_close(); return 1; }
+    return 1;                                       /* anything else: the menu keeps the keys */
+}
+
 uint32_t ctxmenu_signature(void) {
     return g_open ? (g_gen * 2654435761u ^ (uint32_t)(g_x << 16 | g_y) ^ (uint32_t)(g_hover + 2)) : 0;
 }
 
 int ctxmenu_contains(int mx, int my) {
     return g_open && mx >= g_x && mx < g_x + g_w && my >= g_y && my < g_y + g_h;
+}
+
+/* opened from the keyboard: the first item chosen */
+void ctxmenu_select_first(void) {
+    for (int i = 0; i < g_n; i++) if (!is_sep(i) && !g_dis[i]) { g_hover = i; g_gen++; return; }
 }

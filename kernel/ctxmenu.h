@@ -34,4 +34,8 @@ int  ctxmenu_contains(int mx, int my);
 void ctxmenu_draw(void);
 uint32_t ctxmenu_signature(void);
 
+/* the keyboard (kbnav.h codes) while a menu is open: 1 if it took the key */
+int  ctxmenu_key(int code);
+void ctxmenu_select_first(void);
+
 #endif

@@ -21,6 +21,7 @@ void     fc_draw(int x, int y, int w, int h);
 int      fc_click(int mx, int my);          /* (inside the last drawn panel) */
 void     fc_wheel(int dz);
 void     fc_key(char c);
+int      fc_nav(int code);                  /* kbnav.h keys: arrows, Enter, Esc, Tab (places) */
 uint32_t fc_generation(void);               /* changes when it must be drawn again */
 
 #endif

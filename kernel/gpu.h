@@ -65,6 +65,10 @@ void   gpu_wait_vblank(void);
 int    gpu_backlight(int percent);     /* percent < 0 reads; -1 without one */
 
 void   gpu_list(void);                  /* lsgpu */
+/* after gpu_init: a card with no driver here (AMD, NVIDIA, Intel Arc / Xe)
+ * keeps the firmware's screen - named, its framebuffer write-combining */
+void   gpu_firmware_init(void);
+const char* gpu_family_name(uint16_t vendor, uint16_t device);   /* "NVIDIA GeForce RTX 30 series (Ampere)", NULL */
 
 /* the built-in drivers: 0 if it took the device */
 int gpu_bga_probe(const pci_dev_t* d);

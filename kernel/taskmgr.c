@@ -57,7 +57,11 @@ static void bevel(int x, int y, int w, int h, uint32_t base, uint32_t hi, uint32
     gfx_fill_rect(x + w - 1, y, 1, h, lo);
 }
 
+#include "kbnav.h"
+static kbnav_t g_nav;
+
 static void button(int x, int y, int w, const char* label, int enabled) {
+    kbnav_add(&g_nav, x, y, w, 18);
     uint32_t base = enabled ? 0x00303740u : 0x00262B33u;
     bevel(x, y, w, 18, base, 0x00535D6Eu, 0x0015191Fu);
     gfx_draw_text(x + (w - (int)strlen(label) * 8) / 2, y + 5, label, enabled ? C_TEXT : 0x00707A88u, base);
@@ -250,6 +254,7 @@ void taskmgr_click(int mx, int my) {
         return;
     }
     if (win_grip_press(&g_win, mx, my)) return;
+    kbnav_mouse(&g_nav);
     if (ly >= TABS_Y && ly < TABS_Y + TAB_H) {
         int x = 6;
         for (int t = 0; t < TAB_COUNT; t++) {
@@ -279,6 +284,27 @@ void taskmgr_click(int mx, int my) {
     }
 }
 
+/* the keyboard: Tab / arrows, Enter on a row switches to it, Delete ends it */
+int taskmgr_navkey(int code) {
+    if (!g_open) return 0;
+    g_gen++;
+    if (code == KB_DEL && g_tab == TAB_APPS && g_sel >= 0) { end_task(g_sel); return 1; }
+    int cx, cy;
+    int r = kbnav_key(&g_nav, code, &cx, &cy);
+    if (r == 1) {
+        int shown = g_nav.shown, focus = g_nav.focus;
+        int row = g_tab == TAB_APPS ? row_at(cx, cy) : -1;
+        taskmgr_click(cx, cy);
+        if (row >= 0) taskmgr_click(cx, cy);          /* (a double click: switch to it) */
+        g_nav.shown = shown;
+        g_nav.focus = focus;
+    } else if (r == 2 && g_tab == TAB_APPS) {
+        int fx, fy, fw, fh;
+        if (kbnav_focused(&g_nav, &fx, &fy, &fw, &fh)) { int row = row_at(fx + fw / 2, fy + fh / 2); if (row >= 0) g_sel = row; }
+    }
+    return r != 0;
+}
+
 void taskmgr_mouse(int mx, int my, int left) {
     if (win_mouse(&g_win, mx, my, left)) g_gen++;
 }
@@ -306,6 +332,7 @@ void taskmgr_draw(const fb_info_t* fi) {
     (void)fi;
     if (!g_open) return;
     int x = g_win.x, y = g_win.y, W = g_win.w, H = g_win.h;
+    kbnav_begin(&g_nav);
     bevel(x, y, W, H, C_PANEL, 0x00505D72u, 0x0010141Cu);
     bevel(x + 3, y + 3, W - 6, TITLE_H - 1, C_TITLE, 0x00647692u, 0x00111923u);
     gfx_draw_text(x + 10, y + 7, "Task Manager", 0x00FFFFFFu, C_TITLE);
@@ -316,6 +343,7 @@ void taskmgr_draw(const fb_info_t* fi) {
         int w = (int)strlen(TAB_NAMES[t]) * 8 + 20;
         uint32_t bg = t == g_tab ? 0x00F2F2F2u : 0x003A4250u;
         bevel(tx, y + TABS_Y, w, TAB_H, bg, 0x00808A9Au, 0x00202630u);
+        kbnav_add(&g_nav, tx, y + TABS_Y, w, TAB_H);
         gfx_draw_text(tx + 10, y + TABS_Y + 6, TAB_NAMES[t], t == g_tab ? 0x00101010u : C_TEXT, bg);
         tx += w + 4;
     }
@@ -332,6 +360,7 @@ void taskmgr_draw(const fb_info_t* fi) {
         for (int i = 0; i < g_nrows && i < maxr; i++) {
             int ry = list_top() + i * ROW_H;
             uint32_t bg = i == g_sel ? C_SEL : C_LIST;
+            kbnav_add(&g_nav, lx + 1, ry, lw - 2, ROW_H);
             if (i == g_sel) gfx_fill_rect(lx + 1, ry, lw - 2, ROW_H, bg);
             char t[48];
             kstrlcpy(t, g_rows[i].text, sizeof(t));
@@ -417,4 +446,5 @@ void taskmgr_draw(const fb_info_t* fi) {
                    g_hist_n ? g_mem_hist[g_hist_n - 1] : 0, g_nrows, g_nrows == 1 ? "" : "s");
     gfx_draw_text(x + 8, y + H - 14, line, C_DIM, 0x00161B22u);
     gfx_draw_grip(x + W, y + H);
+    kbnav_draw(&g_nav, 0x00FFD34Eu);
 }

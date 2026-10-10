@@ -1,4 +1,5 @@
 #include "smp.h"
+#include "paging.h"
 #include "task.h"
 #include "timer.h"
 #include "kheap.h"
@@ -363,6 +364,7 @@ typedef struct __attribute__((packed)) {
 
 static void smp_ap_entry(uint32_t cpu) {
     idt_ap_init((int)cpu);                  /* GDT with its own TSS, the IDT */
+    paging_pat_init();                      /* the same page attributes as the boot core (write-combining) */
     __asm__ volatile("fninit");
     uint32_t mxcsr = 0x1F80;
     __asm__ volatile("ldmxcsr %0" :: "m"(mxcsr));

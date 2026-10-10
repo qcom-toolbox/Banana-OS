@@ -25,6 +25,7 @@
 #include "appwin.h"
 #include "winframe.h"
 #include "ctxmenu.h"
+#include "kbnav.h"
 #include "launcher.h"
 #include "taskmgr.h"
 #include "settings.h"
@@ -1417,13 +1418,30 @@ static int gui_media_key(int c) {
     return appwin_media_key(c);
 }
 
+/* the keyboard everywhere (defined at the end of this file) */
+static int  kb_global(int k);                 /* Alt+Tab, Win+..., the Menu key: 1 if taken */
+static void kb_draw_overlays(const fb_info_t* fi);
+static int  kb_modal(void);                   /* the switcher, task view, taskbar focus or a menu has the keys */
+static int  kb_modal_key(int code);
+static int  g_sw_open, g_sw_sel;              /* Alt+Tab: the switcher */
+static int  g_tv_open, g_tv_sel;              /* Win+Tab: task view */
+static int  g_bar_kb, g_bar_sel = -1;         /* Win+T: the taskbar has the keys */
+static int  tv_card_at(const fb_info_t* fi, int mx, int my);
+static void tv_activate(int sel);
+
 static void gui_fkeys(const fb_info_t* fi) {
     if (g_osd_shown && (int32_t)(timer_ms() - g_osd_until) >= 0) { g_osd_shown = 0; g_force_redraw = 1; }
     for (int n = 0; n < 16; n++) {
-        /* a console app in the front terminal takes them itself */
-        if (g_front_app < 0 && front_term() >= 0 && app_console_focused()) return;
+        /* a console app in the front terminal takes them itself (not the desktop's own shortcuts) */
+        if (g_front_app < 0 && front_term() >= 0 && app_console_focused()) {
+            int k = keyboard_take_fkey();
+            if (!k) return;
+            if (!kb_global(k)) return;
+            continue;
+        }
         int k = keyboard_take_fkey();
         if (!k) return;
+        if (kb_global(k)) { g_force_redraw = 1; continue; }
         int c = KEYF_CODE(k);
         if (c == KEYF_WIN) { gui_handle_key(20); g_force_redraw = 1; continue; }
         if (c == KEYF_MUTE || c == KEYF_VOLDOWN || c == KEYF_VOLUP) {   /* (the keyboard driver set it) */
@@ -1488,6 +1506,7 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
     if (g_menu_open) startmenu_draw(fi);
 
     draw_volume_osd(fi);
+    kb_draw_overlays(fi);
     ctxmenu_draw();
 
     /* push backbuffer to framebuffer once per frame, then the cursor */
@@ -1720,12 +1739,62 @@ static void gui_poll_body(void) {
          * while one is in front, keys are handed to it from here (Ctrl+T
          * and the Start menu first). Apps and Task Manager read no keys
          * (Esc closes them). */
-        if (gui_notepad_focused() || gui_appwin_focused() ||
+        if (gui_notepad_focused() || gui_appwin_focused() || (kb_modal() && g_front_app >= 0) ||
             ((g_front_app == APP_LAUNCHER || g_front_app == APP_TASKMGR || g_front_app == APP_FILES || g_front_app == APP_SETTINGS || g_front_app == APP_INSTALLER) &&
              app_visible(g_front_app) && tty_current() < 0)) {
             for (int k = 0; k < 64; k++) {
                 char c = keyboard_try_getchar();
                 if (!c) break;
+                /* the switcher, task view, taskbar focus, a right-click menu: theirs */
+                if (kb_modal() && !g_menu_open) {
+                    int code = (unsigned char)c;
+                    if (c == 27) {
+                        char c2 = keyboard_try_getchar();
+                        if (c2 == '[') {
+                            char c3 = keyboard_try_getchar();
+                            if (c3 >= '0' && c3 <= '9') keyboard_try_getchar();
+                            code = c3 == 'A' ? KB_UP : c3 == 'B' ? KB_DOWN : c3 == 'C' ? KB_RIGHT : c3 == 'D' ? KB_LEFT :
+                                   c3 == 'H' ? KB_HOME : c3 == 'F' ? KB_END : 0;
+                        } else code = KB_ESC;
+                    } else if (c == '\n') code = KB_ENTER;
+                    else if (c == '\t') code = (keyboard_mods() & 1) ? KB_BACKTAB : KB_TAB;
+                    else if (c == ' ') code = KB_SPACE;
+                    if (code) kb_modal_key(code);
+                    g_force_redraw = 1;
+                    continue;
+                }
+                /* Settings, Task Manager, Apps: the focus moves between their controls */
+                if (!g_menu_open && (g_front_app == APP_SETTINGS || g_front_app == APP_TASKMGR || g_front_app == APP_LAUNCHER)) {
+                    int code = 0;
+                    if (c == 27) {
+                        char c2 = keyboard_try_getchar();
+                        if (c2 == '[') {
+                            char c3 = keyboard_try_getchar();
+                            if (c3 >= '0' && c3 <= '9') keyboard_try_getchar();
+                            code = c3 == 'A' ? KB_UP : c3 == 'B' ? KB_DOWN : c3 == 'C' ? KB_RIGHT : c3 == 'D' ? KB_LEFT :
+                                   c3 == 'H' ? KB_HOME : c3 == 'F' ? KB_END : c3 == 'I' ? KB_PGUP : c3 == 'G' ? KB_PGDN : c3 == 'P' ? KB_DEL : 0;
+                            if (!code) continue;
+                        } else {
+                            code = KB_ESC;
+                            if (c2) { /* (Esc, then a key typed fast: the key is lost - rare) */ }
+                        }
+                    } else if (c == '\t') code = (keyboard_mods() & 1) ? KB_BACKTAB : KB_TAB;
+                    else if (c == '\n') code = KB_ENTER;
+                    else if (c == ' ') code = KB_SPACE;
+                    int took = 0;
+                    if (code) {
+                        if (g_front_app == APP_SETTINGS) took = settings_navkey(code);
+                        else if (g_front_app == APP_TASKMGR) took = taskmgr_navkey(code);
+                        else took = launcher_navkey(code);
+                    }
+                    if (!took) {
+                        if (code == KB_ESC) c = 27;
+                        if (g_front_app == APP_SETTINGS) settings_key(c);
+                        else if (c == 27) g_apps[g_front_app].close();
+                    }
+                    g_force_redraw = 1;
+                    continue;
+                }
                 if (g_menu_open && c == 27) {
                     char c2 = keyboard_try_getchar();
                     if (c2 == '[') {
@@ -1797,6 +1866,13 @@ static void gui_poll_body(void) {
         int right = ms.btn_right ? 1 : 0;
         int rclick = right && !prev_right;
         prev_right = right;
+        /* task view / switcher / taskbar focus: a click picks a window or leaves */
+        if ((click || rclick) && (g_tv_open || g_sw_open || g_bar_kb)) {
+            if (click && g_tv_open) { int i = tv_card_at(fi, mx, my); if (i >= 0) tv_activate(i); }
+            g_tv_open = g_sw_open = g_bar_kb = 0;
+            g_force_redraw = 1;
+            click = rclick = 0;
+        }
 
         ctxmenu_hover(mx, my);
 
@@ -2264,7 +2340,19 @@ int gui_browser_focused(void) {
     return gfx_available() && g_gui_enabled && g_front_app == APP_BROWSER && browser_is_open() && tty_current() < 0;
 }
 
+static int desk_arrow(char code);
+
 int gui_handle_arrow(char esc_code) {
+    if (gfx_available() && g_gui_enabled && !g_menu_open) {
+        if (kb_modal()) {
+            int code = esc_code == 'A' ? KB_UP : esc_code == 'B' ? KB_DOWN : esc_code == 'C' ? KB_RIGHT : esc_code == 'D' ? KB_LEFT :
+                       esc_code == 'H' ? KB_HOME : esc_code == 'F' ? KB_END : 0;
+            if (code) kb_modal_key(code);
+            g_force_redraw = 1;
+            return 1;
+        }
+        if (desk_arrow(esc_code)) return 1;
+    }
     if (!g_menu_open) return 0;
     if (gfx_available() && g_gui_enabled) { startmenu_arrow(esc_code); return 1; }
     if (esc_code == 'A') { /* up */
@@ -2282,6 +2370,12 @@ int gui_handle_arrow(char esc_code) {
 
 int gui_handle_key(char c) {
     if (gfx_available() && !g_gui_enabled) return 0;
+    if (gfx_available() && kb_modal() && !g_menu_open && c != 20) {
+        int code = c == '\n' ? KB_ENTER : c == 27 ? KB_ESC : c == '\t' ? ((keyboard_mods() & 1) ? KB_BACKTAB : KB_TAB) : c == ' ' ? KB_SPACE : 0;
+        if (code) kb_modal_key(code);
+        g_force_redraw = 1;
+        return 1;
+    }
     /* Ctrl+T toggles Start menu */
     if (c == 20) {
         if (gfx_available()) {
@@ -2326,4 +2420,287 @@ int gui_handle_key(char c) {
     }
 
     return 1; /* swallow typing while menu is open */
+}
+
+/* ══ the keyboard everywhere ══════════════════════════════════════════
+ * Alt+Tab (Shift: backwards) - the window switcher, let Alt go to switch;
+ * Win+Tab - task view (arrows, Enter, Esc); Win+D - the desktop (then the
+ * arrows go through its icons, Enter opens); Win+T - the taskbar (arrows,
+ * Enter); Win+E Files, Win+I Settings, Win+L lock, Win+R a terminal,
+ * Win+M everything down, Win+1..9 the taskbar's windows, Win+Down / Up
+ * minimize / bring back; the Menu key (Shift+F10) - a right-click menu. */
+
+/* the windows in the order they were used, the front one first */
+static int g_mru[TB_MAX], g_nmru;
+static void mru_update(void) {
+    int f = win_front();
+    int n = 0, tmp[TB_MAX];
+    if (f) tmp[n++] = f;
+    for (int i = 0; i < g_nmru; i++) if (g_mru[i] != f && win_exists(g_mru[i]) && n < TB_MAX) tmp[n++] = g_mru[i];
+    for (int j = 0; j < g_ntb; j++) {
+        int have = 0;
+        for (int i = 0; i < n; i++) if (tmp[i] == g_tb[j]) have = 1;
+        if (!have && n < TB_MAX) tmp[n++] = g_tb[j];
+    }
+    memcpy(g_mru, tmp, sizeof(int) * (size_t)n);
+    g_nmru = n;
+}
+
+static int g_list[TB_MAX], g_nlist;      /* the windows the switcher / task view show */
+
+static void tv_card(const fb_info_t* fi, int i, int* x, int* y, int* w, int* h);
+static int tv_card_at(const fb_info_t* fi, int mx, int my);
+static void tv_activate(int sel);
+
+static int kb_modal(void) { return g_sw_open || g_tv_open || g_bar_kb || ctxmenu_is_open(); }
+
+static void list_windows(void) {
+    sync_taskbar();
+    mru_update();
+    g_nlist = g_nmru;
+    memcpy(g_list, g_mru, sizeof(int) * (size_t)g_nlist);
+}
+
+static void show_desktop(int on) {
+    static int downed[TB_MAX], ndowned;
+    if (on) {
+        ndowned = 0;
+        for (int j = 0; j < g_ntb; j++) if (!win_minimized(g_tb[j])) { downed[ndowned++] = g_tb[j]; win_minimize(g_tb[j]); }
+        g_front_app = -1;
+        if (g_desk_sel < 0 && g_ndesk) g_desk_sel = 0;
+    } else {
+        for (int i = 0; i < ndowned; i++) if (win_exists(downed[i])) win_activate(downed[i]);
+        ndowned = 0;
+    }
+}
+
+static int desk_focused(void) { return !g_menu_open && g_front_app < 0 && front_term() < 0; }
+
+/* the arrows on the desktop: through its icons (columns, top to bottom) */
+static int desk_arrow(char code) {
+    if (!desk_focused() || !g_ndesk) return 0;
+    const fb_info_t* fi = fb_info();
+    if (!fi) return 0;
+    int rows = desk_rows(fi);
+    int i = g_desk_sel < 0 ? 0 : g_desk_sel;
+    if (g_desk_sel >= 0) {
+        if (code == 'A' && i % rows > 0) i--;
+        else if (code == 'B' && i + 1 < g_ndesk && (i + 1) % rows) i++;
+        else if (code == 'C' && i + rows < g_ndesk) i += rows;
+        else if (code == 'D' && i - rows >= 0) i -= rows;
+        else if (code == 'H') i = 0;
+        else if (code == 'F') i = g_ndesk - 1;
+    }
+    g_desk_sel = i;
+    g_force_redraw = 1;
+    return 1;
+}
+
+static void tv_activate(int sel) {
+    if (sel >= 0 && sel < g_nlist && win_exists(g_list[sel])) win_activate(g_list[sel]);
+}
+
+static int kb_modal_key(int code) {
+    if (ctxmenu_is_open()) return ctxmenu_key(code);
+    if (g_sw_open) {
+        if (code == KB_ESC) g_sw_open = 0;
+        else if (code == KB_ENTER) { tv_activate(g_sw_sel); g_sw_open = 0; }
+        else if (code == KB_RIGHT || code == KB_TAB) g_sw_sel = (g_sw_sel + 1) % (g_nlist ? g_nlist : 1);
+        else if (code == KB_LEFT || code == KB_BACKTAB) g_sw_sel = (g_sw_sel + g_nlist - 1) % (g_nlist ? g_nlist : 1);
+        return 1;
+    }
+    if (g_tv_open) {
+        int cols = g_nlist <= 4 ? (g_nlist ? g_nlist : 1) : 4;
+        if (code == KB_ESC) g_tv_open = 0;
+        else if (code == KB_ENTER || code == KB_SPACE) { tv_activate(g_tv_sel); g_tv_open = 0; }
+        else if (code == KB_RIGHT || code == KB_TAB) g_tv_sel++;
+        else if (code == KB_LEFT || code == KB_BACKTAB) g_tv_sel--;
+        else if (code == KB_DOWN) g_tv_sel += cols;
+        else if (code == KB_UP) g_tv_sel -= cols;
+        else if (code == KB_DEL && g_tv_sel >= 0 && g_tv_sel < g_nlist) { win_close(g_list[g_tv_sel]); list_windows(); }
+        if (g_tv_sel >= g_nlist) g_tv_sel = g_nlist - 1;
+        if (g_tv_sel < 0) g_tv_sel = 0;
+        return 1;
+    }
+    if (g_bar_kb) {
+        sync_taskbar();
+        if (code == KB_ESC || code == KB_UP) { g_bar_kb = 0; return 1; }
+        if (!g_ntb) { g_bar_kb = 0; return 1; }
+        if (code == KB_RIGHT || code == KB_TAB) g_bar_sel = (g_bar_sel + 1) % g_ntb;
+        else if (code == KB_LEFT || code == KB_BACKTAB) g_bar_sel = (g_bar_sel + g_ntb - 1) % g_ntb;
+        else if (code == KB_HOME) g_bar_sel = 0;
+        else if (code == KB_END) g_bar_sel = g_ntb - 1;
+        else if (code == KB_ENTER || code == KB_SPACE) {
+            int h = g_tb[g_bar_sel];
+            if (win_front() == h && !win_minimized(h)) win_minimize(h); else win_activate(h);
+            g_bar_kb = 0;
+        }
+        if (g_bar_sel >= g_ntb) g_bar_sel = g_ntb - 1;
+        return 1;
+    }
+    return 0;
+}
+
+static int kb_global(int k) {
+    int c = KEYF_CODE(k);
+    if (c == KEYF_TAB && (k & KEYF_ALT)) {
+        if (g_menu_open) { g_menu_open = 0; }
+        if (!g_sw_open) {
+            list_windows();
+            if (!g_nlist) return 1;
+            g_sw_open = 1;
+            g_tv_open = 0;
+            g_sw_sel = g_nlist > 1 ? ((k & KEYF_SHIFT) ? g_nlist - 1 : 1) : 0;
+        } else if (g_nlist) {
+            g_sw_sel = (g_sw_sel + ((k & KEYF_SHIFT) ? g_nlist - 1 : 1)) % g_nlist;
+        }
+        g_force_redraw = 1;
+        return 1;
+    }
+    if (c == KEYF_ALTUP) {
+        if (g_sw_open) { tv_activate(g_sw_sel); g_sw_open = 0; g_force_redraw = 1; }
+        return 1;
+    }
+    if (c == KEYF_MENU || (c == KEYF_F1 + 9 && (k & KEYF_SHIFT))) {
+        const fb_info_t* fi = fb_info();
+        if (!fi || g_menu_open) return 1;
+        if (desk_focused()) {
+            if (g_desk_sel >= 0 && g_desk_sel < g_ndesk) {
+                int x, y;
+                desk_cell(fi, g_desk_sel, &x, &y);
+                open_icon_menu(g_desk_sel, x + CELL_W / 2, y + CELL_H / 2);
+            } else open_desktop_menu((int)fi->width / 3, (int)fi->height / 3);
+        } else if (g_front_app == APP_FILES) {
+            explorer_menu_key();
+        }
+        if (ctxmenu_is_open()) ctxmenu_select_first();
+        g_force_redraw = 1;
+        return 1;
+    }
+    if (!(k & KEYF_WINKEY)) return 0;
+    g_force_redraw = 1;
+    g_menu_open = 0;
+    sync_taskbar();
+    switch (c) {
+    case '\t':
+        if (g_tv_open) { g_tv_open = 0; break; }
+        list_windows();
+        g_tv_open = 1;
+        g_sw_open = 0;
+        g_tv_sel = g_nlist > 1 ? 1 : 0;
+        break;
+    case 'd': {
+        static int shown;
+        int any = 0;
+        for (int j = 0; j < g_ntb; j++) if (!win_minimized(g_tb[j])) any = 1;
+        if (any) { show_desktop(1); shown = 1; }
+        else if (shown) { show_desktop(0); shown = 0; }
+        else if (g_desk_sel < 0 && g_ndesk) g_desk_sel = 0;
+        break;
+    }
+    case 'm': for (int j = 0; j < g_ntb; j++) win_minimize(g_tb[j]); g_front_app = -1; break;
+    case 'e': do_action(ACT_FILES); break;
+    case 'i': do_action(ACT_SETTINGS); break;
+    case 'l': do_action(ACT_LOCK); break;
+    case 'r': do_action(ACT_TERMINAL); break;
+    case 't': g_bar_kb = g_ntb > 0; g_bar_sel = 0; break;
+    case KEYW_DOWN: { int f = win_front(); if (f) win_minimize(f); break; }
+    case KEYW_UP: {
+        mru_update();
+        for (int i = 0; i < g_nmru; i++) if (win_minimized(g_mru[i])) { win_activate(g_mru[i]); break; }
+        int t = front_term();
+        const fb_info_t* fi = fb_info();
+        if (t >= 0 && g_front_app < 0 && fi && !g_terms[t].maxed) toggle_max_term(fi, &g_terms[t]);
+        break;
+    }
+    default:
+        if (c >= '1' && c <= '9' && c - '1' < g_ntb) {
+            int h = g_tb[c - '1'];
+            if (win_front() == h && !win_minimized(h)) win_minimize(h); else win_activate(h);
+        }
+        break;
+    }
+    return 1;
+}
+
+static void kb_card(int x, int y, int w, int h, int handle, int sel, int big) {
+    uint32_t bg = sel ? 0x00405478u : 0x00262D38u;
+    draw_bevel_box(x, y, w, h, bg, sel ? 0x0090B8F0u : 0x00505E74u, 0x0010151Du);
+    if (sel) {
+        gfx_fill_rect(x - 3, y - 3, w + 6, 3, 0x00FFD34Eu); gfx_fill_rect(x - 3, y + h, w + 6, 3, 0x00FFD34Eu);
+        gfx_fill_rect(x - 3, y - 3, 3, h + 6, 0x00FFD34Eu); gfx_fill_rect(x + w, y - 3, 3, h + 6, 0x00FFD34Eu);
+    }
+    int saved = g_is;
+    g_is = big ? 2 : 1;
+    draw_win_glyph(handle, x + w / 2 - (big ? 14 : 7), y + (big ? 16 : 10), bg);
+    g_is = saved;
+    char t[48];
+    win_title(handle, t, sizeof(t));
+    int maxc = (w - 12) / 8;
+    if (maxc > 0 && (int)strlen(t) > maxc) { t[maxc] = 0; if (maxc > 1) t[maxc - 1] = '.'; }
+    gfx_draw_text(x + (w - (int)strlen(t) * 8) / 2, y + h - (big ? 22 : 16), t, 0x00E8EEF6u, bg);
+    if (win_minimized(handle)) gfx_draw_text(x + (w - 9 * 8) / 2, y + h - 10, "minimized", 0x009AA6B6u, bg);
+}
+
+static void kb_draw_overlays(const fb_info_t* fi) {
+    int W = (int)fi->width, H = (int)fi->height;
+    if (g_sw_open && g_nlist) {
+        int cw = 132, ch = 84, gap = 10;
+        int n = g_nlist, per = (W - 80) / (cw + gap);
+        if (per < 1) per = 1;
+        if (n > per) n = per;
+        int first = g_sw_sel >= n ? g_sw_sel - n + 1 : 0;
+        int pw = n * (cw + gap) + gap + 20, ph = ch + 56;
+        int px = (W - pw) / 2, py = (H - ph) / 2;
+        draw_bevel_box(px, py, pw, ph, 0x001B212Bu, 0x00505E74u, 0x000C0F14u);
+        char t[64];
+        win_title(g_list[g_sw_sel], t, sizeof(t));
+        gfx_draw_text(px + (pw - (int)strlen(t) * 8) / 2, py + 12, t, 0x00FFFFFFu, 0x001B212Bu);
+        for (int i = 0; i < n; i++)
+            kb_card(px + 20 + i * (cw + gap), py + 36, cw, ch, g_list[first + i], first + i == g_sw_sel, 1);
+    }
+    if (g_tv_open) {
+        /* everything dimmed, the windows as cards */
+        uint32_t* t;
+        int stride, tw, th;
+        t = fb_target(&stride, &tw, &th);
+        if (t) for (int y = 0; y < th - BAR_H; y++) for (int x = 0; x < tw; x++) { uint32_t p = t[y * stride + x]; t[y * stride + x] = (p >> 2) & 0x003F3F3Fu; }
+        gfx_draw_text_scaled(40, 30, 2, "Task view", 0x00FFFFFFu, 0x00000000u);
+        gfx_draw_text(40, 66, "Arrows choose, Enter switches, Delete closes, Esc goes back", 0x009AA6B6u, 0x00000000u);
+        if (!g_nlist) gfx_draw_text(40, 110, "No windows are open.", 0x00E8EEF6u, 0);
+        for (int i = 0; i < g_nlist; i++) {
+            int x, y, cw, ch;
+            tv_card(fi, i, &x, &y, &cw, &ch);
+            if (y + ch > H - BAR_H - 10) break;
+            kb_card(x, y, cw, ch, g_list[i], i == g_tv_sel, 1);
+        }
+    }
+    if (g_bar_kb && g_bar_sel >= 0 && g_bar_sel < g_ntb) {
+        int bw = tb_btn_w(fi), x = TB_X + g_bar_sel * bw, y = H - BAR_H + 1;
+        gfx_fill_rect(x - 1, y, bw - 2, 2, 0x00FFD34Eu);
+        gfx_fill_rect(x - 1, y + BAR_H - 4, bw - 2, 2, 0x00FFD34Eu);
+        gfx_fill_rect(x - 1, y, 2, BAR_H - 2, 0x00FFD34Eu);
+        gfx_fill_rect(x + bw - 5, y, 2, BAR_H - 2, 0x00FFD34Eu);
+    }
+}
+
+static void tv_card(const fb_info_t* fi, int i, int* x, int* y, int* w, int* h) {
+    int W = (int)fi->width;
+    int cols = g_nlist <= 4 ? (g_nlist ? g_nlist : 1) : 4;
+    int cw = (W - 80 - (cols - 1) * 24) / cols, ch = cw * 9 / 16;
+    if (cw > 300) { cw = 300; ch = 170; }
+    int gx = (W - (cols * cw + (cols - 1) * 24)) / 2;
+    *x = gx + (i % cols) * (cw + 24);
+    *y = 110 + (i / cols) * (ch + 30);
+    *w = cw;
+    *h = ch;
+}
+
+static int tv_card_at(const fb_info_t* fi, int mx, int my) {
+    for (int i = 0; i < g_nlist; i++) {
+        int x, y, w, h;
+        tv_card(fi, i, &x, &y, &w, &h);
+        if (mx >= x && mx < x + w && my >= y && my < y + h) return i;
+    }
+    return -1;
 }

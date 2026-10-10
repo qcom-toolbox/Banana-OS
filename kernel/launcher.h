@@ -20,4 +20,6 @@ void launcher_mouse(int mx, int my, int left);
 void launcher_rclick(int mx, int my);
 uint32_t launcher_signature(void);
 
+int  launcher_navkey(int code);      /* kbnav.h keys */
+
 #endif

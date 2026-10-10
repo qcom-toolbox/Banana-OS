@@ -146,6 +146,24 @@ void launcher_rclick(int mx, int my) {
     ctxmenu_open(mx, my, items, 4, menu_cb, NULL);
 }
 
+#include "kbnav.h"
+static kbnav_t g_nav;
+
+/* the keyboard: Tab / arrows between the tiles, Enter opens one */
+int launcher_navkey(int code) {
+    if (!g_open) return 0;
+    g_gen++;
+    int cx, cy;
+    int r = kbnav_key(&g_nav, code, &cx, &cy);
+    if (r == 1) {
+        int shown = g_nav.shown, focus = g_nav.focus;
+        launcher_click(cx, cy);
+        g_nav.shown = shown;
+        g_nav.focus = focus;
+    }
+    return r != 0;
+}
+
 void launcher_click(int mx, int my) {
     if (!launcher_contains(mx, my)) return;
     int lx = mx - g_win.x, ly = my - g_win.y;
@@ -158,6 +176,7 @@ void launcher_click(int mx, int my) {
         return;
     }
     if (win_grip_press(&g_win, mx, my)) return;
+    kbnav_mouse(&g_nav);
     if (ly >= TOOL_Y && ly < TOOL_Y + 18) {
         if (lx >= 8 && lx < 120) { explorer_open("/home/banana/Examples"); gui_raise_files(); set_status("Double-click a .bpk to install it"); }
         else if (lx >= 126 && lx < 206) { rescan(); set_status("Refreshed"); }
@@ -186,6 +205,9 @@ void launcher_draw(const fb_info_t* fi) {
     bevel(x + 3, y + 3, W - 6, TITLE_H - 1, C_TITLE, 0x00647692u, 0x00111923u);
     gfx_draw_text(x + 10, y + 7, "Apps", 0x00FFFFFFu, C_TITLE);
     win_draw_buttons(&g_win, 4, 12);
+    kbnav_begin(&g_nav);
+    kbnav_add(&g_nav, x + 8, y + TOOL_Y, 112, 18);
+    kbnav_add(&g_nav, x + 126, y + TOOL_Y, 80, 18);
 
     bevel(x + 8, y + TOOL_Y, 112, 18, 0x00303740u, 0x00535D6Eu, 0x0015191Fu);
     gfx_draw_text(x + 16, y + TOOL_Y + 5, "Get apps...", C_TEXT, 0x00303740u);
@@ -203,6 +225,7 @@ void launcher_draw(const fb_info_t* fi) {
         int tx, ty;
         if (!tile_rect(i, &tx, &ty)) continue;
         bevel(tx, ty, TILE_W, TILE_H, C_TILE, 0x00404C60u, 0x00141920u);
+        kbnav_add(&g_nav, tx, ty, TILE_W, TILE_H);
         uint32_t ic = name_color(g_apps[i].name);
         int ix = tx + (TILE_W - 32) / 2;
         bevel(ix, ty + 8, 32, 32, ic, 0x00FFFFFFu & (ic + 0x00303030u), 0x00101010u);
@@ -231,4 +254,5 @@ void launcher_draw(const fb_info_t* fi) {
     if (maxc < (int)sizeof(st) && maxc > 0) st[maxc] = 0;
     gfx_draw_text(x + 8, y + H - 14, st, C_DIM, 0x00161B22u);
     gfx_draw_grip(x + W, y + H);
+    kbnav_draw(&g_nav, 0x00FFD34Eu);
 }

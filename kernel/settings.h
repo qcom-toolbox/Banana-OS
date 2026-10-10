@@ -25,7 +25,8 @@ void settings_open(void);
 void settings_show_status(const char* msg);
 void settings_open_page(int page);
 void settings_close(void);
-void settings_key(char c);          /* typing (the password fields) */
+void settings_key(char c);
+int  settings_navkey(int code);     /* kbnav.h keys: the focus moves / clicks */          /* typing (the password fields) */
 int  settings_is_open(void);
 void settings_draw(const fb_info_t* fi);
 int  settings_contains(int mx, int my);

@@ -53,6 +53,56 @@ int mmio_map(uint64_t phys, uint64_t size) {
     return 1;
 }
 
+/* ── write-combining ── */
+#define P_PAT_LARGE (1ull << 12)              /* the PAT bit of a 2 MiB page */
+#define P_PAT_SMALL (1ull << 7)               /* ... of a 4 KiB one */
+static int g_pat;
+
+void paging_pat_init(void) {
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    if (!(d & (1u << 16))) return;                 /* no PAT */
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x277));
+    lo = (lo & ~0x0000FF00u) | (0x01u << 8);       /* entry 1 (PWT): write-combining (was write-through) */
+    __asm__ volatile("wbinvd" ::: "memory");
+    __asm__ volatile("wrmsr" :: "a"(lo), "d"(hi), "c"(0x277));
+    uintptr_t cr3;
+    __asm__ volatile("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) :: "memory");
+    __asm__ volatile("wbinvd" ::: "memory");
+    g_pat = 1;
+}
+
+int paging_set_wc(uint64_t phys, uint64_t size) {
+    if (!g_pat || !size || !mmio_map(phys, size)) return -1;
+    uintptr_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    uint64_t* pml4 = (uint64_t*)(cr3 & ADDR_MASK);
+    for (uint64_t a = phys & ~0xFFFull; a < phys + size; ) {
+        uint64_t e4 = pml4[(a >> 39) & 511];
+        if (!(e4 & P_PRESENT)) return -1;
+        uint64_t* pdpt = (uint64_t*)(uintptr_t)(e4 & ADDR_MASK);
+        uint64_t e3 = pdpt[(a >> 30) & 511];
+        if (!(e3 & P_PRESENT) || (e3 & P_LARGE)) return -1;   /* (1 GiB pages: not ours to change) */
+        uint64_t* pd = (uint64_t*)(uintptr_t)(e3 & ADDR_MASK);
+        uint64_t* e2 = &pd[(a >> 21) & 511];
+        if (!(*e2 & P_PRESENT)) return -1;
+        if (*e2 & P_LARGE) {
+            *e2 = (*e2 & ~(P_PCD | P_PAT_LARGE)) | P_PWT;
+            a = (a & ~0x1FFFFFull) + 0x200000ull;
+        } else {
+            uint64_t* pt = (uint64_t*)(uintptr_t)(*e2 & ADDR_MASK);
+            uint64_t* e1 = &pt[(a >> 12) & 511];
+            *e1 = (*e1 & ~(P_PCD | P_PAT_SMALL)) | P_PWT;
+            a += 0x1000ull;
+        }
+    }
+    __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");    /* every TLB entry of it gone */
+    __asm__ volatile("wbinvd" ::: "memory");
+    klog("paging: write-combining at %llx (%llu KiB)\n", phys, size >> 10);
+    return 0;
+}
+
 /* the 4 KiB page table entry for addr (below 4 GiB), splitting the 2 MiB
  * page that covers it into 512 small ones (same mapping) the first time */
 static uint64_t* small_pte(uintptr_t addr) {
@@ -114,6 +164,9 @@ int paging_guard(uintptr_t addr, uint32_t size, int guard) {
     return 0;
 }
 
+
+void paging_pat_init(void) {}
+int  paging_set_wc(uint64_t phys, uint64_t size) { (void)phys; (void)size; return -1; }
 
 int mmio_map(uint64_t phys, uint64_t size) {
     return phys + size <= (4ull << 30);   /* no paging: only the low 4 GiB exist */

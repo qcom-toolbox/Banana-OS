@@ -176,6 +176,9 @@ static int altgr_held = 0;   /* right Alt */
 static int caps_lock  = 0;
 static int caps_down  = 0;   /* held: the keyboard repeats it, it toggles once */
 static int g_from_usb = 0;   /* the scancode came from a USB keyboard (no PS/2 LEDs) */
+static int win_held = 0;     /* the Windows key is down */
+static int win_used = 0;     /* ... and another key went with it (no Start menu then) */
+static int alt_tab = 0;      /* Alt+Tab happened while Alt is down */
 
 /* Caps Lock: letters the other case (with Shift: back to small), é -> É too */
 static uint32_t caps_flip(uint32_t v) {
@@ -267,6 +270,32 @@ static void fkey(int code) {
     }
     int next = (g_fk_tail + 1) % 16;
     if (next != g_fk_head) { g_fk[g_fk_tail] = code; g_fk_tail = next; }
+}
+
+/* a key while the Windows key is down: a shortcut, not a character */
+static int win_combo(int code) {
+    if (!win_held || !code) return 0;
+    win_used = 1;
+    if (code >= 'A' && code <= 'Z') code += 32;
+    fkey(KEYF_WINKEY | code);
+    return 1;
+}
+static void win_down(void) { if (!win_held) { win_held = 1; win_used = 0; } }
+static void win_up(void) { if (win_held && !win_used) fkey(KEYF_WIN); win_held = 0; }
+static void alt_up(void) { if (alt_tab) { alt_tab = 0; fkey(KEYF_ALTUP); } }
+/* Alt+Tab, Ctrl+Esc; 1 if the key was one of them (sc1: its set-1 code) */
+static int global_key(uint8_t sc1) {
+    if (sc1 == 0x0F && alt_held && !altgr_held) {
+        fkey(KEYF_TAB | KEYF_ALT | (shift_held ? KEYF_SHIFT : 0));
+        alt_tab = 1;
+        return 1;
+    }
+    if (sc1 == 0x01 && ctrl_held && !alt_held) { fkey(KEYF_WIN); return 1; }
+    if (win_held) {
+        char c = sc1 == 0x0F ? '\t' : sc1 < 128 ? sc_normal[sc1] : 0;
+        if (c) return win_combo(c);
+    }
+    return 0;
 }
 
 int keyboard_take_fkey(void) {
@@ -546,13 +575,21 @@ static int translate_scancode_set2(uint8_t sc, char* out) {
         if (sc == 0x12 || sc == 0x59) shift_held = 0;
         if (sc == 0x58) caps_down = 0;
         if (sc == 0x14) ctrl_held = 0;
-        if (sc == 0x11) { alt_held = 0; if (set2_e0) altgr_held = 0; }
+        if (sc == 0x11) { alt_held = 0; if (set2_e0) altgr_held = 0; alt_up(); }
+        if (set2_e0 && (sc == 0x1F || sc == 0x27)) win_up();
         set2_break = 0;
         set2_e0 = 0;
         return 0;
     }
 
     if (set2_e0) {
+        if (sc == 0x1F || sc == 0x27) { win_down(); set2_e0 = 0; return 0; }
+        if (sc == 0x2F) { fkey(KEYF_MENU); set2_e0 = 0; return 0; }
+        if (win_held && (sc == 0x75 || sc == 0x72 || sc == 0x74 || sc == 0x6B)) {
+            win_combo(sc == 0x75 ? KEYW_UP : sc == 0x72 ? KEYW_DOWN : sc == 0x74 ? KEYW_RIGHT : KEYW_LEFT);
+            set2_e0 = 0;
+            return 0;
+        }
         if (sc == 0x75) { push_arrow('A'); *out = q_pop(); set2_e0 = 0; return 1; }
         if (sc == 0x72) { push_arrow('B'); *out = q_pop(); set2_e0 = 0; return 1; }
         if (sc == 0x74) { push_arrow('C'); *out = q_pop(); set2_e0 = 0; return 1; }
@@ -579,6 +616,10 @@ static int translate_scancode_set2(uint8_t sc, char* out) {
     if (sc == 0x14) { ctrl_held = 1; return 0; }
     if (sc == 0x11) { alt_held = 1; return 0; }  /* left alt */
     if (sc == 0x58) { caps_press(); return 0; }   /* Caps Lock */
+    {
+        uint8_t g1 = sc == 0x0D ? 0x0F : sc == 0x76 ? 0x01 : set2_to_set1(sc);
+        if (g1 && global_key(g1)) return 0;
+    }
 
     if (is_swiss()) {
         uint8_t s1 = set2_to_set1(sc);
@@ -648,6 +689,14 @@ static int process_scancode_byte(uint8_t sc, char* out) {
 
     /* set 1 handling */
     if (set1_e0) {
+        if (sc == 0x5B || sc == 0x5C) { win_down(); set1_e0 = 0; return 0; }
+        if (sc == 0xDB || sc == 0xDC) { win_up(); set1_e0 = 0; return 0; }
+        if (sc == 0x5D) { fkey(KEYF_MENU); set1_e0 = 0; return 0; }
+        if (win_held && (sc == 0x48 || sc == 0x50 || sc == 0x4D || sc == 0x4B)) {
+            win_combo(sc == 0x48 ? KEYW_UP : sc == 0x50 ? KEYW_DOWN : sc == 0x4D ? KEYW_RIGHT : KEYW_LEFT);
+            set1_e0 = 0;
+            return 0;
+        }
         /* set1 extended arrows: E0 48/50/4D/4B */
         if (sc == 0x48) { push_arrow('A'); *out = q_pop(); set1_e0 = 0; return 1; }
         if (sc == 0x50) { push_arrow('B'); *out = q_pop(); set1_e0 = 0; return 1; }
@@ -656,7 +705,7 @@ static int process_scancode_byte(uint8_t sc, char* out) {
         if (sc == 0x1D) { ctrl_held = 1; set1_e0 = 0; return 0; }  /* right ctrl down */
         if (sc == 0x9D) { ctrl_held = 0; set1_e0 = 0; return 0; }  /* right ctrl up */
         if (sc == 0x38) { alt_held = 1; altgr_held = 1; set1_e0 = 0; return 0; }   /* right alt (AltGr) down */
-        if (sc == 0xB8) { alt_held = 0; altgr_held = 0; set1_e0 = 0; return 0; }   /* right alt up */
+        if (sc == 0xB8) { alt_held = 0; altgr_held = 0; set1_e0 = 0; alt_up(); return 0; }   /* right alt up */
         if (sc == 0x47) { push_arrow('H'); *out = q_pop(); set1_e0 = 0; return 1; }   /* Home */
         if (sc == 0x4F) { push_arrow('F'); *out = q_pop(); set1_e0 = 0; return 1; }   /* End */
         if (sc == 0x49) { push_arrow('I'); *out = q_pop(); set1_e0 = 0; return 1; }   /* PgUp */
@@ -676,11 +725,12 @@ static int process_scancode_byte(uint8_t sc, char* out) {
     if (sc == 0x1D)               { ctrl_held  = 1; return 0; }
     if (sc == 0x9D)               { ctrl_held  = 0; return 0; }
     if (sc == 0x38)               { alt_held   = 1; return 0; }  /* left alt down */
-    if (sc == 0xB8)               { alt_held   = 0; return 0; }  /* left alt up */
+    if (sc == 0xB8)               { alt_held   = 0; alt_up(); return 0; }  /* left alt up */
     if (sc == 0x3A)               { caps_press();  return 0; }  /* Caps Lock */
     if (sc == 0xBA)               { caps_down  = 0; return 0; }
     if (sc & 0x80)                return 0; /* key-up */
     { int k = set1_fn(sc); if (k) { fkey(k); return 0; } }
+    if (global_key(sc)) return 0;
 
     return translate_scancode(sc, out);
 }
@@ -871,3 +921,11 @@ void keyboard_inject(const char* s) {
 }
 
 int keyboard_mods(void) { return (shift_held ? 1 : 0) | (ctrl_held ? 2 : 0) | (alt_held ? 4 : 0); }
+
+/* a character read too early goes back to the front of the queue */
+void keyboard_unget(char c) {
+    int prev = (q_head + QUEUE_SIZE - 1) % QUEUE_SIZE;
+    if (prev == q_tail) return;                 /* full */
+    q_head = prev;
+    q_buf[q_head] = c;
+}

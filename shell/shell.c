@@ -593,6 +593,17 @@ static void cmd_gpu_info(const char* args) {
     }
 }
 
+/* the rest of an escape sequence: there at once from a keyboard, a few ms
+ * apart over a serial line; nothing for a lone Escape (0 after ~30 ms) */
+static char esc_follow(void) {
+    for (int i = 0; i < 15; i++) {
+        char c = keyboard_try_getchar();
+        if (c) return c;
+        task_sleep_ms(2);
+    }
+    return 0;
+}
+
 /* `resolution [WxH]`: the modes the display can show, or a new one */
 static void cmd_resolution(const char* args) {
     const char* a = args ? k_skip_spaces(args) : "";
@@ -2132,12 +2143,15 @@ static void shell_readline(char* buf, int maxlen, int persona) {
              * arrow itself ever reaches gui_handle_arrow() - making
              * arrow-key menu navigation unreachable whenever the menu
              * is open. */
-            char c2 = keyboard_getchar(); /* '[' */
+            /* an arrow key queues its three bytes at once: a lone ESC
+             * (the Escape key) has nothing after it - never wait for more */
+            char c2 = esc_follow(); /* '[' */
             if (c2 != '[') {
                 gui_handle_key(c);
+                if (c2) keyboard_unget(c2);
                 continue;
             }
-            char c3 = keyboard_getchar(); /* A/B/C/D */
+            char c3 = esc_follow(); /* A/B/C/D */
             terminal_vt_set_active(my_vt);   /* keyboard_getchar() may yield */
 
             if (gui_handle_arrow(c3)) continue;

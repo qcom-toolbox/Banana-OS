@@ -1,6 +1,7 @@
 #include "settings.h"
 #include "gfx.h"
 #include "display.h"
+#include "gpu.h"
 #include "kstring.h"
 #include "kheap.h"
 #include "timer.h"
@@ -26,6 +27,7 @@
 #include "font.h"
 #include "fb.h"
 #include "filechooser.h"
+#include "kbnav.h"
 #include "serial.h"
 #include "gui.h"
 #include "image.h"
@@ -53,6 +55,7 @@ static const char* const LAYOUTS[] = { "EN (Default)", "fr_CH", "FR", "DE", "de_
 #define NLAYOUTS ((int)(sizeof(LAYOUTS) / sizeof(LAYOUTS[0])))
 
 static int        g_open;
+static kbnav_t    g_nav;              /* keyboard focus: what the page drew */
 static win_geom_t g_win = { .x = 100, .y = 40, .w = 640, .h = 470, .min_w = 580, .min_h = 440 };
 static int        g_page;
 static uint32_t   g_gen;
@@ -72,6 +75,7 @@ static void bevel(int x, int y, int w, int h, uint32_t base, uint32_t hi, uint32
 }
 
 static void button(int x, int y, int w, const char* label, int on) {
+    kbnav_add(&g_nav, x, y, w, 20);
     uint32_t base = on ? C_ACCENT : 0x00303740u;
     bevel(x, y, w, 20, base, 0x00535D6Eu, 0x0015191Fu);
     int tw = (int)strlen(label) * 8;
@@ -172,6 +176,7 @@ static void draw_display(void) {
         if (ty + THUMB_H + 20 > g_win.y + g_win.h - 28) break;
         const wallpaper_preset_t* p = wallpaper_preset(i);
         gfx_fill_rect(tx - 2, ty - 2, THUMB_W + 4, THUMB_H + 4, i == cur ? C_ACCENT : 0x0010141Cu);
+        kbnav_add(&g_nav, tx, ty, THUMB_W, THUMB_H);
         if (p && p->pixels) {
             /* a scaled-down copy of the picture */
             for (int yy = 0; yy < THUMB_H; yy += 2)
@@ -192,13 +197,14 @@ static void draw_display(void) {
     int py = pics_y();
     label(x, py, "Your pictures", C_HEAD);
     int nr = wallpaper_recent_count();
-    if (!nr) label(x, py + 22, "Pictures you choose (Browse, or right-click one in Files) show up here.", C_DIM);
+    if (!nr) label(x, py + 22, "The pictures you choose show up here.", C_DIM);
     for (int i = 0; i < nr; i++) {
         int tx, ty;
         pic_rect(i, &tx, &ty);
         if (tx + THUMB_W > x + cw()) break;
         int on = file && !strcmp(file, wallpaper_recent(i));
         gfx_fill_rect(tx - 2, ty - 2, THUMB_W + 4, THUMB_H + 4, on ? C_ACCENT : 0x0010141Cu);
+        kbnav_add(&g_nav, tx, ty + 14, THUMB_W, THUMB_H - 14);
         const uint32_t* th = wallpaper_recent_thumb(i, THUMB_W, THUMB_H);
         if (th) blit(tx, ty, THUMB_W, THUMB_H, th);
         else { gfx_fill_rect(tx, ty, THUMB_W, THUMB_H, 0x00303740u); label(tx + 4, ty + 20, "(missing)", C_DIM); }
@@ -234,6 +240,7 @@ static int font_rows_total(void) { return 3 + font_user_count(); }
 static int row_face(int r) { return r == 0 ? -2 : r == 1 ? FONT_MONO : r == 2 ? FONT_SANS : font_user_face(r - 3); }
 
 static void radio(int x, int y, int on) {
+    kbnav_add(&g_nav, x, y, 14, 14);
     bevel(x, y, 14, 14, 0x00141920u, 0x0010141Cu, 0x00404B5Cu);
     if (on) gfx_fill_rect(x + 4, y + 4, 6, 6, C_ACCENT);
 }
@@ -472,6 +479,7 @@ static void draw_keyboard(void) {
     for (int i = 0; i < NLAYOUTS; i++) {
         int ry = y + 44 + i * ITEM_H;
         int on = cur && strcmp(cur, LAYOUTS[i]) == 0;
+        kbnav_add(&g_nav, x, ry - 2, 200, 18);
         bevel(x, ry, 14, 14, 0x00141920u, 0x0010141Cu, 0x00404B5Cu);
         if (on) gfx_fill_rect(x + 4, ry + 4, 6, 6, C_ACCENT);
         label(x + 24, ry + 3, LAYOUTS[i], on ? C_HEAD : C_TEXT);
@@ -566,6 +574,7 @@ static void draw_screen(void) {
     for (int i = 0; i < n; i++) {
         int ry = y + 44 + i * ITEM_H;
         int on = fi && modes[i].w == (int)fi->width && modes[i].h == (int)fi->height;
+        kbnav_add(&g_nav, x, ry - 2, 200, 18);
         char nm[32];
         ksnprintf(nm, sizeof(nm), "%d x %d", modes[i].w, modes[i].h);
         bevel(x, ry, 14, 14, 0x00141920u, 0x0010141Cu, 0x00404B5Cu);
@@ -603,6 +612,7 @@ static void rc_set(const char* name, int on, uint16_t port) {
 }
 
 static void checkbox(int x, int y, int on) {
+    kbnav_add(&g_nav, x, y, 14, 14);
     bevel(x, y, 14, 14, 0x00141920u, 0x0010141Cu, 0x00404B5Cu);
     if (on) { gfx_fill_rect(x + 3, y + 3, 8, 8, C_ACCENT); }
 }
@@ -828,7 +838,14 @@ static void draw_about(void) {
     char res[32];
     const fb_info_t* fi = fb_info();
     ksnprintf(res, sizeof(res), "Screen: %ux%u", fi ? fi->width : 0, fi ? fi->height : 0);
-    label(x, ly, res, C_TEXT); ly += 26;
+    label(x, ly, res, C_TEXT); ly += 18;
+    gpu_t* gp = gpu_active();
+    if (gp) {
+        ksnprintf(line, sizeof(line), "Graphics: %s (%s)", gp->name, strcmp(gp->driver, "firmware") ? gp->driver : "firmware screen");
+        if ((int)strlen(line) * 8 > cw()) line[cw() / 8] = 0;
+        label(x, ly, line, C_TEXT);
+    }
+    ly += 26;
     if (sysinfo_live_boot())
         label(x, ly, fsdisk_find_install(NULL)
               ? "Running: the live CD (Banana OS is also installed here: 'update' updates it)"
@@ -851,6 +868,7 @@ void settings_draw(const fb_info_t* fi) {
     (void)fi;
     if (!g_open) return;
     int x = g_win.x, y = g_win.y, W = g_win.w, H = g_win.h;
+    kbnav_begin(&g_nav);
     bevel(x, y, W, H, C_PANEL, 0x00505D72u, 0x0010141Cu);
     bevel(x + 3, y + 3, W - 6, TITLE_H - 1, C_TITLE, 0x00647692u, 0x00111923u);
     gfx_draw_text(x + 10, y + 7, "Settings", 0x00FFFFFFu, C_TITLE);
@@ -862,6 +880,7 @@ void settings_draw(const fb_info_t* fi) {
         int iy = y + BODY_Y + 4 + i * ITEM_H;
         uint32_t bg = i == g_page ? C_SEL : C_SIDE;
         gfx_fill_rect(x + 8, iy, SIDE_W - 4, ITEM_H - 4, bg);
+        kbnav_add(&g_nav, x + 8, iy, SIDE_W - 4, ITEM_H - 4);
         if (i == g_page) gfx_fill_rect(x + 8, iy, 3, ITEM_H - 4, C_ACCENT);
         gfx_draw_text(x + 18, iy + 7, PAGE_NAMES[i], i == g_page ? C_HEAD : C_DIM, bg);
     }
@@ -886,6 +905,25 @@ void settings_draw(const fb_info_t* fi) {
     }
     if (g_status[0]) gfx_draw_text(x + 10, y + H - 18, g_status, C_DIM, C_PANEL);
     gfx_draw_grip(x + W, y + H);
+    kbnav_draw(&g_nav, 0x00FFD34Eu);
+}
+
+/* the keyboard (kbnav.h codes): Tab / arrows move between the controls,
+ * Enter / Space click; 0 if it is not for the focus (typing, Esc) */
+int settings_navkey(int code) {
+    if (!g_open) return 0;
+    g_gen++;
+    if (fc_active()) return fc_nav(code);
+    if (g_pw_focus >= 0) return 0;                 /* typing a password: Tab and Enter are its own */
+    int cx, cy;
+    int r = kbnav_key(&g_nav, code, &cx, &cy);
+    if (r == 1) {
+        int shown = g_nav.shown, focus = g_nav.focus;
+        settings_click(cx, cy);
+        g_nav.shown = shown;
+        g_nav.focus = focus;
+    }
+    return r != 0;
 }
 
 void settings_click(int mx, int my) {
@@ -901,6 +939,7 @@ void settings_click(int mx, int my) {
     }
     if (win_grip_press(&g_win, mx, my)) return;
     g_status[0] = 0;
+    kbnav_mouse(&g_nav);
 
     /* sidebar */
     if (lx >= 8 && lx < 8 + SIDE_W - 4) {

@@ -1098,6 +1098,17 @@ void explorer_wheel(int mx, int my, int dz) {
 
 /* ── mouse ────────────────────────────────────────────────────────── */
 
+/* the Menu key / Shift+F10: the selected item's menu, at the item */
+void explorer_menu_key(void) {
+    if (!g_open) return;
+    int x = g_x + content_x() + 60, y = g_y + list_top() + 8;
+    if (g_sel >= 0 && !g_view_icons) {
+        int r = g_sel - g_scroll;
+        if (r >= 0) y = g_y + list_top() + r * ROW_H + ROW_H / 2;
+    }
+    item_menu(x, y, g_sel);
+}
+
 void explorer_rclick(int mx, int my) {
     if (!explorer_contains(mx, my)) return;
     int row = item_at(mx, my);
