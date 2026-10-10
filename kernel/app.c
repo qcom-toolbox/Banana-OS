@@ -747,6 +747,13 @@ static void thread_entry(void) {
     t->running = 1;
     t->ret = app_enter(thread_tramp, t, t->stack_mem + APP_STACK, &t->saved_sp);
     t->running = 0;
+    /* The task ends now and its slot (and pid) goes to the next task
+     * created - another app's thread, a kernel task. The record stays
+     * for banana_thread_join, but must no longer answer to that pid:
+     * it did, and a new thread of another app was taken for this one
+     * (cur() found this app first) and ran this thread's code again on
+     * its old stack - both apps crashed, and then the kernel. */
+    t->pid = -1;
     t->done = 1;
 }
 
@@ -770,6 +777,13 @@ static int a_thread_create(int (*fn)(void*), void* arg) {
     ksnprintf(name, sizeof(name), "%s/t%d", base, id + 1);
     int pid = task_create(name, thread_entry);
     if (pid < 0) { kfree(t->stack_mem); t->used = 0; return -1; }
+    /* (no record of an ended thread may still answer to this pid) */
+    for (int i = 0; i < APP_MAX; i++) {
+        if (!g_procs[i].used) continue;
+        for (int k = 0; k < APP_THREADS; k++)
+            if (&g_procs[i].threads[k] != t && g_procs[i].threads[k].used && g_procs[i].threads[k].pid == pid)
+                g_procs[i].threads[k].pid = -1;
+    }
     t->pid = pid;                           /* it runs once we yield (no preemption in here) */
     return id + 1;
 }
@@ -1154,6 +1168,13 @@ static void release(app_proc_t* p) {
     webview_close_owner(p->id);
     while (p->blocks) {
         ablock_t* b = p->blocks;
+        extern char _kernel_end[];
+        if (((uintptr_t)b & 15) || (uintptr_t)b < (uintptr_t)_kernel_end || b->magic != ABLOCK_MAGIC) {
+            /* the app wrote over its own memory's bookkeeping: what is left
+             * is not freed (a leak), rather than the kernel crashing on it */
+            klog("app %s: its memory list is damaged - %s\n", p->name, "not freeing the rest");
+            break;
+        }
         p->blocks = b->next;
         b->magic = 0;
         kfree(b);
