@@ -199,6 +199,26 @@ typedef struct {
 static ap_t g_ap[SMP_MAX_CPUS];
 static uint32_t g_core_pct[SMP_MAX_CPUS];   /* per core, from sysmon's last sample */
 
+/* The idle core to wake for queued work: best one whose hardware-thread
+ * siblings are idle too (a whole physical core: Hyper-Threading siblings
+ * share its execution units, so two busy threads on one core run slower
+ * than on two), and on hybrid processors a performance core before an
+ * efficient one. The boot core counts as busy (it runs the kernel). */
+static int core_busy(int c) { return c == 0 || !g_ap[c].idle; }
+static int pick_idle_core(void) {
+    int best = -1, best_score = -1, n = cpu_count();
+    for (int c = 1; c < n; c++) {
+        if (!g_ap[c].idle) continue;
+        const cpu_topo_t* tc = cpu_topo(c);
+        int alone = 1;
+        for (int s = 0; s < n; s++)
+            if (s != c && cpu_topo(s)->phys == tc->phys && core_busy(s)) { alone = 0; break; }
+        int score = (alone ? 4 : 0) + (tc->type != CPU_TYPE_EFF ? 2 : 0);
+        if (score > best_score) { best_score = score; best = c; }
+    }
+    return best;
+}
+
 /* an idle core is woken for it (interrupts off) */
 static uint32_t g_ap_min_vr;
 static void q_push(task_t* t) {
@@ -210,8 +230,8 @@ static void q_push(task_t* t) {
     g_q[(g_qhead + g_qlen) % TASK_MAX] = t;
     g_qlen++;
     q_unlock();
-    for (int c = 1; c < cpu_count(); c++)
-        if (g_ap[c].idle) { smp_send_ipi(c, SMP_VEC_KICK); break; }
+    int c = pick_idle_core();
+    if (c > 0) smp_send_ipi(c, SMP_VEC_KICK);
     irq_restore(f);
 }
 
@@ -840,13 +860,13 @@ void task_smp_tick(void) {
     static uint32_t n;
     if (cpu_count() < 2 || ++n % 5) return;
     uint32_t now = timer_ms();
-    int kicked = 0;
+    if (g_qlen) {
+        int c = pick_idle_core();
+        if (c > 0) smp_send_ipi(c, SMP_VEC_KICK);
+    }
     for (int c = 1; c < cpu_count(); c++) {
         ap_t* a = &g_ap[c];
-        if (!a->task) {
-            if (g_qlen && a->idle && !kicked) { smp_send_ipi(c, SMP_VEC_KICK); kicked = 1; }
-            continue;
-        }
+        if (!a->task) continue;
         uint32_t ran = now - a->since;
         task_t* t = a->task;
         if (!t) continue;

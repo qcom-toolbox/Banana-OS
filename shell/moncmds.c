@@ -351,6 +351,48 @@ static void cmd_htop(void) {
     }
 }
 
+/* lscpu: the processors, their cores and hardware threads */
+static void cmd_lscpu(void) {
+    const sysinfo_t* si = sysinfo_get();
+    char row[160];
+    int n = cpu_count(), tpc = smp_threads_per_core(), np = smp_phys_cores();
+    int perf = 0, eff = 0, pkgs = 0;
+    uint32_t seen_pkg[SMP_MAX_CPUS];
+    for (int i = 0; i < n; i++) {
+        const cpu_topo_t* t = cpu_topo(i);
+        if (t->type == CPU_TYPE_PERF) perf++;
+        if (t->type == CPU_TYPE_EFF) eff++;
+        int k;
+        for (k = 0; k < pkgs; k++) if (seen_pkg[k] == t->pkg) break;
+        if (k == pkgs) seen_pkg[pkgs++] = t->pkg;
+    }
+    ksnprintf(row, sizeof(row), "Processor:            %s\n", si->cpu_brand[0] ? si->cpu_brand : si->cpu_vendor);
+    terminal_write(row);
+    ksnprintf(row, sizeof(row), "Logical processors:   %d running (%d listed by the firmware)\n", n, smp_cores_found());
+    terminal_write(row);
+    ksnprintf(row, sizeof(row), "Physical cores:       %d in %d package%s\n", np, pkgs ? pkgs : 1, pkgs > 1 ? "s" : "");
+    terminal_write(row);
+    ksnprintf(row, sizeof(row), "Threads per core:     %d%s\n", tpc, tpc > 1 ? " (Hyper-Threading / SMT on)" : "");
+    terminal_write(row);
+    if (perf || eff) {
+        ksnprintf(row, sizeof(row), "Hybrid:               %d on performance cores, %d on efficient cores\n", perf, eff);
+        terminal_write(row);
+    }
+    ksnprintf(row, sizeof(row), "Interrupt controller: %s\n", n > 1 ? (smp_x2apic() ? "x2APIC" : "xAPIC") : "8259 (one processor)");
+    terminal_write(row);
+    if (n < 2 && smp_cores_found() < 2) return;
+    ksnprintf(row, sizeof(row), "%4s %6s %4s %5s %6s %5s %5s", "CPU", "APIC", "PKG", "CORE", "THREAD", "TYPE", "BUSY");
+    terminal_write_color(row, VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREEN);
+    terminal_putchar('\n');
+    for (int i = 0; i < n; i++) {
+        const cpu_topo_t* t = cpu_topo(i);
+        ksnprintf(row, sizeof(row), "%4d %6u %4u %5d %6u %5s %4u%%%s\n", i, t->apic, t->pkg, t->phys, t->smt,
+                  t->type == CPU_TYPE_PERF ? "P" : t->type == CPU_TYPE_EFF ? "E" : "-", task_core_pct(i),
+                  i == 0 ? "  (kernel)" : "");
+        terminal_write(row);
+    }
+}
+
 /* sched: what the scheduler sees, task by task */
 static void cmd_sched(void) {
     static task_info_t t[TASK_MAX];
@@ -423,6 +465,7 @@ int moncmd_dispatch(const char* line) {
     if (strcmp(argv[0], "df") == 0) { cmd_df(argc, argv); return 1; }
     if (strcmp(argv[0], "htop") == 0) { cmd_htop(); return 1; }
     if (strcmp(argv[0], "sched") == 0) { cmd_sched(); return 1; }
+    if (strcmp(argv[0], "lscpu") == 0) { cmd_lscpu(); return 1; }
     if (strcmp(argv[0], "renice") == 0) { cmd_renice(argc, argv); return 1; }
     return 0;
 }

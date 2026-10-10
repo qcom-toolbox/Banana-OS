@@ -120,6 +120,11 @@ const void* acpi_table_at(uint64_t addr, const char* sig) { return table_at(addr
 #ifndef __x86_64__
 
 /* the 32-bit kernel uses one core */
+static cpu_topo_t g_topo0;
+const cpu_topo_t* cpu_topo(int cpu) { (void)cpu; return &g_topo0; }
+int smp_phys_cores(void) { return 1; }
+int smp_threads_per_core(void) { return 1; }
+int smp_x2apic(void) { return 0; }
 void smp_init(void) {}
 void smp_send_ipi(int cpu, int vector) { (void)cpu; (void)vector; }
 void smp_eoi(void) {}
@@ -140,12 +145,14 @@ void smp_eoi(void) {}
 
 #define TRAMP_ADDR      0x8000u
 
+/* The local APIC: memory-mapped registers (xAPIC), or MSRs 0x800 +
+ * offset / 16 (x2APIC: 32-bit ids, needed past 255 processors and where the
+ * firmware locks it in that mode). */
 static volatile uint32_t* g_lapic;
-static uint8_t            g_apic_id[SMP_MAX_CPUS];
+static volatile int       g_apic_on;
+static int                g_x2;
+static uint32_t           g_apic_id[SMP_MAX_CPUS];
 static volatile int       g_ap_up;
-
-static uint32_t lapic_rd(uint32_t r) { return g_lapic[r / 4]; }
-static void     lapic_wr(uint32_t r, uint32_t v) { g_lapic[r / 4] = v; }
 
 static void rdmsr(uint32_t msr, uint32_t* lo, uint32_t* hi) {
     __asm__ volatile("rdmsr" : "=a"(*lo), "=d"(*hi) : "c"(msr));
@@ -154,21 +161,130 @@ static void wrmsr(uint32_t msr, uint32_t lo, uint32_t hi) {
     __asm__ volatile("wrmsr" :: "a"(lo), "d"(hi), "c"(msr));
 }
 
+static uint32_t lapic_rd(uint32_t r) {
+    if (g_x2) { uint32_t lo, hi; rdmsr(0x800 + r / 16, &lo, &hi); return lo; }
+    return g_lapic[r / 4];
+}
+static void lapic_wr(uint32_t r, uint32_t v) {
+    if (g_x2) wrmsr(0x800 + r / 16, v, 0);
+    else g_lapic[r / 4] = v;
+}
+static uint32_t lapic_id(void) {
+    return g_x2 ? lapic_rd(LAPIC_ID) : lapic_rd(LAPIC_ID) >> 24;
+}
+
+int smp_x2apic(void) { return g_x2; }
+
 void smp_eoi(void) {
-    if (g_lapic) g_lapic[LAPIC_EOI / 4] = 0;
+    if (g_apic_on) lapic_wr(LAPIC_EOI, 0);
+}
+
+/* ── topology ──────────────────────────────────────────────────────── */
+
+static cpu_topo_t g_topo[SMP_MAX_CPUS];
+static int        g_nphys = 1, g_tpc = 1;
+
+const cpu_topo_t* cpu_topo(int cpu) { return &g_topo[cpu >= 0 && cpu < SMP_MAX_CPUS ? cpu : 0]; }
+int smp_phys_cores(void) { return g_nphys; }
+int smp_threads_per_core(void) { return g_tpc; }
+
+static void cpuid2(uint32_t leaf, uint32_t sub, uint32_t r[4]) {
+    __asm__ volatile("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"(sub));
+}
+static int bits_for(uint32_t n) { int b = 0; while ((1u << b) < n) b++; return b; }
+
+/* this processor's place, asked of itself */
+static void topo_self(cpu_topo_t* t) {
+    uint32_t r[4], max, ext;
+    cpuid2(0, 0, r);
+    max = r[0];
+    int amd = r[1] == 0x68747541u;                      /* "Auth"enticAMD */
+    cpuid2(0x80000000u, 0, r);
+    ext = r[0];
+    cpuid2(1, 0, r);
+    uint32_t apic = r[1] >> 24;
+    int htt = (r[3] >> 28) & 1;
+    uint32_t logical = htt ? ((r[1] >> 16) & 0xFF) : 1;
+    int smt_shift = -1, pkg_shift = -1;
+    uint32_t leaf = max >= 0x1F ? 0x1F : max >= 0xB ? 0xB : 0;
+    if (leaf) {
+        cpuid2(leaf, 0, r);
+        if (!r[1] && leaf == 0x1F && max >= 0xB) { leaf = 0xB; cpuid2(leaf, 0, r); }
+        if (r[1]) {
+            for (uint32_t sub = 0; sub < 8; sub++) {
+                cpuid2(leaf, sub, r);
+                uint32_t type = (r[2] >> 8) & 0xFF;
+                if (!type) break;
+                if (type == 1) smt_shift = (int)(r[0] & 0x1F);
+                pkg_shift = (int)(r[0] & 0x1F);         /* the last level: the package above it */
+                apic = r[3];                            /* the x2APIC id */
+            }
+            if (smt_shift < 0) smt_shift = 0;
+        }
+    }
+    if (pkg_shift < 0) {
+        /* older processors: logical processors per package (leaf 1), cores per package (leaf 4 / AMD) */
+        uint32_t cores = 1;
+        if (amd && ext >= 0x80000008u) { cpuid2(0x80000008u, 0, r); cores = (r[2] & 0xFF) + 1; }
+        else if (!amd && max >= 4) { cpuid2(4, 0, r); cores = (r[0] >> 26) + 1; }
+        if (logical < cores) logical = cores;
+        uint32_t tpc = logical / cores;
+        if (amd && ext >= 0x8000001Eu && max >= 1) {   /* Zen: threads per core */
+            cpuid2(0x8000001Eu, 0, r);
+            tpc = ((r[1] >> 8) & 0xFF) + 1;
+        }
+        smt_shift = bits_for(tpc ? tpc : 1);
+        pkg_shift = bits_for(logical ? logical : 1);
+        if (pkg_shift < smt_shift) pkg_shift = smt_shift;
+    }
+    t->apic = apic;
+    t->smt = (uint8_t)(apic & ((1u << smt_shift) - 1));
+    t->core = (uint16_t)((apic >> smt_shift) & ((1u << (pkg_shift - smt_shift)) - 1));
+    t->pkg = (uint16_t)(apic >> pkg_shift);
+    t->type = CPU_TYPE_PLAIN;
+    if (max >= 0x1A) {
+        cpuid2(7, 0, r);
+        if (r[3] & (1u << 15)) {                        /* a hybrid processor */
+            cpuid2(0x1A, 0, r);
+            uint32_t ct = r[0] >> 24;
+            t->type = ct == 0x40 ? CPU_TYPE_PERF : ct == 0x20 ? CPU_TYPE_EFF : CPU_TYPE_PLAIN;
+        }
+    }
+}
+
+/* which logical processors share a physical core */
+static void topo_link(int n) {
+    int phys = 0, tpc = 1;
+    for (int i = 0; i < n; i++) {
+        g_topo[i].phys = -1;
+        for (int j = 0; j < i; j++)
+            if (g_topo[j].pkg == g_topo[i].pkg && g_topo[j].core == g_topo[i].core) { g_topo[i].phys = g_topo[j].phys; break; }
+        if (g_topo[i].phys < 0) g_topo[i].phys = phys++;
+    }
+    for (int p = 0; p < phys; p++) {
+        int k = 0;
+        for (int i = 0; i < n; i++) if (g_topo[i].phys == p) k++;
+        if (k > tpc) tpc = k;
+    }
+    g_nphys = phys ? phys : 1;
+    g_tpc = tpc;
 }
 
 static void icr_send(uint32_t apic, uint32_t lo) {
     uintptr_t f;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(f) :: "memory");
-    while (lapic_rd(LAPIC_ICR_LO) & (1u << 12)) __asm__ volatile("pause");
-    lapic_wr(LAPIC_ICR_HI, apic << 24);
-    lapic_wr(LAPIC_ICR_LO, lo);
+    if (g_x2) {
+        wrmsr(0x830, lo, apic);                           /* x2APIC: one 64-bit ICR, no busy bit */
+    } else {
+        while (lapic_rd(LAPIC_ICR_LO) & (1u << 12)) __asm__ volatile("pause");
+        lapic_wr(LAPIC_ICR_HI, apic << 24);
+        lapic_wr(LAPIC_ICR_LO, lo);
+    }
     if (f & 0x200) __asm__ volatile("sti" ::: "memory");
 }
 
 void smp_send_ipi(int cpu, int vector) {
-    if (!g_lapic || cpu < 0 || cpu >= g_cpus) return;
+    if (!g_apic_on || cpu < 0 || cpu >= g_cpus) return;
     icr_send(g_apic_id[cpu], (uint32_t)vector | (1u << 14));      /* fixed, assert */
 }
 
@@ -252,7 +368,9 @@ static void smp_ap_entry(uint32_t cpu) {
     __asm__ volatile("ldmxcsr %0" :: "m"(mxcsr));
     uint32_t lo, hi;
     rdmsr(0x1B, &lo, &hi);
-    if (!(lo & (1u << 11))) wrmsr(0x1B, lo | (1u << 11), hi);
+    if (!(lo & (1u << 11))) { lo |= 1u << 11; wrmsr(0x1B, lo, hi); }           /* off -> xAPIC */
+    if (g_x2 && !(lo & (1u << 10))) wrmsr(0x1B, lo | (1u << 10), hi);         /* xAPIC -> x2APIC */
+    topo_self(&g_topo[cpu]);
     lapic_wr(LAPIC_TPR, 0);
     lapic_wr(LAPIC_LVT_TIMER, LVT_MASKED);
     lapic_wr(LAPIC_LVT_LINT0, LVT_MASKED);  /* device interrupts: the boot core's */
@@ -274,11 +392,18 @@ static int lapic_on(uint32_t madt_addr) {
     rdmsr(0x1B, &lo, &hi);
     uint32_t base = lo & 0xFFFFF000u;
     if (hi || !base) base = madt_addr;
-    if (!base) return 0;
+    if (!base && !g_x2) return 0;
     uintptr_t f;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(f) :: "memory");
-    wrmsr(0x1B, (lo & ~(1u << 10)) | (1u << 11), hi);     /* xAPIC mode, on */
-    g_lapic = (volatile uint32_t*)(uintptr_t)base;
+    if (g_x2) {
+        /* off -> xAPIC -> x2APIC (off -> x2APIC directly is not allowed) */
+        if (!(lo & (1u << 11))) { lo = (lo & ~(1u << 10)) | (1u << 11); wrmsr(0x1B, lo, hi); }
+        if (!(lo & (1u << 10))) wrmsr(0x1B, lo | (1u << 10), hi);
+    } else {
+        wrmsr(0x1B, (lo & ~(1u << 10)) | (1u << 11), hi);     /* xAPIC mode, on */
+        g_lapic = (volatile uint32_t*)(uintptr_t)base;
+    }
+    g_apic_on = 1;
     lapic_wr(LAPIC_TPR, 0);
     lapic_wr(LAPIC_LVT_TIMER, LVT_MASKED);
     lapic_wr(LAPIC_LVT_ERR, LVT_MASKED);
@@ -291,8 +416,10 @@ static int lapic_on(uint32_t madt_addr) {
     int ok = ticks_arrive(3, 100);
     if (!ok) {
         __asm__ volatile("cli");
-        wrmsr(0x1B, lo & ~((1u << 11) | (1u << 10)), hi);
+        if (!lapic_x2apic_locked()) wrmsr(0x1B, lo & ~((1u << 11) | (1u << 10)), hi);
         g_lapic = NULL;
+        g_apic_on = 0;
+        g_x2 = 0;
     }
     if (f & 0x200) __asm__ volatile("sti");
     else __asm__ volatile("cli");
@@ -365,8 +492,10 @@ static void lapic_revert(void) {
     ioapic_restore();
     uint32_t lo, hi;
     rdmsr(0x1B, &lo, &hi);
-    wrmsr(0x1B, lo & ~((1u << 11) | (1u << 10)), hi);
+    if (!lapic_x2apic_locked()) wrmsr(0x1B, lo & ~((1u << 11) | (1u << 10)), hi);
     g_lapic = NULL;
+    g_apic_on = 0;
+    g_x2 = 0;
     __asm__ volatile("sti");
 }
 
@@ -382,8 +511,9 @@ void smp_init(void) {
     const sdt_t* madt = r ? find_table(r, "APIC", 0) : NULL;
     if (!madt) { klog("smp: no ACPI MADT - using one core\n"); return; }
 
-    uint8_t ids[64];
-    int n = 0;
+    static uint32_t ids[256];
+    int n = 0, big = 0;
+    topo_self(&g_topo[0]);
     uint32_t ioapic[4] = { 0, 0, 0, 0 };
     int nio = 0;
     uint32_t lapic_addr = *(const uint32_t*)((const uint8_t*)madt + 36);
@@ -393,7 +523,16 @@ void smp_init(void) {
         if (e[0] == 0 && e[1] >= 8) {                     /* a processor's local APIC */
             uint32_t flags;
             memcpy(&flags, e + 4, 4);
-            if ((flags & 1) && n < 64) ids[n++] = e[3];
+            int dup = 0;
+            for (int k = 0; k < n; k++) if (ids[k] == e[3]) dup = 1;
+            if ((flags & 1) && n < 256 && !dup) ids[n++] = e[3];
+        } else if (e[0] == 9 && e[1] >= 16) {             /* a processor's local x2APIC */
+            uint32_t id, flags;
+            memcpy(&id, e + 4, 4);
+            memcpy(&flags, e + 8, 4);
+            int dup = 0;
+            for (int k = 0; k < n; k++) if (ids[k] == id) dup = 1;
+            if ((flags & 1) && n < 256 && !dup && id != 0xFFFFFFFFu) { ids[n++] = id; if (id > 254) big = 1; }
         } else if (e[0] == 1 && e[1] >= 12 && nio < 4) {  /* an I/O APIC */
             memcpy(&ioapic[nio++], e + 4, 4);
         }
@@ -402,6 +541,11 @@ void smp_init(void) {
     g_found = n;
     if (n < 2) { klog("smp: one processor core\n"); return; }
 
+    /* x2APIC when the firmware used it (or locked it), or ids need it */
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    int x2_ok = (c >> 21) & 1;
+    g_x2 = x2_ok && (lapic_boot_x2apic() || lapic_x2apic_locked() || big);
+    if (lapic_x2apic_locked()) g_x2 = 1;
     for (int i = 0; i < nio; i++) ioapic_save(ioapic[i]);
     if (!lapic_on(lapic_addr)) {
         klog("smp: the local APIC would stop the timer - using one core\n");
@@ -416,7 +560,7 @@ void smp_init(void) {
         klog("smp: the timer stopped with the local APIC on - it is off again, using one core\n");
         return;
     }
-    uint8_t bsp = (uint8_t)(lapic_rd(LAPIC_ID) >> 24);
+    uint32_t bsp = lapic_id();
     g_apic_id[0] = bsp;
 
     /* the start code, at 0x8000 */
@@ -436,6 +580,7 @@ void smp_init(void) {
 
     for (int i = 0; i < n && g_cpus < SMP_MAX_CPUS; i++) {
         if (ids[i] == bsp) continue;
+        if (!g_x2 && ids[i] > 254) { klog("smp: core (APIC id %u) needs x2APIC - left off\n", ids[i]); continue; }
         int cpu = g_cpus;
         uint8_t* stack = (uint8_t*)kmalloc(16384);
         if (!stack) break;
@@ -458,7 +603,13 @@ void smp_init(void) {
         }
         g_cpus = cpu + 1;
     }
-    klog("smp: %d of %d processor cores running\n", g_cpus, n);
+    topo_link(g_cpus);
+    klog("smp: %d of %d logical processors running (%s): %d physical cores, %d thread%s per core\n", g_cpus, n,
+         g_x2 ? "x2APIC" : "xAPIC", g_nphys, g_tpc, g_tpc == 1 ? "" : "s");
+    for (int i = 0; i < g_cpus; i++)
+        klog("smp:   cpu %d: APIC id %u, package %u, core %u, thread %u%s\n", i, g_topo[i].apic, g_topo[i].pkg,
+             g_topo[i].core, g_topo[i].smt, g_topo[i].type == CPU_TYPE_PERF ? ", performance core" :
+             g_topo[i].type == CPU_TYPE_EFF ? ", efficient core" : "");
 }
 
 #endif

@@ -402,7 +402,9 @@ void taskmgr_draw(const fb_info_t* fi) {
         gfx_draw_text(lx, ty + 80, line, C_TEXT, C_PANEL);
         ksnprintf(line, sizeof(line), "Kernel:         %s", BANANA_ARCH_DESC);
         gfx_draw_text(lx, ty + 96, line, C_TEXT, C_PANEL);
-        if (cpu_count() > 1)
+        if (cpu_count() > 1 && smp_threads_per_core() > 1)
+            ksnprintf(line, sizeof(line), "Processor:      %d cores, %d threads (the kernel on 0, apps on all)", smp_phys_cores(), cpu_count());
+        else if (cpu_count() > 1)
             ksnprintf(line, sizeof(line), "Processor:      %d cores (the kernel on core 0, apps on all)", cpu_count());
         else
             ksnprintf(line, sizeof(line), "Processor:      1 core in use (%d found)", smp_cores_found());

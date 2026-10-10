@@ -338,15 +338,53 @@ void irq_handler(registers_t* regs) {
  * hardware interrupt would ever reach the CPU - a BIOS sets LINT0 to
  * "ExtINT" pass-through instead. Banana OS uses the 8259, so the local
  * APIC is switched off: the CPU then takes the PIC's INTR directly. */
+static int g_boot_x2apic, g_x2apic_locked;
+int lapic_boot_x2apic(void) { return g_boot_x2apic; }
+int lapic_x2apic_locked(void) { return g_x2apic_locked; }
+
+static void msr_wr(uint32_t msr, uint32_t lo, uint32_t hi) { __asm__ volatile("wrmsr" : : "a"(lo), "d"(hi), "c"(msr)); }
+static uint32_t msr_rd(uint32_t msr, uint32_t* hi) {
+    uint32_t lo, h;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(h) : "c"(msr));
+    if (hi) *hi = h;
+    return lo;
+}
+
+/* Newer Intel platforms can lock the local APIC in x2APIC mode ("legacy
+ * xAPIC disabled"): switching it off then faults. IA32_ARCH_CAPABILITIES
+ * bit 21 says whether IA32_XAPIC_DISABLE_STATUS (0xBD) exists; its bit 0
+ * says the lock is on. */
+static int x2apic_is_locked(void) {
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0), "c"(0));
+    if (a < 7) return 0;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(7), "c"(0));
+    if (!(d & (1u << 29))) return 0;                    /* no IA32_ARCH_CAPABILITIES */
+    if (!(msr_rd(0x10A, NULL) & (1u << 21))) return 0;
+    return msr_rd(0xBD, NULL) & 1;
+}
+
 static void lapic_off(void) {
     uint32_t a, b, c, d;
     __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
-    if (!(d & (1u << 9))) return;                       /* no APIC */
-    uint32_t lo, hi;
-    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x1Bu));
+    if (!(d & (1u << 9)) || !(d & (1u << 5))) return;  /* no APIC / no MSRs */
+    uint32_t hi, lo = msr_rd(0x1B, &hi);
     if (!(lo & (1u << 11))) return;                     /* already off */
-    lo &= ~((1u << 11) | (1u << 10));                   /* EN and x2APIC EXTD */
-    __asm__ volatile("wrmsr" : : "a"(lo), "d"(hi), "c"(0x1Bu));
+    g_boot_x2apic = (lo & (1u << 10)) != 0;
+    if (g_boot_x2apic && x2apic_is_locked()) {
+        /* it must stay on: as a BIOS sets it, the 8259's interrupts pass
+         * through LINT0 (ExtINT) - registers as MSRs 0x800 + offset / 16 */
+        g_x2apic_locked = 1;
+        msr_wr(0x808, 0, 0);                            /* TPR: everything */
+        msr_wr(0x832, 0x10000, 0);                      /* LVT timer: masked */
+        msr_wr(0x837, 0x10000, 0);                      /* LVT error: masked */
+        msr_wr(0x835, 0x700, 0);                        /* LINT0: ExtINT */
+        msr_wr(0x836, 0x400, 0);                        /* LINT1: NMI */
+        msr_wr(0x80F, 0x1FF, 0);                        /* SVR: on, spurious vector 0xFF */
+        return;
+    }
+    lo &= ~((1u << 11) | (1u << 10));                   /* EN and x2APIC EXTD (x2APIC -> off is allowed) */
+    msr_wr(0x1B, lo, hi);
 }
 
 /* Before a restart, in a virtual machine: the local APIC back on, its LINT0
@@ -359,6 +397,7 @@ void lapic_before_reset(void) {
     uint32_t a, b, c, d;
     __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
     if (!(c & (1u << 31)) || !(d & (1u << 5))) return;  /* not a VM / no MSRs */
+    if (g_x2apic_locked) return;                        /* (it never went off) */
     uint32_t lo, hi;
     __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x1Bu));
     if (!(lo & (1u << 11))) {

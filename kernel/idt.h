@@ -19,5 +19,8 @@ void idt_ap_init(int cpu);
 void irq_timer_from_lapic(int on);
 /* before a restart (in a VM): the local APIC as a BIOS expects it */
 void lapic_before_reset(void);
+/* the firmware handed over with the local APIC in x2APIC mode / locked in it */
+int  lapic_boot_x2apic(void);
+int  lapic_x2apic_locked(void);
 
 #endif
