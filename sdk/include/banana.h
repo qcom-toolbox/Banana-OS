@@ -140,6 +140,14 @@ int  banana_interrupted(void);
 /* downloads url (http:// or https://) into a malloc'd buffer (free() it);
  * 0, or -1 with err set */
 int  banana_http_get(const char* url, char** data, unsigned long* len, char* err, int errcap);
+/* POSTs body (a form: "a=1&b=2", see banana_url_encode) and gets the answer
+ * the same way (API version 8; older systems: -1) */
+int  banana_http_post(const char* url, const char* body, char** data, unsigned long* len, char* err, int errcap);
+/* any request: method, body and its content type (NULL: a form) */
+int  banana_http_request(const char* method, const char* url, const char* body, unsigned long body_len,
+                         const char* content_type, char** data, unsigned long* len, char* err, int errcap);
+/* s percent-encoded for a URL or a form into out (cap bytes); its length */
+int  banana_url_encode(const char* s, char* out, int cap);
 
 /* ── sound ────────────────────────────────────────────────────────── */
 /* PCM samples (8-bit unsigned or 16-bit signed, mono or stereo, any

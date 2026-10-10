@@ -667,12 +667,18 @@ static int h_body(void* ctx, const uint8_t* d, uint32_t n) {
     return 0;
 }
 
-static int a_http_get(const char* url, char** data, unsigned long* len, char* ctype, int ccap, char* err, int ecap) {
+static int a_http_request(const char* method, const char* url, const char* body, unsigned long blen, const char* btype,
+                          char** data, unsigned long* len, char* ctype, int ccap, char* err, int ecap) {
     char e[128];
     hbody_t b = { 0, 0, 0, 0 };
     http_request_t req;
     memset(&req, 0, sizeof(req));
-    req.method = "GET";
+    req.method = method && method[0] ? method : "GET";
+    if (body) {
+        req.body = body;
+        req.body_len = (uint32_t)blen;
+        req.content_type = btype && btype[0] ? btype : "application/x-www-form-urlencoded";
+    }
     req.follow_redirects = 1;
     req.max_redirects = 10;
     req.timeout_ms = 15000;
@@ -700,6 +706,10 @@ static int a_http_get(const char* url, char** data, unsigned long* len, char* ct
     *data = b.buf;
     if (len) *len = b.n;
     return 0;
+}
+
+static int a_http_get(const char* url, char** data, unsigned long* len, char* ctype, int ccap, char* err, int ecap) {
+    return a_http_request("GET", url, NULL, 0, NULL, data, len, ctype, ccap, err, ecap);
 }
 
 /* ── sound / clipboard ─────────────────────────────────────────────── */
@@ -977,6 +987,7 @@ static void api_init(void) {
     g_api.audio_stop = G(a_audio_stop);
     g_api.audio_volume = G(a_audio_volume);
     g_api.win_media_keys = G(a_win_media_keys);
+    g_api.http_request = G(a_http_request);
 }
 
 /* ── the ELF loader ────────────────────────────────────────────────── */

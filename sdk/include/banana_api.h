@@ -17,7 +17,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 7u
+#define BANANA_API_VERSION 8u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -241,6 +241,13 @@ typedef struct banana_api {
     /* this window gets the media keys (BANANA_KEY_PLAY...) even when
      * another one has the focus - for music players */
     void  (*win_media_keys)(int win);
+
+    /* ── version 8: any HTTP request (POST forms, JSON APIs) ── */
+    /* method "GET" / "POST" / ...; body (NULL: none) with its Content-Type
+     * (NULL: application/x-www-form-urlencoded); the answer like http_get */
+    int   (*http_request)(const char* method, const char* url, const char* body, unsigned long body_len,
+                          const char* content_type, char** data, unsigned long* len,
+                          char* ctype, int ccap, char* err, int ecap);
 } banana_api_t;
 
 /* the app's entry point (the SDK's crt0 provides it) */

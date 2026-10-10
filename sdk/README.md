@@ -194,6 +194,11 @@ in ring 0, where interrupts use the app's stack: code must not keep data
 below the stack pointer (`-mno-red-zone` - the build script patches the
 two FFmpeg assembly files that did).
 
+Since API version 8 any HTTP request can be made: `banana_http_post(url,
+form, ...)` (with `banana_url_encode()` for the form's values) and
+`banana_http_request(method, url, body, len, content_type, ...)` - what
+`apps/amethyst` uses to talk to a web API.
+
 ### Drivers
 
 Hardware drivers are not apps: they run inside the kernel. The Driver Kit

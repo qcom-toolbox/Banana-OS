@@ -348,3 +348,32 @@ int banana_volume(int percent) { return has_v7() ? __banana->audio_volume(percen
 void bwin_media_keys(bwin_t* win) {
     if (has_v7() && __banana->size >= __builtin_offsetof(banana_api_t, win_media_keys) + sizeof(void*)) __banana->win_media_keys(win->id);
 }
+
+static int has_v8(void) {
+    return __banana->version >= 8 && __banana->size >= __builtin_offsetof(banana_api_t, http_request) + sizeof(void*);
+}
+int banana_http_request(const char* method, const char* url, const char* body, unsigned long body_len,
+                        const char* content_type, char** data, unsigned long* len, char* err, int errcap) {
+    if (!has_v8()) {
+        if (err && errcap > 0) { const char* m = "needs a newer Banana OS"; int i = 0; for (; m[i] && i < errcap - 1; i++) err[i] = m[i]; err[i] = 0; }
+        return -1;
+    }
+    return __banana->http_request(method, url, body, body_len, content_type, data, len, 0, 0, err, errcap);
+}
+int banana_http_post(const char* url, const char* body, char** data, unsigned long* len, char* err, int errcap) {
+    unsigned long n = 0;
+    while (body && body[n]) n++;
+    return banana_http_request("POST", url, body ? body : "", n, 0, data, len, err, errcap);
+}
+int banana_url_encode(const char* s, char* out, int cap) {
+    static const char HEX[] = "0123456789ABCDEF";
+    int n = 0;
+    for (; s && *s && n < cap - 1; s++) {
+        unsigned char c = (unsigned char)*s;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') out[n++] = (char)c;
+        else if (n < cap - 3) { out[n++] = '%'; out[n++] = HEX[c >> 4]; out[n++] = HEX[c & 15]; }
+        else break;
+    }
+    if (cap > 0) out[n] = 0;
+    return n;
+}

@@ -57,7 +57,7 @@ ADEC=aac,aac_latm,mp3,mp3float,mp2,mp2float,mp1,vorbis,opus,flac,alac,ac3,eac3,w
 DEMUX=mov,matroska,avi,mpegps,mpegts,mpegvideo,ogg,flv,mp3,flac,wav,aac,ac3,h264,hevc,m4v,asf,webm_dash_manifest
 PARSE=h264,hevc,mpeg4video,mpegvideo,mpegaudio,aac,aac_latm,vp8,vp9,ac3,flac,vorbis,opus,mjpeg,h263
 if [ "$PROFILE" = audio ]; then
-    VDEC=mjpeg
+    VDEC=mjpeg,webp
     DEMUX=mov,matroska,ogg,mp3,flac,wav,aac,ac3,asf
     PARSE=mpegaudio,aac,aac_latm,ac3,flac,vorbis,opus,mjpeg
 fi
@@ -73,9 +73,12 @@ for f in $LIBC_SRCS; do
 done
 rm -f sdklibc/libc.a
 ar rcs sdklibc/libc.a sdklibc/*.o
-# configured again only when this script changes (its checksum, not its
-# date: a fresh checkout or a restored CI cache keeps the build)
-SUM=$(sha256sum "$HERE/build.sh" | cut -d" " -f1)-$PROFILE
+# configured again only when what goes into configure changes (a checksum
+# of it, not dates: a fresh checkout or a restored CI cache keeps the
+# build). CONFV: bump it when changing the fixed configure options below.
+CONFV=2
+SUM=$(printf '%s|' "$CONFV" "$FARCH" "$ASM" "$VDEC" "$ADEC" "$DEMUX" "$PARSE" "$CFLAGS" "$AFLAGS" | sha256sum | cut -d" " -f1)
+[ -n "$PRINT_SUM" ] && { echo "$SUM"; exit 0; }
 if [ ! -f config.h ] || [ "$(cat .configured 2>/dev/null)" != "$SUM" ]; then
     "$SRC/configure" --enable-cross-compile --target-os=none --arch=$FARCH --cc=gcc --ar=ar \
         --prefix="$OUT/install" \

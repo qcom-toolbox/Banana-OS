@@ -2,7 +2,7 @@
 ; Music): their packages for this kernel's CPU, zlib-compressed, built by
 ; the Makefile (apps/*/). kernel/builtin_apps.c installs them at boot.
 
-global app_mediaplayer, app_mediaplayer_end, app_music, app_music_end
+global app_mediaplayer, app_mediaplayer_end, app_music, app_music_end, app_amethyst, app_amethyst_end
 
 section .rodata
 align 16
@@ -12,10 +12,16 @@ app_mediaplayer_end:
 align 16
 app_music: incbin "apps/music/music-x86_64.bpk.z"
 app_music_end:
+align 16
+app_amethyst: incbin "apps/amethyst/amethyst-x86_64.bpk.z"
+app_amethyst_end:
 %else
 app_mediaplayer: incbin "apps/mediaplayer/mediaplayer-i686.bpk.z"
 app_mediaplayer_end:
 align 16
 app_music: incbin "apps/music/music-i686.bpk.z"
 app_music_end:
+align 16
+app_amethyst: incbin "apps/amethyst/amethyst-i686.bpk.z"
+app_amethyst_end:
 %endif
