@@ -535,13 +535,17 @@ static unsigned int a_ticks(void) { return timer_ms(); }
 static void a_sleep(unsigned int ms) {
     app_proc_t* p = cur();
     uint32_t end = timer_ms() + ms;
-    do {
-        breathe(p, 1);
+    breathe(p, 1);
+    for (;;) {
         int32_t left = (int32_t)(end - timer_ms());
         if (left <= 0) break;
         task_sleep_ms(left > 10 ? 10 : (uint32_t)left);
         if (p) terminal_vt_set_active(p->vt);
-    } while (1);
+        /* awake at the time asked: back to the app now - breathing first
+         * (it yields) would hand the processor to the busy tasks again */
+        if ((int32_t)(end - timer_ms()) <= 0) break;
+        breathe(p, 0);                      /* (every 20 ms: Ctrl+C, End task, painting) */
+    }
 }
 
 static void a_yield(void) { breathe(cur(), 1); }
@@ -817,10 +821,13 @@ static int a_wait(volatile int* addr, int expected, int timeout_ms) {
     app_proc_t* p = cur();
     if (!p || !addr) return -1;
     uint32_t end = timer_ms() + (uint32_t)(timeout_ms > 0 ? timeout_ms : 0);
+    breathe(p, 1);                          /* paints, notices Ctrl+C / End task (may not return) */
     for (;;) {
-        breathe(p, 1);                      /* paints, notices Ctrl+C / End task (may not return) */
+        /* woken: straight back to the app (breathing first would yield) */
         if (*addr != expected) return 0;
         if (timeout_ms >= 0 && (int32_t)(timer_ms() - end) >= 0) return 1;
+        breathe(p, 0);                      /* (every 20 ms) */
+        if (*addr != expected) return 0;
         /* registered only while asleep: if the app is stopped in breathe()
          * no stale entry is left behind; a wake in between costs <= 10 ms */
         int slot = waiter_add(addr);
@@ -853,7 +860,7 @@ void app_preempt(uintptr_t ip) {
     /* what an app call does: paint the desktop (the app may run in the task
      * that draws it), notice Ctrl+C / End task, let the other tasks run */
     breathe(p, 0);
-    task_maybe_yield();
+    task_maybe_yield();                     /* slice over, or a woken task waits (task_should_yield) */
     if (p->has_term) terminal_vt_set_active(p->vt);
     /* a free processor core takes the app code from here (kernel/task.h):
      * nothing of the kernel may run after this - it may be on that core now */

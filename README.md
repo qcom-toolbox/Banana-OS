@@ -78,7 +78,7 @@ Banana-OS/
 │   ├── kernel.c        # kernel_main()
 │   ├── idt.c, isr.asm  # CPU exceptions (panic screen) + PIC / hardware IRQs (isr64.asm: 64-bit)
 │   ├── timer.c         # PIT at 1 kHz on IRQ0, hlt-based idle
-│   ├── task.c/h        # Kernel threads, fair scheduling (weighted run time, priorities); app code on other cores
+│   ├── task.c/h        # Kernel threads, fair scheduling (weighted run time, nice values, wakeup preemption); app code on other cores
 │   ├── smp.c, smp_tramp.asm # Starts the other CPU cores (ACPI MADT, INIT/STARTUP IPIs, real -> long mode)
 │   ├── splash.c        # The boot screen: a banana drawn in code, three dots taking turns under it
 │   ├── kheap.c         # Kernel heap (first-fit, coalescing) over the Multiboot2 memory map
@@ -455,7 +455,7 @@ QEMU: `-audiodev pa,id=snd0 -device intel-hda -device hda-output,audiodev=snd0` 
 ## The desktop: taskbar, Task Manager, right-click
 
 - **Taskbar**: the **banana** button opens the Start menu; every open window has a button - click it to bring the window to the front, click again to minimize it (every window also has **_** minimize, maximize / restore and **x** close buttons); the right side shows the network status and the clock. Right-click the taskbar for **Task Manager**, **Show the desktop** and **Restore all windows**; right-click a window's button to restore, minimize or close it.
-- **Task Manager**: *Apps & windows* (Switch to / End task, also on right-click), *Processes* (the kernel's tasks, their state and CPU use), *Performance* (CPU and memory graphs, uptime, files, network, sound). Open it from its desktop icon, the Start menu, the taskbar's right-click menu, or `taskmgr`.
+- **Task Manager**: *Apps & windows* (Switch to / End task, also on right-click), *Processes* (the kernel's tasks, their state, CPU use and priority - right-click one to change it), *Performance* (CPU and memory graphs, uptime, files, network, sound). Open it from its desktop icon, the Start menu, the taskbar's right-click menu, or `taskmgr`.
 - **Right-click menus**: the desktop (open any app, wallpaper, exit), terminals (copy, paste, clear, new, minimize, close), Files (open, install app, play, set as wallpaper, edit, cut / copy / paste, rename, delete, properties, new folder / text file, terminal here, eject), the browser (open a link / in a new tab, save it, copy its address, back, forward, reload, copy, paste, save page, page source, Downloads folder), Notepad (cut, copy, paste, select all, find, open, save), Apps (open, details, uninstall).
 - Files also takes the keyboard while it is in front: arrows, Enter, Backspace (up), Delete, Ctrl+C / Ctrl+X / Ctrl+V, Ctrl+R (rename), Ctrl+N (new folder).
 
@@ -591,7 +591,10 @@ include /path/to/banana-sdk/driver/driver.mk
 | `chsh [sh\|bash]` | Show/set the default shell persona for new sessions |
 | `run <file.sh>` | Execute script line by line |
 | `time <command>` | Run a command and print its wall-clock time |
-| `uptime` | Show uptime |
+| `uptime` | Show uptime and the load average (1, 5, 15 minutes) |
+| `nice [-n N] command` | Run a command with its nice value raised by N (default 10; negative = more processor time); `nice` alone shows it |
+| `renice [-n] N pid...` | Set the nice value (-20 .. 19) of running tasks |
+| `sched` | The scheduler's view: load average, and per task its nice value, weight, switches, wait for the processor, longest run |
 | `top` | Live CPU/RAM/process monitor (`q` to quit) |
 | `htop` | Colour monitor: a meter per CPU core, memory and disk, the tasks (`P`/`N`/`T` sort by CPU, PID, time; `q` quits) |
 | `free [-h\|-k\|-m\|-g]` | RAM: total, used, free, file data in RAM |
@@ -779,7 +782,7 @@ Building: the Makefile signs with `sbsign` when the private key is at `~/.banana
 - **Language**: freestanding C + NASM, no floating point (integer-only graphics and crypto)
 - **Graphics**: 32-bit framebuffer + 8x8 bitmap font; the console paints lazily (dirty rows, coalesced scrolling)
 - **Interrupts**: PIC remapped to vectors 32-47; IRQ0 (1 kHz timer) and the NIC's IRQ are used, keyboard/mouse stay polled
-- **Scheduling**: kernel threads switch where they choose to (app code is also time-sliced by the timer); the next to run is the ready one that has had the least CPU time (counted with the TSC, weighted: the desktop's task x2, daemons like autosave x1/4), and a task waking from a sleep (a key, a packet) runs at the next switch; with nothing to run the CPU halts until the next interrupt
+- **Scheduling**: kernel threads switch where they choose to (app code is also time-sliced by the timer); the next to run is the ready one that has had the least CPU time (counted with the TSC, weighted by its **nice value**, -20 to 19, with Linux's CFS weights: the desktop's task -3, daemons like autosave 6). Busy work gives way after a time slice that shrinks as more tasks compete (16 ms shared, 2-8 ms each) and, after at least 1 ms, as soon as a sleeping task wakes (a key, a timer, a packet): a 5 ms sleep next to busy threads now wakes ~0.6 ms late instead of ~4 ms. The other cores take app code by the least weighted processor time (on any core), for a turn scaled by weight, and the first core takes turns with them. With nothing to run the CPU halts until the next interrupt. `nice`, `renice`, Task Manager's *Processes* tab (right-click: High ... Low) change priorities; `sched` shows each task's switches, wait for the processor and longest run, `uptime` and `htop` the load average
 - **Multicore** (64-bit): the other cores are started with INIT/STARTUP IPIs through a real-mode trampoline at 0x8000 and run app code taken from a queue; the boot core's local APIC is on in "virtual wire" mode (the 8259 still delivers the device interrupts), IPIs move tasks between cores
 - **Memory**: physical = virtual (32-bit: paging off; 64-bit: the first 4 GiB identity-mapped), kernel heap from the Multiboot2 memory map, so heap buffers double as DMA buffers
 - **Input**:

@@ -201,7 +201,12 @@ static void info_line(int k, char* out, int cap, int ntasks, int nrun) {
     out[0] = 0;
     uint32_t s = timer_ms() / 1000u;
     if (k == 0) ksnprintf(out, (size_t)cap, "Tasks: %d, %d running", ntasks, nrun);
-    else if (k == 1) ksnprintf(out, (size_t)cap, "Cores: %d", cpu_count());
+    else if (k == 1) {
+        uint32_t la[3];
+        task_loadavg(la);
+        ksnprintf(out, (size_t)cap, "Cores: %d, load average: %u.%02u %u.%02u %u.%02u", cpu_count(),
+                  la[0] / 100, la[0] % 100, la[1] / 100, la[1] % 100, la[2] / 100, la[2] % 100);
+    }
     else if (k == 2) ksnprintf(out, (size_t)cap, "Uptime: %02u:%02u:%02u", s / 3600u, (s / 60u) % 60u, s % 60u);
     else if (k == 3) ksnprintf(out, (size_t)cap, "Files: %u, folders: %u", fs_used_files(), fs_used_dirs());
 }
@@ -296,8 +301,7 @@ static void htop_draw(int sort) {
     int rows = H - line - 2;
     for (int i = 0; i < n && i < rows; i++) {
         const task_info_t* x = &t[i];
-        int pri = x->prio == TASK_PRIO_HIGH ? 15 : x->prio == TASK_PRIO_BACKGROUND ? 30 : 20;
-        int ni = pri - 20;
+        int ni = x->nice, pri = 20 + ni;
         char st = x->state == TASK_SLEEPING ? 'S' : 'R';
         char core[8];
         if (x->state == TASK_AWAY) ksnprintf(core, sizeof(core), x->cpu > 0 ? "%d" : "-", x->cpu);
@@ -347,6 +351,68 @@ static void cmd_htop(void) {
     }
 }
 
+/* sched: what the scheduler sees, task by task */
+static void cmd_sched(void) {
+    static task_info_t t[TASK_MAX];
+    int n = task_count();
+    if (n > TASK_MAX) n = TASK_MAX;
+    task_snapshot(t, n);
+    uint32_t la[3];
+    task_loadavg(la);
+    int nrun = 0;
+    for (int i = 0; i < n; i++) if (t[i].state == TASK_RUNNING || t[i].state == TASK_READY || t[i].state == TASK_AWAY) nrun++;
+    char row[160];
+    ksnprintf(row, sizeof(row), "Load average: %u.%02u %u.%02u %u.%02u (1, 5, 15 min)   %d tasks, %d wanting a processor, %d core%s\n",
+              la[0] / 100, la[0] % 100, la[1] / 100, la[1] % 100, la[2] / 100, la[2] % 100, n, nrun, cpu_count(),
+              cpu_count() == 1 ? "" : "s");
+    terminal_write(row);
+    ksnprintf(row, sizeof(row), "%4s %3s %6s %-6s %4s %8s %8s %8s %8s %7s  %s", "PID", "NI", "WEIGHT", "STATE", "CPU%",
+              "GAVE UP", "PREEMPT", "WAIT avg", "WAIT max", "LONGEST", "NAME");
+    terminal_write_color(row, VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREEN);
+    terminal_putchar('\n');
+    for (int i = 0; i < n; i++) {
+        const task_info_t* x = &t[i];
+        if (x->state == TASK_UNUSED) continue;
+        char st[12];
+        if (x->state == TASK_AWAY && x->cpu > 0) ksnprintf(st, sizeof(st), "core%d", x->cpu);
+        else kstrlcpy(st, task_state_str(x->state), sizeof(st));
+        char avg[16], mx[16];
+        if (x->lat_avg_us >= 10000) ksnprintf(avg, sizeof(avg), "%ums", x->lat_avg_us / 1000);
+        else ksnprintf(avg, sizeof(avg), "%uus", x->lat_avg_us);
+        if (x->lat_max_us >= 10000) ksnprintf(mx, sizeof(mx), "%ums", x->lat_max_us / 1000);
+        else ksnprintf(mx, sizeof(mx), "%uus", x->lat_max_us);
+        ksnprintf(row, sizeof(row), "%4u %3d %6u %-6s %4u %8u %8u %8s %8s %5ums  %s\n", x->pid, x->nice, x->weight, st,
+                  x->cpu_pct, x->vcsw, x->icsw, avg, mx, x->longest_ms, x->name);
+        terminal_write_color(row, x->longest_ms >= 500 ? VGA_COLOR_LIGHT_RED : VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    }
+    terminal_writeln("GAVE UP: it slept / waited / yielded;  PREEMPT: its slice ended or a woken task took over;");
+    terminal_writeln("WAIT: from ready to running;  LONGEST: its longest run without letting other tasks in.");
+}
+
+/* renice N pid...: another share of the processor for running tasks */
+static void cmd_renice(int argc, char** argv) {
+    int i = 1;
+    if (i < argc && strcmp(argv[i], "-n") == 0) i++;
+    if (i >= argc) { terminal_writeln("usage: renice [-n] N pid...   (N: -20 most processor time .. 19 least)"); return; }
+    const char* v = argv[i++];
+    int neg = *v == '-';
+    if (*v == '-' || *v == '+') v++;
+    if (*v < '0' || *v > '9' || i >= argc) { terminal_writeln("usage: renice [-n] N pid...   (N: -20 most processor time .. 19 least)"); return; }
+    int nice = 0;
+    while (*v >= '0' && *v <= '9') nice = nice * 10 + (*v++ - '0');
+    if (neg) nice = -nice;
+    for (; i < argc; i++) {
+        if (strcmp(argv[i], "-p") == 0) continue;
+        uint32_t pid;
+        char b[96];
+        if (!k_parse_u32(argv[i], &pid)) { ksnprintf(b, sizeof(b), "renice: %s: not a process number", argv[i]); terminal_writeln(b); continue; }
+        int old = task_get_nice((int)pid);
+        if (task_set_nice((int)pid, nice) < 0) { ksnprintf(b, sizeof(b), "renice: %u: no such task", pid); terminal_writeln(b); continue; }
+        ksnprintf(b, sizeof(b), "%u (process ID) old priority %d, new priority %d", pid, old, task_get_nice((int)pid));
+        terminal_writeln(b);
+    }
+}
+
 int moncmd_dispatch(const char* line) {
     char buf[256];
     kstrlcpy(buf, line, sizeof(buf));
@@ -356,5 +422,7 @@ int moncmd_dispatch(const char* line) {
     if (strcmp(argv[0], "free") == 0) { cmd_free(argc, argv); return 1; }
     if (strcmp(argv[0], "df") == 0) { cmd_df(argc, argv); return 1; }
     if (strcmp(argv[0], "htop") == 0) { cmd_htop(); return 1; }
+    if (strcmp(argv[0], "sched") == 0) { cmd_sched(); return 1; }
+    if (strcmp(argv[0], "renice") == 0) { cmd_renice(argc, argv); return 1; }
     return 0;
 }

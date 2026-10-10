@@ -451,6 +451,12 @@ static void cmd_neofetch(int persona) {
 static void cmd_uptime(void) {
     terminal_write_color("Uptime: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     print_uptime();
+    uint32_t la[3];
+    task_loadavg(la);
+    char b[64];
+    ksnprintf(b, sizeof(b), ",  load average: %u.%02u, %u.%02u, %u.%02u", la[0] / 100, la[0] % 100,
+              la[1] / 100, la[1] % 100, la[2] / 100, la[2] % 100);
+    terminal_write(b);
     terminal_putchar('\n');
 }
 
@@ -1330,14 +1336,14 @@ static const char* const known_cmds[] = {
     "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
     "hw_info", "shutdown", "reboot", "halt", "install", "sync", "update", "installer", "disks", "history", "which", "type",
     "alias", "unalias", "export", "unset", "env", "chsh", "autologin",
-    "grep", "wc", "head", "tail", "find", "time",
+    "grep", "wc", "head", "tail", "find", "time", "nice",
     /* shell/netcmds.c + shell/wpcmd.c */
     "ifconfig", "dhcp", "ping", "nslookup", "host", "netstat", "arp", "curl", "wget",
     "cryptotest", "wallpaper", "lsusb", "usb", "httpd", "sshd", "passwd", "files", "browser", "notepad",
     /* shell/syscmds.c */
     "mount", "umount", "eject", "pkg", "apps", "taskmgr", "settings", "play", "beep", "volume", "lsaudio",
     /* shell/moncmds.c */
-    "free", "df", "htop", "lsgpu", "brightness", "resolution", "drivers", "driver", (void*)0
+    "free", "df", "htop", "sched", "renice", "lsgpu", "brightness", "resolution", "drivers", "driver", (void*)0
 };
 
 /* ── $PATH: where commands that are not built in are looked for ───── */
@@ -2509,6 +2515,31 @@ static void dispatch_cmd(const char* raw_line, int persona) {
     if (k_strcmp(line, "install")  == 0) { cmd_install();     return; }
     if (k_strcmp(line, "sync")     == 0) { cmd_sync();        return; }
     if (k_strcmp(line, "update")   == 0) { cmd_update();      return; }
+    if (k_strcmp(line, "nice") == 0 || k_strncmp(line, "nice ", 5) == 0) {
+        /* nice [-n N | -N] command: the command runs with its nice value
+         * raised by N (default 10: a smaller share of the processor;
+         * negative: more) */
+        int pid = task_current_pid(), old = task_get_nice(pid), n = 10;
+        const char* p = k_skip_spaces(line + 4);
+        if (!*p) { char b[32]; ksnprintf(b, sizeof(b), "%d\n", old); terminal_write(b); return; }
+        int have = 0;
+        if (p[0] == '-' && p[1] == 'n' && (p[2] == ' ' || !p[2])) { p = k_skip_spaces(p + 2); have = 1; }
+        else if (p[0] == '-' && ((p[1] >= '0' && p[1] <= '9') || p[1] == '-')) { p++; have = 1; }
+        if (have) {
+            int neg = 0;
+            if (*p == '-') { neg = 1; p++; } else if (*p == '+') p++;
+            if (*p < '0' || *p > '9') { terminal_write_color("usage: nice [-n N] command\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK); return; }
+            n = 0;
+            while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
+            if (neg) n = -n;
+            p = k_skip_spaces(p);
+        }
+        if (!*p) { terminal_write_color("usage: nice [-n N] command\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK); return; }
+        task_set_nice(pid, old + n);        /* (like Linux: added to the current value) */
+        dispatch(p, persona);
+        task_set_nice(pid, old);
+        return;
+    }
     if (k_strncmp(line, "time ", 5) == 0) {
         /* bash-style `time`: wall-clock duration of one command */
         uint32_t t0 = timer_ms();

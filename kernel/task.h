@@ -30,14 +30,29 @@ typedef struct {
     uint32_t     cpu_pct;
     uint32_t     ticks_total;
     int          cpu;       /* the core it runs on (0 = the boot core), -1 waiting for one */
-    int          prio;      /* TASK_PRIO_* */
+    int          prio;      /* TASK_PRIO_* (from nice: < 0 high, >= 5 background) */
+    int          nice;      /* -20 (most CPU) .. 19 (least) */
+    uint32_t     weight;    /* its share: 1024 at nice 0, x1.25 per step */
+    uint32_t     vcsw;      /* switches: it gave the processor up (sleep, wait, yield) */
+    uint32_t     icsw;      /* ... its time slice ended / a woken task took over */
+    uint32_t     lat_avg_us, lat_max_us;   /* from ready (woken) to running */
+    uint32_t     longest_ms;               /* its longest run without letting others in */
 } task_info_t;
 
 /* How big a share of the boot core a task gets when several want it:
- * the desktop's task twice a normal one, daemons a quarter. */
+ * the desktop's task twice a normal one, daemons a quarter. These are
+ * nice values -3, 0 and 6 (task_set_nice: any of -20 .. 19). */
 #define TASK_PRIO_HIGH       0
 #define TASK_PRIO_NORMAL     1
 #define TASK_PRIO_BACKGROUND 2
+
+#define TASK_NICE_MIN (-20)
+#define TASK_NICE_MAX 19
+/* nice value of task pid (`renice`, Task Manager): 0, or -1 (no such task) */
+int  task_set_nice(int pid, int nice);
+int  task_get_nice(int pid);
+/* load averages over 1, 5 and 15 minutes (tasks wanting a processor), x100 */
+void task_loadavg(uint32_t out[3]);
 
 /* Turns the currently executing context (the boot stack) into task 0. */
 void task_init(const char* main_task_name);
@@ -63,6 +78,11 @@ void task_yield(void);
  * call in loops and keeps the desktop responsive. */
 #define TASK_SLICE_MS 8
 void task_maybe_yield(void);
+/* 1 when the current task should let another run now: its time slice is
+ * over (8 ms, less when many tasks want the processor), or - after at
+ * least 1 ms - a sleeping task woke up (a key, a timer, a packet): the
+ * woken one takes over at once instead of waiting for the slice. */
+int  task_should_yield(void);
 
 /* Real sleep: marks the calling task SLEEPING and does not resume it
  * until at least `ms` milliseconds have passed (or task_wake()). */

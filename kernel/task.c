@@ -30,6 +30,14 @@
  *
  * CPU% and run times are real: measured with the TSC across each task's
  * actual run spans; halted (idle) time is charged to no task.
+ *
+ * Shares come from nice values (-20 .. 19, the weights of Linux's CFS:
+ * each step is ~1.25x). Long work gives way after a time slice that
+ * shrinks as more tasks want the processor (16 ms shared, 2 to 8 ms
+ * each), and as soon as a sleeping task wakes (after at least 1 ms):
+ * app code is switched away from by the timer for that, kernel code
+ * where it calls task_maybe_yield(). The other cores take app code by
+ * the least weighted time used there, for a slice scaled by weight.
  */
 
 typedef struct task {
@@ -47,8 +55,16 @@ typedef struct task {
     uint32_t     away_life_ms;
     uint32_t     cpu_pct;
     uint64_t     vruntime;                /* weighted cycles: who runs next */
-    uint32_t     weight;                  /* 2048 high, 1024 normal, 256 background */
+    uint32_t     weight;                  /* from nice: 1024 at 0 */
     int          prio;
+    int          nice, nice_set;          /* nice_set: chosen by the user (inherited by its threads) */
+    uint64_t     switched_in;             /* TSC when it last got the boot core */
+    uint64_t     longest_cyc;             /* longest run without a switch */
+    uint64_t     ready_tsc;               /* when it became ready (0: not waiting) */
+    uint64_t     lat_sum_cyc, lat_max_cyc;
+    uint32_t     lat_n, vcsw, icsw;
+    uint64_t     here_cyc;                /* boot-core time since it last came there */
+    uint32_t     ap_vr;                   /* weighted us of processor time, any core: whose turn for one */
     int          pinned;                  /* never runs on another core */
     volatile int cpu;                     /* 0 boot core, n another core, -1 waiting for one */
     volatile int came_home;               /* back from another core: vruntime caught up first */
@@ -95,9 +111,34 @@ static int task_index(const task_t* t) {
     return (int)(t - g_tasks);
 }
 
-static uint32_t weight_of(int prio) {
-    return prio == TASK_PRIO_HIGH ? 2048u : prio == TASK_PRIO_BACKGROUND ? 256u : 1024u;
+/* CFS's weights: nice 0 = 1024, each step ~1.25x */
+static const uint32_t NICE_WEIGHT[40] = {
+    88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916,
+     9548,  7620,  6100,  4904,  3906,  3121,  2501,  1991,  1586,  1277,
+     1024,   820,   655,   526,   423,   335,   272,   215,   172,   137,
+      110,    87,    70,    56,    45,    36,    29,    23,    18,    15,
+};
+
+static int nice_of(int prio) {
+    return prio == TASK_PRIO_HIGH ? -3 : prio == TASK_PRIO_BACKGROUND ? 6 : 0;
 }
+static int prio_of(int nice) {
+    return nice < 0 ? TASK_PRIO_HIGH : nice >= 5 ? TASK_PRIO_BACKGROUND : TASK_PRIO_NORMAL;
+}
+static void set_nice(task_t* t, int nice) {
+    if (nice < TASK_NICE_MIN) nice = TASK_NICE_MIN;
+    if (nice > TASK_NICE_MAX) nice = TASK_NICE_MAX;
+    t->nice = nice;
+    t->weight = NICE_WEIGHT[nice + 20];
+    t->prio = prio_of(nice);
+}
+
+/* sleepers: the earliest deadline (wakeup preemption looks at it), and a
+ * task_wake() that came from an interrupt */
+static volatile uint32_t g_next_wake;
+static volatile int      g_have_sleeper, g_wake_pending;
+static int               g_nr_ready = 1;    /* runnable on the boot core at the last pick */
+static int               g_involuntary;     /* the coming switch is a preemption */
 
 /* Reached only if a task's entry function ever returns (it shouldn't). */
 static void task_exit_stub(void) {
@@ -159,7 +200,11 @@ static ap_t g_ap[SMP_MAX_CPUS];
 static uint32_t g_core_pct[SMP_MAX_CPUS];   /* per core, from sysmon's last sample */
 
 /* an idle core is woken for it (interrupts off) */
+static uint32_t g_ap_min_vr;
 static void q_push(task_t* t) {
+    /* one that was away a long time starts just behind the others, not
+     * with all that time as credit */
+    if ((int32_t)(g_ap_min_vr - 40000u - t->ap_vr) > 0) t->ap_vr = g_ap_min_vr - 40000u;
     uintptr_t f = irq_save();
     q_lock();
     g_q[(g_qhead + g_qlen) % TASK_MAX] = t;
@@ -170,19 +215,36 @@ static void q_push(task_t* t) {
     irq_restore(f);
 }
 
+/* the waiting task that has had the least (weighted) time on the other
+ * cores - a heavy number cruncher does not keep a light thread waiting */
 static task_t* q_pop(void) {
     if (!g_qlen) return NULL;
     uintptr_t f = irq_save();
     q_lock();
     task_t* t = NULL;
     if (g_qlen) {
-        t = g_q[g_qhead];
+        int best = 0;
+        for (int k = 1; k < g_qlen; k++) {
+            task_t* c = g_q[(g_qhead + k) % TASK_MAX];
+            task_t* b = g_q[(g_qhead + best) % TASK_MAX];
+            if ((int32_t)(c->ap_vr - b->ap_vr) < 0) best = k;
+        }
+        t = g_q[(g_qhead + best) % TASK_MAX];
+        for (int k = best; k > 0; k--)                     /* close the gap: the others keep their order */
+            g_q[(g_qhead + k) % TASK_MAX] = g_q[(g_qhead + k - 1) % TASK_MAX];
         g_qhead = (g_qhead + 1) % TASK_MAX;
         g_qlen--;
+        if ((int32_t)(t->ap_vr - g_ap_min_vr) > 0) g_ap_min_vr = t->ap_vr;
     }
     q_unlock();
     irq_restore(f);
     return t;
+}
+
+/* a task's turn on another core: AP_SLICE_MS at nice 0, longer / shorter by weight */
+static uint32_t ap_slice(const task_t* t) {
+    uint32_t s = AP_SLICE_MS * t->weight / 1024u;
+    return s < 10 ? 10 : s > 60 ? 60 : s;
 }
 
 static int idle_cores(void) {
@@ -201,7 +263,12 @@ static void account(task_t* t) {
     if (t == &g_idle) return;
     t->window_cyc += d;
     t->life_cyc += d;
+    t->here_cyc += d;
     t->vruntime += d * 1024u / t->weight;
+    uint64_t per_us = g_tsc_per_ms / 1000u ? g_tsc_per_ms / 1000u : 1;
+    t->ap_vr += (uint32_t)(d / per_us * 1024u / t->weight);
+    uint64_t span = now - t->switched_in;
+    if (t->switched_in && span > t->longest_cyc) t->longest_cyc = span;
 }
 
 /* a task that slept (or came back from another core) starts just ahead of
@@ -213,13 +280,26 @@ static void catch_up(task_t* t) {
 }
 
 static void wake_expired(uint32_t now_ms) {
+    g_wake_pending = 0;
+    int sleepers = 0;
+    uint32_t next = now_ms + 0x7FFFFFFFu;
+    uint64_t tsc = 0;
     for (int i = 0; i < g_count; i++) {
         task_t* t = &g_tasks[i];
-        if (t->state == TASK_SLEEPING && (int32_t)(now_ms - t->sleep_until_tick) >= 0) {
+        if (t->state != TASK_SLEEPING) continue;
+        if ((int32_t)(now_ms - t->sleep_until_tick) >= 0) {
             catch_up(t);
+            if (!tsc) tsc = rdtsc();
+            t->ready_tsc = tsc;
             t->state = TASK_READY;
+        } else {
+            sleepers++;
+            if ((int32_t)(t->sleep_until_tick - next) < 0) next = t->sleep_until_tick;
         }
     }
+    uintptr_t f = irq_save();               /* (a task_wake() from an interrupt meanwhile wins) */
+    if (!g_wake_pending) { g_next_wake = next; g_have_sleeper = sleepers; }
+    irq_restore(f);
 }
 
 /* The READY task with the least virtual run time other than cur (ties go
@@ -228,15 +308,18 @@ static task_t* pick_next(task_t* cur) {
     task_t* best = NULL;
     uint64_t min_vr = ~0ull;
     int start = (cur == &g_idle || !cur) ? 0 : task_index(cur) + 1;
+    int nr = 0;
     for (int k = 0; k < g_count; k++) {
         task_t* t = &g_tasks[(start + k) % g_count];
         if (t->state != TASK_READY && t->state != TASK_RUNNING) continue;
-        if (t->came_home) { t->came_home = 0; catch_up(t); }
+        nr++;
+        if (t->came_home) { t->came_home = 0; t->here_cyc = 0; catch_up(t); }
         if (t->vruntime < min_vr) min_vr = t->vruntime;
         if (t->state != TASK_READY || t == cur) continue;
         if (!best || t->vruntime < best->vruntime) best = t;
     }
     if (min_vr != ~0ull && min_vr > g_min_vr) g_min_vr = min_vr;
+    g_nr_ready = nr ? nr : 1;
     if (!best && cur && cur != &g_idle && cur->state == TASK_READY) best = cur;
     return best;
 }
@@ -255,15 +338,31 @@ static void after_switch(task_t* self) {
     if (cpu_id() != 0) return;
     finish_switch();
     self->run_start = rdtsc();
+    self->switched_in = self->run_start;
     /* every task has its own idea of which terminal it writes to */
     terminal_vt_set_active(self->vt);
 }
 
 static void switch_to(task_t* cur, task_t* nxt) {
+    uint64_t now = rdtsc();
+    int invol = g_involuntary;
+    g_involuntary = 0;
     nxt->state = TASK_RUNNING;
     nxt->cpu = 0;
-    nxt->run_start = rdtsc();
+    nxt->run_start = now;
+    if (nxt->ready_tsc) {                   /* how long it waited to run */
+        uint64_t lat = now - nxt->ready_tsc;
+        nxt->ready_tsc = 0;
+        nxt->lat_sum_cyc += lat;
+        nxt->lat_n++;
+        if (lat > nxt->lat_max_cyc) nxt->lat_max_cyc = lat;
+    }
     if (nxt == cur) return;
+    if (cur != &g_idle) {
+        if (invol) cur->icsw++;
+        else cur->vcsw++;
+    }
+    nxt->switched_in = now;
     /* a background command (or another window) running in between must
      * not leave its terminal selected for us */
     cur->vt = terminal_vt_get_active();
@@ -286,6 +385,7 @@ static void task_trampoline(void) {
         __asm__ volatile("ldmxcsr %0" :: "m"(mxcsr));
     }
     g_current->run_start = rdtsc();
+    g_current->switched_in = g_current->run_start;
     terminal_vt_set_active(g_current->vt);
     __asm__ volatile("sti");
     g_current->entry();
@@ -339,15 +439,16 @@ void task_init(const char* main_task_name) {
     t->state = TASK_RUNNING;
     t->entry = NULL;
     t->sp = NULL;
-    t->prio = TASK_PRIO_HIGH;               /* the desktop and the main shell */
-    t->weight = weight_of(t->prio);
+    set_nice(t, nice_of(TASK_PRIO_HIGH));   /* the desktop and the main shell */
     t->pinned = 1;
     t->run_start = rdtsc();
+    t->switched_in = t->run_start;
 
     set_name(g_idle.name, "idle", TASK_NAME_MAX);
     g_idle.entry = idle_entry;
     g_idle.weight = 1024;
     g_idle.pinned = 1;
+    g_idle.prio = TASK_PRIO_NORMAL;
     g_idle.sp = fake_frame(&g_idle.stack[TASK_STACK_WORDS], task_trampoline);
 
     g_count = 1;
@@ -383,8 +484,15 @@ int task_create_stack(const char* name, void (*entry)(void), uint32_t stack_byte
     t->cpu_pct = 0;
     t->vt = 0;
     t->background = 0;
-    t->prio = TASK_PRIO_NORMAL;
-    t->weight = weight_of(t->prio);
+    /* a nice value the user chose is inherited (an app's threads) */
+    t->nice_set = g_current && g_current != &g_idle && g_current->nice_set;
+    set_nice(t, t->nice_set ? g_current->nice : 0);
+    t->switched_in = 0;
+    t->longest_cyc = 0;
+    t->ready_tsc = rdtsc();
+    t->lat_sum_cyc = t->lat_max_cyc = 0;
+    t->lat_n = t->vcsw = t->icsw = 0;
+    t->ap_vr = 0;
     t->pinned = 0;
     t->cpu = 0;
     t->came_home = 0;
@@ -406,7 +514,7 @@ int task_create_stack(const char* name, void (*entry)(void), uint32_t stack_byte
 void task_yield(void) {
     task_t* cur = g_current;
     account(cur);
-    if (cur->state == TASK_RUNNING) cur->state = TASK_READY;
+    if (cur->state == TASK_RUNNING) { cur->state = TASK_READY; cur->ready_tsc = rdtsc(); }
 
     task_t* nxt;
     for (;;) {
@@ -428,8 +536,13 @@ void task_yield(void) {
 
 void task_sleep_ms(uint32_t ms) {
     if (ms == 0) ms = 1;
-    g_current->sleep_until_tick = timer_ms() + ms;
+    uint32_t until = timer_ms() + ms;
+    g_current->sleep_until_tick = until;
     g_current->state = TASK_SLEEPING;
+    uintptr_t f = irq_save();
+    if (!g_have_sleeper || (int32_t)(until - g_next_wake) < 0) g_next_wake = until;
+    g_have_sleeper = 1;
+    irq_restore(f);
     /* task_yield() only picks READY tasks, and a sleeper only becomes
      * READY once its deadline passes (or task_wake()), so one call is
      * enough - no early-wakeup guard loop needed. */
@@ -444,8 +557,10 @@ void task_wake(int pid) {
     /* Safe from IRQ context: only moves the deadline, and the scheduler
      * re-checks deadlines after every hlt. */
     if (pid < 0 || pid >= g_count) return;
-    if (g_tasks[pid].state == TASK_SLEEPING)
+    if (g_tasks[pid].state == TASK_SLEEPING) {
         g_tasks[pid].sleep_until_tick = timer_ms();
+        g_wake_pending = 1;                 /* (task_should_yield: someone woke) */
+    }
 }
 
 int task_count(void) {
@@ -464,6 +579,14 @@ void task_snapshot(task_info_t* out, int max_count) {
         out[i].ticks_total = (uint32_t)(t->life_cyc / per_tick) + t->away_life_ms / 10u;
         out[i].cpu = t->state == TASK_AWAY ? t->cpu : 0;
         out[i].prio = t->prio;
+        out[i].nice = t->nice;
+        out[i].weight = t->weight;
+        out[i].vcsw = t->vcsw;
+        out[i].icsw = t->icsw;
+        uint64_t per_us = g_tsc_per_ms / 1000u ? g_tsc_per_ms / 1000u : 1;
+        out[i].lat_avg_us = t->lat_n ? (uint32_t)(t->lat_sum_cyc / t->lat_n / per_us) : 0;
+        out[i].lat_max_us = (uint32_t)(t->lat_max_cyc / per_us);
+        out[i].longest_ms = (uint32_t)(t->longest_cyc / g_tsc_per_ms);
     }
 }
 
@@ -518,10 +641,35 @@ uint32_t task_core_pct(int cpu) {
     return cpu >= 0 && cpu < SMP_MAX_CPUS ? g_core_pct[cpu] : 0;
 }
 
+/* load average, as Linux counts it: tasks running or wanting a processor,
+ * averaged every 5 s into exponentially decaying 1 / 5 / 15 minute
+ * figures (fixed point, 11 bits) - here from 25 samples per 5 s */
+static uint32_t g_load[3];                  /* x2048 */
+static void sample_load(void) {
+    static uint32_t sum, n;
+    int run = 0;
+    for (int i = 0; i < g_count; i++) {
+        task_t* t = &g_tasks[i];
+        if (t == g_current) continue;       /* (sysmon itself) */
+        if (t->state == TASK_READY || t->state == TASK_RUNNING || t->state == TASK_AWAY) run++;
+    }
+    sum += (uint32_t)run;
+    if (++n < 25) return;
+    uint32_t active = sum * 2048u / n;
+    sum = n = 0;
+    static const uint32_t E[3] = { 1884, 2014, 2037 };     /* 2048 * e^(-5 s / 1, 5, 15 min) */
+    for (int k = 0; k < 3; k++) g_load[k] = (g_load[k] * E[k] + active * (2048u - E[k])) >> 11;
+}
+
+void task_loadavg(uint32_t out[3]) {
+    for (int k = 0; k < 3; k++) out[k] = (g_load[k] * 100u + 1024u) >> 11;
+}
+
 static void sysmon_entry(void) {
     task_set_background();
     for (;;) {
         recompute_cpu_window();
+        sample_load();
         for (int c = 1; c < cpu_count(); c++)
             if (g_ap[c].used == 1) {
                 g_ap[c].used = 2;
@@ -547,14 +695,45 @@ int task_is_background(void) {
 void task_set_priority(int prio) {
     task_t* t = g_current;
     if (!t || t == &g_idle || prio < TASK_PRIO_HIGH || prio > TASK_PRIO_BACKGROUND) return;
+    if (t->nice_set) return;                /* the user's choice stays */
     account(t);
-    t->prio = prio;
-    t->weight = weight_of(prio);
+    set_nice(t, nice_of(prio));
+}
+
+int task_set_nice(int pid, int nice) {
+    if (pid < 0 || pid >= g_count) return -1;
+    task_t* t = &g_tasks[pid];
+    if (t->state == TASK_UNUSED) return -1;
+    if (t == g_current) account(t);
+    set_nice(t, nice);
+    t->nice_set = 1;
+    return 0;
+}
+
+int task_get_nice(int pid) {
+    if (pid < 0 || pid >= g_count || g_tasks[pid].state == TASK_UNUSED) return 0;
+    return g_tasks[pid].nice;
+}
+
+int task_should_yield(void) {
+    task_t* t = g_current;
+    if (!t || t == &g_idle) return 0;
+    uint64_t ran = rdtsc() - t->run_start;
+    /* the slice: 16 ms shared by the tasks that want the processor, 2 to 8 ms each */
+    uint32_t slice = 16u / (uint32_t)g_nr_ready;
+    if (slice < 2) slice = 2;
+    if (slice > TASK_SLICE_MS) slice = TASK_SLICE_MS;
+    if (ran >= (uint64_t)slice * g_tsc_per_ms) return 1;
+    if (ran < g_tsc_per_ms) return 0;       /* at least 1 ms, or switching costs more than it gives */
+    /* a sleeper's time has come (or a driver woke one) */
+    return g_wake_pending || (g_have_sleeper && (int32_t)(timer_ms() - g_next_wake) >= 0);
 }
 
 void task_maybe_yield(void) {
-    task_t* t = g_current;
-    if (t && rdtsc() - t->run_start >= (uint64_t)TASK_SLICE_MS * g_tsc_per_ms) task_yield();
+    if (task_should_yield()) {
+        g_involuntary = 1;
+        task_yield();
+    }
 }
 
 /* ── other cores ─────────────────────────────────────────────────── */
@@ -566,7 +745,21 @@ void task_pin(void) {
 int task_offload(void) {
     task_t* cur = g_current;
     if (cpu_count() < 2 || cur == &g_idle || cur->pinned || cur->state != TASK_RUNNING) return 0;
-    if (idle_cores() <= g_qlen) return 0;   /* no core free for it */
+    if (idle_cores() <= g_qlen) {
+        /* no core free: the boot core takes turns with the other cores -
+         * after its slice, it goes into the queue if a waiting task has
+         * had less processor time (else the busy threads stuck here would
+         * share one core while the others share the rest) */
+        if (!g_qlen || cur->here_cyc + (rdtsc() - cur->run_start) < (uint64_t)ap_slice(cur) * g_tsc_per_ms) return 0;
+        int less = 0;
+        uintptr_t f = irq_save();
+        q_lock();
+        for (int k = 0; k < g_qlen; k++)
+            if ((int32_t)(g_q[(g_qhead + k) % TASK_MAX]->ap_vr - cur->ap_vr) < 0) { less = 1; break; }
+        q_unlock();
+        irq_restore(f);
+        if (!less) return 0;
+    }
     /* (interrupts stay on, as in task_yield: the task switched to expects them) */
     account(cur);
     cur->state = TASK_AWAY;
@@ -610,6 +803,7 @@ void task_ap_loop(int cpu) {
         task_switch(&a->idle_sp, t->sp);
         /* t stopped: a system call, its turn ended, or a fault */
         a->task = NULL;
+        t->ap_vr += (timer_ms() - a->since) * 1000u * 1024u / t->weight + 1;
         __sync_fetch_and_add(&t->away_window_ms, timer_ms() - a->since);
         __sync_fetch_and_add(&a->busy_ms, timer_ms() - a->counted);
         if (a->reason == AP_REQUEUE) {
@@ -639,7 +833,7 @@ void task_ipi(void) {
     if (!t) return;                         /* the idle loop looks at the queue itself */
     uint32_t ran = timer_ms() - a->since;
     if (ran >= AP_HOME_MS) ap_switch_out(a, t, AP_HOME);
-    else if (g_qlen && ran >= AP_SLICE_MS) ap_switch_out(a, t, AP_REQUEUE);
+    else if (g_qlen && ran >= ap_slice(t)) ap_switch_out(a, t, AP_REQUEUE);
 }
 
 void task_smp_tick(void) {
@@ -654,7 +848,9 @@ void task_smp_tick(void) {
             continue;
         }
         uint32_t ran = now - a->since;
-        if (ran >= AP_HOME_MS || (g_qlen && ran >= AP_SLICE_MS)) smp_send_ipi(c, SMP_VEC_KICK);
+        task_t* t = a->task;
+        if (!t) continue;
+        if (ran >= AP_HOME_MS || (g_qlen && ran >= ap_slice(t))) smp_send_ipi(c, SMP_VEC_KICK);
     }
 }
 

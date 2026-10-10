@@ -172,13 +172,58 @@ static int row_at(int mx, int my) {
     return r < g_nrows ? r : -1;
 }
 
+/* Processes tab: the task shown on list row r (unused slots are skipped), -1 */
+static int g_menu_pid = -1;
+static int proc_at(int mx, int my) {
+    int lx = g_win.x + 8, lw = g_win.w - 16;
+    if (mx < lx || mx >= lx + lw || my < list_top()) return -1;
+    int r = (my - list_top()) / ROW_H;
+    static task_info_t t[TASK_MAX];
+    int n = task_count();
+    if (n > TASK_MAX) n = TASK_MAX;
+    task_snapshot(t, n);
+    for (int i = 0; i < n; i++) {
+        if (t[i].state == TASK_UNUSED) continue;
+        if (r-- == 0) return (int)t[i].pid;
+    }
+    return -1;
+}
+
+static const struct { const char* name; int nice; } PRIOS[] = {
+    { "High", -10 }, { "Above normal", -5 }, { "Normal", 0 }, { "Below normal", 5 }, { "Low", 10 },
+};
+
 static void menu_cb(int id, void* arg) {
     (void)arg;
     if (id == 1) switch_to(g_menu_row);
     else if (id == 2) end_task(g_menu_row);
+    else if (id >= 10 && id < 15 && g_menu_pid >= 0) {
+        int k = id - 10;
+        if (task_set_nice(g_menu_pid, PRIOS[k].nice) == 0)
+            ksnprintf(g_status, sizeof(g_status), "Task %d: priority %s (nice %d)", g_menu_pid, PRIOS[k].name, PRIOS[k].nice);
+        g_gen++;
+    }
 }
 
 void taskmgr_rclick(int mx, int my) {
+    if (g_tab == TAB_PROCS) {
+        /* a process: its priority (nice value) */
+        int pid = proc_at(mx, my);
+        if (pid < 0) return;
+        g_menu_pid = pid;
+        int cur = task_get_nice(pid);
+        static char labels[5][32];
+        ctx_item_t items[5];
+        for (int k = 0; k < 5; k++) {
+            ksnprintf(labels[k], sizeof(labels[k]), "%s%s", cur == PRIOS[k].nice ? "* " : "  ", PRIOS[k].name);
+            items[k].label = labels[k];
+            items[k].id = 10 + k;
+            items[k].disabled = 0;
+        }
+        ctxmenu_open(mx, my, items, 5, menu_cb, NULL);
+        g_gen++;
+        return;
+    }
     if (g_tab != TAB_APPS) return;
     int r = row_at(mx, my);
     if (r < 0) return;
@@ -308,7 +353,7 @@ void taskmgr_draw(const fb_info_t* fi) {
         int lh = H - BODY_Y - 30;
         bevel(lx, y + BODY_Y, lw, lh, C_LIST, 0x0010141Cu, 0x00404B5Cu);
         gfx_fill_rect(lx + 1, y + BODY_Y + 1, lw - 2, ROW_H, 0x00252C37u);
-        gfx_draw_text(lx + 8, y + BODY_Y + 4, "PID  Name                    State     CPU   Time", C_DIM, 0x00252C37u);
+        gfx_draw_text(lx + 8, y + BODY_Y + 4, "PID  Name                    State     CPU   Time   Prio", C_DIM, 0x00252C37u);
         int row = 0, maxr = (lh - ROW_H - 4) / ROW_H;
         for (int i = 0; i < n && row < maxr; i++) {
             if (t[i].state == TASK_UNUSED) continue;
@@ -316,8 +361,8 @@ void taskmgr_draw(const fb_info_t* fi) {
             char st[16];
             if (t[i].state == TASK_AWAY && t[i].cpu > 0) ksnprintf(st, sizeof(st), "core %d", t[i].cpu);
             else kstrlcpy(st, t[i].state == TASK_AWAY ? "wait core" : task_state_str(t[i].state), sizeof(st));
-            ksnprintf(line, sizeof(line), "%-4u %-23s %-9s %3u%%  %u:%02u", t[i].pid, t[i].name,
-                      st, t[i].cpu_pct, s / 60, s % 60);
+            ksnprintf(line, sizeof(line), "%-4u %-23s %-9s %3u%%  %u:%02u   %3d", t[i].pid, t[i].name,
+                      st, t[i].cpu_pct, s / 60, s % 60, t[i].nice);
             gfx_draw_text(lx + 8, list_top() + row * ROW_H + 3, line, t[i].cpu_pct >= 50 ? 0x00F0A060u : C_TEXT, C_LIST);
             row++;
         }
