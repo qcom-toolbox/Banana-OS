@@ -19,8 +19,8 @@
 
 void settings_open(void);
 #define SETTINGS_PAGE_DISPLAY 0
-#define SETTINGS_PAGE_STARTUP 6
-#define SETTINGS_PAGE_ABOUT   7
+#define SETTINGS_PAGE_STARTUP 7
+#define SETTINGS_PAGE_ABOUT   8
 void settings_show_status(const char* msg);
 void settings_open_page(int page);
 void settings_close(void);

@@ -566,6 +566,32 @@ void mouse_inject(int dx, int dy, int buttons) {
  * controller is left alone too (it is the keyboard's). The task side
  * (mouse_read, keyboard_try_getchar) runs with interrupts off while it
  * touches the controller or the packet queue. */
+/* pointer speed: the motion times SPEED_X20[speed] / 20, the fractions
+ * kept for the next move (slow speeds still move by single pixels) */
+static const int SPEED_X20[11] = { 20, 5, 8, 12, 16, 20, 26, 34, 44, 56, 70 };
+static int g_mouse_speed = 5, g_frac_x, g_frac_y;
+
+void mouse_set_speed(int speed) {
+    if (speed < 1) speed = 1;
+    if (speed > 10) speed = 10;
+    g_mouse_speed = speed;
+    g_frac_x = g_frac_y = 0;
+}
+int mouse_get_speed(void) { return g_mouse_speed; }
+
+static int scale_axis(int d, int* frac) {
+    if (!d) return 0;
+    if ((d > 0 && *frac < 0) || (d < 0 && *frac > 0)) *frac = 0;     /* turned back */
+    int v = d * SPEED_X20[g_mouse_speed] + *frac;
+    *frac = v % 20;
+    return v / 20;
+}
+static void scale_motion(int* dx, int* dy) {
+    if (g_mouse_speed == 5) return;
+    *dx = scale_axis(*dx, &g_frac_x);
+    *dy = scale_axis(*dy, &g_frac_y);
+}
+
 int mouse_irq_motion(int* dx, int* dy) {
     if (!mouse_enabled || syn_detected) return 0;
     for (;;) {
@@ -585,6 +611,7 @@ int mouse_irq_motion(int* dx, int* dy) {
         mouse_ring_len--;
         any = 1;
     }
+    scale_motion(&sx, &sy);
     *dx = sx;
     *dy = sy;
     return any;
@@ -605,6 +632,7 @@ mouse_state_t mouse_read(void) {
     usb_poll();                  /* USB mice report through here too: every frame */
     uintptr_t f = irq_off();
     mouse_state_t m = mouse_read_locked();
+    scale_motion(&m.dx, &m.dy);
     irq_on(f);
     return m;
 }

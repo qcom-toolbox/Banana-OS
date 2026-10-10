@@ -21,6 +21,7 @@
 #include "fsdisk.h"
 #include "login.h"
 #include "utf8.h"
+#include "usb.h"
 
 #define TITLE_H  20
 #define SIDE_W   132
@@ -36,8 +37,8 @@
 #define C_ACCENT 0x003A7BD5u
 #define C_SEL    0x002C3E5Cu
 
-enum { PG_DISPLAY = 0, PG_SCREEN, PG_SOUND, PG_KEYBOARD, PG_NETWORK, PG_TIME, PG_STARTUP, PG_ABOUT, PG_COUNT };
-static const char* const PAGE_NAMES[PG_COUNT] = { "Display", "Screen", "Sound", "Keyboard", "Network", "Date & time", "Startup", "About" };
+enum { PG_DISPLAY = 0, PG_SCREEN, PG_SOUND, PG_KEYBOARD, PG_MOUSE, PG_NETWORK, PG_TIME, PG_STARTUP, PG_ABOUT, PG_COUNT };
+static const char* const PAGE_NAMES[PG_COUNT] = { "Display", "Screen", "Sound", "Keyboard", "Mouse", "Network", "Date & time", "Startup", "About" };
 
 static const char* const LAYOUTS[] = { "EN (Default)", "fr_CH", "FR", "DE", "de_CH", "BEPO" };
 #define NLAYOUTS ((int)(sizeof(LAYOUTS) / sizeof(LAYOUTS[0])))
@@ -48,7 +49,7 @@ static int        g_page;
 static uint32_t   g_gen;
 static char       g_status[96];
 static int        g_muted, g_vol_before_mute = 80;
-static int        g_dragging_vol;
+static int        g_dragging_vol, g_dragging_speed;
 static uint32_t   g_tick_s;
 
 static int inside(int mx, int my, int x, int y, int w, int h) { return mx >= x && mx < x + w && my >= y && my < y + h; }
@@ -182,6 +183,44 @@ static void draw_sound(void) {
     button(sx + sw + 12, sy, 40, "Max", 0);
     button(x, sy + 36, 100, g_muted ? "Unmute" : "Mute", g_muted);
     button(x + 112, sy + 36, 120, "Test sound", 0);
+}
+
+/* Mouse: the pointer speed, 1..10 on the same kind of slider */
+static void speed_rect(int* x, int* y, int* w) { *x = cx0(); *y = cy0() + 64; *w = cw() - 60; }
+
+static void set_speed_at(int mx) {
+    int x, y, w;
+    speed_rect(&x, &y, &w);
+    int v = 1 + ((mx - x) * 9 + (w > 0 ? w : 1) / 2) / (w > 0 ? w : 1);
+    mouse_set_speed(v);
+}
+
+static void save_speed(void) {
+    char v[8];
+    ksnprintf(v, sizeof(v), "%d", mouse_get_speed());
+    save_setting("mouse_speed", v);
+}
+
+static void draw_mouse(void) {
+    int x = cx0(), y = cy0();
+    label(x, y, "Mouse", C_HEAD);
+    label(x, y + 18, "How far the pointer moves when you move the mouse:", C_DIM);
+    int sp = mouse_get_speed();
+    char line[64];
+    ksnprintf(line, sizeof(line), "Pointer speed: %d%s", sp, sp == 5 ? " (normal)" : sp < 5 ? " (slower)" : " (faster)");
+    label(x, y + 44, line, C_TEXT);
+    int sx, sy, sw;
+    speed_rect(&sx, &sy, &sw);
+    bevel(sx, sy + 6, sw, 8, 0x00141920u, 0x0010141Cu, 0x00404B5Cu);
+    gfx_fill_rect(sx + 1, sy + 7, (sw - 2) * (sp - 1) / 9, 6, C_ACCENT);
+    for (int i = 0; i < 10; i++) gfx_fill_rect(sx + 4 + (sw - 10) * i / 9, sy + 22, 2, 4, C_DIM);
+    int kx = sx + (sw - 10) * (sp - 1) / 9;
+    bevel(kx, sy, 10, 20, 0x00C8D2E0u, 0x00FFFFFFu, 0x00606A78u);
+    label(sx, sy + 32, "Slow", C_DIM);
+    label(sx + sw - 32, sy + 32, "Fast", C_DIM);
+    button(x, sy + 56, 70, "Slower", 0);
+    button(x + 80, sy + 56, 70, "Faster", 0);
+    button(x + 160, sy + 56, 70, "Normal", sp == 5);
 }
 
 static void draw_keyboard(void) {
@@ -517,6 +556,7 @@ void settings_draw(const fb_info_t* fi) {
     case PG_SCREEN:   draw_screen(); break;
     case PG_SOUND:    draw_sound(); break;
     case PG_KEYBOARD: draw_keyboard(); break;
+    case PG_MOUSE:    draw_mouse(); break;
     case PG_NETWORK:  draw_network(); break;
     case PG_TIME:     draw_time(); break;
     case PG_STARTUP:  draw_startup(); break;
@@ -607,6 +647,17 @@ void settings_click(int mx, int my) {
                 return;
             }
         }
+    } else if (g_page == PG_MOUSE) {
+        int sx, sy, sw;
+        speed_rect(&sx, &sy, &sw);
+        int sp = mouse_get_speed();
+        if (inside(mx, my, sx - 6, sy, sw + 12, 28)) { set_speed_at(mx); g_dragging_speed = 1; return; }
+        if (inside(mx, my, x, sy + 56, 70, 20)) mouse_set_speed(sp - 1);
+        else if (inside(mx, my, x + 80, sy + 56, 70, 20)) mouse_set_speed(sp + 1);
+        else if (inside(mx, my, x + 160, sy + 56, 70, 20)) mouse_set_speed(5);
+        else return;
+        save_speed();
+        ksnprintf(g_status, sizeof(g_status), "Pointer speed: %d", mouse_get_speed());
     } else if (g_page == PG_STARTUP) {
         click_startup(mx, my);
     } else if (g_page == PG_NETWORK) {
@@ -626,6 +677,16 @@ void settings_mouse(int mx, int my, int left) {
     if (g_dragging_vol) {
         if (left) { set_volume_at(mx); g_gen++; }
         else { g_dragging_vol = 0; save_volume(); g_gen++; }
+        return;
+    }
+    if (g_dragging_speed) {
+        if (left) { set_speed_at(mx); g_gen++; }
+        else {
+            g_dragging_speed = 0;
+            save_speed();
+            ksnprintf(g_status, sizeof(g_status), "Pointer speed: %d", mouse_get_speed());
+            g_gen++;
+        }
         return;
     }
     if (win_mouse(&g_win, mx, my, left)) g_gen++;
@@ -652,7 +713,7 @@ void settings_close(void) {
     memset(g_pw, 0, sizeof(g_pw));
     g_pw_focus = -1;
     g_win.dragging = g_win.resizing = 0;
-    g_dragging_vol = 0;
+    g_dragging_vol = g_dragging_speed = 0;
     g_gen++;
 }
 
@@ -667,7 +728,7 @@ uint32_t settings_signature(void) {
         if (s != g_tick_s) { g_tick_s = s; g_gen++; }
     }
     return g_gen * 2654435761u ^ (uint32_t)(g_win.x << 16 | g_win.y) ^ (uint32_t)(g_win.w << 20 | g_win.h << 4) ^
-           (uint32_t)g_page << 28 ^ (uint32_t)audio_get_volume() << 8 ^ wallpaper_generation() ^ (uint32_t)gfx_smooth_text() << 27;
+           (uint32_t)g_page << 28 ^ (uint32_t)audio_get_volume() << 8 ^ (uint32_t)mouse_get_speed() << 15 ^ wallpaper_generation() ^ (uint32_t)gfx_smooth_text() << 27;
 }
 
 void settings_boot(void) {
@@ -677,6 +738,10 @@ void settings_boot(void) {
         if (k_parse_u32(v, &n) && n <= 100) audio_set_volume((int)n);
     }
     if (cfg_get(CFG_SETTINGS, "keyboard", v, sizeof(v))) keyboard_set_layout(v);
+    if (cfg_get(CFG_SETTINGS, "mouse_speed", v, sizeof(v))) {
+        uint32_t n = 0;
+        if (k_parse_u32(v, &n)) mouse_set_speed((int)n);
+    }
     if (cfg_get(CFG_SETTINGS, "ui_font", v, sizeof(v))) gfx_set_smooth_text(strcmp(v, "classic") != 0);
     if (cfg_get(CFG_SETTINGS, "resolution", v, sizeof(v))) {       /* "1024x768" */
         uint32_t w = 0, h = 0;

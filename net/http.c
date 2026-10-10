@@ -311,8 +311,19 @@ static stream_t* open_stream(const url_t* u, const http_request_t* req, http_res
     return s;
 }
 
+/* a GET whose connection broke in the middle of the body goes on where
+ * it stopped (Range: bytes=N-), so one stalled connection does not lose
+ * a whole download */
+typedef struct {
+    uint32_t from;          /* bytes already delivered (0: a fresh request) */
+    int      got_headers;   /* the first answer's headers arrived */
+    int      resumable;     /* ... a 200 of known length, not chunked, to a GET */
+    int      status;        /* the first answer's status and length */
+    int32_t  total;
+} resume_t;
+
 static int do_request(const url_t* u, const http_request_t* req, http_response_t* resp,
-                      int* redirect, char* errmsg, uint32_t errlen) {
+                      int* redirect, resume_t* rs, char* errmsg, uint32_t errlen) {
     const char* method = req->method ? req->method : "GET";
     int is_head = strcmp(method, "HEAD") == 0;
     uint32_t timeout = req->timeout_ms ? req->timeout_ms : 20000;
@@ -336,6 +347,8 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
     char* rq = (char*)kmalloc(rqcap);
     if (!rq) { s_close(s); kfree(s); return NET_ERR_NOMEM; }
     char body_hdr[160] = "";
+    char range_hdr[48] = "";
+    if (rs->from) ksnprintf(range_hdr, sizeof(range_hdr), "Range: bytes=%u-\r\n", rs->from);
     if (req->body)
         ksnprintf(body_hdr, sizeof(body_hdr), "Content-Type: %s\r\nContent-Length: %u\r\n",
                   req->content_type ? req->content_type : "application/x-www-form-urlencoded", req->body_len);
@@ -344,11 +357,11 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
         "Host: %s\r\n"
         "User-Agent: %s\r\n"
         "Accept: */*\r\n"
-        "%s%s"
+        "%s%s%s"
         "Connection: keep-alive\r\n"
         "\r\n",
         method, u->path, host_hdr, req->user_agent ? req->user_agent : "BananaOS/0.5",
-        body_hdr, req->extra_headers ? req->extra_headers : "");
+        range_hdr, body_hdr, req->extra_headers ? req->extra_headers : "");
     if (rqlen >= (int)rqcap) rqlen = (int)rqcap - 1;
     if (req->on_request) req->on_request(req->ctx, rq);
     rc = s_write(s, rq, (uint32_t)rqlen);
@@ -381,6 +394,7 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
     char* line = (char*)kmalloc(HTTP_URL_MAX + 256);  /* a Location: line can be a whole long URL */
     if (!raw || !line) { kfree(raw); kfree(line); s_close(s); kfree(s); return NET_ERR_NOMEM; }
     int chunked = 0;
+    int64_t range_start = -1;                   /* Content-Range: bytes <start>-... */
     int conn_close = 0;                         /* the server ends the connection after this answer */
     for (;;) {
         uint32_t raw_len = 0;
@@ -442,12 +456,38 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
                 else if (strstr(v, "keep-alive") || strstr(v, "Keep-Alive")) conn_close = 0;
             } else if (header_is(line, "Content-Type", &v)) {
                 kstrlcpy(resp->content_type, v, sizeof(resp->content_type));
+            } else if (header_is(line, "Content-Range", &v)) {
+                if (strncasecmp(v, "bytes ", 6) == 0) {
+                    uint32_t n;
+                    if (k_parse_u32(v + 6, &n)) range_start = n;
+                }
             }
         }
         if (status >= 100 && status < 200) continue;   /* 100 Continue & co */
         break;
     }
-    if (req->on_headers) req->on_headers(req->ctx, resp, raw);
+    int32_t want = resp->content_length;
+    if (rs->from) {
+        /* a resumed transfer: the rest of the same body, or nothing (the
+         * caller already has the headers and the first part) */
+        if (resp->status != 206 || range_start != (int64_t)rs->from || chunked) {
+            ksnprintf(errmsg, errlen, "the connection broke after %u bytes and the server cannot resume", rs->from);
+            rc = NET_ERR_PROTO;
+            goto fail;
+        }
+        resp->status = rs->status;
+        resp->content_length = rs->total;
+    } else {
+        int redir = resp->status >= 300 && resp->status < 400;
+        if (!redir) {
+            rs->got_headers = 1;
+            rs->status = resp->status;
+            rs->total = resp->content_length;
+            rs->resumable = resp->status == 200 && resp->content_length > 0 && !chunked &&
+                            strcmp(method, "GET") == 0 && !req->body;
+        }
+        if (req->on_headers) req->on_headers(req->ctx, resp, raw);
+    }
 
     int is_redirect = (resp->status == 301 || resp->status == 302 || resp->status == 303 ||
                        resp->status == 307 || resp->status == 308) && resp->location[0];
@@ -460,7 +500,7 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
     body_ctx_t b = { req, resp, 0 };
     if (is_head || resp->status == 204 || resp->status == 304) rc = NET_OK;
     else if (chunked) rc = read_chunked(s, &b);
-    else if (resp->content_length >= 0) rc = read_body_bytes(s, &b, resp->content_length);
+    else if (want >= 0) rc = read_body_bytes(s, &b, want);
     else rc = read_body_bytes(s, &b, -1);
     if (rc != NET_OK) {
         if (b.aborted) ksnprintf(errmsg, errlen, "transfer aborted");
@@ -514,7 +554,28 @@ int http_fetch(const char* url, const http_request_t* req, http_response_t* resp
         /* cookies are per host - and the previous hop may have set one */
         if (cur_req.headers_for) cur_req.extra_headers = cur_req.headers_for(cur_req.ctx, w->cur);
         int redirect = 0;
-        rc = do_request(&w->u, req, resp, &redirect, errmsg, errmsg_len);
+        resume_t rs = { 0, 0, 0, 0, 0 };
+        rc = do_request(&w->u, req, resp, &redirect, &rs, errmsg, errmsg_len);
+        /* the connection broke (or stalled) in the middle of the body: go on
+         * from there on a new one, while that gets somewhere */
+        int tries = 0;
+        uint32_t last = resp->body_bytes;
+        while (rc != NET_OK && rs.resumable && tries < 6 && resp->body_bytes < (uint32_t)rs.total &&
+               (rc == NET_ERR_TIMEOUT || rc == NET_ERR_RESET || rc == NET_ERR_CLOSED || rc == NET_ERR_PROTO)) {
+            if (rs.from && resp->body_bytes == rs.from && rc == NET_ERR_PROTO) break;   /* cannot resume */
+            tries = resp->body_bytes > last ? 1 : tries + 1;
+            last = resp->body_bytes;
+            rs.from = resp->body_bytes;
+            info(req, "Connection lost after %u bytes, resuming", rs.from);
+            redirect = 0;
+            rc = do_request(&w->u, req, resp, &redirect, &rs, errmsg, errmsg_len);
+        }
+        /* no answer at all from a GET: once more on a new connection */
+        if (rc == NET_ERR_TIMEOUT && !rs.got_headers && !req->body && (!req->method || strcmp(req->method, "GET") == 0)) {
+            info(req, "No answer, trying again");
+            redirect = 0;
+            rc = do_request(&w->u, req, resp, &redirect, &rs, errmsg, errmsg_len);
+        }
         if (rc != NET_OK || !redirect) goto out;
         resolve_location(&w->u, resp->location, w->cur, sizeof(w->cur));
         info(req, "Redirected (%d) to %s", resp->status, w->cur);
