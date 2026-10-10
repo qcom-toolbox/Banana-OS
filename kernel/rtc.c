@@ -1,4 +1,6 @@
 #include "rtc.h"
+#include "timer.h"
+#include "kstring.h"
 
 #define CMOS_ADDR 0x70
 #define CMOS_DATA 0x71
@@ -87,4 +89,64 @@ int rtc_read_datetime(rtc_datetime_t* out) {
     b.year = (uint16_t)(2000u + (b.year % 100u)); /* best effort */
     *out = b;
     return 0;
+}
+
+
+/* ── Unix time (days from the civil date: H. Hinnant's algorithms) ── */
+
+static int32_t days_from_civil(int y, int m, int d) {
+    y -= m <= 2;
+    int era = (y >= 0 ? y : y - 399) / 400;
+    int yoe = y - era * 400;
+    int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+uint32_t rtc_make_time(int year, int month, int day, int hour, int minute, int second) {
+    if (year < 1970 || month < 1 || month > 12 || day < 1 || day > 31) return 0;
+    return (uint32_t)days_from_civil(year, month, day) * 86400u + (uint32_t)(hour * 3600 + minute * 60 + second);
+}
+
+void rtc_split_time(uint32_t t, rtc_datetime_t* out) {
+    int32_t z = (int32_t)(t / 86400u) + 719468;
+    uint32_t secs = t % 86400u;
+    int era = (z >= 0 ? z : z - 146096) / 146097;
+    int doe = z - era * 146097;
+    int yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int y = yoe + era * 400;
+    int doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    int mp = (5 * doy + 2) / 153;
+    int d = doy - (153 * mp + 2) / 5 + 1;
+    int m = mp + (mp < 10 ? 3 : -9);
+    out->year = (uint16_t)(y + (m <= 2));
+    out->month = (uint8_t)m;
+    out->day = (uint8_t)d;
+    out->hour = (uint8_t)(secs / 3600u);
+    out->minute = (uint8_t)((secs / 60u) % 60u);
+    out->second = (uint8_t)(secs % 60u);
+}
+
+uint32_t rtc_now(void) {
+    static uint32_t base, base_ms;
+    static int have;
+    uint32_t ms = timer_ms();
+    if (!have || ms - base_ms > 600000u) {
+        rtc_datetime_t dt;
+        if (rtc_read_datetime(&dt) == 0 && dt.year >= 1970) {
+            base = rtc_make_time(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+            base_ms = ms;
+            have = 1;
+        } else if (!have) {
+            return 0;
+        }
+    }
+    return base + (ms - base_ms) / 1000u;
+}
+
+void rtc_format(uint32_t t, char* out, int cap) {
+    if (!t) { if (cap > 0) out[0] = 0; return; }
+    rtc_datetime_t dt;
+    rtc_split_time(t, &dt);
+    ksnprintf(out, (size_t)cap, "%02u/%02u/%04u %02u:%02u", dt.day, dt.month, dt.year, dt.hour, dt.minute);
 }

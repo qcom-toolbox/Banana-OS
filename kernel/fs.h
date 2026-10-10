@@ -28,6 +28,8 @@ typedef struct {
     int32_t  sib;        /* next file in the same folder */
     uint32_t last_use;   /* timer_ms() it was last used (eviction takes the oldest first) */
     uint16_t pins;       /* held by someone for a while (fs_pin): never evicted */
+    uint32_t mtime;      /* last change of its data, ctime: made (rtc_now(); 0 = not known) */
+    uint32_t ctime;
 } fs_file_t;
 
 typedef struct {
@@ -40,6 +42,8 @@ typedef struct {
     int32_t  sib;        /* next folder in the same folder */
     int32_t  kid_dir, last_dir;     /* its subfolders, in creation order */
     int32_t  kid_file, last_file;   /* its files */
+    uint32_t mtime;      /* last time something in it was added, removed or renamed; ctime: made */
+    uint32_t ctime;
 } fs_dir_t;
 
 void fs_init(void);
@@ -206,6 +210,10 @@ const char* fs_mount_point(int mnt);
 /* 1 if the last failed fs_* call failed because the volume reported an
  * error (full, unplugged...) rather than a bad name or path */
 int  fs_io_error(void);
+/* the dates of file (is_dir 0) or folder idx: loading a saved tree, a volume */
+void fs_set_times(int is_dir, int idx, uint32_t mtime, uint32_t ctime);
+/* touch: makes the file if needed, else its modification date becomes now */
+int  fs_touch(const char* path);
 /* 1 once the tree exists (fs_init() ran, or a disk was loaded) */
 int  fs_is_ready(void);
 

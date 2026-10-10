@@ -1,4 +1,5 @@
 #include "fs.h"
+#include "rtc.h"
 #include "terminal.h"
 #include "types.h"
 #include "kheap.h"
@@ -295,6 +296,7 @@ static void used_now(fs_file_t* f) { f->last_use = timer_ms(); }
 /* bumped by every change to the tree or a file (the disk autosave watches it) */
 static uint32_t g_fs_gen = 1;
 static void touched(void) { g_fs_gen++; }
+static void dir_changed(int d);
 uint32_t fs_generation(void) { return g_fs_gen; }
 
 static int mkdir_in(int parent, const char* name_in) {
@@ -317,12 +319,20 @@ static int mkdir_in(int parent, const char* name_in) {
     D(i).node       = node;
     D(i).kid_dir = D(i).last_dir = D(i).kid_file = D(i).last_file = -1;
     k_strcpy(D(i).name, name, FS_NAME_LEN);
+    D(i).mtime = D(i).ctime = rtc_now();
     link_dir(i);
+    dir_changed(parent);
     return i;
+}
+
+/* the folder's contents changed: its modification date is now */
+static void dir_changed(int d) {
+    if (d >= 0 && d < g_dslots && D(d).used) D(d).mtime = rtc_now();
 }
 
 /* a folder is no more (its contents already gone) */
 static void free_dir(int i) {
+    dir_changed(D(i).parent_dir);
     unlink_dir(i);
     D(i).used = 0;
     D(i).mnt = 0;
@@ -352,7 +362,9 @@ static int remove_file(int i) {
     touched();
     mount_t* m = mount_of(F(i).mnt);
     if (m && m->ops->remove(m->ctx, F(i).node, 0) != 0) { g_io_err = 1; return -1; }
+    int parent = F(i).parent_dir;
     free_file(i);
+    dir_changed(parent);
     return 0;
 }
 
@@ -423,7 +435,9 @@ static int create_file_in(int parent, const char* name_in) {
     F(i).pins       = 0;
     used_now(&F(i));
     k_strcpy(F(i).name, name, FS_NAME_LEN);
+    F(i).mtime = F(i).ctime = rtc_now();
     link_file(i);
+    dir_changed(parent);
     return i;
 }
 
@@ -435,6 +449,7 @@ int fs_write(int idx, const void* data, uint32_t len) {
     used_now(f);
     if (reserve(f, len) != 0) return -1;
     f->data_gen = g_fs_gen;
+    f->mtime = rtc_now();
     mount_t* m = mount_of(f->mnt);
     if (m && m->ops->write(m->ctx, f->node, data, len) != 0) {
         g_io_err = 1;
@@ -464,6 +479,7 @@ int fs_append(int idx, const void* data, uint32_t len) {
     if (!f || !f->used) return -1;
     used_now(f);
     f->data_gen = g_fs_gen;
+    f->mtime = rtc_now();
     if (ensure_loaded(f) != 0) return -1;
     if (reserve(f, f->size + len) != 0) return -1;
     mount_t* m = mount_of(f->mnt);
@@ -665,7 +681,7 @@ int fs_find_dir(const char* path) {
     return resolve_dir(p);
 }
 
-static void print_perm_size(int is_dir, uint32_t size) {
+static void print_perm_size(int is_dir, uint32_t size, uint32_t mtime) {
     terminal_write(is_dir ? "drwxr-xr-x  " : "-rw-r--r--  ");
     terminal_write("banana  ");
     char b[16];
@@ -674,6 +690,21 @@ static void print_perm_size(int is_dir, uint32_t size) {
     for (int i = l; i < 8; i++) terminal_putchar(' ');
     terminal_write(s);
     terminal_write("  ");
+    /* "Oct 10 16:45", like ls -l */
+    static const char* const MON[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    char d[24];
+    if (mtime) {
+        rtc_datetime_t dt;
+        rtc_split_time(mtime, &dt);
+        uint32_t now = rtc_now();
+        if (now && (mtime > now + 3600u || now - mtime > 183u * 86400u))     /* old (or future): the year */
+            ksnprintf(d, sizeof(d), "%s %2u  %4u  ", MON[(dt.month + 11) % 12], dt.day, dt.year);
+        else
+            ksnprintf(d, sizeof(d), "%s %2u %02u:%02u  ", MON[(dt.month + 11) % 12], dt.day, dt.hour, dt.minute);
+    } else {
+        k_strcpy(d, "              ", sizeof(d));   /* (no date known) */
+    }
+    terminal_write(d);
 }
 
 void fs_ls(const char* path) {
@@ -711,13 +742,13 @@ void fs_ls_long(const char* path) {
     }
     int any = 0;
     for (int i = D(target).kid_dir; i >= 0; i = D(i).sib) {
-        print_perm_size(1, 4096);
+        print_perm_size(1, 4096, D(i).mtime);
         terminal_write_color(D(i).name, VGA_COLOR_LIGHT_BLUE, VGA_COLOR_BLACK);
         terminal_writeln("/");
         any = 1;
     }
     for (int i = D(target).kid_file; i >= 0; i = F(i).sib) {
-        print_perm_size(0, F(i).size);
+        print_perm_size(0, F(i).size, F(i).mtime);
         terminal_writeln(F(i).name);
         any = 1;
     }
@@ -735,6 +766,24 @@ int fs_create(const char* path) {
     int existing = find_file_in(parent, leaf);
     if (existing >= 0) return existing;
     return create_file_in(parent, leaf);
+}
+
+int fs_touch(const char* path) {
+    int i = fs_create(path);
+    if (i >= 0) { touched(); F(i).mtime = rtc_now(); }
+    return i;
+}
+
+void fs_set_times(int is_dir, int idx, uint32_t mtime, uint32_t ctime) {
+    if (is_dir) {
+        if (idx < 0 || idx >= g_dslots) return;
+        D(idx).mtime = mtime;
+        D(idx).ctime = ctime;
+    } else {
+        if (idx < 0 || idx >= g_fslots) return;
+        F(idx).mtime = mtime;
+        F(idx).ctime = ctime;
+    }
 }
 
 int fs_find_file(const char* path) {
@@ -863,6 +912,7 @@ int fs_copy(const char* src, const char* dst) {
     if (tidx < 0) return -1;
 
     if (fs_write(tidx, F(sidx).content, F(sidx).size) != 0) return -1;
+    if (F(sidx).mtime) F(tidx).mtime = F(sidx).mtime;    /* a copy keeps the original's date */
     return tidx;
 }
 
@@ -908,6 +958,8 @@ int fs_move(const char* src, const char* dst) {
         F(sfile).parent_dir = target_dir;
         k_strcpy(F(sfile).name, target_name, FS_NAME_LEN);
         link_file(sfile);
+        dir_changed(sparent);
+        dir_changed(target_dir);
         return sfile;
     }
 
@@ -931,6 +983,8 @@ int fs_move(const char* src, const char* dst) {
     D(sdir).parent_dir = target_dir;
     k_strcpy(D(sdir).name, target_name, FS_NAME_LEN);
     link_dir(sdir);
+    dir_changed(sparent);
+    dir_changed(target_dir);
     return sdir;
 }
 
@@ -1401,6 +1455,7 @@ int fs_restore_file_lazy(int idx, const char* name, int parent, uint32_t size) {
     f->node = 0;
     f->loaded = 0;
     f->data_gen = g_fs_gen;
+    f->mtime = f->ctime = 0;
     return 0;
 }
 

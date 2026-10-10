@@ -351,7 +351,8 @@ Laid out like Windows 7's Explorer:
 - **Back / Forward** (round buttons; Backspace goes back), the **address bar** as a breadcrumb (*Computer > home > banana*: click a part to go there, click beside the parts - or Ctrl+L / F4 - to type a path), and the **search box** (click it, Ctrl+F or F3): the folder shows only what matches as you type, Esc clears it
 - The command bar: **Organize** (cut, copy, paste, delete, rename, new text document, properties, refresh, close), **New folder** (named right away), **Open in terminal**, **Up**, and the views **Details** (Name, Type, Size - click a column heading to sort, again to reverse) or **Icons** (large icons)
 - The **navigation pane**: Favorites (Downloads, the home folder), Libraries (Documents, Music, Pictures, Videos - made when first opened), Computer (the whole disk, a USB stick when one is in)
-- The **details pane** at the bottom: the selected item's icon (a thumbnail for pictures), type and size - or the folder's item count and total size; messages show there too
+- The **details pane** at the bottom: the selected item's icon (a thumbnail for pictures), type, size, date modified and date created - or the folder's item count and total size; messages show there too
+- **Dates**: every file and folder records when it was made and last changed (a folder: when something in it was added, removed or renamed; a copy keeps the original's date, like Windows). They are saved on the installed disk with the files, and USB sticks show the dates their FAT32 entries hold (and get today's date for what Banana OS writes). The Details view has a *Date modified* column (sortable)
 - Icons by kind of file (pictures, songs, videos, apps, archives, programs, web pages, PDFs, source code...)
 - Click selects, double-click (or Enter) opens: folders, apps (.bpk) install, songs and videos play in their app, web pages and SVG open in the Browser, pictures become the wallpaper, text opens in Notepad; typing a letter jumps to the next item starting with it
 - Right-click an item or the empty space for its menu; F2 renames, Delete deletes (twice to confirm; folders with their contents), Ctrl+C / Ctrl+X / Ctrl+V copy / move, Ctrl+N new folder, F5 refresh
@@ -571,12 +572,12 @@ include /path/to/banana-sdk/driver/driver.mk
 | `whoami` | Print current user |
 | `hostname` | Print system hostname |
 | `date` | Print current date/time (from RTC) |
-| `ls [-l] [path]` | List a directory (long format with `-l`) |
+| `ls [-l] [path]` | List a directory (long format with `-l`: size and date modified - the time this year, the year for older files) |
 | `pwd` | Print current directory (full absolute path) |
 | `cd [path]` | Change directory (no arg or `~` goes home, `..` up) |
 | `mkdir [-p] <dir>` | Create directory (`-p` creates parents too) |
 | `rm [-r] <name>` | Remove a file, or a directory with `-r` |
-| `touch <file>` | Create an empty file (or no-op if it exists) |
+| `touch <file>` | Create an empty file, or set an existing file's date modified to now |
 | `cp <src> <dst>` | Copy a file |
 | `mv <src> <dst>` | Move/rename a file or directory |
 | `edit <file>` | Open built-in nano-like editor |

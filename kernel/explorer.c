@@ -40,6 +40,7 @@
 #include "ctxmenu.h"
 #include "blockdev.h"
 #include "fileicons.h"
+#include "rtc.h"
 
 #define HOME      "/home/banana"
 #define TITLE_H   20
@@ -103,7 +104,7 @@ static int      g_status_warn;
 static uint32_t g_gen;                  /* bumped on every state change */
 
 static int      g_view_icons;           /* 0 Details, 1 Large icons */
-static int      g_sort = 0, g_sort_desc;  /* 0 name, 1 type, 2 size */
+static int      g_sort = 0, g_sort_desc;  /* 0 name, 1 date modified, 2 type, 3 size */
 
 /* history */
 #define HIST 24
@@ -174,6 +175,18 @@ static const char* item_name(const item_t* it) {
     return (f && f->used) ? f->name : "?";
 }
 
+static uint32_t item_mtime(const item_t* it) {
+    if (it->is_dir) { const fs_dir_t* d = fs_get_dir(it->idx); return d ? d->mtime : 0; }
+    fs_file_t* f = fs_file_info(it->idx);
+    return f ? f->mtime : 0;
+}
+
+static uint32_t item_ctime(const item_t* it) {
+    if (it->is_dir) { const fs_dir_t* d = fs_get_dir(it->idx); return d ? d->ctime : 0; }
+    fs_file_t* f = fs_file_info(it->idx);
+    return f ? f->ctime : 0;
+}
+
 static uint32_t item_size(const item_t* it) {
     if (it->is_dir) return 0;
     fs_file_t* f = fs_file_info(it->idx);
@@ -237,11 +250,14 @@ static int before(const item_t* a, const item_t* b) {
     if (a->is_dir != b->is_dir) return a->is_dir;            /* folders first, always */
     int c = 0;
     if (g_sort == 1) {
+        uint32_t ma = item_mtime(a), mb = item_mtime(b);
+        c = ma < mb ? -1 : ma > mb ? 1 : 0;
+    } else if (g_sort == 2) {
         char ta[40], tb[40];
         type_of(a, ta, sizeof(ta));
         type_of(b, tb, sizeof(tb));
         c = strcasecmp(ta, tb);
-    } else if (g_sort == 2) {
+    } else if (g_sort == 3) {
         uint32_t sa = item_size(a), sb = item_size(b);
         c = sa < sb ? -1 : sa > sb ? 1 : 0;
     }
@@ -779,12 +795,15 @@ static int per_row(void) {
     return n < 1 ? 1 : n;
 }
 
-/* Details columns: name, type, size (x offsets from the content's left) */
-static void columns(int* type_x, int* size_x) {
+/* Details columns: name, date modified, type, size (x offsets from the
+ * content's left); the date goes first when the window is narrow (-1) */
+static void columns(int* date_x, int* type_x, int* size_x) {
     int w = content_w() - SB_W;
     *size_x = w - 86;
     *type_x = *size_x - 150;
     if (*type_x < 160) *type_x = 160;
+    *date_x = *type_x - 144;
+    if (*date_x < 170) *date_x = -1;
 }
 
 /* the item under (mx, my): index, -1 empty space in the list, -2 outside it */
@@ -1110,9 +1129,10 @@ void explorer_click(int mx, int my) {
     /* column headers: sort */
     int cx = content_x();
     if (!g_view_icons && ly >= BODY_Y && ly < BODY_Y + HDR_H && lx >= cx && lx < cx + content_w() - SB_W) {
-        int type_x, size_x;
-        columns(&type_x, &size_x);
-        int col = lx - cx < type_x ? 0 : lx - cx < size_x ? 1 : 2;
+        int date_x, type_x, size_x;
+        columns(&date_x, &type_x, &size_x);
+        int rx = lx - cx;
+        int col = (date_x >= 0 && rx >= date_x && rx < type_x) ? 1 : rx < type_x ? 0 : rx < size_x ? 2 : 3;
         if (g_sort == col) g_sort_desc = !g_sort_desc;
         else { g_sort = col; g_sort_desc = 0; }
         int keep = g_sel >= 0 ? g_items[g_sel].idx * 2 + g_items[g_sel].is_dir : -1;
@@ -1318,14 +1338,16 @@ static void draw_rename_box(int x, int y, int w) {
 
 static void draw_details_view(void) {
     int x = g_x + content_x(), y = g_y + BODY_Y, w = content_w() - SB_W;
-    int type_x, size_x;
-    columns(&type_x, &size_x);
+    int date_x, type_x, size_x;
+    columns(&date_x, &type_x, &size_x);
+    int name_end = date_x >= 0 ? date_x : type_x;
     /* headers */
     gfx_fill_rect(x, y, w, HDR_H, C_WHITE);
     gfx_fill_rect(x, y + HDR_H - 1, w, 1, 0x00E5E5E5u);
-    const char* hdr[3] = { "Name", "Type", "Size" };
-    int hx[3] = { 0, type_x, size_x };
-    for (int c = 0; c < 3; c++) {
+    const char* hdr[4] = { "Name", "Date modified", "Type", "Size" };
+    int hx[4] = { 0, date_x, type_x, size_x };
+    for (int c = 0; c < 4; c++) {
+        if (hx[c] < 0) continue;
         gfx_draw_text(x + hx[c] + 8, y + 7, hdr[c], 0x004C607Au, C_WHITE);
         if (c) gfx_fill_rect(x + hx[c], y + 3, 1, HDR_H - 6, 0x00E5E5E5u);
         if (g_sort == c) {                                  /* the sort arrow */
@@ -1349,8 +1371,13 @@ static void draw_details_view(void) {
         if (i == g_sel) { frame(x + 2, ry, w - 4, ROW_H, C_SEL, C_SEL_B); bg = C_SEL; }
         else if (i == g_hover) { frame(x + 2, ry, w - 4, ROW_H, C_HOVER, C_HOVER_B); bg = C_HOVER; }
         fileicon_draw(icon_of(it), x + 6, ry + 2, 16);
-        if (i == g_renaming) draw_rename_box(x + 26, ry + 1, type_x - 30);
-        else draw_clip(x + 28, ry + 6, item_name(it), (type_x - 34) / 8, C_TEXT, bg);
+        if (i == g_renaming) draw_rename_box(x + 26, ry + 1, name_end - 30);
+        else draw_clip(x + 28, ry + 6, item_name(it), (name_end - 34) / 8, C_TEXT, bg);
+        if (date_x >= 0) {
+            char d[24];
+            rtc_format(item_mtime(it), d, sizeof(d));
+            gfx_draw_text(x + date_x + 8, ry + 6, d, 0x006D6D6Du, bg);
+        }
         char t[40];
         type_of(it, t, sizeof(t));
         draw_clip(x + type_x + 8, ry + 6, t, (size_x - type_x - 12) / 8, 0x006D6D6Du, bg);
@@ -1444,6 +1471,15 @@ static void draw_details_pane(void) {
         } else {
             human_size(item_size(it), size, sizeof(size));
             ksnprintf(l2, sizeof(l2), "%s    Size: %s", type, size);
+        }
+        char dm[24], dc[24];
+        rtc_format(item_mtime(it), dm, sizeof(dm));
+        rtc_format(item_ctime(it), dc, sizeof(dc));
+        if (dm[0] && !g_status[0]) {
+            char l3[112];
+            if (dc[0]) ksnprintf(l3, sizeof(l3), "Date modified: %s    Date created: %s", dm, dc);
+            else ksnprintf(l3, sizeof(l3), "Date modified: %s", dm);
+            draw_clip(tx, y + 46, l3, cols, 0x005E6F86u, 0x00DFE8F4u);
         }
     } else {
         fileicon_draw(strcmp(g_path, "/") == 0 ? FI_COMPUTER : FI_FOLDER_OPEN, ix + 2, iy + 2, 48);

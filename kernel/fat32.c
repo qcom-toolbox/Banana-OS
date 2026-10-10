@@ -706,6 +706,12 @@ static void sfn_to_name(const uint8_t* e, char* out) {
     out[n] = 0;
 }
 
+/* a FAT date and time (local time, 2-second steps) as rtc_now() counts */
+static uint32_t fat_time(uint16_t date, uint16_t time) {
+    if (!date) return 0;
+    return rtc_make_time(1980 + (date >> 9), (date >> 5) & 15, date & 31, time >> 11, (time >> 5) & 63, (time & 31) * 2);
+}
+
 static void scan_dir(fvol_t* v, uint32_t dnode, int fsdir, int depth) {
     uint32_t len;
     uint8_t* dir = dir_load(v, node_first(v, dnode), &len);
@@ -763,11 +769,15 @@ static void scan_dir(fvol_t* v, uint32_t dnode, int fsdir, int depth) {
             if (!valid_clus(v, n->first)) { n->used = 0; continue; }
             int fd = fs_mount_add_dir(v->mnt, fsdir, name, (uint32_t)ni);
             if (fd < 0) { v->nodes[ni].used = 0; v->skipped++; continue; }
+            fs_set_times(1, fd, fat_time(rd16(e + 24), rd16(e + 22)), fat_time(rd16(e + 16), rd16(e + 14)));
             if (depth < MAX_DEPTH) scan_dir(v, (uint32_t)ni, fd, depth + 1);
         } else {
-            if (fs_mount_add_file(v->mnt, fsdir, name, (uint32_t)ni, n->size) < 0) {
+            int fi = fs_mount_add_file(v->mnt, fsdir, name, (uint32_t)ni, n->size);
+            if (fi < 0) {
                 v->nodes[ni].used = 0;
                 v->skipped++;
+            } else {
+                fs_set_times(0, fi, fat_time(rd16(e + 24), rd16(e + 22)), fat_time(rd16(e + 16), rd16(e + 14)));
             }
         }
     }

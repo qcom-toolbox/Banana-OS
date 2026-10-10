@@ -1720,7 +1720,7 @@ static void cmd_touch(const char* args) {
     int any = 0;
     while (next_token(&p, tok, sizeof(tok))) {
         any = 1;
-        if (fs_create(tok) < 0) {
+        if (fs_touch(tok) < 0) {
             terminal_write_color("touch: cannot create: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
             terminal_writeln(tok);
         }

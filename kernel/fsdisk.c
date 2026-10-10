@@ -529,7 +529,10 @@ static void wipe_header(const ata_disk_t* d, uint32_t lba) {
 #define V5_META_SECT    512u           /* per metadata slot */
 #define V5_DIR_REC      (4u + FS_NAME_LEN + 4u)               /* idx, name, parent */
 #define V5_FILE_REC     (4u + FS_NAME_LEN + 4u + 4u * 3u)     /* idx, name, parent, size, lba, check */
-#define V5_BODY_MAX     (4u + FS_MAX_DIRS * V5_DIR_REC + 8u + FS_MAX_FILES * V5_FILE_REC)
+#define V5_TIMES_MAGIC  0x454D4954u    /* "TIME": the dates, after the records */
+#define V5_TIME_REC     12u            /* idx, mtime, ctime */
+#define V5_BODY_MAX     (4u + FS_MAX_DIRS * V5_DIR_REC + 8u + FS_MAX_FILES * V5_FILE_REC + \
+                         12u + (FS_MAX_DIRS + FS_MAX_FILES) * V5_TIME_REC)
 #define V5_INLINE_MAX   ((V5_META_SECT - 1u) * FSDISK_SECTOR) /* a body that fits in the slot */
 
 typedef struct __attribute__((packed)) {
@@ -789,7 +792,7 @@ static int v5_body_ok(const uint8_t* b, uint32_t len, const v5_mark_t* m) {
 
 /* Rebuilds the tree from a checked body. The files' data stays on the disk
  * until used (v5_read_file): a boot no longer reads every file. */
-static void v5_load_body(const uint8_t* b) {
+static void v5_load_body(const uint8_t* b, uint32_t len) {
     uint32_t off = 4, nd = rd32(b);
     char name[FS_NAME_LEN];
     fs_restore_begin();
@@ -821,6 +824,16 @@ static void v5_load_body(const uint8_t* b) {
         rec->size = size;
         rec->check = check;
         ext_push(rec->lba, sectors);
+    }
+    /* the dates (saved since build 103; older saves have none: 0) */
+    if (off + 8u <= len && rd32(b + off) == V5_TIMES_MAGIC) {
+        off += 4;
+        for (int kind = 1; kind >= 0 && off + 4u <= len; kind--) {
+            uint32_t n = rd32(b + off);
+            off += 4;
+            for (uint32_t k = 0; k < n && off + V5_TIME_REC <= len; k++, off += V5_TIME_REC)
+                fs_set_times(kind, (int)rd32(b + off), rd32(b + off + 4), rd32(b + off + 8));
+        }
     }
     ext_sort();
     fs_restore_end(home);
@@ -923,7 +936,7 @@ static int v5_try_load(const ata_disk_t* d) {
         int s = k ? first ^ 1 : first;
         if (!have[s] || !v5_body_ok(body[s], h[s].body_bytes, &m)) continue;
         g_mark = m;
-        v5_load_body(body[s]);
+        v5_load_body(body[s], h[s].body_bytes);
         g_body_lba = h[s].body_lba;
         g_body_sect = g_body_lba ? bytes_to_sectors(h[s].body_bytes) : 0;
         ext_add(g_body_lba, g_body_sect);
@@ -964,7 +977,8 @@ static int v5_write_file(const ata_disk_t* d, v5_rec_t* rec, const uint8_t* data
 static int v5_sync(const ata_disk_t* d) {
     uint32_t gen = fs_generation();
     int nfs = fs_file_slots(), nds = fs_dir_slots();     /* (files made while this writes: the next save) */
-    uint32_t body_sect = bytes_to_sectors(4u + (uint32_t)nds * V5_DIR_REC + 8u + (uint32_t)nfs * V5_FILE_REC);
+    uint32_t body_sect = bytes_to_sectors(4u + (uint32_t)nds * V5_DIR_REC + 8u + (uint32_t)nfs * V5_FILE_REC +
+                                          12u + (uint32_t)(nds + nfs) * V5_TIME_REC);
     if (rec_grow(nfs) != 0) return FSDISK_ERR_IO;
     uint8_t* meta = (uint8_t*)kzalloc((1u + body_sect) * FSDISK_SECTOR);
     uint32_t* rec_off = (uint32_t*)kzalloc((size_t)(nfs + 1) * sizeof(uint32_t));
@@ -1012,6 +1026,33 @@ static int v5_sync(const ata_disk_t* d) {
         nf++;
     }
     wr32(b + nf_off, nf);
+    /* the dates: after the records, where an older Banana OS stops reading */
+    wr32(b + off, V5_TIMES_MAGIC);
+    off += 4;
+    uint32_t td_off = off, ntd = 0;
+    off += 4;
+    for (int i = 0; i < nds; i++) {
+        const fs_dir_t* dir = fs_get_dir(i);
+        if (!dir || !dir->used || dir->mnt) continue;
+        wr32(b + off, (uint32_t)i);
+        wr32(b + off + 4, dir->mtime);
+        wr32(b + off + 8, dir->ctime);
+        off += V5_TIME_REC;
+        ntd++;
+    }
+    wr32(b + td_off, ntd);
+    uint32_t tf_off = off, ntf = 0;
+    off += 4;
+    for (int i = 0; i < nfs; i++) {
+        fs_file_t* f = fs_file_info(i);
+        if (!rec_off[i] || !f) continue;                    /* (only the files saved above) */
+        wr32(b + off, (uint32_t)i);
+        wr32(b + off + 4, f->mtime);
+        wr32(b + off + 8, f->ctime);
+        off += V5_TIME_REC;
+        ntf++;
+    }
+    wr32(b + tf_off, ntf);
     uint32_t body_bytes = off;
 
     /* 2. the changed files, each into a new extent (the other tasks run in
