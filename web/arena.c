@@ -45,8 +45,12 @@ void* arena_alloc(arena_t* a, uint32_t n) {
             a->oom = 1;
             return fallback(n);
         }
-        c->cap = cap;
-        c->used = (uint32_t)((16u - ((uintptr_t)c->data & 15u)) & 15u);   /* align data */
+        /* align data; the padding (< 16, there are 16 spare bytes) counts as
+         * used, so cap must include it - otherwise used ends up past cap and
+         * cap - used wraps. (On i386 the header is 12 bytes: 4 bytes of
+         * padding, and a chunk sized for one big allocation overflowed.) */
+        c->used = (uint32_t)((16u - ((uintptr_t)c->data & 15u)) & 15u);
+        c->cap = cap + c->used;
         c->next = a->head;
         a->head = c;
         a->total += cap;
