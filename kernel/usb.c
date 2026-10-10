@@ -1,4 +1,5 @@
 #include "usb.h"
+#include "../usb/usbcore.h"
 #include "terminal.h"
 #include "types.h"
 #include "timer.h"
@@ -533,14 +534,26 @@ static void mouse_consume_ready(void) {
  */
 /* USB mice (usb/usbhid.c) add their motion here; it's merged into the
  * next mouse_read(). dy follows the PS/2 convention (positive = up). */
-static int g_usb_dx, g_usb_dy, g_usb_buttons = -1, g_usb_dz;
+static int g_usb_dx, g_usb_dy, g_usb_dz;
+/* every button change, in order: each mouse_read() gives one, so a quick
+ * double-click (press, release, press between two frames of the desktop -
+ * VirtualBox sends its reports in bursts) is still two clicks */
+#define USB_BTNQ 16
+static int g_usb_btnq[USB_BTNQ], g_usb_btnq_n, g_usb_btn_last = -1;
 
 void mouse_inject_wheel(int dz) { g_usb_dz += dz; }
 
 void mouse_inject(int dx, int dy, int buttons) {
+    uintptr_t f;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(f) :: "memory");
     g_usb_dx += dx;
     g_usb_dy += dy;
-    g_usb_buttons = buttons;
+    if (buttons != g_usb_btn_last) {
+        if (g_usb_btnq_n < USB_BTNQ) g_usb_btnq[g_usb_btnq_n++] = buttons;
+        else g_usb_btnq[USB_BTNQ - 1] = buttons;
+        g_usb_btn_last = buttons;
+    }
+    if (f & 0x200) __asm__ volatile("sti" ::: "memory");
 }
 
 /* ── the pointer from the timer interrupt (kernel/gui.c) ─────────────
@@ -589,6 +602,7 @@ static inline void irq_on(uintptr_t f) {
 static mouse_state_t mouse_read_locked(void);
 
 mouse_state_t mouse_read(void) {
+    usb_poll();                  /* USB mice report through here too: every frame */
     uintptr_t f = irq_off();
     mouse_state_t m = mouse_read_locked();
     irq_on(f);
@@ -596,22 +610,24 @@ mouse_state_t mouse_read(void) {
 }
 
 static mouse_state_t mouse_read_locked(void) {
-    if (g_usb_dx || g_usb_dy || g_usb_buttons >= 0 || g_usb_dz) {
+    if (g_usb_dx || g_usb_dy || g_usb_btnq_n || g_usb_dz) {
         mouse_state_t m = last_mouse;
         m.dx = g_usb_dx;
         m.dy = g_usb_dy;
         m.dz = g_usb_dz;
         g_usb_dz = 0;
-        if (g_usb_buttons >= 0) {
-            m.btn_left = g_usb_buttons & 1;
-            m.btn_right = (g_usb_buttons >> 1) & 1;
-            m.btn_middle = (g_usb_buttons >> 2) & 1;
+        if (g_usb_btnq_n) {                       /* the oldest change; the others next time */
+            int b = g_usb_btnq[0];
+            for (int i = 1; i < g_usb_btnq_n; i++) g_usb_btnq[i - 1] = g_usb_btnq[i];
+            g_usb_btnq_n--;
+            m.btn_left = b & 1;
+            m.btn_right = (b >> 1) & 1;
+            m.btn_middle = (b >> 2) & 1;
             last_mouse.btn_left = m.btn_left;
             last_mouse.btn_right = m.btn_right;
             last_mouse.btn_middle = m.btn_middle;
         }
         g_usb_dx = g_usb_dy = 0;
-        g_usb_buttons = -1;
         return m;
     }
     if (!mouse_enabled) return last_mouse;

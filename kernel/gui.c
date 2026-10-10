@@ -1911,7 +1911,7 @@ static void gui_poll_body(void) {
             if (click && !g_menu_open) {
                 int i = icon_at(mx, my);
                 uint32_t now = timer_ms();
-                if (i >= 0 && i == g_last_click_i && now - g_last_click_ms < 500) {
+                if (i >= 0 && i == g_last_click_i && now - g_last_click_ms < 800) {
                     g_last_click_i = -1;
                     if (g_desk[i].act == ACT_RUN_APP) run_app(g_desk[i].app);
                     else do_action(g_desk[i].act);
@@ -2250,6 +2250,13 @@ int gui_handle_key(char c) {
         return 1;
     }
 
+    /* Enter on the desktop (no window in front): the selected icon opens */
+    if (!g_menu_open && c == '\n' && g_desk_sel >= 0 && g_desk_sel < g_ndesk && g_front_app < 0 && front_term() < 0) {
+        int i = g_desk_sel;
+        if (g_desk[i].act == ACT_RUN_APP) run_app(g_desk[i].app);
+        else do_action(g_desk[i].act);
+        return 1;
+    }
     if (!g_menu_open) return 0;
 
     if (c == '\n') {

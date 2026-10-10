@@ -456,6 +456,8 @@ static void cmd_curl(int argc, char** argv) {
     const char* out_path = NULL;
     const char* ua = "curl/8.0 (BananaOS 0.5)";
     int remote_name = 0, follow = 0, ciphers = TLS_CIPHERS_ALL;
+    const char* data = NULL;               /* -d: a POST body (a form) */
+    const char* method = NULL;             /* -X */
 
     for (int i = 1; i < argc; i++) {
         const char* a = argv[i];
@@ -470,11 +472,14 @@ static void cmd_curl(int argc, char** argv) {
                 else if (f == 's') c.silent = 1;
                 else if (f == 'S' || f == 'k' || f == 'f') {}          /* accepted, no-op */
                 else if (f == 'O') remote_name = 1;
-                else if ((f == 'o' || f == 'A') && !a[j + 1] && i + 1 < argc) {
-                    if (f == 'o') out_path = argv[++i]; else ua = argv[++i];
+                else if ((f == 'o' || f == 'A' || f == 'd' || f == 'X') && !a[j + 1] && i + 1 < argc) {
+                    if (f == 'o') out_path = argv[++i];
+                    else if (f == 'A') ua = argv[++i];
+                    else if (f == 'd') data = argv[++i];
+                    else method = argv[++i];
                     break;
                 } else {
-                    terminal_writeln("usage: curl [-L] [-o file | -O] [-I] [-i] [-v] [-s] [-A agent] <url>");
+                    terminal_writeln("usage: curl [-L] [-o file | -O] [-I] [-i] [-v] [-s] [-A agent] [-d data] [-X method] <url>");
                     return;
                 }
             }
@@ -484,18 +489,20 @@ static void cmd_curl(int argc, char** argv) {
         else if (strcmp(a, "--output") == 0 && i + 1 < argc) out_path = argv[++i];
         else if (strcmp(a, "--remote-name") == 0) remote_name = 1;
         else if (strcmp(a, "--verbose") == 0) c.verbose = 1;
+        else if ((strcmp(a, "--data") == 0 || strcmp(a, "--data-raw") == 0) && i + 1 < argc) data = argv[++i];
+        else if (strcmp(a, "--request") == 0 && i + 1 < argc) method = argv[++i];
         else if (strcmp(a, "--tls13-ciphers") == 0 && i + 1 < argc) {
             const char* list = argv[++i];
             int aes = strstr(list, "AES_128_GCM") != NULL, cc = strstr(list, "CHACHA20") != NULL;
             ciphers = (aes && !cc) ? TLS_CIPHERS_AES : (cc && !aes) ? TLS_CIPHERS_CHACHA : TLS_CIPHERS_ALL;
         }
         else if (a[0] == '-') {
-            terminal_writeln("usage: curl [-L] [-o file | -O] [-I] [-i] [-v] [-s] [-A agent] <url>");
+            terminal_writeln("usage: curl [-L] [-o file | -O] [-I] [-i] [-v] [-s] [-A agent] [-d data] [-X method] <url>");
             return;
         } else url = a;
     }
     if (!url) {
-        terminal_writeln("usage: curl [-L] [-o file | -O] [-I] [-i] [-v] [-s] [-A agent] <url>");
+        terminal_writeln("usage: curl [-L] [-o file | -O] [-I] [-i] [-v] [-s] [-A agent] [-d data] [-X method] <url>");
         terminal_writeln("       e.g. curl http://example.com    curl -L -o page.html https://example.com");
         return;
     }
@@ -515,7 +522,12 @@ static void cmd_curl(int argc, char** argv) {
 
     http_request_t req;
     memset(&req, 0, sizeof(req));
-    req.method = c.head ? "HEAD" : "GET";
+    req.method = method ? method : c.head ? "HEAD" : data ? "POST" : "GET";
+    if (data) {
+        req.body = data;
+        req.body_len = (uint32_t)strlen(data);
+        req.content_type = "application/x-www-form-urlencoded";
+    }
     req.follow_redirects = follow;
     req.user_agent = ua;
     req.tls_ciphers = ciphers;

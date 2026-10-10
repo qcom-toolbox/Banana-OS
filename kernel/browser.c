@@ -343,6 +343,31 @@ static int displayable(const char* ct) {
     return 0;
 }
 
+/* files (by their name) that are downloaded whatever the server calls
+ * them: videos, sound, archives, documents, programs, disk images */
+static int download_ext(const char* url) {
+    static const char* const EXT[] = {
+        "mp4", "m4v", "mkv", "webm", "avi", "mov", "wmv", "flv", "mpg", "mpeg", "ts", "3gp", "ogv",
+        "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "wav", "wma",
+        "zip", "7z", "rar", "gz", "tgz", "bz2", "xz", "tar", "iso", "img", "dmg",
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "epub",
+        "exe", "msi", "deb", "rpm", "apk", "bin", "bpk",
+    };
+    const char* p = strstr(url, "://");
+    p = p ? p + 3 : url;
+    const char* path = strchr(p, '/');
+    if (!path) return 0;
+    const char* end = path;
+    while (*end && *end != '?' && *end != '#') end++;
+    const char* dot = NULL;
+    for (const char* q = path; q < end; q++) { if (*q == '.') dot = q; if (*q == '/') dot = NULL; }
+    if (!dot) return 0;
+    int n = (int)(end - dot - 1);
+    for (unsigned i = 0; i < sizeof(EXT) / sizeof(EXT[0]); i++)
+        if ((int)strlen(EXT[i]) == n && strncasecmp(dot + 1, EXT[i], (size_t)n) == 0) return 1;
+    return 0;
+}
+
 /* filename="x" (or filename=x) from a Content-Disposition header, if any */
 static int disposition(const char* raw, char* name, int cap, int* attachment) {
     *attachment = 0;
@@ -378,7 +403,7 @@ static void on_headers(void* ctx, const http_response_t* r, const char* raw) {
         int attach;
         char fname[96];
         disposition(raw, fname, sizeof(fname), &attach);
-        if (b->dl->force || attach || !displayable(r->content_type)) {
+        if (b->dl->force || attach || !displayable(r->content_type) || download_ext(r->final_url)) {
             b->dl->active = 1;
             b->limit = FS_MAX_FILE_SIZE;
             if (fname[0]) kstrlcpy(b->dl->name, fname, sizeof(b->dl->name));
@@ -953,6 +978,7 @@ static void save_download(const char* url, const char* hint, const char* ctype, 
     const char* dot = strrchr(leaf, '.');
     if (dot && strcasecmp(dot, ".bpk") == 0) tail = " - an app: install it from Files (right-click)";
     else if (dot && strcasecmp(dot, ".wav") == 0) tail = " - play it from Files";
+    else if (dot && download_ext(leaf - 1 > path ? path : leaf)) tail = " - open it from Files";
     ksnprintf(msg, sizeof(msg), "Downloaded %s (%u KB) to ~/Downloads%s", leaf, (len + 1023) / 1024, tail);
     set_status(msg, 0);
 }
@@ -1004,6 +1030,11 @@ static void load(tab_t* t, const char* url_in, const char* post, uint32_t post_l
         ksnprintf(fin, sizeof(fin), "view-source:%s", final_url);
         kstrlcpy(final_url, fin, sizeof(final_url));
         kstrlcpy(ctype, "text/plain", sizeof(ctype));
+    }
+    /* a binary answer the server called text (or nothing): a file, not a page */
+    if (frc == 0 && !vsrc && !dl.active && len && strncasecmp(ctype, "image/", 6) != 0) {
+        uint32_t n = len < 1024 ? len : 1024;
+        for (uint32_t i = 0; i < n; i++) if (!data[i]) { dl.active = 1; break; }
     }
     if (frc == 0 && dl.active) {
         /* not a page: save it, and stay on the page we were on */

@@ -10,7 +10,7 @@
  * and playlists take the user name and password with each request (that
  * is how the API works), so they are kept in ~/.config/amethyst/account.
  *
- *     amethyst [server url]
+ *     amethyst [server url]      (else the one given last, asked the first time)
  */
 #include <banana.h>
 #include <stdio.h>
@@ -34,7 +34,7 @@
 #define BAR_H     84
 #define ROW_H     30
 #define RATE      48000
-#define DEFAULT_SERVER "https://music.office-works.ch/"
+#define EXAMPLE_SERVER "https://music.office-works.ch"   /* (only shown as an example) */
 #define CONF_DIR  "/home/banana/.config/amethyst"
 #define CACHE_DIR "/home/banana/.cache/amethyst"
 #define CACHE_SONGS 40                    /* songs kept on the disk */
@@ -57,7 +57,7 @@
 #define F_BOLD    BANANA_FONT_SANS_BOLD
 
 static bwin_t win;
-static char g_server[200] = DEFAULT_SERVER;
+static char g_server[200];                 /* "" until the user gives one */
 
 /* ── the catalogue ────────────────────────────────────────────────── */
 typedef struct {
@@ -1054,8 +1054,14 @@ static int net_thread(void* arg) {
             snprintf(f, sizeof(f), "track_id=%d", j.a);
             free(api_post("increment_play", f, 1, err, sizeof(err)));
             break;
-        case J_PLAYLISTS: load_playlists(); break;
-        case J_PERSONAL: load_personal(); break;
+        case J_PLAYLISTS:
+            while (g_loading && !g_quit) banana_sleep(200);
+            load_playlists();
+            break;
+        case J_PERSONAL:
+            while (g_loading && !g_quit) banana_sleep(200);      /* (it maps the tracks of the catalogue) */
+            load_personal();
+            break;
         case J_PL_ADD: case J_PL_REMOVE: case J_PL_DELETE:
             if (j.kind == J_PL_DELETE) snprintf(f, sizeof(f), "playlist_id=%d&mode=delete", j.a);
             else snprintf(f, sizeof(f), "playlist_id=%d&mode=%s&track_id=%d", j.a, j.kind == J_PL_ADD ? "add" : "remove", j.b);
@@ -1446,9 +1452,10 @@ static int hit_at(int mx, int my) {
 /* ── the dialog (log in, new playlist) and the right-click menu ───── */
 enum { D_NONE = 0, D_LOGIN, D_NEWPL };
 static int  g_dlg;
-static char g_f[2][128];                   /* its text fields */
+static char g_f[3][128];                   /* its text fields (log in: server, user, password) */
 static int  g_focus;
 static int  g_dlg_public = 1;
+static int  g_show_pass;                   /* the password in clear (a keyboard layout typing other characters...) */
 static char g_dlg_msg[160];
 static volatile int g_dlg_busy;
 
@@ -1536,18 +1543,25 @@ static void open_dialog(int kind) {
     g_focus = 0;
     g_dlg_msg[0] = 0;
     memset(g_f, 0, sizeof(g_f));
-    if (kind == D_LOGIN && g_user[0]) snprintf(g_f[0], sizeof(g_f[0]), "%s", g_user);
+    if (kind == D_LOGIN) {
+        snprintf(g_f[0], sizeof(g_f[0]), "%s", g_server);
+        snprintf(g_f[1], sizeof(g_f[1]), "%s", g_user);
+        g_focus = !g_server[0] ? 0 : !g_user[0] ? 1 : 2;
+    }
 }
 
-static void draw_field(int x, int y, int w, const char* label, const char* text, int focus, int secret, int id) {
+static void draw_field(int x, int y, int w, const char* label, const char* text, int focus, int secret, int id, const char* hint) {
     bwin_font(&win, x, y, F_SANS, 12, label, C_DIM);
     bwin_fill_rect(&win, x, y + 18, w, 30, C_BG);
     bwin_rect(&win, x, y + 18, w, 30, focus ? C_ACCENT : 0x353A48u);
     char shown[140];
     if (secret) { int n = (int)strlen(text); if (n > 60) n = 60; memset(shown, '*', (size_t)n); shown[n] = 0; }
     else snprintf(shown, sizeof(shown), "%s", text);
-    if (focus) strcat(shown, "_");
-    text_fit(x + 8, y + 25, F_SANS, 14, shown, w - 16, C_TEXT);
+    if (!text[0] && hint && !focus) text_fit(x + 8, y + 25, F_SANS, 14, hint, w - 16, C_FAINT);
+    else {
+        if (focus) strcat(shown, "_");
+        text_fit(x + 8, y + 25, F_SANS, 14, shown, w - 16, C_TEXT);
+    }
     hit(x, y + 18, w, 30, id);
 }
 
@@ -1561,23 +1575,25 @@ static void button(int x, int y, int w, const char* label, int primary, int id) 
 static void draw_dialog(void) {
     if (!g_dlg) return;
     for (int y = 0; y < win.h; y += 2) bwin_fill_rect(&win, 0, y, win.w, 1, 0x000000u);   /* (dims the window) */
-    int w = 400, h = g_dlg == D_LOGIN ? 300 : 230, x = (win.w - w) / 2, y = (win.h - h) / 2;
+    int w = 420, h = g_dlg == D_LOGIN ? (g_user[0] ? 340 : 300) : 230, x = (win.w - w) / 2, y = (win.h - h) / 2;
     bwin_fill_rect(&win, x, y, w, h, C_PANEL);
     bwin_rect(&win, x, y, w, h, C_ACCENT);
     if (g_dlg == D_LOGIN) {
-        bwin_font(&win, x + 24, y + 18, F_BOLD, 18, g_user[0] ? "Your account" : "Log in to Amethyst", C_TEXT);
-        text_fit(x + 24, y + 44, F_SANS, 12, g_server, w - 48, C_DIM);
-        draw_field(x + 24, y + 66, w - 48, "User name", g_f[0], g_focus == 0, 0, H_DLG + 0);
-        draw_field(x + 24, y + 124, w - 48, "Password", g_f[1], g_focus == 1, 1, H_DLG + 1);
-        if (g_dlg_msg[0]) text_fit(x + 24, y + 186, F_SANS, 12, g_dlg_msg, w - 48, C_ERR);
-        if (g_dlg_busy) bwin_font(&win, x + 24, y + 186, F_SANS, 12, "Talking to the server...", C_ACCENT2);
-        button(x + 24, y + 214, 108, "Log in", 1, H_DLG + 2);
-        button(x + 140, y + 214, 132, "Create account", 0, H_DLG + 3);
-        button(x + 280, y + 214, 96, "Cancel", 0, H_DLG + 4);
-        if (g_user[0]) button(x + 24, y + 254, w - 48, "Log out", 0, H_DLG + 5);
+        bwin_font(&win, x + 24, y + 16, F_BOLD, 18, g_user[0] ? "Your account" : g_server[0] ? "Log in" : "Connect to Amethyst", C_TEXT);
+        bwin_font(&win, x + 24, y + 40, F_SANS, 12, "The account is optional: leave it empty to just listen.", C_DIM);
+        draw_field(x + 24, y + 60, w - 48, "Server", g_f[0], g_focus == 0, 0, H_DLG + 0, "e.g. " EXAMPLE_SERVER);
+        draw_field(x + 24, y + 116, w - 48, "User name", g_f[1], g_focus == 1, 0, H_DLG + 1, NULL);
+        draw_field(x + 24, y + 172, w - 48 - 64, "Password", g_f[2], g_focus == 2, !g_show_pass, H_DLG + 7, NULL);
+        button(x + w - 24 - 56, y + 190, 56, g_show_pass ? "Hide" : "Show", 0, H_DLG + 8);
+        if (g_dlg_msg[0]) text_fit(x + 24, y + 228, F_SANS, 12, g_dlg_msg, w - 48, C_ERR);
+        if (g_dlg_busy) bwin_font(&win, x + 24, y + 228, F_SANS, 12, "Talking to the server...", C_ACCENT2);
+        button(x + 24, y + 254, 120, g_f[1][0] ? "Log in" : "Connect", 1, H_DLG + 2);
+        button(x + 152, y + 254, 140, "Create account", 0, H_DLG + 3);
+        button(x + 300, y + 254, 96, "Cancel", 0, H_DLG + 4);
+        if (g_user[0]) button(x + 24, y + 296, w - 48, "Log out", 0, H_DLG + 5);
     } else {
         bwin_font(&win, x + 24, y + 18, F_BOLD, 18, "New playlist", C_TEXT);
-        draw_field(x + 24, y + 56, w - 48, "Name", g_f[0], 1, 0, H_DLG + 0);
+        draw_field(x + 24, y + 56, w - 48, "Name", g_f[0], 1, 0, H_DLG + 0, NULL);
         bwin_rect(&win, x + 24, y + 124, 16, 16, C_DIM);
         if (g_dlg_public) bwin_fill_rect(&win, x + 28, y + 128, 8, 8, C_ACCENT2);
         bwin_font(&win, x + 48, y + 124, F_SANS, 13, "Public (everyone can see it)", C_TEXT);
@@ -1590,23 +1606,85 @@ static void draw_dialog(void) {
 typedef struct { int create; } login_arg_t;
 static login_arg_t g_login_arg;
 
+static int loader_thread(void* arg);
+
+/* "music.example.com" -> "https://music.example.com/" */
+static void normalize_server(const char* in, char* out, int cap) {
+    while (*in == ' ') in++;
+    char t[200];
+    snprintf(t, sizeof(t), "%s%s", strstr(in, "://") ? "" : "https://", in);
+    size_t n = strlen(t);
+    while (n && t[n - 1] == ' ') t[--n] = 0;
+    /* a pasted page address (".../index.html", ".../api.php"): its folder */
+    char* q = strchr(t, '?');
+    if (q) *q = 0;
+    char* last = strrchr(t, '/');
+    if (last && last > strstr(t, "://") + 2 && strchr(last, '.')) last[1] = 0;
+    n = strlen(t);
+    snprintf(out, cap, "%s%s", t, n && t[n - 1] == '/' ? "" : "/");
+}
+
+/* another server: its catalogue, nothing of the last one (song ids differ) */
+static void server_switch(const char* url) {
+    engine_play(-1, 0);
+    banana_lock(&g_q_lock);
+    g_qlen = 0;
+    g_qpos = -1;
+    banana_unlock(&g_q_lock);
+    banana_lock(&g_data_lock);
+    snprintf(g_server, sizeof(g_server), "%s", url);
+    g_ntracks = 0;
+    g_nalbums = 0;
+    for (int i = 0; i < g_npls; i++) free(g_pls[i].songs);
+    g_npls = 0;
+    g_nrec = g_nhist = 0;
+    banana_unlock(&g_data_lock);
+    banana_lock(&g_dl_lock);
+    for (int i = 0; i < g_ncached; i++) { char p[96]; cache_path(g_cached[i], p, sizeof(p)); remove(p); }
+    g_ncached = 0;
+    g_dl_nwant = 0;
+    banana_unlock(&g_dl_lock);
+    banana_lock(&g_c_lock);
+    for (int i = 0; i < NCOVERS; i++) if (g_covers[i].state != 1) { free(g_covers[i].px); g_covers[i].px = NULL; g_covers[i].state = 0; }
+    banana_unlock(&g_c_lock);
+    g_loading = 1;
+    g_data_gen++;
+    banana_thread(loader_thread, NULL);
+}
+
 static int login_thread(void* arg) {
     login_arg_t* a = arg;
     char msg[160];
-    if (account_login(g_f[0], g_f[1], a->create, msg, sizeof(msg)) == 0) {
+    char url[200];
+    normalize_server(g_f[0], url, sizeof(url));
+    if (strcmp(url, g_server)) {
+        g_user[0] = g_pass[0] = 0;                 /* (an account belongs to its server) */
+        g_user_id = -1;
+        server_switch(url);
+        account_save();
+    }
+    if (!g_f[1][0]) {                              /* no account: listening only */
+        g_dlg = D_NONE;
+        snprintf(g_status, sizeof(g_status), "Connected to %s", g_server);
+        g_dlg_busy = 0;
+        return 0;
+    }
+    if (account_login(g_f[1], g_f[2], a->create, msg, sizeof(msg)) == 0) {
         account_save();
         g_dlg = D_NONE;
         snprintf(g_status, sizeof(g_status), "Logged in as %s", g_user);
         job(J_PERSONAL, 0, 0, NULL);
         job(J_PLAYLISTS, 0, 0, NULL);
-    } else snprintf(g_dlg_msg, sizeof(g_dlg_msg), "%s", msg);
+    } else snprintf(g_dlg_msg, sizeof(g_dlg_msg), "%s: %s", a->create ? "Not created" : "Not logged in", msg);
     g_dlg_busy = 0;
     return 0;
 }
 
 static void dialog_submit(int create) {
     if (g_dlg == D_LOGIN) {
-        if (!g_f[0][0] || !g_f[1][0]) { snprintf(g_dlg_msg, sizeof(g_dlg_msg), "Type your user name and password"); return; }
+        if (!g_f[0][0]) { snprintf(g_dlg_msg, sizeof(g_dlg_msg), "Type the address of an Amethyst server"); g_focus = 0; return; }
+        if (g_f[1][0] && !g_f[2][0]) { snprintf(g_dlg_msg, sizeof(g_dlg_msg), "Type your password (or clear the user name)"); g_focus = 2; return; }
+        if (create && !g_f[1][0]) { snprintf(g_dlg_msg, sizeof(g_dlg_msg), "Choose a user name and a password"); g_focus = 1; return; }
         if (g_dlg_busy) return;
         g_dlg_busy = 1;
         g_dlg_msg[0] = 0;
@@ -1865,8 +1943,9 @@ static void draw_home(int x, int y, int w, int h) {
         }
         cy += card + 62;
     }
-    if (g_loading && !g_ntracks) bwin_font(&win, x + 24, y + 30, F_SANS, 14, "Loading the catalogue...", C_DIM);
-    else if (!g_ntracks) bwin_font(&win, x + 24, y + 30, F_SANS, 14, "The server sent no songs", C_DIM);
+    if (!g_server[0]) bwin_font(&win, x + 24, y + 30, F_SANS, 14, "Not connected: click the account box (bottom left) to connect to a server", C_DIM);
+    else if (g_loading && !g_ntracks) bwin_font(&win, x + 24, y + 30, F_SANS, 14, "Loading the catalogue...", C_DIM);
+    else if (!g_ntracks) text_fit(x + 24, y + 30, F_SANS, 14, g_status[0] ? g_status : "The server sent no songs", w - 48, C_DIM);
     if (g_home_scroll > 0 && cy + g_home_scroll < y + h) g_home_scroll = 0;
 }
 
@@ -2076,6 +2155,8 @@ static void click(int mx, int my, int dbl, int right) {
     int id = hit_at(mx, my);
     if (g_dlg) {
         if (id == H_DLG + 0 || id == H_DLG + 1) g_focus = id - H_DLG;
+        else if (id == H_DLG + 7) g_focus = 2;
+        else if (id == H_DLG + 8) g_show_pass = !g_show_pass;
         else if (id == H_DLG + 2) dialog_submit(0);
         else if (id == H_DLG + 3) dialog_submit(1);
         else if (id == H_DLG + 4) g_dlg = D_NONE;
@@ -2157,11 +2238,13 @@ static void click(int mx, int my, int dbl, int right) {
 }
 
 static void dialog_key(int k) {
+    if (g_dlg_busy) return;
     char* f = g_f[g_dlg == D_LOGIN ? g_focus : 0];
     if (k == 27) { g_dlg = D_NONE; return; }
-    if (k == '\t' || k == BANANA_KEY_DOWN || k == BANANA_KEY_UP) { if (g_dlg == D_LOGIN) g_focus ^= 1; return; }
+    if (k == '\t' || k == BANANA_KEY_DOWN) { if (g_dlg == D_LOGIN) g_focus = (g_focus + 1) % 3; return; }
+    if (k == BANANA_KEY_UP) { if (g_dlg == D_LOGIN) g_focus = (g_focus + 2) % 3; return; }
     if (k == '\n' || k == '\r') {
-        if (g_dlg == D_LOGIN && g_focus == 0) { g_focus = 1; return; }
+        if (g_dlg == D_LOGIN && g_focus < 2 && g_f[1][0]) { g_focus++; return; }
         dialog_submit(0);
         return;
     }
@@ -2245,7 +2328,8 @@ int main(int argc, char** argv) {
     int eng = banana_thread(engine_thread, NULL);
     banana_thread(download_thread, NULL);
     banana_thread(net_thread, NULL);
-    banana_thread(loader_thread, NULL);
+    if (g_server[0]) banana_thread(loader_thread, NULL);
+    else { g_loading = 0; open_dialog(D_LOGIN); }
     if (eng < 0) { printf("amethyst: no thread\n"); return 1; }
 
     unsigned int last = 0;
