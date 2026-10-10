@@ -44,6 +44,8 @@ int          mouse_get_speed(void);
 /* USB mice report here (dy positive = up, buttons bit0 left/1 right/2 middle) */
 void         mouse_inject(int dx, int dy, int buttons);
 void         mouse_inject_wheel(int dz);      /* + = scroll down */
+/* " | Touchpad: Synaptics ClickPad (firmware 8.1)" and the like, for usb_status() */
+void         touchpad_describe(char* out, int cap);
 int          mouse_is_touchpad(void); /* 1 if a Synaptics PS/2 touchpad was detected */
 
 /* For other drivers that consume AUX bytes (e.g. keyboard polling) */

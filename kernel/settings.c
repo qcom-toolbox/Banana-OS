@@ -22,6 +22,7 @@
 #include "login.h"
 #include "utf8.h"
 #include "usb.h"
+#include "touchpad.h"
 
 #define TITLE_H  20
 #define SIDE_W   132
@@ -185,6 +186,8 @@ static void draw_sound(void) {
     button(x + 112, sy + 36, 120, "Test sound", 0);
 }
 
+static void checkbox(int x, int y, int on);
+
 /* Mouse: the pointer speed, 1..10 on the same kind of slider */
 static void speed_rect(int* x, int* y, int* w) { *x = cx0(); *y = cy0() + 64; *w = cw() - 60; }
 
@@ -221,6 +224,15 @@ static void draw_mouse(void) {
     button(x, sy + 56, 70, "Slower", 0);
     button(x + 80, sy + 56, 70, "Faster", 0);
     button(x + 160, sy + 56, 70, "Normal", sp == 5);
+
+    label(x, sy + 100, "Touchpad", C_HEAD);
+    checkbox(x, sy + 124, tp_tap_to_click);
+    label(x + 24, sy + 127, "Tap to click (two fingers: right click)", C_TEXT);
+    checkbox(x, sy + 150, tp_natural_scroll);
+    label(x + 24, sy + 153, "Natural scrolling (the page follows the fingers)", C_TEXT);
+    char tdesc[96];
+    touchpad_describe(tdesc, sizeof(tdesc));
+    label(x, sy + 182, tdesc + 3, C_DIM);       /* (without the " | ") */
 }
 
 static void draw_keyboard(void) {
@@ -655,6 +667,17 @@ void settings_click(int mx, int my) {
         if (inside(mx, my, x, sy + 56, 70, 20)) mouse_set_speed(sp - 1);
         else if (inside(mx, my, x + 80, sy + 56, 70, 20)) mouse_set_speed(sp + 1);
         else if (inside(mx, my, x + 160, sy + 56, 70, 20)) mouse_set_speed(5);
+        else if (inside(mx, my, x, sy + 120, cw(), 22)) {
+            tp_tap_to_click = !tp_tap_to_click;
+            save_setting("tp_tap", tp_tap_to_click ? "1" : "0");
+            ksnprintf(g_status, sizeof(g_status), "Tap to click: %s", tp_tap_to_click ? "on" : "off");
+            return;
+        } else if (inside(mx, my, x, sy + 146, cw(), 22)) {
+            tp_natural_scroll = !tp_natural_scroll;
+            save_setting("tp_natural", tp_natural_scroll ? "1" : "0");
+            ksnprintf(g_status, sizeof(g_status), "Natural scrolling: %s", tp_natural_scroll ? "on" : "off");
+            return;
+        }
         else return;
         save_speed();
         ksnprintf(g_status, sizeof(g_status), "Pointer speed: %d", mouse_get_speed());
@@ -738,6 +761,8 @@ void settings_boot(void) {
         if (k_parse_u32(v, &n) && n <= 100) audio_set_volume((int)n);
     }
     if (cfg_get(CFG_SETTINGS, "keyboard", v, sizeof(v))) keyboard_set_layout(v);
+    if (cfg_get(CFG_SETTINGS, "tp_tap", v, sizeof(v))) tp_tap_to_click = strcmp(v, "0") != 0;
+    if (cfg_get(CFG_SETTINGS, "tp_natural", v, sizeof(v))) tp_natural_scroll = strcmp(v, "0") != 0;
     if (cfg_get(CFG_SETTINGS, "mouse_speed", v, sizeof(v))) {
         uint32_t n = 0;
         if (k_parse_u32(v, &n)) mouse_set_speed((int)n);

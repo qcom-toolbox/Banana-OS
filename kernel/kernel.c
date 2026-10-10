@@ -1,3 +1,4 @@
+#include "i2chid.h"
 #include "terminal.h"
 #include "keyboard.h"
 #include "sysinfo.h"
@@ -106,6 +107,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     usb_init();       /* xHCI legacy handoff → USB keyboards work via PS/2 */
     STEP("mouse, keyboard");
     mouse_init();     /* enable PS/2 AUX port for USB/PS2 mice */
+    i2chid_init();    /* I2C touchpads (laptops since ~2015), when ACPI lists one */
     keyboard_init();  /* drain buffer after USB init */
     random_init();
     STEP("network");

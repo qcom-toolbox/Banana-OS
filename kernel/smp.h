@@ -32,6 +32,7 @@ int  smp_cores_found(void);
 /* an ACPI table by its 4-letter signature ("FACP", "APIC"...), NULL if none;
  * one at a physical address, if it has that signature (kernel/acpi.c) */
 const void* acpi_find_table(const char* sig);
+const void* acpi_find_table_n(const char* sig, int n);   /* the n-th one (SSDTs) */
 const void* acpi_table_at(uint64_t addr, const char* sig);
 
 #endif

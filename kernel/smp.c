@@ -80,16 +80,18 @@ static const sdt_t* table_at(uint64_t a, const char* sig) {
     return memcmp(t->sig, sig, 4) == 0 ? t : NULL;
 }
 
-/* an ACPI table by its signature, through the XSDT or the RSDT */
-static const sdt_t* find_table(const rsdp_t* r, const char* sig) {
+/* the n-th ACPI table with this signature (0 = the first; there are
+ * several SSDTs), through the XSDT or else the RSDT */
+static const sdt_t* find_table(const rsdp_t* r, const char* sig, int n) {
     const sdt_t* x = r->rev >= 2 ? table_at(r->xsdt, "XSDT") : NULL;
     if (x) {
         for (uint32_t o = sizeof(sdt_t); o + 8 <= x->len; o += 8) {
             uint64_t a;
             memcpy(&a, (const uint8_t*)x + o, 8);
             const sdt_t* t = table_at(a, sig);
-            if (t) return t;
+            if (t && n-- == 0) return t;
         }
+        return NULL;
     }
     const sdt_t* rs = table_at(r->rsdt, "RSDT");
     if (rs) {
@@ -97,7 +99,7 @@ static const sdt_t* find_table(const rsdp_t* r, const char* sig) {
             uint32_t a;
             memcpy(&a, (const uint8_t*)rs + o, 4);
             const sdt_t* t = table_at(a, sig);
-            if (t) return t;
+            if (t && n-- == 0) return t;
         }
     }
     return NULL;
@@ -105,7 +107,12 @@ static const sdt_t* find_table(const rsdp_t* r, const char* sig) {
 
 const void* acpi_find_table(const char* sig) {
     const rsdp_t* r = find_rsdp();
-    return r ? find_table(r, sig) : NULL;
+    return r ? find_table(r, sig, 0) : NULL;
+}
+
+const void* acpi_find_table_n(const char* sig, int n) {
+    const rsdp_t* r = find_rsdp();
+    return r ? find_table(r, sig, n) : NULL;
 }
 
 const void* acpi_table_at(uint64_t addr, const char* sig) { return table_at(addr, sig); }
@@ -372,7 +379,7 @@ void smp_init(void) {
      * Every 64-bit processor has one; the MADT below says how many cores.) */
     if (!(d & (1u << 5))) { klog("smp: no MSRs - using one core\n"); return; }
     const rsdp_t* r = find_rsdp();
-    const sdt_t* madt = r ? find_table(r, "APIC") : NULL;
+    const sdt_t* madt = r ? find_table(r, "APIC", 0) : NULL;
     if (!madt) { klog("smp: no ACPI MADT - using one core\n"); return; }
 
     uint8_t ids[64];

@@ -172,7 +172,10 @@ Banana-OS/
   - VGA text mode
   - Framebuffer-rendered console
 - GUI desktop (started on demand with `startx`)
-- PS/2 keyboard + PS/2 mouse support, plus real Synaptics PS/2 touchpad support (absolute mode + tap-to-click)
+- PS/2 keyboard + PS/2 mouse support, plus touchpads:
+  - **Synaptics PS/2** (most laptops until ~2015, e.g. the HP Folio 13): absolute mode, ClickPads (the whole pad is the button; bottom-right corner or two fingers = right click), TrackPoint pass-through, palm detection
+  - **I2C HID touchpads** (most laptops since ~2015: Synaptics, ELAN, ALPS, Cirque... on the Intel LPSS I2C controllers, Skylake and later): found from the ACPI tables, switched to precision-touchpad mode
+  - gestures on both: tap to click, tap-and-drag, double tap, two-finger tap = right click, three-finger tap = middle click, two-finger scrolling; *Settings > Mouse* turns tap-to-click and natural scrolling on/off; `usbctl` shows which touchpad was found
 - Ctrl+Alt+Delete closes the GUI, from anywhere
 - Up to 4 draggable, closable, focusable terminal windows in GUI mode, each with its own independent shell task and scrollback
 - Fluxbox-inspired dark desktop theme, with network status in the taskbar
@@ -219,7 +222,7 @@ Banana-OS/
 - Up to 4 terminal windows (draggable, closable, focusable, scrollable), each running its own independent shell task
 - Every window resizes from its bottom-right corner; double-click a title bar to maximize it (and again to restore)
 - Copy and paste: drag over a terminal's text to select and copy it, right-click to paste it (into the shell, or whatever runs there); Notepad, the editor (Ctrl+C / Ctrl+V) and the browser share the same clipboard
-- PS/2 mouse and Synaptics touchpad (absolute mode + tap-to-click) both work for pointing
+- PS/2 mouse, Synaptics PS/2 and I2C HID touchpads (gestures, see above) all work for pointing
 - Ctrl+Alt+Delete quits the GUI immediately, from anywhere
 
 ## Networking

@@ -1,3 +1,6 @@
+#include "touchpad.h"
+#include "kstring.h"
+#include "i2chid.h"
 #include "usb.h"
 #include "../usb/usbcore.h"
 #include "terminal.h"
@@ -228,8 +231,9 @@ const char* usb_status(void) {
 
     for (int i = 0; e[i] && p < (int)sizeof(usb_status_buf) - 1; i++) usb_status_buf[p++] = e[i];
 
-    const char* t = syn_detected ? " | Touchpad: Synaptics (absolute+tap)"
-                                  : " | Touchpad: PS/2 (relative)";
+    char tdesc[96];
+    touchpad_describe(tdesc, sizeof(tdesc));
+    const char* t = tdesc;
     for (int i = 0; t[i] && p < (int)sizeof(usb_status_buf) - 1; i++) usb_status_buf[p++] = t[i];
 
     usb_status_buf[p < (int)sizeof(usb_status_buf) ? p : (int)sizeof(usb_status_buf) - 1] = '\0';
@@ -275,6 +279,15 @@ static uint8_t ps2_mouse_read(void) {
     ps2_wait_read();
     return inb(PS2_DATA);
 }
+/* an answer that can take long (a reset: up to ~1 s on some touchpads);
+ * -1 if none came */
+static int ps2_mouse_read_long(int ms) {
+    for (int i = 0; i < ms * 1000; i++) {
+        if (inb(PS2_STATUS) & 0x01) return inb(PS2_DATA);
+        inb(0x80);                                 /* ~1 us */
+    }
+    return -1;
+}
 static void ps2_mouse_write(uint8_t val) {
     ps2_wait_write();
     outb(PS2_CMD, 0xD4);   /* next byte goes to AUX port */
@@ -295,33 +308,12 @@ static void ps2_mouse_cmd1(uint8_t cmd, uint8_t param) {
     ps2_mouse_read(); /* ACK */
 }
 
-/* ── Synaptics identify + mode set ──────────────────────────────────
- * "Magic knock" identify: send Set Resolution (0xE8) with argument 0,
- * four times, then a Status Request (0xE9, 3 response bytes). A plain
- * PS/2 mouse just reports normal status; a Synaptics touchpad
- * recognizes this exact pattern and echoes 0x47 in the middle response
- * byte instead. */
-static int synaptics_detect(void) {
-    ps2_mouse_cmd1(0xE8, 0x00);
-    ps2_mouse_cmd1(0xE8, 0x00);
-    ps2_mouse_cmd1(0xE8, 0x00);
-    ps2_mouse_cmd1(0xE8, 0x00);
-
-    ps2_mouse_write(0xE9);
-    ps2_mouse_read();          /* ACK */
-    uint8_t r0 = ps2_mouse_read();
-    uint8_t r1 = ps2_mouse_read();
-    uint8_t r2 = ps2_mouse_read();
-    (void)r0; (void)r2;
-
-    return r1 == 0x47;
-}
-
-/* "Sliced command": smuggle an arbitrary byte to the touchpad firmware
- * through the standard Set Resolution command, 2 bits at a time (MSB
- * pair first), preceded by Set Scale 1:1 - the whole trick a plain
- * PS/2 mouse interface has no vendor-specific command byte to carry
- * one directly. */
+/* ── Synaptics identify, queries, mode ───────────────────────────────
+ * A query: its number sent as a "sliced command" (Set Scale 1:1, then
+ * four Set Resolution carrying 2 bits each, high bits first), then a
+ * Status Request (0xE9) whose 3 bytes are the answer. Identify (query 0)
+ * answers 0x47 in the middle byte on a Synaptics pad; a plain mouse
+ * gives its normal status. */
 static void ps2_mouse_sliced_write(uint8_t val) {
     ps2_mouse_cmd0(0xE6); /* Set Scale 1:1 */
     for (int shift = 6; shift >= 0; shift -= 2) {
@@ -330,14 +322,98 @@ static void ps2_mouse_sliced_write(uint8_t val) {
     }
 }
 
-#define SYN_BIT_ABSOLUTE_MODE 0x80u
-#define SYN_BIT_W_MODE        0x01u
-#define SYN_PS_SET_MODE2      0x14u
+static void syn_query(uint8_t q, uint8_t r[3]) {
+    ps2_mouse_sliced_write(q);
+    ps2_mouse_write(0xE9);
+    ps2_mouse_read();          /* ACK */
+    r[0] = ps2_mouse_read();
+    r[1] = ps2_mouse_read();
+    r[2] = ps2_mouse_read();
+}
+
+static int synaptics_detect(void) {
+    uint8_t r[3];
+    syn_query(0x00, r);
+    return r[1] == 0x47;
+}
+
+#define SYN_BIT_ABSOLUTE_MODE    0x80u
+#define SYN_BIT_HIGH_RATE        0x40u
+#define SYN_BIT_DISABLE_GESTURE  0x04u     /* no taps by the pad itself: ours instead */
+#define SYN_BIT_W_MODE           0x01u
+#define SYN_PS_SET_MODE2         0x14u
+
+/* what the pad says about itself */
+static uint32_t syn_caps, syn_ext, syn_ext0c;
+static int      syn_fw_major, syn_fw_minor;
+static touchpad_t g_syn_tp;
+
+#define SYN_CAP_EXTENDED(c)     ((c) & 0x800000u)
+#define SYN_EXT_QUERIES(c)      (((c) >> 20) & 7u)
+#define SYN_CAP_MIDDLE(c)       ((c) & 0x040000u)
+#define SYN_CAP_PASSTHROUGH(c)  ((c) & 0x80u)
+#define SYN_CAP_PALM(c)         ((c) & 0x01u)
+#define SYN_CAP_MULTIFINGER(c)  ((c) & 0x02u)
+#define SYN_CAP_CLICKPAD(e)     ((e) & 0x100000u)   /* one button: the whole pad */
+#define SYN_CAP_CLICKPAD2(e)    ((e) & 0x000100u)   /* two-button ClickPad */
+#define SYN_CAP_MAX_DIM(e)      ((e) & 0x020000u)
+#define SYN_CAP_MIN_DIM(e)      ((e) & 0x002000u)
+
+static void synaptics_setup(void) {
+    uint8_t r[3];
+    syn_query(0x00, r);                         /* identify: firmware version */
+    syn_fw_minor = r[0];
+    syn_fw_major = r[2] & 0x0F;
+    syn_query(0x02, r);                         /* capabilities */
+    syn_caps = (uint32_t)r[0] << 16 | (uint32_t)r[1] << 8 | r[2];
+    if (!SYN_CAP_EXTENDED(syn_caps)) syn_caps = 0;
+    syn_ext = syn_ext0c = 0;
+    if (SYN_EXT_QUERIES(syn_caps) >= 1) { syn_query(0x09, r); syn_ext = (uint32_t)r[0] << 16 | (uint32_t)r[1] << 8 | r[2]; }
+    if (SYN_EXT_QUERIES(syn_caps) >= 4) { syn_query(0x0C, r); syn_ext0c = (uint32_t)r[0] << 16 | (uint32_t)r[1] << 8 | r[2]; }
+
+    /* the pad's area (the usual values when it cannot tell) */
+    touchpad_t* t = &g_syn_tp;
+    int xmin = 1472, xmax = 5472, ymin = 1408, ymax = 4448;
+    if (SYN_CAP_MAX_DIM(syn_ext0c)) {
+        syn_query(0x0D, r);
+        int mx = (r[0] << 5) | ((r[1] & 0x0F) << 1), my = (r[2] << 5) | ((r[1] & 0xF0) >> 3);
+        if (mx > 1000 && my > 1000) { xmax = mx; ymax = my; }
+    }
+    if (SYN_CAP_MIN_DIM(syn_ext0c) && (syn_fw_major > 7 || (syn_fw_major == 7 && syn_fw_minor >= 5))) {
+        syn_query(0x0F, r);
+        int mx = (r[0] << 5) | ((r[1] & 0x0F) << 1), my = (r[2] << 5) | ((r[1] & 0xF0) >> 3);
+        if (mx > 0 && mx < xmax - 1000 && my > 0 && my < ymax - 1000) { xmin = mx; ymin = my; }
+    }
+    int upm = 0;
+    if (syn_fw_major >= 4) {
+        syn_query(0x08, r);                     /* resolution: units per mm */
+        if ((r[1] & 0x80) && r[0] >= 10 && r[0] < 200) upm = r[0];
+    }
+    if (!upm) upm = (xmax - xmin) / 95;         /* (a pad is about 95 mm wide) */
+    t->xmin = xmin; t->xmax = xmax; t->ymin = ymin; t->ymax = ymax;
+    t->upm = upm > 0 ? upm : 40;
+    t->clickpad = (SYN_CAP_CLICKPAD(syn_ext0c) || SYN_CAP_CLICKPAD2(syn_ext0c)) ? 1 : 0;
+    klog("touchpad: Synaptics fw %d.%d caps %06x ext %06x ext0c %06x, x %d-%d y %d-%d, %d/mm%s\n",
+         syn_fw_major, syn_fw_minor, syn_caps, syn_ext, syn_ext0c, xmin, xmax, ymin, ymax, t->upm,
+         t->clickpad ? ", ClickPad" : "");
+}
 
 static void synaptics_enable_absolute_mode(void) {
-    uint8_t mode = SYN_BIT_ABSOLUTE_MODE | SYN_BIT_W_MODE;
+    uint8_t mode = SYN_BIT_ABSOLUTE_MODE | SYN_BIT_HIGH_RATE | SYN_BIT_DISABLE_GESTURE;
+    if (syn_caps) mode |= SYN_BIT_W_MODE;      /* finger count / width in every packet */
     ps2_mouse_sliced_write(mode);
     ps2_mouse_cmd1(0xF3, SYN_PS_SET_MODE2); /* Set Sample Rate <- SET_MODE2 */
+}
+
+/* "Synaptics ClickPad (firmware 7.5)", "PS/2 mouse", ... for usb_status() */
+void touchpad_describe(char* out, int cap) {
+    char i2c[64];
+    if (i2chid_describe(i2c, sizeof(i2c))) { ksnprintf(out, (size_t)cap, " | Touchpad: %s", i2c); return; }
+    if (syn_detected)
+        ksnprintf(out, (size_t)cap, " | Touchpad: Synaptics %s (firmware %d.%d)",
+                  g_syn_tp.clickpad ? "ClickPad" : "TouchPad", syn_fw_major, syn_fw_minor);
+    else
+        ksnprintf(out, (size_t)cap, " | Touchpad: none (PS/2 mouse)");
 }
 
 void mouse_init(void) {
@@ -357,15 +433,17 @@ void mouse_init(void) {
     ps2_wait_write();
     outb(PS2_DATA, cb);
 
-    /* Reset mouse */
+    /* Reset mouse (a touchpad's self test can take most of a second) */
+    while (inb(PS2_STATUS) & 0x01) inb(PS2_DATA);
     ps2_mouse_write(0xFF);
-    ps2_mouse_read();  /* ACK */
-    ps2_mouse_read();  /* 0xAA */
-    ps2_mouse_read();  /* 0x00 */
+    ps2_mouse_read_long(100);  /* ACK */
+    ps2_mouse_read_long(1000); /* 0xAA */
+    ps2_mouse_read_long(100);  /* 0x00 */
 
     syn_detected = synaptics_detect();
 
     if (syn_detected) {
+        synaptics_setup();
         synaptics_enable_absolute_mode();
         mouse_pkt_size = 6;
     } else {
@@ -396,24 +474,7 @@ int mouse_is_touchpad(void) {
 
 static mouse_state_t last_mouse = {0,0,0,0,0,0};
 
-/* Synaptics absolute-stroke tracking, converted to the same relative
- * dx/dy the rest of the OS already consumes, plus software tap-to-click
- * (taps aren't a packet bit - they're a brief, low-movement touch
- * detected by watching the stream, same as every real Synaptics driver
- * does it). */
-static int syn_touch_active = 0;
-static int syn_prev_x = 0, syn_prev_y = 0;
-static int syn_start_x = 0, syn_start_y = 0;
-static uint32_t syn_start_tick = 0;
-static int syn_tap_click_pulse = 0;
 
-#define SYN_TAP_MAX_TICKS  25   /* ~250ms at the 100Hz PIT rate */
-#define SYN_TAP_MAX_MOVE   100  /* touchpad position units, not pixels */
-#define SYN_SENSITIVITY_SHIFT 2 /* divide raw units -> cursor mickeys;
-                                   raise this if the cursor feels too
-                                   fast on real hardware */
-
-static int abs_i(int v) { return v < 0 ? -v : v; }
 
 /* Complete packets wait in a small queue: bytes can arrive through
  * keyboard_try_getchar() as well as mouse_read(), and a quick press +
@@ -427,9 +488,16 @@ static int     mouse_ring_head = 0, mouse_ring_len = 0;
 void mouse_on_aux_byte(uint8_t b) {
     if (!mouse_enabled) return;
 
-    if (mouse_asm_i == 0) {
-        /* validate sync bit (bit 3 of the first byte is always 1,
-         * in both the plain and Synaptics packet formats) */
+    if (syn_detected) {
+        /* Synaptics absolute packets: byte 0 is 10xx0xxx, byte 3 11xx0xxx
+         * - a byte that breaks this drops the packet (and may start one) */
+        if (mouse_asm_i == 0 && (b & 0xC8) != 0x80) return;
+        if (mouse_asm_i == 3 && (b & 0xC8) != 0xC0) {
+            mouse_asm_i = 0;
+            if ((b & 0xC8) != 0x80) return;
+        }
+    } else if (mouse_asm_i == 0) {
+        /* validate sync bit (bit 3 of the first byte is always 1) */
         if (!(b & 0x08)) return;
     }
     mouse_asm[mouse_asm_i++] = b;
@@ -456,49 +524,43 @@ static void mouse_pop(void) {
     mouse_ring_len--;
 }
 
+/* one absolute packet -> the gesture engine (touchpad.c) */
 static void synaptics_consume_ready(void) {
     const uint8_t* buf = mouse_pkt;
+    int w = ((buf[0] & 0x30) >> 2) | ((buf[0] & 0x04) >> 1) | ((buf[3] & 0x04) >> 2);
+    if (syn_caps && w == 3) {
+        /* pass-through: a packet of the TrackPoint behind the pad */
+        if (SYN_CAP_PASSTHROUGH(syn_caps)) {
+            int dx = (int)buf[4] - ((buf[1] & 0x10) ? 256 : 0);
+            int dy = (int)buf[5] - ((buf[1] & 0x20) ? 256 : 0);
+            mouse_inject(dx, dy, (buf[1] & 7) | g_syn_tp.out);
+        }
+        return;
+    }
+    if (syn_caps && w == 2) return;             /* an extended-W packet (not asked for) */
 
     int x = (int)(((buf[3] & 0x10u) << 8) | ((buf[1] & 0x0fu) << 8) | buf[4]);
     int y = (int)(((buf[3] & 0x20u) << 7) | ((buf[1] & 0xf0u) << 4) | buf[5]);
     int z = buf[2];
-    int phys_left  = buf[0] & 0x01;
-    int phys_right = (buf[0] >> 1) & 0x01;
+    int buttons = (buf[0] & 0x01) | (buf[0] & 0x02);
+    int mid = (buf[0] ^ buf[3]) & 0x01;
+    if (g_syn_tp.clickpad || !SYN_CAP_MIDDLE(syn_caps)) buttons |= mid;   /* a ClickPad's press */
+    else if (mid) buttons |= 4;
 
-    int touching = (z > 0);
-
-    if (touching) {
-        if (!syn_touch_active) {
-            syn_touch_active = 1;
-            syn_start_tick = timer_ticks();
-            syn_start_x = x;
-            syn_start_y = y;
-            syn_prev_x = x;
-            syn_prev_y = y;
-        } else {
-            int dx = (x - syn_prev_x) >> SYN_SENSITIVITY_SHIFT;
-            /* Synaptics Y increases upward on the pad; screen Y
-             * increases downward, so flip it here. */
-            int dy = -((y - syn_prev_y) >> SYN_SENSITIVITY_SHIFT);
-            last_mouse.dx = dx;
-            last_mouse.dy = dy;
-            syn_prev_x = x;
-            syn_prev_y = y;
-        }
-    } else if (syn_touch_active) {
-        syn_touch_active = 0;
-        uint32_t held = timer_ticks() - syn_start_tick;
-        if (held <= SYN_TAP_MAX_TICKS &&
-            abs_i(x - syn_start_x) < SYN_TAP_MAX_MOVE &&
-            abs_i(y - syn_start_y) < SYN_TAP_MAX_MOVE) {
-            syn_tap_click_pulse = 1; /* synthesize one click frame */
-        }
+    /* fingers: a touch is z >= 30 (25 to stay down); W tells how many */
+    static int down;
+    int touching = z >= (down ? 25 : 30);
+    down = touching;
+    int fingers = touching ? 1 : 0;
+    if (touching && syn_caps && SYN_CAP_MULTIFINGER(syn_caps)) {
+        if (w == 0) fingers = 2;
+        else if (w == 1) fingers = 3;
     }
-
-    last_mouse.btn_left  = phys_left  || syn_tap_click_pulse;
-    last_mouse.btn_right = phys_right;
-    syn_tap_click_pulse = 0; /* one mouse_read() frame only */
-
+    int flags = 0;
+    if (touching && syn_caps && SYN_CAP_PALM(syn_caps) && w >= 12 && z >= 200) flags |= TPF_PALM;
+    /* the pad's y grows upwards, the screen's downwards */
+    y = g_syn_tp.ymax + g_syn_tp.ymin - y;
+    tp_frame(&g_syn_tp, fingers, x, y, buttons, flags);
     mouse_pkt_i = 0;
 }
 
@@ -630,6 +692,7 @@ static mouse_state_t mouse_read_locked(void);
 
 mouse_state_t mouse_read(void) {
     usb_poll();                  /* USB mice report through here too: every frame */
+    i2chid_poll();               /* and I2C touchpads */
     uintptr_t f = irq_off();
     mouse_state_t m = mouse_read_locked();
     scale_motion(&m.dx, &m.dy);
@@ -638,6 +701,16 @@ mouse_state_t mouse_read(void) {
 }
 
 static mouse_state_t mouse_read_locked(void) {
+    if (mouse_enabled && syn_detected) {
+        /* the touchpad's packets become motion / clicks (mouse_inject) */
+        for (;;) {
+            uint8_t st = inb(PS2_STATUS);
+            if (!((st & 0x01) && (st & 0x20))) break;
+            mouse_on_aux_byte(inb(PS2_DATA));
+        }
+        while (mouse_pkt_ready()) { mouse_pop(); synaptics_consume_ready(); }
+        tp_tick(&g_syn_tp);
+    }
     if (g_usb_dx || g_usb_dy || g_usb_btnq_n || g_usb_dz) {
         mouse_state_t m = last_mouse;
         m.dx = g_usb_dx;
