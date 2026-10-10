@@ -1,4 +1,5 @@
 #include "notepad.h"
+#include "keyboard.h"
 #include "utf8.h"
 #include "gfx.h"
 #include "fs.h"
@@ -649,4 +650,8 @@ void notepad_draw(const fb_info_t* fi) {
         draw_clip(x + 8, sy + 4, line, (w - 24) / 8, C_DIM, 0x00161B22u);
     }
     gfx_draw_grip(x + w, y + h);
+}
+
+void notepad_fkey(int k) {
+    if (k == KEYF_F1 + 2) find_next();                    /* F3, like Ctrl+G */
 }

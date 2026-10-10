@@ -1,4 +1,5 @@
 #include "explorer.h"
+#include "keyboard.h"
 #include "utf8.h"
 #include "gfx.h"
 #include "fs.h"
@@ -869,4 +870,9 @@ void explorer_draw(const fb_info_t* fi) {
     draw_clip(x + LIST_X, y + WIN_H - 16, st, (WIN_W - 16) / 8,
               g_confirm_delete ? C_WARN : C_DIM, C_PANEL);
     gfx_draw_grip(x + WIN_W, y + WIN_H);
+}
+
+void explorer_fkey(int k) {
+    if (k == KEYF_F1 + 1) start_rename();                 /* F2 */
+    else if (k == KEYF_F1 + 4) { scan(); set_status("Refreshed"); }   /* F5 */
 }

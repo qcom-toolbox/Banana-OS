@@ -1,4 +1,5 @@
 #include "appwin.h"
+#include "keyboard.h"
 #include "winframe.h"
 #include "gfx.h"
 #include "kheap.h"
@@ -544,4 +545,16 @@ int appwin_take_new(void) {
     int n = g_new_window;
     g_new_window = 0;
     return n;
+}
+
+void appwin_fkey(int k) {
+    awin_t* w = front();
+    if (!w) return;
+    int c = KEYF_CODE(k), key = 0;
+    if (c >= KEYF_F1 && c < KEYF_F1 + 12) key = BANANA_KEY_F1 + (c - KEYF_F1);
+    else if (c == KEYF_PLAY) key = BANANA_KEY_PLAY;
+    else if (c == KEYF_STOP) key = BANANA_KEY_STOP;
+    else if (c == KEYF_NEXT) key = BANANA_KEY_NEXT;
+    else if (c == KEYF_PREV) key = BANANA_KEY_PREV;
+    if (key) push_simple(w, BANANA_EV_KEY, 0, 0, 0, key);
 }

@@ -49,5 +49,7 @@ uintptr_t app_fault_stack(int pid);
 /* running apps, for `pkg ps` */
 void app_list(void);
 int  app_count(void);
+/* a console app runs in the terminal that has the keyboard (it takes the F-keys) */
+int  app_console_focused(void);
 
 #endif

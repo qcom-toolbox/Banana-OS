@@ -7,6 +7,7 @@
 #include "tty.h"
 #include "../usb/usbcore.h"
 #include "utf8.h"
+#include "audio.h"
 
 #define KB_DATA_PORT    0x60
 #define KB_STATUS_PORT  0x64
@@ -238,6 +239,81 @@ static char q_pop(void) {
 
 static void push_arrow(char letter) {
     q_push(27); q_push('['); q_push(letter);
+}
+
+
+/* ── function and media keys: events of their own (keyboard_take_fkey) ── */
+static int g_fk[16];
+static int g_fk_head, g_fk_tail;
+
+static void fkey(int code) {
+    if (code == KEYF_MUTE || code == KEYF_VOLDOWN || code == KEYF_VOLUP) {
+        /* the volume keys work everywhere, desktop or not */
+        static int muted_from = -1;
+        int v = audio_get_volume();
+        if (code == KEYF_MUTE) {
+            if (v > 0) { muted_from = v; audio_set_volume(0); }
+            else audio_set_volume(muted_from > 0 ? muted_from : 50);
+        } else {
+            v += code == KEYF_VOLUP ? 5 : -5;
+            audio_set_volume(v < 0 ? 0 : v > 100 ? 100 : v);
+            muted_from = -1;
+        }
+    }
+    if (code >= KEYF_F1 && code < KEYF_F1 + 12) {
+        if (shift_held) code |= KEYF_SHIFT;
+        if (ctrl_held)  code |= KEYF_CTRL;
+        if (alt_held)   code |= KEYF_ALT;
+    }
+    int next = (g_fk_tail + 1) % 16;
+    if (next != g_fk_head) { g_fk[g_fk_tail] = code; g_fk_tail = next; }
+}
+
+int keyboard_take_fkey(void) {
+    if (g_fk_head == g_fk_tail) return 0;
+    int c = g_fk[g_fk_head];
+    g_fk_head = (g_fk_head + 1) % 16;
+    return c;
+}
+
+/* set 1: F1-F10 are 3B-44, F11 57, F12 58; set 2 has its own codes */
+static int set1_fn(uint8_t sc) {
+    if (sc >= 0x3B && sc <= 0x44) return KEYF_F1 + (sc - 0x3B);
+    if (sc == 0x57) return KEYF_F1 + 10;
+    if (sc == 0x58) return KEYF_F1 + 11;
+    return 0;
+}
+static int set2_fn(uint8_t sc) {
+    static const uint8_t T[12] = { 0x05, 0x06, 0x04, 0x0C, 0x03, 0x0B, 0x83, 0x0A, 0x01, 0x09, 0x78, 0x07 };
+    for (int i = 0; i < 12; i++) if (T[i] == sc) return KEYF_F1 + i;
+    return 0;
+}
+/* the E0-prefixed ones: Windows key and the multimedia keys */
+static int set1_e0_key(uint8_t sc) {
+    switch (sc) {
+    case 0x5B: case 0x5C: return KEYF_WIN;
+    case 0x20: return KEYF_MUTE;
+    case 0x2E: return KEYF_VOLDOWN;
+    case 0x30: return KEYF_VOLUP;
+    case 0x22: return KEYF_PLAY;
+    case 0x24: return KEYF_STOP;
+    case 0x19: return KEYF_NEXT;
+    case 0x10: return KEYF_PREV;
+    default:   return 0;
+    }
+}
+static int set2_e0_key(uint8_t sc) {
+    switch (sc) {
+    case 0x1F: case 0x27: return KEYF_WIN;
+    case 0x23: return KEYF_MUTE;
+    case 0x21: return KEYF_VOLDOWN;
+    case 0x32: return KEYF_VOLUP;
+    case 0x34: return KEYF_PLAY;
+    case 0x3B: return KEYF_STOP;
+    case 0x4D: return KEYF_NEXT;
+    case 0x15: return KEYF_PREV;
+    default:   return 0;
+    }
 }
 
 static char set2_map_char(uint8_t sc, int shifted) {
@@ -493,10 +569,12 @@ static int translate_scancode_set2(uint8_t sc, char* out) {
             if (ctrl_held && alt_held) { ctrl_alt_del_pending = 1; return 0; }
             push_arrow('P'); *out = q_pop(); return 1;
         }
+        { int k = set2_e0_key(sc); if (k) { fkey(k); set2_e0 = 0; return 0; } }
         set2_e0 = 0;
         return 0;
     }
 
+    { int k = set2_fn(sc); if (k) { fkey(k); return 0; } }
     if (sc == 0x12 || sc == 0x59) { shift_held = 1; return 0; }
     if (sc == 0x14) { ctrl_held = 1; return 0; }
     if (sc == 0x11) { alt_held = 1; return 0; }  /* left alt */
@@ -588,6 +666,7 @@ static int process_scancode_byte(uint8_t sc, char* out) {
             if (ctrl_held && alt_held) { ctrl_alt_del_pending = 1; return 0; }
             push_arrow('P'); *out = q_pop(); return 1;
         }
+        { int k = set1_e0_key(sc); if (k) { fkey(k); set1_e0 = 0; return 0; } }
         set1_e0 = 0;
         return 0;
     }
@@ -601,6 +680,7 @@ static int process_scancode_byte(uint8_t sc, char* out) {
     if (sc == 0x3A)               { caps_press();  return 0; }  /* Caps Lock */
     if (sc == 0xBA)               { caps_down  = 0; return 0; }
     if (sc & 0x80)                return 0; /* key-up */
+    { int k = set1_fn(sc); if (k) { fkey(k); return 0; } }
 
     return translate_scancode(sc, out);
 }

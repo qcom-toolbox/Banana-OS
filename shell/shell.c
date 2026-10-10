@@ -34,6 +34,8 @@
 #include "../kernel/passwd.h"
 #include "../kernel/idt.h"
 #include "../kernel/acpi.h"
+#include "../kernel/pkg.h"
+#include "../kernel/app.h"
 #include "../kernel/meminfo.h"
 
 extern char _kernel_end[];   /* boot/linker.ld */
@@ -64,6 +66,7 @@ static const char* k_skip_spaces(const char* s) {
 }
 
 static void print_uptime(void);
+static const char* path_value(void);
 static void dispatch(const char* line, int persona);
 static void run_script_text(const char* content, int persona);
 
@@ -226,7 +229,7 @@ static void resolve_var(const char* name, int persona, char* out, int outlen) {
         return;
     }
     if (k_strcmp(name, "PWD") == 0)  { fs_cwd_path(out, outlen); return; }
-    if (k_strcmp(name, "PATH") == 0) { k_strcpy_n(out, "/bin", outlen); return; }
+    if (k_strcmp(name, "PATH") == 0) { k_strcpy_n(out, path_value(), outlen); return; }
     const char* v = env_lookup(name);
     k_strcpy_n(out, v ? v : "", outlen);
 }
@@ -1290,6 +1293,94 @@ static const char* const known_cmds[] = {
     "free", "df", "htop", (void*)0
 };
 
+/* ── $PATH: where commands that are not built in are looked for ───── */
+/* Each folder in $PATH (':'-separated, in order) is searched for a file of
+ * the command's name - a program (ELF, built with the SDK) or a shell
+ * script - and the folder /apps for the installed apps (pkg). A name with
+ * a '/' in it (./script.sh, /home/banana/bin/x) is run as it is. */
+#define DEFAULT_PATH "/bin:/apps:/home/banana/bin"
+
+static const char* path_value(void) {
+    const char* v = env_lookup("PATH");
+    return v ? v : DEFAULT_PATH;
+}
+
+enum { PATH_NONE = 0, PATH_FILE, PATH_APP };
+
+static int path_lookup(const char* name, char* out, int cap) {
+    if (!name || !name[0]) return PATH_NONE;
+    if (strchr(name, '/')) {
+        if (fs_find_file(name) < 0) return PATH_NONE;
+        kstrlcpy(out, name, cap);
+        return PATH_FILE;
+    }
+    const char* p = path_value();
+    for (;;) {
+        const char* e = p;
+        while (*e && *e != ':') e++;
+        char dir[FS_PATH_LEN];
+        int n = (int)(e - p);
+        if (n >= (int)sizeof(dir)) n = (int)sizeof(dir) - 1;
+        memcpy(dir, p, (size_t)n);
+        dir[n] = 0;
+        if (!n) kstrlcpy(dir, ".", sizeof(dir));          /* an empty entry: the current folder */
+        while (n > 1 && dir[n - 1] == '/') dir[--n] = 0;
+        pkg_info_t pi;
+        if (k_strcmp(dir, PKG_DIR) == 0) {
+            if (pkg_get(name, &pi) == 0) { ksnprintf(out, cap, "%s/%s", PKG_DIR, name); return PATH_APP; }
+        } else {
+            char cand[FS_PATH_LEN];
+            ksnprintf(cand, sizeof(cand), "%s/%s", k_strcmp(dir, "/") == 0 ? "" : dir, name);
+            if (fs_find_file(cand) >= 0) { kstrlcpy(out, cand, cap); return PATH_FILE; }
+        }
+        if (!*e) return PATH_NONE;
+        p = e + 1;
+    }
+}
+
+/* runs what path_lookup found for the command line `line`; 1 if it ran */
+static int path_run(const char* line, int persona) {
+    char buf[SH_LINE_MAX];
+    kstrlcpy(buf, line, sizeof(buf));
+    char* argv[16];
+    int argc = shell_split_args(buf, argv, 16);
+    if (argc == 0) return 0;
+    char path[FS_PATH_LEN];
+    int kind = path_lookup(argv[0], path, sizeof(path));
+    if (kind == PATH_NONE) return 0;
+    char err[128];
+    err[0] = 0;
+    if (kind == PATH_APP) {
+        if (pkg_run(argv[0], argc, argv, 0, err, sizeof(err)) < 0 && err[0]) {
+            terminal_write_color(argv[0], VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            terminal_write_color(": ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            terminal_writeln(err);
+        }
+        return 1;
+    }
+    int idx = fs_find_file(path);
+    uint8_t hdr[4] = { 0 };
+    fs_read(idx, 0, hdr, 4);
+    if (hdr[0] == 0x7F && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F') {
+        if (app_exec(path, argc, argv, err, sizeof(err)) < 0 && err[0]) {
+            terminal_write_color(argv[0], VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            terminal_write_color(": ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            terminal_writeln(err);
+        }
+        return 1;
+    }
+    if (fs_is_binary(idx)) {
+        terminal_write_color(argv[0], VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_write_color(": cannot run this file (neither a program nor a script)\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return 1;
+    }
+    fs_file_t* f = fs_get_file(idx);
+    fs_pin(idx);                   /* the script stays in RAM while its commands run */
+    run_script_text(f->content, persona);
+    fs_unpin(idx);
+    return 1;
+}
+
 static void cmd_which(const char* args) {
     const char* p = args ? args : "";
     char tok[64];
@@ -1304,6 +1395,8 @@ static void cmd_which(const char* args) {
             return;
         }
     }
+    char path[FS_PATH_LEN];
+    if (path_lookup(tok, path, sizeof(path)) != PATH_NONE) { terminal_writeln(path); return; }
     terminal_write(tok);
     terminal_writeln(": not found");
 }
@@ -1331,6 +1424,14 @@ static void cmd_type(const char* args) {
             terminal_writeln(" is a shell builtin");
             return;
         }
+    }
+    char path[FS_PATH_LEN];
+    int kind = path_lookup(tok, path, sizeof(path));
+    if (kind != PATH_NONE) {
+        terminal_write(tok);
+        terminal_write(kind == PATH_APP ? " is an installed app, " : " is ");
+        terminal_writeln(path);
+        return;
     }
     terminal_write(tok);
     terminal_writeln(": not found");
@@ -1416,6 +1517,7 @@ static void print_env(int persona) {
         terminal_writeln(val);
     }
     for (int i = 0; i < env_count; i++) {
+        if (k_strcmp(env_name[i], "PATH") == 0) continue;     /* (shown above) */
         terminal_write(env_name[i]);
         terminal_write("=");
         terminal_writeln(env_val[i]);
@@ -2101,6 +2203,10 @@ static void cmd_startx(void) {
         terminal_writeln("startx: not over SSH - the desktop belongs to the computer's own screen");
         return;
     }
+    if (terminal_vt_get_active() != 0) {            /* a terminal window of the desktop */
+        terminal_writeln("startx: the desktop is already running (this is one of its windows)");
+        return;
+    }
     gui_set_enabled(1);
     terminal_writeln("startx: GUI enabled (Ctrl+T or click [Start]). Type 'stopx' to return to shell-only view.");
 }
@@ -2425,8 +2531,8 @@ static void dispatch_cmd(const char* raw_line, int persona) {
     if (srvcmd_dispatch(line)) return;
     if (netcmd_dispatch(line)) return;
 
-    /* an installed app (pkg) */
-    if (syscmd_try_app(line)) return;
+    /* a program, a script or an installed app found through $PATH */
+    if (path_run(line, persona)) return;
 
     /* unknown */
     terminal_write_color(shell_kind_name(persona), VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);

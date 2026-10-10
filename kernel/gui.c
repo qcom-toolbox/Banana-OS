@@ -29,6 +29,8 @@
 #include "taskmgr.h"
 #include "settings.h"
 #include "pkg.h"
+#include "audio.h"
+#include "app.h"
 #include "../net/net.h"
 #include "../shell/shell.h"
 
@@ -1237,6 +1239,113 @@ static void open_submenu(const fb_info_t* fi, int slot) {
     g_sub_slot = slot;
 }
 
+/* ── function and media keys (keyboard_take_fkey) ──────────────────── */
+static uint32_t g_osd_until;                /* the volume level shows until then */
+static int      g_osd_shown;
+
+/* the terminal window in front, -1 if none is open */
+static int front_term(void) {
+    for (int oi = TERM_WIN_MAX - 1; oi >= 0; oi--) {
+        int i = g_term_order[oi];
+        if (g_terms[i].open && !g_terms[i].minimized) return i;
+    }
+    return -1;
+}
+
+/* Alt+F4: the window in front closes; with none, the Shut down menu opens */
+static void close_front_window(const fb_info_t* fi) {
+    if (ctxmenu_is_open()) {                    /* a menu: it closes (the Start menu with its submenu) */
+        if (g_sub_slot >= 0) g_menu_open = 0;
+        ctxmenu_close();
+        g_sub_slot = -1;
+        g_force_redraw = 1;
+        return;
+    }
+    if (g_menu_open) { g_menu_open = 0; g_force_redraw = 1; return; }
+    if (g_front_app >= 0 && app_visible(g_front_app)) {
+        if (g_front_app == APP_APPWIN) { int id = appwin_front_id(); if (id >= 0) appwin_request_close(id); }
+        else win_close(WK_APP << 8 | g_front_app);
+        return;
+    }
+    int t = front_term();
+    if (t >= 0) { g_terms[t].open = 0; g_terms[t].minimized = 0; g_tb_gen++; return; }
+    for (int i = 0; i < MENU_ITEMS; i++)
+        if (MENU_ACTS[menu_idx(i)] == ACT_POWER) {
+            g_menu_open = 1;
+            g_menu_sel = i;
+            open_submenu(fi, i);
+            g_force_redraw = 1;
+        }
+}
+
+static void toggle_max_term(const fb_info_t* fi, term_win_t* w) {
+    if (!w->maxed) {
+        w->sx = w->x; w->sy = w->y; w->sw = w->w; w->sh = w->h;
+        w->x = 0; w->y = 0; w->w = (int)fi->width; w->h = (int)fi->height - BAR_H;
+        w->maxed = 1;
+    } else {
+        w->x = w->sx; w->y = w->sy; w->w = w->sw; w->h = w->sh;
+        w->maxed = 0;
+    }
+    clamp_win(fi, w);
+    term_apply_size(w);
+}
+
+/* play / pause, stop, next, previous: the music player has them first (1 if taken) */
+static int gui_media_key(int c) {
+    (void)c;
+    return 0;
+}
+
+static void gui_fkeys(const fb_info_t* fi) {
+    if (g_osd_shown && (int32_t)(timer_ms() - g_osd_until) >= 0) { g_osd_shown = 0; g_force_redraw = 1; }
+    for (int n = 0; n < 16; n++) {
+        /* a console app in the front terminal takes them itself */
+        if (g_front_app < 0 && front_term() >= 0 && app_console_focused()) return;
+        int k = keyboard_take_fkey();
+        if (!k) return;
+        int c = KEYF_CODE(k);
+        if (c == KEYF_WIN) { gui_handle_key(20); g_force_redraw = 1; continue; }
+        if (c == KEYF_MUTE || c == KEYF_VOLDOWN || c == KEYF_VOLUP) {   /* (the keyboard driver set it) */
+            g_osd_until = timer_ms() + 1500;
+            g_osd_shown = 1;
+            g_force_redraw = 1;
+            continue;
+        }
+        if (c == KEYF_F1 + 3 && (k & KEYF_ALT)) { close_front_window(fi); continue; }   /* Alt+F4 */
+        if (c >= KEYF_PLAY && c <= KEYF_PREV) {
+            if (gui_media_key(c)) continue;          /* the music player, wherever it is */
+        }
+        if (g_menu_open || ctxmenu_is_open()) continue;
+        if (g_front_app >= 0 && app_visible(g_front_app)) {
+            switch (g_front_app) {
+            case APP_FILES:   explorer_fkey(k); break;
+            case APP_BROWSER: browser_fkey(k); break;
+            case APP_NOTEPAD: notepad_fkey(k); break;
+            case APP_APPWIN:  appwin_fkey(k); break;
+            default: break;
+            }
+        } else if (c == KEYF_F1 + 10) {             /* F11: the front terminal fills the screen */
+            int t = front_term();
+            if (t >= 0) toggle_max_term(fi, &g_terms[t]);
+        }
+        g_force_redraw = 1;
+    }
+}
+
+static void draw_volume_osd(const fb_info_t* fi) {
+    if (!g_osd_shown) return;
+    int w = 220, h = 54, x = ((int)fi->width - w) / 2, y = (int)fi->height - BAR_H - h - 40;
+    int v = audio_get_volume();
+    draw_bevel_box(x, y, w, h, 0x001D232Cu, 0x00505E74u, 0x0010151Du);
+    char t[32];
+    if (v == 0) kstrlcpy(t, "Sound off", sizeof(t));
+    else ksnprintf(t, sizeof(t), "Volume %d%%", v);
+    gfx_draw_text(x + 14, y + 10, t, 0x00E8EEF6u, 0x001D232Cu);
+    gfx_fill_rect(x + 14, y + 30, w - 28, 10, 0x00303A4Au);
+    gfx_fill_rect(x + 14, y + 30, (w - 28) * v / 100, 10, 0x0068A8F0u);
+}
+
 static void render_desktop(const fb_info_t* fi, int mx, int my) {
     refresh_wallpaper_cache(fi);
     blit_wallpaper_cache();
@@ -1272,6 +1381,7 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
         }
     }
 
+    draw_volume_osd(fi);
     ctxmenu_draw();
 
     /* push backbuffer to framebuffer once per frame, then the cursor */
@@ -1519,6 +1629,7 @@ static void gui_poll_body(void) {
                 else if (c == 27) g_apps[g_front_app].close();
             }
         }
+        gui_fkeys(fi);
 
         if (!g_backbuf_active) {
             size_desktop(fi);
@@ -1827,6 +1938,7 @@ static void gui_poll_body(void) {
 }
 
 void gui_set_enabled(int enabled) {
+    while (keyboard_take_fkey()) {}          /* (pressed while the desktop was off) */
     g_gui_enabled = enabled ? 1 : 0;
     g_ptr_drawn_x = -1;              /* no pointer on the screen until the desktop draws one */
     g_menu_open = 0;

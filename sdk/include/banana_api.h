@@ -51,6 +51,12 @@
 #define BANANA_KEY_PGUP   0x107
 #define BANANA_KEY_PGDN   0x108
 #define BANANA_KEY_DELETE 0x109
+#define BANANA_KEY_F1     0x111    /* F1..F12: BANANA_KEY_F1 + 0 .. 11 */
+#define BANANA_KEY_F12    0x11C
+#define BANANA_KEY_PLAY   0x120    /* the media keys (laptops: Fn + F-key) */
+#define BANANA_KEY_STOP   0x121
+#define BANANA_KEY_NEXT   0x122
+#define BANANA_KEY_PREV   0x123
 
 /* web_poll() flags */
 #define BANANA_WEB_DIRTY    1    /* a new picture: web_draw() it */

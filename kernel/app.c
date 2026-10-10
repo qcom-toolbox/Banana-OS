@@ -264,6 +264,14 @@ static long a_write(int fd, const void* buf, unsigned long len) {
 /* the next key for the app (ESC sequences become BANANA_KEY_*), 0 if none */
 static int next_key(app_proc_t* p) {
     for (;;) {
+        if (focused(p)) {                       /* F-keys and media keys: events of their own */
+            int f = KEYF_CODE(keyboard_take_fkey());
+            if (f >= KEYF_F1 && f < KEYF_F1 + 12) return BANANA_KEY_F1 + (f - KEYF_F1);
+            if (f == KEYF_PLAY) return BANANA_KEY_PLAY;
+            if (f == KEYF_STOP) return BANANA_KEY_STOP;
+            if (f == KEYF_NEXT) return BANANA_KEY_NEXT;
+            if (f == KEYF_PREV) return BANANA_KEY_PREV;
+        }
         int c = key_pop(p);
         if (!c && focused(p)) c = (unsigned char)keyboard_try_getchar();
         if (!c) return 0;
@@ -289,6 +297,8 @@ static int next_key(app_proc_t* p) {
             case 'H': return BANANA_KEY_HOME;
             case 'F': return BANANA_KEY_END;
             case 'P': return BANANA_KEY_DELETE;
+            case 'I': return BANANA_KEY_PGUP;
+            case 'G': return BANANA_KEY_PGDN;
             case '5': keyboard_try_getchar(); return BANANA_KEY_PGUP;
             case '6': keyboard_try_getchar(); return BANANA_KEY_PGDN;
             case '3': keyboard_try_getchar(); return BANANA_KEY_DELETE;
@@ -1306,5 +1316,11 @@ int app_snapshot(app_info_t* out, int max) {
 int app_kill(int id) {
     if (id < 0 || id >= APP_MAX || !g_procs[id].used) return -1;
     g_procs[id].kill_req = 1;
+    return 0;
+}
+
+int app_console_focused(void) {
+    for (int i = 0; i < APP_MAX; i++)
+        if (g_procs[i].used && focused(&g_procs[i])) return 1;
     return 0;
 }

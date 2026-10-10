@@ -22,4 +22,23 @@ void keyboard_inject(const char* s);
 /* only task `pid` reads the keyboard from now on (-1: everyone again) - the lock screen */
 void keyboard_set_owner(int pid);
 
+/* Function keys, the Windows key and the multimedia keys (on laptops:
+ * Fn + F-key) are not characters: each press is an event of its own,
+ * taken with keyboard_take_fkey() (0 if none). The volume keys also change
+ * the volume themselves, wherever they are pressed. */
+#define KEYF_F1      1           /* F1..F12: KEYF_F1 .. KEYF_F1 + 11 */
+#define KEYF_WIN     13          /* the Windows key: the Start menu */
+#define KEYF_MUTE    16
+#define KEYF_VOLDOWN 17
+#define KEYF_VOLUP   18
+#define KEYF_PLAY    19          /* play / pause */
+#define KEYF_STOP    20
+#define KEYF_NEXT    21
+#define KEYF_PREV    22
+#define KEYF_SHIFT   0x100       /* held with an F-key */
+#define KEYF_CTRL    0x200
+#define KEYF_ALT     0x400
+#define KEYF_CODE(k) ((k) & 0xFF)
+int keyboard_take_fkey(void);
+
 #endif
