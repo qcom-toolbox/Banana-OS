@@ -62,10 +62,11 @@ typedef struct task {
     uint64_t     longest_cyc;             /* longest run without a switch */
     uint64_t     ready_tsc;               /* when it became ready (0: not waiting) */
     uint64_t     lat_sum_cyc, lat_max_cyc;
-    uint32_t     lat_n, vcsw, icsw;
+    uint32_t     lat_n, vcsw, icsw, kpreempts;
     uint64_t     here_cyc;                /* boot-core time since it last came there */
     uint32_t     ap_vr;                   /* weighted us of processor time, any core: whose turn for one */
     int          pinned;                  /* never runs on another core */
+    int          no_kpreempt;             /* never preempted in kernel code (the desktop's task) */
     volatile int cpu;                     /* 0 boot core, n another core, -1 waiting for one */
     volatile int came_home;               /* back from another core: vruntime caught up first */
     int          vt;                      /* terminal output target, restored on switch-in */
@@ -377,6 +378,7 @@ static void switch_to(task_t* cur, task_t* nxt) {
         nxt->lat_n++;
         if (lat > nxt->lat_max_cyc) nxt->lat_max_cyc = lat;
     }
+    nxt->switched_in = now;                 /* (it offered the processor: a new run starts, switch or not) */
     if (nxt == cur) return;
     if (cur != &g_idle) {
         if (invol) cur->icsw++;
@@ -461,6 +463,7 @@ void task_init(const char* main_task_name) {
     t->sp = NULL;
     set_nice(t, nice_of(TASK_PRIO_HIGH));   /* the desktop and the main shell */
     t->pinned = 1;
+    t->no_kpreempt = 1;                     /* (see task_kpreempt) */
     t->run_start = rdtsc();
     t->switched_in = t->run_start;
 
@@ -511,9 +514,10 @@ int task_create_stack(const char* name, void (*entry)(void), uint32_t stack_byte
     t->longest_cyc = 0;
     t->ready_tsc = rdtsc();
     t->lat_sum_cyc = t->lat_max_cyc = 0;
-    t->lat_n = t->vcsw = t->icsw = 0;
+    t->lat_n = t->vcsw = t->icsw = t->kpreempts = 0;
     t->ap_vr = 0;
     t->pinned = 0;
+    t->no_kpreempt = 0;
     t->cpu = 0;
     t->came_home = 0;
     t->vruntime = g_min_vr;                 /* a new task starts level with the others */
@@ -603,6 +607,7 @@ void task_snapshot(task_info_t* out, int max_count) {
         out[i].weight = t->weight;
         out[i].vcsw = t->vcsw;
         out[i].icsw = t->icsw;
+        out[i].kpreempts = t->kpreempts;
         uint64_t per_us = g_tsc_per_ms / 1000u ? g_tsc_per_ms / 1000u : 1;
         out[i].lat_avg_us = t->lat_n ? (uint32_t)(t->lat_sum_cyc / t->lat_n / per_us) : 0;
         out[i].lat_max_us = (uint32_t)(t->lat_max_cyc / per_us);
@@ -685,11 +690,24 @@ void task_loadavg(uint32_t out[3]) {
     for (int k = 0; k < 3; k++) out[k] = (g_load[k] * 100u + 1024u) >> 11;
 }
 
+/* a task that kept the processor long (a new record over 50 ms): logged */
+static void report_long_runs(void) {
+    static uint32_t reported[TASK_MAX];
+    for (int i = 0; i < g_count; i++) {
+        task_t* t = &g_tasks[i];
+        uint32_t ms = (uint32_t)(t->longest_cyc / g_tsc_per_ms);
+        if (t->state == TASK_UNUSED || ms < 50 || ms <= reported[i] + reported[i] / 4) continue;
+        reported[i] = ms;
+        klog("sched: %s (task %d) ran %u ms without letting others in\n", t->name, i, ms);
+    }
+}
+
 static void sysmon_entry(void) {
     task_set_background();
     for (;;) {
         recompute_cpu_window();
         sample_load();
+        if (timer_ms() > 15000) report_long_runs();     /* (after the boot) */
         for (int c = 1; c < cpu_count(); c++)
             if (g_ap[c].used == 1) {
                 g_ap[c].used = 2;
@@ -747,6 +765,23 @@ int task_should_yield(void) {
     if (ran < g_tsc_per_ms) return 0;       /* at least 1 ms, or switching costs more than it gives */
     /* a sleeper's time has come (or a driver woke one) */
     return g_wake_pending || (g_have_sleeper && (int32_t)(timer_ms() - g_next_wake) >= 0);
+}
+
+extern char __kpreempt_start[], __kpreempt_end[];
+
+void task_kpreempt(uintptr_t ip) {
+    if (ip < (uintptr_t)__kpreempt_start || ip >= (uintptr_t)__kpreempt_end) return;
+    if (cpu_id() != 0) return;
+    task_t* t = g_current;
+    if (!t || t == &g_idle || t->no_kpreempt || t->state != TASK_RUNNING) return;
+    if (!task_should_yield()) return;
+    /* (the interrupt was acknowledged: kernel/idt.c) - as task_maybe_yield
+     * would here, with interrupts on as the interrupted code had them */
+    __asm__ volatile("sti");
+    g_involuntary = 1;
+    t->kpreempts++;
+    task_yield();
+    __asm__ volatile("cli");
 }
 
 void task_maybe_yield(void) {

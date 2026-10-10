@@ -13,6 +13,7 @@
 #include "../kernel/timer.h"
 #include "../kernel/daemon.h"
 #include "../kernel/gui.h"
+#include "../kernel/kptest.h"
 
 static int has_opt(int argc, char** argv, const char* opt) {
     for (int i = 1; i < argc; i++) if (strcmp(argv[i], opt) == 0) return 1;
@@ -427,6 +428,10 @@ static void cmd_sched(void) {
                   x->cpu_pct, x->vcsw, x->icsw, avg, mx, x->longest_ms, x->name);
         terminal_write_color(row, x->longest_ms >= 500 ? VGA_COLOR_LIGHT_RED : VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     }
+    uint32_t kp = 0;
+    for (int i = 0; i < n; i++) kp += t[i].kpreempts;
+    ksnprintf(row, sizeof(row), "Preempted in kernel code (image / SVG decoding): %u times\n", kp);
+    terminal_write(row);
     terminal_writeln("GAVE UP: it slept / waited / yielded;  PREEMPT: its slice ended or a woken task took over;");
     terminal_writeln("WAIT: from ready to running;  LONGEST: its longest run without letting other tasks in.");
 }
@@ -466,6 +471,15 @@ int moncmd_dispatch(const char* line) {
     if (strcmp(argv[0], "htop") == 0) { cmd_htop(); return 1; }
     if (strcmp(argv[0], "sched") == 0) { cmd_sched(); return 1; }
     if (strcmp(argv[0], "lscpu") == 0) { cmd_lscpu(); return 1; }
+    if (strcmp(argv[0], "kptest") == 0) {
+        if (argc < 3) { terminal_writeln("usage: kptest <picture.png|jpg|gif|bmp> <drawing.svg> [seconds]   (checks kernel preemption)"); return 1; }
+        char rep[400];
+        int secs = 10;
+        if (argc > 3) { uint32_t v; if (k_parse_u32(argv[3], &v) && v > 0 && v < 600) secs = (int)v; }
+        kptest_run(argv[1], argv[2], secs, rep, sizeof(rep));
+        terminal_writeln(rep);
+        return 1;
+    }
     if (strcmp(argv[0], "renice") == 0) { cmd_renice(argc, argv); return 1; }
     return 0;
 }

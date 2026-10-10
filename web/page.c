@@ -399,9 +399,7 @@ static void load_inline_svgs(page_t* p, dom_node_t* n, int* count) {
             img_data_t* img = (img_data_t*)arena_alloc(&p->A, sizeof(img_data_t));
             img->failed = 1;
             char* src = dom_html(&p->A, c, 1);
-            svg_current_color = col;
-            if (src && svg_render(src, (uint32_t)strlen(src), 0, 0, img, &p->A) == 0) img->failed = 0;
-            svg_current_color = 0;
+            if (src && svg_render_color(src, (uint32_t)strlen(src), 0, 0, img, &p->A, col) == 0) img->failed = 0;
             c->img = img;
             c->svg_color = col;
             continue;

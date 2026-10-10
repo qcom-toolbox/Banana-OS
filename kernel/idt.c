@@ -331,6 +331,7 @@ void irq_handler(registers_t* regs) {
     pic_outb(PIC1_CMD, 0x20);
     /* app code is safe to switch away from (kernel code is not) */
     app_preempt((uintptr_t)REG_IP(regs));
+    task_kpreempt((uintptr_t)REG_IP(regs));     /* (kernel code that may be preempted) */
 }
 
 /* UEFI firmware hands over with the local APIC enabled and its LINT0
@@ -478,6 +479,7 @@ void ipi_handler(registers_t* regs) {
         for (int i = 0; i < IRQ_CHAIN && irq_handlers[0][i]; i++) irq_handlers[0][i]();
         smp_eoi();
         app_preempt((uintptr_t)REG_IP(regs));
+        task_kpreempt((uintptr_t)REG_IP(regs));
         return;
     }
     smp_eoi();

@@ -1343,7 +1343,7 @@ static const char* const known_cmds[] = {
     /* shell/syscmds.c */
     "mount", "umount", "eject", "pkg", "apps", "taskmgr", "settings", "play", "beep", "volume", "lsaudio",
     /* shell/moncmds.c */
-    "free", "df", "htop", "sched", "renice", "lscpu", "lsgpu", "brightness", "resolution", "drivers", "driver", (void*)0
+    "free", "df", "htop", "sched", "renice", "lscpu", "kptest", "lsgpu", "brightness", "resolution", "drivers", "driver", (void*)0
 };
 
 /* ── $PATH: where commands that are not built in are looked for ───── */

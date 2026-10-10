@@ -35,6 +35,7 @@ typedef struct {
     uint32_t     weight;    /* its share: 1024 at nice 0, x1.25 per step */
     uint32_t     vcsw;      /* switches: it gave the processor up (sleep, wait, yield) */
     uint32_t     icsw;      /* ... its time slice ended / a woken task took over */
+    uint32_t     kpreempts; /* ... of those, preempted in kernel code (task_kpreempt) */
     uint32_t     lat_avg_us, lat_max_us;   /* from ready (woken) to running */
     uint32_t     longest_ms;               /* its longest run without letting others in */
 } task_info_t;
@@ -83,6 +84,19 @@ void task_maybe_yield(void);
  * least 1 ms - a sleeping task woke up (a key, a timer, a packet): the
  * woken one takes over at once instead of waiting for the slice. */
 int  task_should_yield(void);
+
+/* Kernel preemption. Most of the kernel switches tasks only where its code
+ * calls task_yield / task_sleep_ms / task_maybe_yield (it was written for
+ * that: shared structures are never seen half-updated). Some kernel code
+ * is pure computation on what its caller handed it - image and zlib
+ * decoding (stb_image), SVG drawing - and is linked between
+ * __kpreempt_start and __kpreempt_end: a timer interrupt that lands there
+ * switches tasks like one in app code (the slice is over, or a woken task
+ * waits). Rules for that code: no mutable globals, nothing that waits; its
+ * calls out (kmalloc, memcpy...) run unpreempted as before. The desktop's
+ * task (task 0) is never preempted in kernel code: other tasks may change
+ * the windows it is drawing only between its frames. */
+void task_kpreempt(uintptr_t ip);       /* kernel/idt.c, every hardware interrupt */
 
 /* Real sleep: marks the calling task SLEEPING and does not resume it
  * until at least `ms` milliseconds have passed (or task_wake()). */

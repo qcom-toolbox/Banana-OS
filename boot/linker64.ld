@@ -8,6 +8,12 @@ SECTIONS {
 
     .text BLOCK(4K) : ALIGN(4K) {
         *(.multiboot2)
+        /* preemptible kernel code (kernel/task.h, task_kpreempt): compute
+         * that only touches what its caller hands it */
+        __kpreempt_start = .;
+        web/svg.o64(.text .text.*)
+        third_party/stb/stb_image_impl.o64(.text .text.*)
+        __kpreempt_end = .;
         *(.text .text.*)
     }
 

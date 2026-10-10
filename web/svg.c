@@ -45,6 +45,12 @@ typedef struct {
     /* <style> rules: ".cls { decls }" / "tag { decls }" */
     struct { const char* sel; const char* decls; } rules[64];
     int       nrules;
+    int       keep_flat;           /* add_seg() keeps horizontal segments (a stroke's outline) */
+    /* scratch space of fill_segs() and make_stroke() - per drawing, not
+     * static: two tasks may draw at once, preempted in between */
+    real*     xs;
+    int*      dirs;
+    seg_t*    tmp;
 } rc_t;
 
 static void xform(const rc_t* R, real x, real y, real* ox, real* oy) {
@@ -53,11 +59,11 @@ static void xform(const rc_t* R, real x, real y, real* ox, real* oy) {
 }
 
 /* add_seg() drops horizontal segments, which a fill does not need but a
- * stroke does: shapes that are stroked collect their outline with this on */
-static int g_keep_flat;
-
+ * stroke does: shapes that are stroked collect their outline with
+ * R->keep_flat on. (No mutable globals in this file: it is preemptible
+ * kernel code - see kernel/task.h - and two tasks may draw at once.) */
 static void add_seg(rc_t* R, real x0, real y0, real x1, real y1) {
-    if (R->nsegs >= MAX_SEGS || (y0 == y1 && !g_keep_flat)) return;
+    if (R->nsegs >= MAX_SEGS || (y0 == y1 && !R->keep_flat)) return;
     seg_t* s = &R->segs[R->nsegs++];
     s->x0 = x0; s->y0 = y0; s->x1 = x1; s->y1 = y1;
 }
@@ -82,8 +88,8 @@ static void fill_segs(rc_t* R, uint32_t color, real opacity, int evenodd) {
         if (s->y1 > ymax) ymax = s->y1;
     }
     int row0 = ymin < 0 ? 0 : (int)ymin, row1 = ymax >= R->h ? R->h - 1 : (int)ymax;
-    static real xs[2048];
-    static int dirs[2048];
+    real* xs = R->xs;
+    int* dirs = R->dirs;
     uint32_t cr = (color >> 16) & 255, cg = (color >> 8) & 255, cb = color & 255;
     int op = (int)(opacity * 255);
     if (op > 255) op = 255;
@@ -350,7 +356,7 @@ static void make_stroke(rc_t* R, int start, real width) {
     real hw = width * scale / 2;
     if (hw < 0.35L) hw = 0.35L;
     int end = R->nsegs;
-    static seg_t tmp[MAX_SEGS];
+    seg_t* tmp = R->tmp;
     int n = end - start;
     if (n > MAX_SEGS) n = MAX_SEGS;
     memcpy(tmp, R->segs + start, (size_t)n * sizeof(seg_t));
@@ -630,16 +636,16 @@ static void draw_node(rc_t* R, dom_node_t* e, const paint_t* parent, int depth) 
         draw_children(R, e, &ps, depth);
     } else {
         int start = R->nsegs;
-        g_keep_flat = 0;
+        R->keep_flat = 0;
         if (shape_outline(R, e)) {
             int is_line = strcmp(t, "line") == 0 || strcmp(t, "polyline") == 0;
             if (!ps.fill_none && !is_line) fill_segs(R, ps.fill, ps.opacity * ps.fill_op, ps.evenodd);
             else R->nsegs = start;
             if (!ps.stroke_none && ps.stroke_w > 0) {
                 /* the outline again, now kept for the stroke */
-                g_keep_flat = 1;
+                R->keep_flat = 1;
                 shape_outline(R, e);
-                g_keep_flat = 0;
+                R->keep_flat = 0;
                 make_stroke(R, start, ps.stroke_w);
                 fill_segs(R, ps.stroke, ps.opacity * ps.stroke_op, 0);
             }
@@ -703,9 +709,12 @@ static dom_node_t* find_svg(dom_node_t* n) {
     return NULL;
 }
 
-uint32_t svg_current_color;
-
 int svg_render(const char* src, uint32_t len, int want_w, int want_h, img_data_t* out, arena_t* A) {
+    return svg_render_color(src, len, want_w, want_h, out, A, 0);
+}
+
+int svg_render_color(const char* src, uint32_t len, int want_w, int want_h, img_data_t* out, arena_t* A,
+                     uint32_t current_color) {
     dom_node_t* doc = html_parse(A, src, len);
     dom_node_t* svg = doc ? find_svg(doc) : NULL;
     if (!svg) return -1;
@@ -733,6 +742,8 @@ int svg_render(const char* src, uint32_t len, int want_w, int want_h, img_data_t
     if (H < 1) H = 1;
 
     rc_t* R = (rc_t*)arena_alloc(A, sizeof(rc_t));
+    if (!R) return -1;
+    memset(R, 0, sizeof(*R));
     R->w = W;
     R->h = H;
     R->A = A;
@@ -741,6 +752,9 @@ int svg_render(const char* src, uint32_t len, int want_w, int want_h, img_data_t
     R->a = (uint8_t*)arena_alloc(A, (uint32_t)(W * H));
     R->segs = (seg_t*)arena_alloc(A, MAX_SEGS * (uint32_t)sizeof(seg_t));
     R->cov = (uint8_t*)arena_alloc(A, (uint32_t)W + 1);
+    R->xs = (real*)arena_alloc(A, 2048u * (uint32_t)sizeof(real));
+    R->dirs = (int*)arena_alloc(A, 2048u * (uint32_t)sizeof(int));
+    R->tmp = (seg_t*)arena_alloc(A, MAX_SEGS * (uint32_t)sizeof(seg_t));
     if (A->oom) return -1;
     /* viewBox -> pixels (preserveAspectRatio xMidYMid meet) */
     real sx = W / vw, sy = H / vh, s = sx < sy ? sx : sy;
@@ -754,7 +768,7 @@ int svg_render(const char* src, uint32_t len, int want_w, int want_h, img_data_t
     ps.stroke_none = 1;
     ps.stroke_w = 1;
     ps.opacity = ps.fill_op = ps.stroke_op = 1;
-    ps.color = svg_current_color;
+    ps.color = current_color;
     paint_of(R, svg, &ps);
     draw_children(R, svg, &ps, 0);
     out->px = R->rgb;
