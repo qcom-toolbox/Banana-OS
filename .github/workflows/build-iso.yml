@@ -32,6 +32,16 @@ jobs:
             chmod 600 ~/.banana-secureboot/banana-sb.key
           fi
 
+      # FFmpeg for the Media Player and Music apps (ports/ffmpeg/build.sh):
+      # built once, then kept until the build script or the SDK's libc changes
+      - name: FFmpeg build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ports/ffmpeg/src
+            ports/ffmpeg/build
+          key: ffmpeg-7.1-${{ hashFiles('ports/ffmpeg/build.sh', 'sdk/lib/*.c', '!sdk/lib/banana.c', 'sdk/include/**', '!sdk/include/banana*.h') }}
+
       - name: Build Banana_OS.iso
         run: |
           make clean

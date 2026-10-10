@@ -25,4 +25,47 @@ typedef __UINTMAX_TYPE__ uintmax_t;
 #define INT64_MAX  9223372036854775807LL
 #define UINT64_MAX 18446744073709551615ULL
 #define SIZE_MAX   __SIZE_MAX__
+typedef __INT_LEAST8_TYPE__   int_least8_t;
+typedef __INT_LEAST16_TYPE__  int_least16_t;
+typedef __INT_LEAST32_TYPE__  int_least32_t;
+typedef __INT_LEAST64_TYPE__  int_least64_t;
+typedef __UINT_LEAST8_TYPE__  uint_least8_t;
+typedef __UINT_LEAST16_TYPE__ uint_least16_t;
+typedef __UINT_LEAST32_TYPE__ uint_least32_t;
+typedef __UINT_LEAST64_TYPE__ uint_least64_t;
+typedef __INT_FAST8_TYPE__    int_fast8_t;
+typedef __INT_FAST16_TYPE__   int_fast16_t;
+typedef __INT_FAST32_TYPE__   int_fast32_t;
+typedef __INT_FAST64_TYPE__   int_fast64_t;
+typedef __UINT_FAST8_TYPE__   uint_fast8_t;
+typedef __UINT_FAST16_TYPE__  uint_fast16_t;
+typedef __UINT_FAST32_TYPE__  uint_fast32_t;
+typedef __UINT_FAST64_TYPE__  uint_fast64_t;
+#define INT8_C(c)    c
+#define INT16_C(c)   c
+#define INT32_C(c)   c
+#define INT64_C(c)   c ## LL
+#define UINT8_C(c)   c
+#define UINT16_C(c)  c
+#define UINT32_C(c)  c ## U
+#define UINT64_C(c)  c ## ULL
+#define INTMAX_C(c)  c ## LL
+#define UINTMAX_C(c) c ## ULL
+#define INTMAX_MAX   __INTMAX_MAX__
+#define INTMAX_MIN   (-__INTMAX_MAX__ - 1)
+#define UINTMAX_MAX  __UINTMAX_MAX__
+#define INTPTR_MAX   __INTPTR_MAX__
+#define INTPTR_MIN   (-__INTPTR_MAX__ - 1)
+#define UINTPTR_MAX  __UINTPTR_MAX__
+#define PTRDIFF_MAX  __PTRDIFF_MAX__
+#define PTRDIFF_MIN  (-__PTRDIFF_MAX__ - 1)
+#define INT_FAST8_MAX  __INT_FAST8_MAX__
+#define INT_FAST16_MAX __INT_FAST16_MAX__
+#define INT_FAST32_MAX __INT_FAST32_MAX__
+#define INT_FAST64_MAX __INT_FAST64_MAX__
+#define UINT_FAST32_MAX __UINT_FAST32_MAX__
+#define UINT_FAST64_MAX __UINT_FAST64_MAX__
+#define SIG_ATOMIC_MAX __SIG_ATOMIC_MAX__
+#define WCHAR_MAX    __WCHAR_MAX__
+#define WCHAR_MIN    __WCHAR_MIN__
 #endif

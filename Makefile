@@ -31,8 +31,8 @@ LIBGCC64 := $(shell $(CC) -m64 -print-libgcc-file-name)
 C_SRCS   = $(wildcard kernel/*.c) $(wildcard shell/*.c) $(wildcard net/*.c) \
            $(wildcard crypto/*.c) $(wildcard usb/*.c) $(wildcard web/*.c) $(wildcard media/*.c) \
            third_party/stb/stb_image_impl.c
-ASM_SRCS   = boot/boot.asm kernel/isr.asm kernel/task_switch.asm kernel/appcall.asm kernel/exbin.asm kernel/fontbin.asm
-ASM_SRCS64 = boot/boot64.asm kernel/isr64.asm kernel/task_switch64.asm kernel/appcall64.asm kernel/exbin.asm kernel/fontbin.asm kernel/smp_tramp.asm
+ASM_SRCS   = boot/boot.asm kernel/isr.asm kernel/task_switch.asm kernel/appcall.asm kernel/exbin.asm kernel/fontbin.asm kernel/appbin.asm
+ASM_SRCS64 = boot/boot64.asm kernel/isr64.asm kernel/task_switch64.asm kernel/appcall64.asm kernel/exbin.asm kernel/fontbin.asm kernel/appbin.asm kernel/smp_tramp.asm
 # the boot object must come first: it carries the Multiboot2 header
 OBJS     = $(ASM_SRCS:.asm=.o) $(C_SRCS:.c=.o)
 OBJS64   = $(ASM_SRCS64:.asm=.o64) $(C_SRCS:.c=.o64)
@@ -200,6 +200,8 @@ run-tap: Banana_OS.iso
 
 clean:
 	for e in $(EXAMPLES); do $(MAKE) -s -C sdk/examples/$$e clean; done
+	for a in $(APPS); do $(MAKE) -s -C apps/$$a clean; done
+	for d in $(DRIVER_EXAMPLES); do $(MAKE) -s -C sdk/driver/examples/$$d clean; done
 	rm -f banana-sdk.tar.gz
 	rm -f $(OBJS) $(OBJS64) $(DEPS) kernel.bin kernel64.bin Banana_OS.iso
 	rm -rf isoroot
@@ -219,6 +221,25 @@ endef
 $(foreach e,$(EXAMPLES),$(eval $(call EXAMPLE_RULE,$(e))))
 
 kernel/exbin.o kernel/exbin.o64: $(EXAMPLE_BPKS)
+
+# ── the apps that come with Banana OS (apps/): FFmpeg-based, built into the
+# kernel compressed and installed at boot (kernel/builtin_apps.c). FFmpeg
+# itself is built once by ports/ffmpeg/build.sh (the first build takes a while).
+APPS     = mediaplayer music
+APP_DEPS = $(SDK_DEPS) ports/ffmpeg/build.sh
+define APP_RULE
+apps/$(1)/$(1)-i686.bpk.z apps/$(1)/$(1)-x86_64.bpk.z: $$(wildcard apps/$(1)/*.c) apps/$(1)/Makefile $$(APP_DEPS)
+	$$(MAKE) -C apps/$(1) bundle
+endef
+$(foreach a,$(APPS),$(eval $(call APP_RULE,$(a))))
+kernel/appbin.o: $(foreach a,$(APPS),apps/$(a)/$(a)-i686.bpk.z)
+kernel/appbin.o64: $(foreach a,$(APPS),apps/$(a)/$(a)-x86_64.bpk.z)
+
+# the Driver Kit's examples (sdk/driver/examples): packages, not in the kernel
+DRIVER_EXAMPLES = edu bochsfb
+.PHONY: driver-examples
+driver-examples:
+	for d in $(DRIVER_EXAMPLES); do $(MAKE) -C sdk/driver/examples/$$d; done
 kernel/fontbin.o kernel/fontbin.o64: $(wildcard fonts/*.ttf)
 
 .PHONY: examples sdk

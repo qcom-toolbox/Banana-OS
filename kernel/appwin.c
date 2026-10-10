@@ -558,3 +558,20 @@ void appwin_fkey(int k) {
     else if (c == KEYF_PREV) key = BANANA_KEY_PREV;
     if (key) push_simple(w, BANANA_EV_KEY, 0, 0, 0, key);
 }
+
+/* the window that gets the media keys (play / pause, next...) wherever
+ * the focus is: the last one that asked (a music player) */
+static int g_media_win = -1, g_media_owner = -1;
+
+void appwin_set_media(int id, int owner) {
+    if (get(id, owner)) { g_media_win = id; g_media_owner = owner; }
+}
+
+int appwin_media_key(int k) {
+    if (g_media_win < 0 || !get(g_media_win, g_media_owner)) { g_media_win = -1; return 0; }
+    int key = k == KEYF_PLAY ? BANANA_KEY_PLAY : k == KEYF_STOP ? BANANA_KEY_STOP :
+              k == KEYF_NEXT ? BANANA_KEY_NEXT : k == KEYF_PREV ? BANANA_KEY_PREV : 0;
+    if (!key) return 0;
+    push_simple(&g_w[g_media_win], BANANA_EV_KEY, 0, 0, 0, key);
+    return 1;
+}

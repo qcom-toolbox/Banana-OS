@@ -50,6 +50,9 @@ int  bwin_wait_event(bwin_t* win, banana_event_t* ev, int timeout_ms);
  * bwin_event() has already updated win->w, win->h and win->px: redraw
  * everything. 0, or -1 on a Banana OS too old for it. */
 int  bwin_resizable(bwin_t* win, int min_w, int min_h);
+/* the media keys (play / pause, next, previous, stop) come to this window
+ * even when another one has the focus (API version 7) */
+void bwin_media_keys(bwin_t* win);
 
 /* drawing (clipped to the window) */
 void bwin_clear(bwin_t* win, unsigned int color);
@@ -146,6 +149,12 @@ int  banana_playing(void);                 /* queued sound still playing */
 void banana_beep(int hz, int ms);
 /* a square-wave tone through the sound card (beep if there is none) */
 void banana_tone(int hz, int ms, int volume_percent);
+/* for players (API version 7; older systems: 0 / nothing / -1):
+ * how much of what was queued has not been heard yet, dropping it, and
+ * the system volume (percent < 0 only reads it) */
+unsigned int banana_audio_queued_ms(void);
+void banana_audio_stop(void);
+int  banana_volume(int percent);
 
 /* ── clipboard ────────────────────────────────────────────────────── */
 void banana_copy(const char* text);

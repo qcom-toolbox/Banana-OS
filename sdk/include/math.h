@@ -19,6 +19,19 @@
 #define isnan(x)   __builtin_isnan(x)
 #define isinf(x)   __builtin_isinf(x)
 #define isfinite(x) __builtin_isfinite(x)
+#define signbit(x) __builtin_signbit(x)
+#define isnormal(x) __builtin_isnormal(x)
+#define FP_NAN       0
+#define FP_INFINITE  1
+#define FP_ZERO      2
+#define FP_SUBNORMAL 3
+#define FP_NORMAL    4
+#define fpclassify(x) __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL, FP_ZERO, x)
+#define HUGE_VALF  (__builtin_huge_valf())
+#define M_SQRT1_2  0.70710678118654752440
+#define M_1_PI     0.31830988618379067154
+#define M_2_PI     0.63661977236758134308
+#define M_2_SQRTPI 1.12837916709551257390
 
 double sqrt(double x);
 double cbrt(double x);
@@ -50,6 +63,17 @@ double tanh(double x);
 double hypot(double x, double y);
 double fmin(double a, double b);
 double fmax(double a, double b);
+double scalbn(double x, int n);
+double copysign(double x, double y);
+double expm1(double x);
+double log1p(double x);
+double erf(double x);
+long   lrint(double x);
+long long llrint(double x);
+double rint(double x);
+long   lround(double x);
+long long llround(double x);
+double nearbyint(double x);
 
 float sqrtf(float x);
 float fabsf(float x);
@@ -65,5 +89,23 @@ float cosf(float x);
 float tanf(float x);
 float atanf(float x);
 float atan2f(float y, float x);
+float exp2f(float x);
+float log2f(float x);
+float log10f(float x);
+float truncf(float x);
+float rintf(float x);
+long  lrintf(float x);
+float cbrtf(float x);
+float hypotf(float x, float y);
+float copysignf(float x, float y);
+float fminf(float a, float b);
+float fmaxf(float a, float b);
+float asinf(float x);
+float acosf(float x);
+float sinhf(float x);
+float coshf(float x);
+float tanhf(float x);
+float ldexpf(float x, int e);
+float frexpf(float x, int* e);
 
 #endif

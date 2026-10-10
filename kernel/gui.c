@@ -29,6 +29,7 @@
 #include "taskmgr.h"
 #include "settings.h"
 #include "pkg.h"
+#include "gpu.h"
 #include "audio.h"
 #include "app.h"
 #include "../net/net.h"
@@ -806,11 +807,66 @@ static void draw_cursor_shape(int mx, int my, int shape) {
         cursor_bits(mx + 12, my + 14, CUR_HOURGLASS_BITS, (int)(sizeof(CUR_HOURGLASS_BITS) / sizeof(CUR_HOURGLASS_BITS[0])));
 }
 
+/* the pointer in hardware (kernel/gpu.h), when the display has one: its
+ * image is the shape, and the display moves it - nothing to restore */
+static int g_hw_shape = -1;               /* the image the hardware has (-1: none) */
+static int g_hw_failed;
+
+static void img_bits(uint32_t* img, int x, int y, const char* const* rows, int n) {
+    for (int r = 0; r < n; r++)
+        for (int c = 0; rows[r][c]; c++) {
+            int px = x + c, py = y + r;
+            if (px < 0 || py < 0 || px >= 32 || py >= 32) continue;
+            if (rows[r][c] == 'B') img[py * 32 + px] = 0xFF000000u;
+            else if (rows[r][c] == 'W') img[py * 32 + px] = 0xFFFFFFFFu;
+        }
+}
+
+static void shape_image(int shape, uint32_t* img, int* hx, int* hy) {
+    memset(img, 0, 32 * 32 * 4);
+    if (shape == CUR_RESIZE) {
+        for (int y = -1; y <= 15; y++)
+            for (int x = -1; x <= 15; x++) {
+                uint32_t* p = &img[(y + 1) * 32 + (x + 1)];
+                if (resize_white(x, y)) { *p = 0xFFFFFFFFu; continue; }
+                for (int dy = -1; dy <= 1; dy++)
+                    for (int dx = -1; dx <= 1; dx++) if (resize_white(x + dx, y + dy)) *p = 0xFF000000u;
+            }
+        *hx = 8;
+        *hy = 8;
+        return;
+    }
+    img_bits(img, 0, 0, CUR_ARROW_BITS, (int)(sizeof(CUR_ARROW_BITS) / sizeof(CUR_ARROW_BITS[0])));
+    if (shape == CUR_BUSY) img_bits(img, 12, 14, CUR_HOURGLASS_BITS, (int)(sizeof(CUR_HOURGLASS_BITS) / sizeof(CUR_HOURGLASS_BITS[0])));
+    *hx = 0;
+    *hy = 0;
+}
+
+/* 1 if the hardware shows the pointer at (mx, my) */
+static int hw_cursor(int mx, int my, int shape) {
+    if (g_hw_failed || !gpu_has_hw_cursor()) return 0;
+    if (shape != g_hw_shape) {
+        static uint32_t img[32 * 32];
+        int hx, hy;
+        shape_image(shape, img, &hx, &hy);
+        if (gpu_cursor_image(img, 32, 32, hx, hy) < 0) { g_hw_failed = 1; return 0; }
+        g_hw_shape = shape;
+    }
+    gpu_cursor_move(mx, my, 1);
+    return 1;
+}
+
+static void hw_cursor_hide(void) {
+    if (g_hw_shape >= 0) gpu_cursor_move(0, 0, 0);
+    g_hw_shape = -1;
+}
+
 static int cursor_shape(int mx, int my);
 static int g_drawn_shape;
 
 static void draw_cursor(int mx, int my) {
     g_drawn_shape = cursor_shape(mx, my);
+    if (hw_cursor(mx, my, g_drawn_shape)) return;
     draw_cursor_shape(mx, my, g_drawn_shape);
 }
 
@@ -833,6 +889,14 @@ void gui_cursor_tick(void) {
     g_cur_mx = x;
     g_cur_my = y;
     if (x == g_ptr_drawn_x && y == g_ptr_drawn_y) return;
+    if (g_hw_shape >= 0) {                    /* the hardware pointer: only moved */
+        gpu_t* gp = gpu_active();
+        if (!gp || !gp->cursor_irq_safe) return;   /* (moved by the desktop loop instead) */
+        gpu_cursor_move(x, y, 1);
+        g_ptr_drawn_x = x;
+        g_ptr_drawn_y = y;
+        return;
+    }
     fb_present_rect(g_ptr_drawn_x + CURSOR_X0, g_ptr_drawn_y + CURSOR_Y0, CURSOR_W, CURSOR_H);
     draw_cursor_shape(x, y, g_drawn_shape);
     g_ptr_drawn_x = x;
@@ -1293,8 +1357,7 @@ static void toggle_max_term(const fb_info_t* fi, term_win_t* w) {
 
 /* play / pause, stop, next, previous: the music player has them first (1 if taken) */
 static int gui_media_key(int c) {
-    (void)c;
-    return 0;
+    return appwin_media_key(c);
 }
 
 static void gui_fkeys(const fb_info_t* fi) {
@@ -1938,6 +2001,7 @@ static void gui_poll_body(void) {
 }
 
 void gui_set_enabled(int enabled) {
+    if (!enabled) hw_cursor_hide();
     while (keyboard_take_fkey()) {}          /* (pressed while the desktop was off) */
     g_gui_enabled = enabled ? 1 : 0;
     g_ptr_drawn_x = -1;              /* no pointer on the screen until the desktop draws one */

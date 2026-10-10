@@ -30,6 +30,9 @@ AUTHOR      ?=
 SRCS        ?= main.c
 DATA        ?=
 BUILD       ?= build
+# extra libraries (.a) linked after the objects, per CPU
+LIBS_i686   ?=
+LIBS_x86_64 ?=
 
 CC   ?= gcc
 LD   ?= ld
@@ -50,7 +53,7 @@ APP_LDFLAGS = -pie --no-dynamic-linker -z noexecstack -z norelro -z max-page-siz
               -z noseparate-code --hash-style=sysv -e _banana_start -s $(LDFLAGS)
 
 LIBC_SRCS = $(BANANA_SDK)/lib/crt0.c $(BANANA_SDK)/lib/libc.c $(BANANA_SDK)/lib/stdio.c $(BANANA_SDK)/lib/banana.c \
-            $(BANANA_SDK)/lib/math.c
+            $(BANANA_SDK)/lib/math.c $(BANANA_SDK)/lib/posix.c
 LIBC_i686   = $(LIBC_SRCS) $(BANANA_SDK)/lib/divdi3.c
 LIBC_x86_64 = $(LIBC_SRCS)
 
@@ -86,10 +89,10 @@ $(BUILD)/x86_64/sdk_%.o: $(BANANA_SDK)/lib/%.c
 	$(CC) $(CFLAGS_x86_64) $(APP_CFLAGS) $(NOBUILTIN) -c $< -o $@
 
 $(BUILD)/app-i686: $(LOBJS_i686) $(OBJS_i686)
-	$(LD) $(LDFLAGS_i686) $(APP_LDFLAGS) -o $@ $^
+	$(LD) $(LDFLAGS_i686) $(APP_LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS_i686)
 
 $(BUILD)/app-x86_64: $(LOBJS_x86_64) $(OBJS_x86_64)
-	$(LD) $(LDFLAGS_x86_64) $(APP_LDFLAGS) -o $@ $^
+	$(LD) $(LDFLAGS_x86_64) $(APP_LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS_x86_64)
 
 $(BUILD)/manifest: $(MAKEFILE_LIST)
 	@mkdir -p $(BUILD)
@@ -100,5 +103,15 @@ $(APP).bpk: $(BUILD)/manifest $(BUILD)/app-i686 $(BUILD)/app-x86_64 $(DATA)
 	$(PYTHON) $(BANANA_SDK)/tools/bpkg pack -o $@ $(BUILD)/manifest $(BUILD)/app-i686 $(BUILD)/app-x86_64 $(DATA)
 	@$(PYTHON) $(BANANA_SDK)/tools/bpkg check $@
 
+# one package per CPU, compressed (apps built into Banana OS: the Makefile's APPS)
+.PHONY: bundle
+bundle: $(APP)-i686.bpk.z $(APP)-x86_64.bpk.z
+$(APP)-i686.bpk: $(BUILD)/manifest $(BUILD)/app-i686 $(DATA)
+	$(PYTHON) $(BANANA_SDK)/tools/bpkg pack -o $@ $^
+$(APP)-x86_64.bpk: $(BUILD)/manifest $(BUILD)/app-x86_64 $(DATA)
+	$(PYTHON) $(BANANA_SDK)/tools/bpkg pack -o $@ $^
+%.bpk.z: %.bpk
+	$(PYTHON) -c "import sys, zlib; open(sys.argv[2], 'wb').write(zlib.compress(open(sys.argv[1], 'rb').read(), 9))" $< $@
+
 clean:
-	rm -rf $(BUILD) $(APP).bpk
+	rm -rf $(BUILD) $(APP).bpk $(APP)-i686.bpk $(APP)-x86_64.bpk $(APP)-*.bpk.z

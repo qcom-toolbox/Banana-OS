@@ -11,6 +11,7 @@
 #include "gui.h"
 #include "browser.h"
 #include "fb.h"
+#include "gpu.h"
 #include "gfx.h"
 #include "idt.h"
 #include "serial.h"
@@ -79,6 +80,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     kheap_init(magic == MULTIBOOT2_MAGIC ? mb_info : 0);
     klog("heap: %u KiB free\n", kheap_total_bytes() / 1024u);
     paging_guard_null();      /* NULL pointers fault (64-bit), after every Multiboot2 reader */
+    gpu_init();               /* graphics drivers: one may set the screen up (kernel/gpu.h) */
 
     terminal_init();
     /* "verbose" (GRUB's "boot messages" entry): no boot screen, every step on
@@ -97,6 +99,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     STEP("tasks");
     task_init("banana-sh");   /* boot stack becomes the shell's real thread */
     task_start_sysmon();      /* real background stats-sampling thread */
+    gpu_start();              /* (virtual GPUs: what is drawn is pushed to the screen) */
     STEP("processor cores");
     smp_init();               /* the other processor cores: they run app code (64-bit) */
     STEP("usb (legacy handoff)");

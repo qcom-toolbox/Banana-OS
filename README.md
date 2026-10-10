@@ -14,6 +14,13 @@ Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux k
 
 ## Latest additions
 
+- **Media Player** - videos and music through **FFmpeg** (7.1, ported to Banana OS: [ports/ffmpeg](ports/ffmpeg/build.sh)): MP4, MKV, WebM, AVI, MOV, MPEG, OGG, FLV, WMV with H.264, H.265/HEVC, VP8, VP9, MPEG-4 (DivX/Xvid), MPEG-1/2, Theora, WMV and AAC, MP3, Opus, Vorbis, FLAC, AC-3, ALAC sound. The picture keeps to the sound's clock (late frames are dropped), seek bar, pause, keyboard and media keys, album covers for songs. Double-click a video in Files, or `mediaplayer file.mp4`. On the 64-bit kernel FFmpeg's SIMD code (SSE2...SSE4) is used
+- **Music** - a music library player after [Amethyst](https://github.com/Geoxor/Amethyst): the songs of `~/Music`, `~/Downloads`, the home folder and USB sticks with their tags and covers, *Songs* / *Albums* (a grid of covers) / *Artists* / *Liked songs* / *Queue*, search as you type, shuffle and repeat, **gapless** playback, a 6-band **equalizer** with presets, a spectrum **visualizer** (*Now playing*), and the media keys from anywhere on the desktop. (Amethyst itself is an Electron app - a whole Chromium - which cannot run here; this is a native player made the same way.)
+- **Graphics drivers** - real drivers instead of only the firmware's framebuffer: **VMware SVGA II** (VMware, VirtualBox's VMSVGA / VBoxSVGA, QEMU `-vga vmware`), **virtio-gpu** (QEMU / KVM `-vga virtio` and `-device virtio-gpu-pci`, which has no firmware framebuffer at all), **Bochs / QEMU / VirtualBox VBoxVGA** (and `bochs-display`), **Intel GMA 950** and **HD Graphics 2000 / 3000 / 2500 / 4000** (Sandy Bridge, Ivy Bridge). Resolution changes, the mouse pointer drawn by the graphics card, vertical-blank waits and a laptop panel's backlight (`brightness`) where the card has them - see [Graphics drivers](#graphics-drivers); `lsgpu`, `resolution`
+- **Driver Kit: drivers from hardware makers** - drivers are kernel modules built outside Banana OS with [sdk/driver](sdk/driver/banana_driver.h): a `.bpk` of type `driver`, installed with `pkg install`, loaded at every boot. PCI, ports, device memory, DMA memory, interrupts, tasks, and registering PCI drivers and displays - a display module replaces the built-in driver of its card. Two examples: a QEMU `edu` device driver and a display driver - see [Driver Kit](#driver-kit)
+- **Function keys** - F1-F12, the Windows key (Start menu), Alt+F4 (closes the window in front; with none, *Shut down*), F11 (a terminal fills the screen), F2 / F5 in Files (rename, refresh), F5 in the browser, F3 in Notepad, and the **media keys** (laptops: Fn + F-key): volume up / down / mute work everywhere, with the level on the screen, play / pause / next / previous go to Music. PS/2 and USB keyboards; apps get `BANANA_KEY_F1`... and the media keys
+- **`$PATH`** - commands that are not built in are looked for in the folders of `$PATH` (`/bin:/apps:/home/banana/bin` by default): programs (SDK ELF files) and shell scripts run by name, `/apps` holds the installed apps; `export PATH=...` changes it, `which` / `type` say where a command is
+- **ACPI power-off** - `shutdown` and Start > Shut down turn the computer off the ACPI way (the FADT's registers and the DSDT's `\_S5_` sleep type, switching ACPI on first if the firmware left it off): VMware, VirtualBox, QEMU and real PCs
 - **Secure Boot, 32-bit UEFI, more in the boot menu** - the UEFI loaders are signed with Banana OS's own key and boot with Secure Boot on once the key is enrolled: from the boot menu in Secure Boot's setup mode (*Enroll Banana OS's Secure Boot keys*), or by hand in the firmware's settings from `EFI/BananaOS/BananaOS.cer` on the CD or stick. Under Secure Boot the loader starts only the kernels it was built with (their SHA-256 is in it). `BOOTIA32.EFI` boots on 32-bit UEFI firmware (tablets, early UEFI PCs) - both kernels, the 64-bit one when the processor has long mode. The menu also has *Boot the next boot option* / *Boot from the next device*, *UEFI firmware settings* (restarts into the firmware's setup screen) and *Restart the computer* - see [Secure Boot](#secure-boot)
 - **Our own boot loader: Banana Boot** - GRUB is gone. One image boots on **legacy BIOS and UEFI**, from a **CD, a USB stick or a hard disk**, and starts the **64-bit or the 32-bit kernel** (the same menu as before, 64-bit by default when the CPU can). On BIOS: a 440-byte MBR or a 2 KiB El Torito entry loads a 10 KiB loader that runs in 32-bit protected mode and calls the BIOS through a real-mode thunk; it reads the kernel from the ISO9660 file system and sets the VBE graphics mode. On UEFI: `BOOTX64.EFI` (10 KiB, our C, no EDK2/gnu-efi) reads the kernel from its EFI partition, takes the GOP framebuffer and the firmware's memory map, leaves the firmware and steps down from 64-bit long mode to 32-bit protected mode. Both hand the kernels exactly what GRUB did (Multiboot2), so nothing changed for them - see [loader/](loader/)
 - **A much bigger filesystem** - up to 65,536 files and 16,384 folders (was 1,024 and 256), found by name through hash tables, so a folder of thousands of files lists and opens as fast as a small one; files up to 128 MB. On an installed disk, files are read in the first time they are used instead of all at boot: what you can store is no longer limited by the RAM, and boot does not slow down as the disk fills. IDE disks larger than 128 GB are used whole (48-bit addressing)
@@ -515,6 +522,33 @@ Bash-flavored extras (available in both personas, since they share one engine):
 - `!!` - re-runs (and re-records) the previous command
 - `type <cmd>` - like `which`, but alias-aware
 
+## Graphics drivers
+
+At boot every display controller gets the driver that knows it (`lsgpu` shows them); without one the framebuffer the firmware set up is used as before.
+
+| Driver | Cards | What it does |
+|---|---|---|
+| `vmsvga` | VMware SVGA II: VMware Workstation / Player / ESXi, VirtualBox VMSVGA and VBoxSVGA, QEMU `-vga vmware` | Mode setting, the screen updated through the command FIFO, the pointer drawn by the host (alpha or AND/XOR cursor) |
+| `virtio` | virtio-gpu: QEMU / KVM `-vga virtio`, `-device virtio-gpu-pci`, crosvm | A screen of its own (also when the firmware has none: `-vga none -device virtio-gpu-pci`), any resolution, the host window's size, a hardware pointer on the cursor queue |
+| `bga` | Bochs VBE DISPI: QEMU `-vga std` and `bochs-display`, Bochs, VirtualBox VBoxVGA | Mode setting (ports or memory-mapped registers); sets a mode itself when the firmware gave none |
+| `intel` | Intel GMA 950 (945G/GM/GME), HD Graphics 2000 / 3000 (Sandy Bridge), HD Graphics 2500 / 4000 (Ivy Bridge) | Takes the display engine over from the firmware: reads the pipe, plane, mode and stolen memory; the cursor plane for the pointer (64x64 ARGB); waits for the vertical blank; the panel's backlight. The mode stays the panel's native one (the clocks and timings the firmware set are kept) |
+
+`resolution` lists the modes and switches (`resolution 1280x720`; also Settings > Screen); `brightness 60` sets a laptop panel's backlight. Tested in QEMU (`std`, `vmware`, `virtio`, `virtio-gpu-pci` without VGA, `bochs-display`); the Intel driver follows Intel's documentation and could not be tried on that hardware here.
+
+## Driver Kit
+
+Hardware makers (or anyone) can write drivers for Banana OS without changing it: [sdk/driver/banana_driver.h](sdk/driver/banana_driver.h) is the whole interface. A driver is a position-independent program of the kernel's own (ring 0, no floating point) with one entry point, `int banana_driver_main(const banana_driver_api_t* api)`; the table gives it the kernel log, PCI configuration space and BARs (mapped), I/O ports, device memory, ordinary and DMA memory, timing, shared interrupt lines, tasks, and two ways to plug in: `register_pci_driver()` (the devices of its ID list, probed right away) and `register_display()` (it becomes the screen - a display module takes over from the built-in driver of its card).
+
+```make
+DRIVER      = acme-gpu
+TITLE       = ACME Graphics 9000
+VERSION     = 1.0
+SRCS        = acme.c
+include /path/to/banana-sdk/driver/driver.mk
+```
+
+`make` builds it for both kernels into `acme-gpu.bpk` (type `driver`); on Banana OS `pkg install acme-gpu.bpk` installs it and loads it, and it is loaded again at every boot. `drivers` lists the drivers, what each module drives and its state; `driver load <file>` loads a driver file for testing. Examples in [sdk/driver/examples](sdk/driver/examples): `edu` (QEMU's `-device edu` teaching device: registers, an interrupt, a task) and `bochsfb` (a display driver for the Bochs / QEMU VGA). `make driver-examples` builds them.
+
 ## Available Commands
 
 | Command | Description |
@@ -559,7 +593,7 @@ Bash-flavored extras (available in both personas, since they share one engine):
 | `free [-h\|-k\|-m\|-g]` | RAM: total, used, free, file data in RAM |
 | `df [-h\|-k\|-m] [-i]` | Disk space of `/` and the USB sticks: size, used, free (`-i`: files and folders) |
 | `ram_info [-t -u -h -f -p -m]` | Memory usage, including the kernel heap (`-h`) |
-| `startx` | Start GUI desktop (on the machine's own screen: not over SSH) |
+| `startx` | Start GUI desktop (on the machine's own screen: not over SSH, nor from a terminal window of the desktop) |
 | `stopx` | Quit GUI desktop (not over SSH, nor from a terminal window inside the desktop: use Start > Shut down > Exit to the shell) |
 | `start` | Alias of `startx` |
 | `stop` | Alias of `stopx` |
@@ -567,6 +601,11 @@ Bash-flavored extras (available in both personas, since they share one engine):
 | `loadctl [layout]` | Alias of `keyboardctl` |
 | `usbctl` | Show USB legacy handoff state |
 | `shutdown [now\|-c]` | Schedule shutdown (60s), immediate shutdown, or cancel - powers off the ACPI way (the firmware's FADT and `\_S5_`), which VMware, VirtualBox, QEMU and real PCs all accept |
+| `lsgpu` | Graphics cards: driver, mode, video memory, hardware pointer, backlight |
+| `resolution [WxH]` | The screen's modes, or switch to one |
+| `brightness [0-100]` | A laptop panel's backlight (Intel graphics) |
+| `drivers` / `driver load <file>` | Drivers and driver modules (Driver Kit) / load one |
+| `mediaplayer [file]` / `music [file...]` | The Media Player and Music apps |
 | `autologin [on\|off]` | Log in without the password at boot (also in Settings > Startup) |
 | `reboot` | Immediate reboot |
 | `halt` | Hard CPU halt |

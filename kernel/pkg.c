@@ -1,4 +1,5 @@
 #include "pkg.h"
+#include "driver.h"
 #include "app.h"
 #include "fs.h"
 #include "gui.h"
@@ -51,7 +52,7 @@ static void parse_manifest(const char* mf, uint32_t len, pkg_info_t* p) {
     mf_get(mf, len, "description", p->description, sizeof(p->description));
     mf_get(mf, len, "author", p->author, sizeof(p->author));
     if (!p->title[0]) kstrlcpy(p->title, p->name, sizeof(p->title));
-    if (strcmp(p->type, "gui") != 0) kstrlcpy(p->type, "console", sizeof(p->type));
+    if (strcmp(p->type, "gui") != 0 && strcmp(p->type, "driver") != 0) kstrlcpy(p->type, "console", sizeof(p->type));
 }
 
 /* checks the archive; *count entries at data+8 */
@@ -98,8 +99,8 @@ static int inspect_data(const uint8_t* d, uint32_t size, pkg_info_t* out, char* 
         return -1;
     }
     uint32_t l;
-    out->has_i686 = find_entry(d, count, "app-i686", &l) != NULL;
-    out->has_x86_64 = find_entry(d, count, "app-x86_64", &l) != NULL;
+    out->has_i686 = find_entry(d, count, "app-i686", &l) != NULL || find_entry(d, count, "driver-i686", &l) != NULL;
+    out->has_x86_64 = find_entry(d, count, "app-x86_64", &l) != NULL || find_entry(d, count, "driver-x86_64", &l) != NULL;
     out->files = count;
     out->bytes = size;
     return 0;
@@ -125,11 +126,17 @@ int pkg_install(const char* bpk_path, char* msg, int mcap) {
     if (fi < 0) { kstrlcpy(msg, "no such file", (size_t)mcap); return -1; }
     fs_file_t* f = fs_get_file(fi);
     if (!f) { kstrlcpy(msg, "cannot read the file", (size_t)mcap); return -1; }
+    fs_pin(fi);
+    int r = pkg_install_mem((const uint8_t*)f->content, f->size, msg, mcap);
+    fs_unpin(fi);
+    return r;
+}
+
+int pkg_install_mem(const uint8_t* data, uint32_t size, char* msg, int mcap) {
     /* work on a copy: the package may live on a stick, or be replaced meanwhile */
-    uint32_t size = f->size;
     uint8_t* d = (uint8_t*)kmalloc(size + 1);
     if (!d) { kstrlcpy(msg, "out of memory", (size_t)mcap); return -1; }
-    memcpy(d, f->content, size);
+    memcpy(d, data, size);
     pkg_info_t info;
     if (inspect_data(d, size, &info, msg, mcap) != 0) { kfree(d); return -1; }
     int mine = BANANA_ARCH[0] == 'x' ? info.has_x86_64 : info.has_i686;
@@ -161,10 +168,18 @@ int pkg_install(const char* bpk_path, char* msg, int mcap) {
             return -1;
         }
     }
+    kfree(d);
+    if (!strcmp(info.type, "driver")) {             /* a driver: loaded right away (and at every boot) */
+        char err[96];
+        if (driver_load_package(info.name, err, sizeof(err)) == 0)
+            ksnprintf(msg, (size_t)mcap, "%s driver %s %s - loaded (see: drivers)", upgrade ? "upgraded" : "installed", info.title, info.version);
+        else
+            ksnprintf(msg, (size_t)mcap, "%s driver %s %s - %s", upgrade ? "upgraded" : "installed", info.title, info.version, err);
+        return 0;
+    }
     ksnprintf(msg, (size_t)mcap, "%s %s %s (%s app) - %s", upgrade ? "upgraded" : "installed", info.title,
               info.version[0] ? info.version : "", info.type,
               strcmp(info.type, "gui") == 0 ? "open it from Apps on the desktop" : "type its name to run it");
-    kfree(d);
     return 0;
 }
 
@@ -186,7 +201,8 @@ int pkg_get(const char* name, pkg_info_t* out) {
     return 0;
 }
 
-int pkg_list(pkg_info_t* out, int max) {
+/* the apps (drivers: 1 for the driver packages instead) */
+static int list_kind(pkg_info_t* out, int max, int drivers) {
     int idx[64];
     int n = fs_list_dirs(PKG_DIR, idx, 64);
     if (n < 0) return 0;
@@ -196,6 +212,7 @@ int pkg_list(pkg_info_t* out, int max) {
         const fs_dir_t* d = fs_get_dir(idx[i]);
         pkg_info_t info;
         if (!d || pkg_get(d->name, &info) != 0) continue;
+        if ((strcmp(info.type, "driver") == 0) != drivers) continue;
         /* A-Z by title */
         int at = got < max ? got : max;
         while (at > 0 && strcasecmp(out[at - 1].title, info.title) > 0) {
@@ -207,6 +224,9 @@ int pkg_list(pkg_info_t* out, int max) {
     }
     return got;
 }
+
+int pkg_list(pkg_info_t* out, int max) { return list_kind(out, max, 0); }
+int pkg_list_drivers(pkg_info_t* out, int max) { return list_kind(out, max, 1); }
 
 int pkg_remove(const char* name, char* msg, int mcap) {
     pkg_info_t info;
@@ -221,6 +241,7 @@ int pkg_remove(const char* name, char* msg, int mcap) {
 int pkg_run(const char* name, int argc, char** argv, int from_desktop, char* err, int ecap) {
     pkg_info_t info;
     if (pkg_get(name, &info) != 0) { ksnprintf(err, (size_t)ecap, "%s is not installed", name); return -1; }
+    if (!strcmp(info.type, "driver")) { ksnprintf(err, (size_t)ecap, "%s is a driver (loaded at boot: see drivers)", name); return -1; }
     char prog[FS_PATH_LEN];
     ksnprintf(prog, sizeof(prog), "%s/%s/app-%s", PKG_DIR, name, BANANA_ARCH);
     if (fs_find_file(prog) < 0) { ksnprintf(err, (size_t)ecap, "%s has no %s program", name, BANANA_ARCH); return -1; }
@@ -238,4 +259,8 @@ int pkg_run(const char* name, int argc, char** argv, int from_desktop, char* err
         return 0;
     }
     return app_exec(prog, argc, argv, err, ecap);
+}
+
+int pkg_inspect_mem(const uint8_t* data, uint32_t size, pkg_info_t* out, char* err, int ecap) {
+    return inspect_data(data, size, out, err, ecap);
 }

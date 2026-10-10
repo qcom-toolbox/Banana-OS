@@ -338,3 +338,13 @@ void banana_font_metrics(int font, int size, int* ascent, int* descent, int* lin
     if (descent) *descent = 1 * s;
     if (line_h) *line_h = 10 * s;
 }
+
+static int has_v7(void) {
+    return __banana->version >= 7 && __banana->size >= __builtin_offsetof(banana_api_t, audio_volume) + sizeof(void*);
+}
+unsigned int banana_audio_queued_ms(void) { return has_v7() ? __banana->audio_queued_ms() : 0; }
+void banana_audio_stop(void) { if (has_v7()) __banana->audio_stop(); }
+int banana_volume(int percent) { return has_v7() ? __banana->audio_volume(percent) : -1; }
+void bwin_media_keys(bwin_t* win) {
+    if (has_v7() && __banana->size >= __builtin_offsetof(banana_api_t, win_media_keys) + sizeof(void*)) __banana->win_media_keys(win->id);
+}

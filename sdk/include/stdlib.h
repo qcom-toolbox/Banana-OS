@@ -8,6 +8,10 @@ void*  malloc(size_t size);
 void*  calloc(size_t n, size_t size);
 void*  realloc(void* p, size_t size);
 void   free(void* p);
+/* memory aligned on align bytes (a power of two); free() it as usual */
+int    posix_memalign(void** out, size_t align, size_t size);
+void*  aligned_alloc(size_t align, size_t size);
+void*  memalign(size_t align, size_t size);
 void   exit(int code) __attribute__((noreturn));
 void   abort(void) __attribute__((noreturn));
 int    atexit(void (*fn)(void));
@@ -27,7 +31,7 @@ int    rand(void);
 void   srand(unsigned int seed);
 void   qsort(void* base, size_t n, size_t size, int (*cmp)(const void*, const void*));
 void*  bsearch(const void* key, const void* base, size_t n, size_t size, int (*cmp)(const void*, const void*));
-char*  getenv(const char* name);
+char*  (getenv)(const char* name);    /* (in parentheses: a program may define getenv as a macro) */
 double strtod(const char* s, char** end);
 float  strtof(const char* s, char** end);
 double atof(const char* s);

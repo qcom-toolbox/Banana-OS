@@ -321,13 +321,48 @@ static void play_sound(const char* path) {
     set_status(msg);
 }
 
+/* videos open in the Media Player, songs in Music (or the Media Player);
+ * both are apps (pkg) */
+static int ext_in(const char* name, const char* const* list) {
+    const char* dot = strrchr(name, '.');
+    if (!dot) return 0;
+    for (int i = 0; list[i]; i++) if (strcasecmp(dot + 1, list[i]) == 0) return 1;
+    return 0;
+}
+static const char* const VIDEO_EXT[] = { "mp4", "m4v", "mkv", "webm", "avi", "mov", "mpg", "mpeg", "ts", "m2ts", "ogv", "flv", "wmv", "asf", "3gp", NULL };
+static const char* const AUDIO_EXT[] = { "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "wma", "ac3", "wav", NULL };
+static int is_video(const char* name) { return ext_in(name, VIDEO_EXT); }
+static int is_audio(const char* name) { return ext_in(name, AUDIO_EXT); }
+
+/* the app that plays it, or NULL if none is installed */
+static const char* media_app(const char* name) {
+    pkg_info_t pi;
+    if (is_audio(name) && pkg_get("music", &pi) == 0) return "music";
+    if ((is_video(name) || is_audio(name)) && pkg_get("mediaplayer", &pi) == 0) return "mediaplayer";
+    return NULL;
+}
+
+/* 1 if an app took it */
+static int open_media(const char* path, const char* name) {
+    const char* app = media_app(name);
+    if (!app) return 0;
+    char err[96], msg[128];
+    char* argv[2] = { (char*)app, (char*)path };
+    if (pkg_run(app, 2, argv, 1, err, sizeof(err)) < 0) ksnprintf(msg, sizeof(msg), "Cannot play it: %s", err);
+    else ksnprintf(msg, sizeof(msg), "Playing %s", name);
+    set_status(msg);
+    return 1;
+}
+
 static void open_item(int i) {
     const item_t* it = &g_items[i];
     char path[FS_PATH_LEN];
     child_path(item_name(it), path, sizeof(path));
     if (it->is_dir) { go(path); return; }
     if (has_ext(item_name(it), ".bpk")) { install_package(path); return; }
+    if (open_media(path, item_name(it))) return;
     if (has_ext(item_name(it), ".wav")) { play_sound(path); return; }
+    if (is_video(item_name(it))) { set_status("Install the Media Player app to play videos"); return; }
     if (is_image_file(it->idx)) {
         char err[80], msg[96];
         set_status("Setting the wallpaper...");
@@ -478,7 +513,7 @@ static void menu_cb(int id, void* arg) {
     case M_OPEN: if (g_sel >= 0) open_item(g_sel); break;
     case M_EDIT: if (path[0]) gui_open_notepad(path); break;
     case M_INSTALL: if (path[0]) install_package(path); break;
-    case M_PLAY: if (path[0]) play_sound(path); break;
+    case M_PLAY: if (path[0] && g_sel >= 0 && !open_media(path, item_name(&g_items[g_sel]))) play_sound(path); break;
     case M_WALLPAPER: if (g_sel >= 0) open_item(g_sel); break;
     case M_COPY: clip_selected(0); break;
     case M_CUT: clip_selected(1); break;
@@ -535,7 +570,7 @@ void explorer_rclick(int mx, int my) {
         items[n++] = (ctx_item_t){ "Open", M_OPEN, 0 };
         if (!it->is_dir) {
             if (has_ext(name, ".bpk")) items[n++] = (ctx_item_t){ "Install app", M_INSTALL, 0 };
-            if (has_ext(name, ".wav")) items[n++] = (ctx_item_t){ "Play", M_PLAY, 0 };
+            if (has_ext(name, ".wav") || media_app(name)) items[n++] = (ctx_item_t){ "Play", M_PLAY, 0 };
             if (is_image_file(it->idx)) items[n++] = (ctx_item_t){ "Set as wallpaper", M_WALLPAPER, 0 };
             items[n++] = (ctx_item_t){ "Edit in Notepad", M_EDIT, 0 };
         } else {
@@ -772,7 +807,7 @@ static void draw_preview(int px, int py, int ph) {
         int img = is_image_file(it->idx), txt = !img && is_text_file(it->idx);
         ksnprintf(line, sizeof(line), "%s, %s", img ? "Picture" : txt ? "Text" : "Binary", size);
         gfx_draw_text(x, y + 16, line, C_DIM, C_LIST);
-        action = img ? "Set as wallpaper" : has_ext(f->name, ".bpk") ? "Install app" : has_ext(f->name, ".wav") ? "Play" : "Edit";
+        action = img ? "Set as wallpaper" : has_ext(f->name, ".bpk") ? "Install app" : (has_ext(f->name, ".wav") || media_app(f->name)) ? "Play" : "Edit";
         int top = y + 36;
         if (img) {
             if (g_thumb_for != it->idx) make_thumb(it->idx);

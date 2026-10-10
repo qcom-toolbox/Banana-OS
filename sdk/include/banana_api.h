@@ -17,7 +17,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 6u
+#define BANANA_API_VERSION 7u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -233,6 +233,14 @@ typedef struct banana_api {
     int   (*font_width)(int font, int size, const char* text);     /* pixels */
     /* ascent above the baseline, descent below it, and the line height */
     void  (*font_metrics)(int font, int size, int* ascent, int* descent, int* line_h);
+
+    /* ── version 7: the sound queue, for players ──────────── */
+    unsigned int (*audio_queued_ms)(void);    /* queued sound not played yet */
+    void  (*audio_stop)(void);                /* drops what is queued (pause, seek) */
+    int   (*audio_volume)(int percent);       /* sets it (0..100; -1: only reads it); the volume */
+    /* this window gets the media keys (BANANA_KEY_PLAY...) even when
+     * another one has the focus - for music players */
+    void  (*win_media_keys)(int win);
 } banana_api_t;
 
 /* the app's entry point (the SDK's crt0 provides it) */

@@ -172,6 +172,34 @@ banana_font_metrics(BANANA_FONT_MONO, 13, &ascent, &descent, &line_h);
 `(x, y)` is the top-left of the line; `bwin_font` returns the x after the
 text. On older systems these fall back to the 8x8 font.
 
+### Players, keys, POSIX and ported libraries
+
+Since API version 7 an app can drive a player: `banana_audio_queued_ms()`
+(how much queued sound has not been heard - the clock of a video player),
+`banana_audio_stop()` (drops it: pause, seek), `banana_volume()` (the
+system volume) and `bwin_media_keys(&win)` (play / pause, next, previous
+and stop come to this window even when another one has the focus). Keys
+include `BANANA_KEY_F1`...`BANANA_KEY_F12` and the media keys
+(`BANANA_KEY_PLAY`, `_STOP`, `_NEXT`, `_PREV`).
+
+The C library also has the POSIX pieces ported code expects: `open`,
+`lseek`, `fstat`, `stat`, `isatty`, `fdopen`, `posix_memalign` /
+`aligned_alloc`, `<inttypes.h>`, `<fcntl.h>`, `<sys/stat.h>`, more of
+`<math.h>` (`lrint`, `rint`, `copysign`, `erf`, ...) and the usual
+`errno` codes. That is enough for FFmpeg: `ports/ffmpeg/build.sh` builds
+it (libavformat, libavcodec, libswscale, libswresample) as static
+libraries for both CPUs, and `apps/mediaplayer` and `apps/music` show how
+an app links them (`LIBS_i686` / `LIBS_x86_64` in its Makefile). Apps run
+in ring 0, where interrupts use the app's stack: code must not keep data
+below the stack pointer (`-mno-red-zone` - the build script patches the
+two FFmpeg assembly files that did).
+
+### Drivers
+
+Hardware drivers are not apps: they run inside the kernel. The Driver Kit
+in [driver/](driver/banana_driver.h) builds them (`driver/driver.mk`,
+examples in `driver/examples`) into `.bpk` packages of type `driver`.
+
 ### Rules of the road
 
 - **Floating point works**: `float`, `double`, `math.h` (`sqrt`, `sin`, `cos`,

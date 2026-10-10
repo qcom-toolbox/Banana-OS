@@ -27,7 +27,7 @@
 #define APP_GUARD   (16u << 10)       /* unmapped pages under it (64-bit): an overflow faults */
 #define STACK_CANARY 0xB4A4A5C0u      /* at the bottom of the stack: checked on every system call */
 #define APP_KEYQ    32
-#define APP_MAX_IMAGE (16u << 20)
+#define APP_MAX_IMAGE (64u << 20)
 #define APP_THREADS 16                /* extra threads per app (api->thread_create) */
 
 /* ── per-app state ─────────────────────────────────────────────────── */
@@ -584,6 +584,7 @@ static int a_win_event(int win, banana_event_t* ev) {
 static void a_win_close(int win) { app_proc_t* p = cur(); if (p) appwin_close(win, p->id); }
 static void a_win_set_title(int win, const char* t) { app_proc_t* p = cur(); if (p) appwin_set_title(win, p->id, t); }
 static void a_win_size(int win, int* w, int* h) { app_proc_t* p = cur(); appwin_size(win, p ? p->id : -1, w, h); }
+static void a_win_media_keys(int win) { app_proc_t* p = cur(); if (p) appwin_set_media(win, p->id); }
 static void a_win_set_resizable(int win, int mw, int mh) { app_proc_t* p = cur(); if (p) appwin_set_resizable(win, p->id, mw, mh); }
 
 /* web views (webview.c): each belongs to the app that opened it */
@@ -615,6 +616,13 @@ static int a_font_draw(unsigned int* px, int stride, int w, int h, int x, int y,
 static int a_font_width(int font, int size, const char* text) {
     return text ? font_text_width(font, clamp_size(size), text, (uint32_t)strlen(text)) : 0;
 }
+static unsigned int a_audio_queued_ms(void) { return audio_queued_ms(); }
+static void a_audio_stop(void) { audio_stop(); }
+static int a_audio_volume(int percent) {
+    if (percent >= 0) audio_set_volume(percent > 100 ? 100 : percent);
+    return audio_get_volume();
+}
+
 static void a_font_metrics(int font, int size, int* ascent, int* descent, int* line_h) {
     font_metrics(font, clamp_size(size), ascent, descent, line_h);
 }
@@ -965,6 +973,10 @@ static void api_init(void) {
     g_api.font_draw = G(a_font_draw);
     g_api.font_width = G(a_font_width);
     g_api.font_metrics = G(a_font_metrics);
+    g_api.audio_queued_ms = G(a_audio_queued_ms);
+    g_api.audio_stop = G(a_audio_stop);
+    g_api.audio_volume = G(a_audio_volume);
+    g_api.win_media_keys = G(a_win_media_keys);
 }
 
 /* ── the ELF loader ────────────────────────────────────────────────── */
@@ -1084,6 +1096,15 @@ static int load_elf(const uint8_t* f, uint32_t size, uint8_t** image_out, banana
     *base_out = base;
     *lo_out = (uintptr_t)mem;
     *hi_out = (uintptr_t)mem + span;
+    return 0;
+}
+
+/* the same loader for driver modules (kernel/driver.c): the image stays loaded */
+int app_load_image(const uint8_t* f, uint32_t size, uint8_t** raw, uintptr_t* entry, char* err, int ecap) {
+    banana_entry_t e;
+    uintptr_t base, lo, hi;
+    if (load_elf(f, size, raw, &e, &base, &lo, &hi, err, ecap) < 0) return -1;
+    *entry = (uintptr_t)e;
     return 0;
 }
 

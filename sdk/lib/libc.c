@@ -169,8 +169,22 @@ int toupper(int c) { return islower(c) ? c - 32 : c; }
 /* ── memory ───────────────────────────────────────────────────────── */
 
 void* malloc(size_t n) { void* p = __banana->malloc(n ? n : 1); if (!p) errno = ENOMEM; return p; }
-void  free(void* p) { if (p) __banana->free(p); }
-void* realloc(void* p, size_t n) { return __banana->realloc(p, n); }
+int __aligned_block(void* p, void** raw, size_t* size);     /* posix.c */
+void  free(void* p) {
+    void* raw;
+    if (!p) return;
+    __banana->free(__aligned_block(p, &raw, NULL) ? raw : p);
+}
+void* realloc(void* p, size_t n) {
+    void* raw;
+    size_t old;
+    if (p && __aligned_block(p, &raw, &old)) {           /* (from posix_memalign) */
+        void* q = malloc(n);
+        if (q) { memcpy(q, p, old < n ? old : n); __banana->free(raw); }
+        return q;
+    }
+    return __banana->realloc(p, n);
+}
 void* calloc(size_t n, size_t s) {
     if (s && n > (size_t)-1 / s) return NULL;
     void* p = malloc(n * s);

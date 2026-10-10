@@ -6,4 +6,7 @@ void __assert_fail(const char* expr, const char* file, int line);
 #else
 #define assert(e) ((e) ? (void)0 : __assert_fail(#e, __FILE__, __LINE__))
 #endif
+#ifndef __cplusplus
+#define static_assert _Static_assert
+#endif
 #endif

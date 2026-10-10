@@ -1,5 +1,6 @@
 #include "fb.h"
 #include "kstring.h"
+#include "gpu.h"
 
 /* Multiboot2 info parsing (only what we need) */
 typedef struct {
@@ -158,6 +159,16 @@ void fb_reconfigure(uint32_t width, uint32_t height, uint32_t pitch) {
     g_fb.pitch = pitch;
 }
 
+void fb_set_framebuffer(uintptr_t addr, uint32_t width, uint32_t height, uint32_t pitch) {
+    g_fb.addr = addr;
+    g_fb.width = width;
+    g_fb.height = height;
+    g_fb.pitch = pitch;
+    g_fb.bpp = 32;
+    g_fb.type = 1;
+    g_fb_ok = addr && width && height;
+}
+
 void fb_set_backbuffer(uint32_t* buf, uint32_t buf_width, uint32_t buf_height) {
     g_bb = buf;
     g_bb_w = buf_width;
@@ -181,6 +192,7 @@ void fb_present(void) {
         uint32_t* dst = (uint32_t*)(g_fb.addr + (uintptr_t)(y * g_fb.pitch));
         memcpy(dst, &g_bb[y * g_bb_w], w * 4u);
     }
+    gpu_flush(0, 0, (int)w, (int)h);
 }
 
 void fb_present_rect(int x, int y, int w, int h) {
@@ -197,5 +209,6 @@ void fb_present_rect(int x, int y, int w, int h) {
         uint32_t* dst = (uint32_t*)(g_fb.addr + (uintptr_t)((uint32_t)yy * g_fb.pitch));
         memcpy(dst + x, &g_bb[(uint32_t)yy * g_bb_w + (uint32_t)x], (uint32_t)(x1 - x) * 4u);
     }
+    gpu_flush(x, y, x1 - x, y1 - y);
 }
 

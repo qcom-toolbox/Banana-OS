@@ -7,4 +7,5 @@ typedef __WCHAR_TYPE__   wchar_t;
 #define NULL ((void*)0)
 #endif
 #define offsetof(t, m) __builtin_offsetof(t, m)
+typedef struct { long long __ll __attribute__((aligned(__alignof__(long long)))); long double __ld __attribute__((aligned(__alignof__(long double)))); } max_align_t;
 #endif

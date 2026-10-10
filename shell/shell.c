@@ -34,6 +34,10 @@
 #include "../kernel/passwd.h"
 #include "../kernel/idt.h"
 #include "../kernel/acpi.h"
+#include "../kernel/gpu.h"
+#include "../kernel/driver.h"
+#include "../kernel/builtin_apps.h"
+#include "../kernel/display.h"
 #include "../kernel/pkg.h"
 #include "../kernel/app.h"
 #include "../kernel/meminfo.h"
@@ -558,7 +562,9 @@ static void cmd_gpu_info(const char* args) {
 
     if (show_all || has_flag(args, "-n")) {
         terminal_write_color("GPU: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-        terminal_writeln("Generic VBE/Multiboot framebuffer");
+        gpu_t* g = gpu_active();
+        if (g) { terminal_write(g->name); terminal_write(" (driver "); terminal_write(g->driver); terminal_writeln(")"); }
+        else terminal_writeln("Generic VBE/Multiboot framebuffer (no driver)");
     }
     if (show_all || has_flag(args, "-r")) {
         terminal_write_color("Resolution: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
@@ -579,6 +585,43 @@ static void cmd_gpu_info(const char* args) {
         terminal_write_color("Framebuffer addr: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
         terminal_writeln(u32_to_str((uint32_t)fi->addr, b, sizeof(b)));
     }
+}
+
+/* `resolution [WxH]`: the modes the display can show, or a new one */
+static void cmd_resolution(const char* args) {
+    const char* a = args ? k_skip_spaces(args) : "";
+    display_mode_t m[24];
+    int n = display_modes(m, 24);
+    const fb_info_t* fi = fb_info();
+    char b[64];
+    if (!*a) {
+        ksnprintf(b, sizeof(b), "resolution: %ux%u", fi->width, fi->height);
+        terminal_writeln(b);
+        if (!display_can_change()) { terminal_writeln("(this display stays at this mode)"); return; }
+        terminal_write("modes:");
+        for (int i = 0; i < n; i++) { ksnprintf(b, sizeof(b), " %dx%d", m[i].w, m[i].h); terminal_write(b); }
+        terminal_putchar(0x0A);
+        return;
+    }
+    uint32_t w = 0, h = 0;
+    int k = k_parse_u32(a, &w);
+    if (!k || (a[k] != 'x' && a[k] != 'X') || !k_parse_u32(a + k + 1, &h)) { terminal_writeln("Usage: resolution [WIDTHxHEIGHT]"); return; }
+    if (display_set_mode((int)w, (int)h) < 0) { terminal_writeln("resolution: the display cannot show that mode (see: resolution)"); return; }
+    ksnprintf(b, sizeof(b), "resolution: %ux%u", w, h);
+    terminal_writeln(b);
+}
+
+/* `brightness [percent]`: a laptop panel's backlight (graphics driver) */
+static void cmd_brightness(const char* args) {
+    const char* a = args ? k_skip_spaces(args) : "";
+    uint32_t v;
+    int cur = gpu_backlight(-1);
+    if (cur < 0) { terminal_writeln("brightness: this display has no backlight Banana OS can set"); return; }
+    if (*a && k_parse_u32(a, &v)) cur = gpu_backlight(v > 100 ? 100 : (int)v);
+    else if (*a) { terminal_writeln("Usage: brightness [0-100]"); return; }
+    char b[40];
+    ksnprintf(b, sizeof(b), "brightness: %d%%", cur);
+    terminal_writeln(b);
 }
 
 static void cmd_hw_info(const char* args) {
@@ -839,6 +882,10 @@ static void cmd_help(void) {
         "  proc_info [flags]  cpu info (-c -t -n -v -f -m -s -ht)",
         "  ram_info [flags]   ram info (-t -u -h -f -p -m)",
         "  gpu_info [flags]   gpu/fb info (-n -r -b -p -m)",
+        "  lsgpu              graphics cards: driver, mode, video memory, features",
+        "  brightness [0-100] a laptop panel's backlight (Intel graphics)",
+        "  resolution [WxH]   the screen's modes, or switch to one",
+        "  drivers            loaded drivers and driver modules (driver load <file>)",
         "  hw_info [flags]    hardware summary (-c -m -g -u -k -r)",
         "  shutdown [now|-c]  schedule shutdown (60s), now, or cancel",
         "  reboot             immediate reboot",
@@ -1290,7 +1337,7 @@ static const char* const known_cmds[] = {
     /* shell/syscmds.c */
     "mount", "umount", "eject", "pkg", "apps", "taskmgr", "settings", "play", "beep", "volume", "lsaudio",
     /* shell/moncmds.c */
-    "free", "df", "htop", (void*)0
+    "free", "df", "htop", "lsgpu", "brightness", "resolution", "drivers", "driver", (void*)0
 };
 
 /* ── $PATH: where commands that are not built in are looked for ───── */
@@ -2368,6 +2415,7 @@ static void dispatch_cmd(const char* raw_line, int persona) {
     if (k_strcmp(line, "clear")    == 0) { terminal_clear(); return; }
     if (k_strcmp(line, "neofetch") == 0) { cmd_neofetch(persona); return; }
     if (k_strcmp(line, "uname")    == 0) { cmd_uname(persona);    return; }
+    if (k_strncmp(line, "uname ", 6) == 0) { cmd_uname(persona); return; }   /* (uname -a ...: the same) */
     if (k_strcmp(line, "halt")     == 0) { cmd_halt();       return; }
     if (k_strcmp(line, "ls")       == 0) { cmd_ls("");       return; }
     if (k_strcmp(line, "pwd")      == 0) { fs_pwd();         return; }
@@ -2523,6 +2571,21 @@ static void dispatch_cmd(const char* raw_line, int persona) {
     if (k_strncmp(line, "proc_info ", 10) == 0) { cmd_proc_info(k_skip_spaces(line+10)); return; }
     if (k_strncmp(line, "ram_info ", 9) == 0) { cmd_ram_info(k_skip_spaces(line+9)); return; }
     if (k_strncmp(line, "gpu_info ", 9) == 0) { cmd_gpu_info(k_skip_spaces(line+9)); return; }
+    if (k_strcmp(line, "lsgpu") == 0) { gpu_list(); return; }
+    if (k_strcmp(line, "drivers") == 0) { drivers_list(); return; }
+    if (k_strncmp(line, "driver load ", 12) == 0) {
+        const char* p = k_skip_spaces(line + 12);
+        const char* b = strrchr(p, '/');
+        char name[32], err[96];
+        kstrlcpy(name, b ? b + 1 : p, sizeof(name));
+        if (driver_load(p, name, err, sizeof(err)) < 0) { terminal_write("driver: "); terminal_writeln(err); }
+        else terminal_writeln("driver: loaded (see: drivers)");
+        return;
+    }
+    if (k_strcmp(line, "resolution") == 0) { cmd_resolution(""); return; }
+    if (k_strncmp(line, "resolution ", 11) == 0) { cmd_resolution(line + 11); return; }
+    if (k_strcmp(line, "brightness") == 0) { cmd_brightness(""); return; }
+    if (k_strncmp(line, "brightness ", 11) == 0) { cmd_brightness(line + 11); return; }
     if (k_strncmp(line, "hw_info ", 8) == 0) { cmd_hw_info(k_skip_spaces(line+8)); return; }
 
     /* network commands (shell/netcmds.c) */
@@ -2655,6 +2718,11 @@ void shell_run(void) {
             "Live CD - Banana OS is also installed on a disk here (its files are not used now).\n"
             "Type 'update' to update that installation with this CD (files kept), or boot from the disk.\n\n",
             VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+
+    klog("boot: built-in apps\n");
+    builtin_apps_install();         /* Media Player, Music (kernel/builtin_apps.c) */
+    klog("boot: driver modules\n");
+    drivers_load_installed();       /* (installed with pkg: sdk/driver) */
 
     klog("boot: settings, servers\n");
     /* saved network settings, services enabled at boot (shell/srvcmds.c) */

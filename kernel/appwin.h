@@ -42,6 +42,9 @@ uint32_t appwin_signature(void);
 void     appwin_close_all(void);                /* the desktop quits: ask every app to close */
 void     appwin_key(char c);                    /* a key while an app window is in front */
 void     appwin_fkey(int k);                    /* F1-F12 (KEYF_*) for the front app window */
+/* media keys: the window that asked for them (win_media_keys) gets them, wherever the focus is */
+void     appwin_set_media(int id, int owner);
+int      appwin_media_key(int k);             /* 1 if a window took it */
 void     appwin_rclick(int mx, int my);
 void     appwin_focus(int focused);             /* the app windows went to front / back */
 

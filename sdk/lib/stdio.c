@@ -522,3 +522,15 @@ int scanf(const char* fmt, ...) {
     if (in.peek >= 0) ungetc(in.peek, stdin);
     return r;
 }
+
+FILE* fdopen(int fd, const char* mode) {
+    (void)mode;
+    if (fd >= 0 && fd <= 2) return &g_std[fd];
+    FILE* f = calloc(1, sizeof(FILE));
+    if (!f) return NULL;
+    f->fd = fd;
+    f->ungot = -1;
+    return f;
+}
+int fileno(FILE* f) { return f ? f->fd : -1; }
+int setvbuf(FILE* f, char* buf, int mode, size_t size) { (void)f; (void)buf; (void)mode; (void)size; return 0; }

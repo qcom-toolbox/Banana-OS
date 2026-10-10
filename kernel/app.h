@@ -51,5 +51,8 @@ void app_list(void);
 int  app_count(void);
 /* a console app runs in the terminal that has the keyboard (it takes the F-keys) */
 int  app_console_focused(void);
+/* loads a position-independent ELF (an app or a driver module) into the
+ * kernel's memory: 0 with *raw (its allocation) and *entry, or -1 with err */
+int  app_load_image(const uint8_t* f, uint32_t size, uint8_t** raw, uintptr_t* entry, char* err, int ecap);
 
 #endif

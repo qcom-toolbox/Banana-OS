@@ -214,3 +214,73 @@ float cosf(float x) { return (float)cos(x); }
 float tanf(float x) { return (float)tan(x); }
 float atanf(float x) { return (float)atan(x); }
 float atan2f(float y, float x) { return (float)atan2(y, x); }
+
+double scalbn(double x, int n) { return ldexp(x, n); }
+double copysign(double x, double y) {
+    dbits_t a = { x }, b = { y };
+    a.u = (a.u & ~(1ull << 63)) | (b.u & (1ull << 63));
+    return a.d;
+}
+double expm1(double x) {
+    if (fabs(x) < 1e-5) return x + x * x / 2 + x * x * x / 6;
+    return exp(x) - 1.0;
+}
+double log1p(double x) {
+    if (fabs(x) < 1e-4) return x - x * x / 2 + x * x * x / 3;
+    return log(1.0 + x);
+}
+/* Abramowitz & Stegun 7.1.26 (error < 1.5e-7) */
+double erf(double x) {
+    double s = x < 0 ? -1 : 1;
+    x = fabs(x);
+    double t = 1.0 / (1.0 + 0.3275911 * x);
+    double y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-x * x);
+    return s * y;
+}
+
+/* round to nearest, ties to even (the default rounding mode) */
+double rint(double x) {
+    if (isnan(x) || isinf(x)) return x;
+    double f = floor(x), d = x - f;
+    if (d > 0.5 || (d == 0.5 && fmod(f, 2.0) != 0)) f += 1.0;
+    return f;
+}
+double nearbyint(double x) { return rint(x); }
+
+/* a whole double to long long in two 32-bit halves (no libgcc on i686) */
+static long long whole_to_ll(double x) {
+    int neg = x < 0;
+    if (neg) x = -x;
+    double hi = floor(x / 4294967296.0);
+    double lo = x - hi * 4294967296.0;
+    unsigned long long u = ((unsigned long long)(unsigned int)hi << 32) | (unsigned int)lo;
+    return neg ? -(long long)u : (long long)u;
+}
+long long llrint(double x) { return whole_to_ll(rint(x)); }
+long long llround(double x) { return whole_to_ll(round(x)); }
+#if __SIZEOF_LONG__ == 8
+long lrint(double x) { return (long)whole_to_ll(rint(x)); }
+long lround(double x) { return (long)whole_to_ll(round(x)); }
+#else
+long lrint(double x) { return (long)rint(x); }
+long lround(double x) { return (long)round(x); }
+#endif
+
+float exp2f(float x) { return (float)exp2(x); }
+float log2f(float x) { return (float)log2(x); }
+float log10f(float x) { return (float)log10(x); }
+float truncf(float x) { return (float)trunc(x); }
+float rintf(float x) { return (float)rint(x); }
+long  lrintf(float x) { return lrint(x); }
+float cbrtf(float x) { return (float)cbrt(x); }
+float hypotf(float x, float y) { return (float)hypot(x, y); }
+float copysignf(float x, float y) { return (float)copysign(x, y); }
+float fminf(float a, float b) { return a < b ? a : b; }
+float fmaxf(float a, float b) { return a > b ? a : b; }
+float asinf(float x) { return (float)asin(x); }
+float acosf(float x) { return (float)acos(x); }
+float sinhf(float x) { return (float)sinh(x); }
+float coshf(float x) { return (float)cosh(x); }
+float tanhf(float x) { return (float)tanh(x); }
+float ldexpf(float x, int e) { return (float)ldexp(x, e); }
+float frexpf(float x, int* e) { return (float)frexp(x, e); }

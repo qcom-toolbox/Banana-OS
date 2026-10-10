@@ -2,6 +2,7 @@
 """bpkg - Banana OS app packages (.bpk).
 
   bpkg pack -o app.bpk manifest app-i686 app-x86_64 [data files...]
+  (a driver: manifest driver-i686 driver-x86_64, type=driver in the manifest)
   bpkg list app.bpk              what is inside
   bpkg extract app.bpk [dir]     unpack it
   bpkg check app.bpk             validate (manifest, programs, relocations)
@@ -96,11 +97,13 @@ def check(path):
     name = mf.get("name", "")
     if not re.fullmatch(r"[a-z0-9_-]{1,24}", name):
         die(f"{path}: bad app name '{name}' (a-z, 0-9, - and _, at most 24)")
-    if mf.get("type", "console") not in ("console", "gui"):
-        die(f"{path}: type must be console or gui")
-    progs = [p for p in ("app-i686", "app-x86_64") if p in files]
+    kind = mf.get("type", "console")
+    if kind not in ("console", "gui", "driver"):
+        die(f"{path}: type must be console, gui or driver")
+    names = ("driver-i686", "driver-x86_64") if kind == "driver" else ("app-i686", "app-x86_64")
+    progs = [p for p in names if p in files]
     if not progs:
-        die(f"{path}: no program (app-i686 / app-x86_64)")
+        die(f"{path}: no program ({names[0]} / {names[1]})")
     for p in progs:
         err = elf_check(p, files[p])
         if err:

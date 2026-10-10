@@ -52,4 +52,10 @@ int    fflush(FILE* f);
 int    remove(const char* path);
 int    rename(const char* from, const char* to);
 void   perror(const char* s);
+FILE*  fdopen(int fd, const char* mode);
+int    fileno(FILE* f);
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
+int    setvbuf(FILE* f, char* buf, int mode, size_t size);
 #endif
