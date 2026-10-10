@@ -17,7 +17,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 8u
+#define BANANA_API_VERSION 9u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -103,7 +103,7 @@ typedef struct banana_api {
     unsigned int version;     /* BANANA_API_VERSION */
     unsigned int size;        /* sizeof(banana_api_t) on the running system */
     const char*  arch;        /* "i686" or "x86_64" */
-    const char*  os_version;  /* "0.5" */
+    const char*  os_version;  /* "0.6" */
 
     /* ── process ─────────────────────────────────────────── */
     void  (*exit)(int code);                            /* never returns */
@@ -248,6 +248,14 @@ typedef struct banana_api {
     int   (*http_request)(const char* method, const char* url, const char* body, unsigned long body_len,
                           const char* content_type, char** data, unsigned long* len,
                           char* ctype, int ccap, char* err, int ecap);
+
+    /* ── version 9: pictures ──────────────────────────────── */
+    /* decodes a picture file (PNG, JPEG, BMP, GIF): *w x *h pixels
+     * 0x00RRGGBB, row by row (free() them); NULL with err set */
+    unsigned int* (*image_load)(const char* path, int* w, int* h, char* err, int ecap);
+    /* makes it the desktop's wallpaper - mode 0 fill, 1 fit, 2 stretch,
+     * 3 center - and adds it to Settings' pictures; 0, or -1 with err */
+    int   (*set_wallpaper)(const char* path, int mode, char* err, int ecap);
 } banana_api_t;
 
 /* the app's entry point (the SDK's crt0 provides it) */

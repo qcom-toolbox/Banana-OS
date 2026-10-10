@@ -23,6 +23,14 @@
 #include "utf8.h"
 #include "usb.h"
 #include "touchpad.h"
+#include "font.h"
+#include "fb.h"
+#include "filechooser.h"
+#include "serial.h"
+#include "gui.h"
+#include "image.h"
+
+void shell_power(int reboot);
 
 #define TITLE_H  20
 #define SIDE_W   132
@@ -38,14 +46,14 @@
 #define C_ACCENT 0x003A7BD5u
 #define C_SEL    0x002C3E5Cu
 
-enum { PG_DISPLAY = 0, PG_SCREEN, PG_SOUND, PG_KEYBOARD, PG_MOUSE, PG_NETWORK, PG_TIME, PG_STARTUP, PG_ABOUT, PG_COUNT };
-static const char* const PAGE_NAMES[PG_COUNT] = { "Display", "Screen", "Sound", "Keyboard", "Mouse", "Network", "Date & time", "Startup", "About" };
+enum { PG_DISPLAY = 0, PG_FONTS, PG_SCREEN, PG_SOUND, PG_KEYBOARD, PG_MOUSE, PG_NETWORK, PG_TIME, PG_STARTUP, PG_ABOUT, PG_COUNT };
+static const char* const PAGE_NAMES[PG_COUNT] = { "Wallpaper", "Fonts", "Screen", "Sound", "Keyboard", "Mouse", "Network", "Date & time", "Startup", "About" };
 
 static const char* const LAYOUTS[] = { "EN (Default)", "fr_CH", "FR", "DE", "de_CH", "BEPO" };
 #define NLAYOUTS ((int)(sizeof(LAYOUTS) / sizeof(LAYOUTS[0])))
 
 static int        g_open;
-static win_geom_t g_win = { .x = 110, .y = 50, .w = 600, .h = 430, .min_w = 520, .min_h = 360 };
+static win_geom_t g_win = { .x = 100, .y = 40, .w = 640, .h = 470, .min_w = 580, .min_h = 440 };
 static int        g_page;
 static uint32_t   g_gen;
 static char       g_status[96];
@@ -89,15 +97,36 @@ static int cx0(void) { return g_win.x + SIDE_W + 16; }
 static int cy0(void) { return g_win.y + BODY_Y + 6; }
 static int cw(void) { return g_win.w - SIDE_W - 28; }
 
-/* Display: the wallpaper thumbnails */
-#define THUMB_W 98
-#define THUMB_H 60
-static int thumbs_per_row(void) { int n = (cw() + 10) / (THUMB_W + 10); return n < 1 ? 1 : n; }
+/* Wallpaper: the presets' thumbnails, two rows; then the user's pictures */
+#define THUMB_W 80
+#define THUMB_H 50
+#define THUMB_GAP 8
+static int thumbs_per_row(void) { int n = (cw() + THUMB_GAP) / (THUMB_W + THUMB_GAP); return n < 1 ? 1 : n; }
 static void thumb_rect(int i, int* x, int* y) {
     int per = thumbs_per_row();
-    *x = cx0() + (i % per) * (THUMB_W + 10);
-    *y = cy0() + 42 + (i / per) * (THUMB_H + 24);
+    *x = cx0() + (i % per) * (THUMB_W + THUMB_GAP);
+    *y = cy0() + 38 + (i / per) * (THUMB_H + 20);
 }
+static int preset_rows(void) { int per = thumbs_per_row(); return (wallpaper_preset_count() + per - 1) / per; }
+static int pics_y(void) { return cy0() + 38 + preset_rows() * (THUMB_H + 20) + 4; }     /* "Your pictures" */
+static void pic_rect(int i, int* x, int* y) { *x = cx0() + i * (THUMB_W + THUMB_GAP); *y = pics_y() + 18; }
+static int wp_buttons_y(void) { return pics_y() + 18 + THUMB_H + 24; }
+
+/* a w x h picture at (x, y), clipped to the screen */
+static void blit(int x, int y, int w, int h, const uint32_t* px) {
+    int stride, tw, th;
+    uint32_t* t = fb_target(&stride, &tw, &th);
+    if (!t || !px) return;
+    for (int r = 0; r < h; r++) {
+        int yy = y + r;
+        if (yy < 0 || yy >= th) continue;
+        int x0 = x < 0 ? -x : 0, x1 = x + w > tw ? tw - x : w;
+        if (x0 < x1) memcpy(t + (uint32_t)yy * (uint32_t)stride + x + x0, px + r * w + x0, (uint32_t)(x1 - x0) * 4u);
+    }
+}
+
+static const char* const MODE_NAMES[4] = { "Fill", "Fit", "Stretch", "Center" };
+static const image_mode_t MODES[4] = { IMAGE_FILL, IMAGE_FIT, IMAGE_STRETCH, IMAGE_CENTER };
 
 /* Sound: the volume slider */
 static void slider_rect(int* x, int* y, int* w) { *x = cx0(); *y = cy0() + 64; *w = cw() - 60; }
@@ -120,21 +149,16 @@ static void save_volume(void) {
 
 /* ── pages ────────────────────────────────────────────────────────── */
 
-/* the UI font switch, right of the "Wallpaper" heading */
-#define FONT_BX(x) ((x) + 216)
-static void draw_font_switch(int x, int y) {
-    label(FONT_BX(x) - 48, y, "Font:", C_DIM);
-    button(FONT_BX(x), y - 6, 64, "Smooth", gfx_smooth_text());
-    button(FONT_BX(x) + 68, y - 6, 72, "Classic", !gfx_smooth_text());
-}
-
 static void draw_display(void) {
     int x = cx0(), y = cy0();
     label(x, y, "Wallpaper", C_HEAD);
-    draw_font_switch(x, y);
     const char* file = wallpaper_current_file();
     char line[96];
-    if (file && *file) ksnprintf(line, sizeof(line), "Now: picture %s", file);
+    if (file && *file) {
+        const char* b = strrchr(file, '/');
+        ksnprintf(line, sizeof(line), "Now: your picture %s (%s)", b ? b + 1 : file, MODE_NAMES[wallpaper_current_mode() < 4 ? wallpaper_current_mode() : 0]);
+        if ((int)strlen(line) * 8 > cw()) line[cw() / 8] = 0;
+    }
     else {
         const wallpaper_preset_t* p = wallpaper_preset(wallpaper_current_preset());
         ksnprintf(line, sizeof(line), "Now: %s", p ? p->name : "-");
@@ -159,11 +183,216 @@ static void draw_display(void) {
         } else {
             gfx_fill_rect(tx, ty, THUMB_W, THUMB_H, p ? p->base : 0);
         }
-        char nm[13];
+        char nm[11];
         kstrlcpy(nm, p ? p->name : "?", sizeof(nm));
-        label(tx, ty + THUMB_H + 6, nm, i == cur ? C_HEAD : C_DIM);
+        label(tx, ty + THUMB_H + 5, nm, i == cur ? C_HEAD : C_DIM);
     }
-    label(x, g_win.y + g_win.h - 40, "Own picture: right-click it in Files.", C_DIM);
+
+    /* the user's pictures: those used lately */
+    int py = pics_y();
+    label(x, py, "Your pictures", C_HEAD);
+    int nr = wallpaper_recent_count();
+    if (!nr) label(x, py + 22, "Pictures you choose (Browse, or right-click one in Files) show up here.", C_DIM);
+    for (int i = 0; i < nr; i++) {
+        int tx, ty;
+        pic_rect(i, &tx, &ty);
+        if (tx + THUMB_W > x + cw()) break;
+        int on = file && !strcmp(file, wallpaper_recent(i));
+        gfx_fill_rect(tx - 2, ty - 2, THUMB_W + 4, THUMB_H + 4, on ? C_ACCENT : 0x0010141Cu);
+        const uint32_t* th = wallpaper_recent_thumb(i, THUMB_W, THUMB_H);
+        if (th) blit(tx, ty, THUMB_W, THUMB_H, th);
+        else { gfx_fill_rect(tx, ty, THUMB_W, THUMB_H, 0x00303740u); label(tx + 4, ty + 20, "(missing)", C_DIM); }
+        /* remove it from the list: x in its corner */
+        gfx_fill_rect(tx + THUMB_W - 12, ty, 12, 12, 0x00202630u);
+        gfx_draw_text(tx + THUMB_W - 10, ty + 2, "x", C_TEXT, 0x00202630u);
+        const char* b = strrchr(wallpaper_recent(i), '/');
+        char nm[11];
+        kstrlcpy(nm, b ? b + 1 : wallpaper_recent(i), sizeof(nm));
+        label(tx, ty + THUMB_H + 5, nm, on ? C_HEAD : C_DIM);
+    }
+
+    /* Browse..., and how a picture covers the screen */
+    int by = wp_buttons_y();
+    button(x, by, 96, "Browse...", 0);
+    int pic = file && *file;
+    label(x + 112, by + 6, "Position:", pic ? C_TEXT : C_DIM);
+    for (int m = 0; m < 4; m++)
+        button(x + 192 + m * 68, by, 64, MODE_NAMES[m], pic && wallpaper_current_mode() == MODES[m]);
+}
+
+/* ── Fonts: the text size, the installed fonts, which one the interface
+ *    and the documents use ── */
+#define FROW_H 34
+static int g_font_top;                       /* the first row shown (the list scrolls) */
+static int fonts_list_y(void) { return cy0() + 86; }
+static int fonts_rows(void) { int r = (g_win.y + g_win.h - 64 - fonts_list_y()) / FROW_H; return r < 1 ? 1 : r; }
+static int ui_col(void) { return cx0() + cw() - 190; }
+static int doc_col(void) { return cx0() + cw() - 110; }
+
+/* the rows: classic, DejaVu Sans Mono, DejaVu Sans, then the user's fonts */
+static int font_rows_total(void) { return 3 + font_user_count(); }
+static int row_face(int r) { return r == 0 ? -2 : r == 1 ? FONT_MONO : r == 2 ? FONT_SANS : font_user_face(r - 3); }
+
+static void radio(int x, int y, int on) {
+    bevel(x, y, 14, 14, 0x00141920u, 0x0010141Cu, 0x00404B5Cu);
+    if (on) gfx_fill_rect(x + 4, y + 4, 6, 6, C_ACCENT);
+}
+
+static void draw_fonts(void) {
+    int x = cx0(), y = cy0();
+    label(x, y, "Text size", C_HEAD);
+    label(x + 88, y, "(terminal windows, Notepad, desktop icon names)", C_DIM);
+    for (int s = 0; s < GFX_TEXT_SIZES; s++) button(x + s * 92, y + 18, 86, gfx_text_size_name(s), gfx_text_size() == s);
+
+    label(x, y + 56, "Fonts", C_HEAD);
+    label(ui_col() - 20, y + 56, "Interface", C_DIM);
+    label(doc_col() - 4, y + 56, "Documents", C_DIM);
+    int stride, tw, th;
+    uint32_t* t = fb_target(&stride, &tw, &th);
+    int ly = fonts_list_y(), n = font_rows_total(), rows = fonts_rows();
+    if (g_font_top > n - rows) g_font_top = n - rows;
+    if (g_font_top < 0) g_font_top = 0;
+    for (int i = 0; i < rows && g_font_top + i < n; i++) {
+        int r = g_font_top + i, face = row_face(r);
+        int ry = ly + i * FROW_H;
+        gfx_fill_rect(x, ry, cw(), FROW_H - 2, (i & 1) ? 0x00222932u : 0x001F252Eu);
+        const char* name = r == 0 ? "Classic (8x8 pixels)" : r == 1 ? "DejaVu Sans Mono" : r == 2 ? "DejaVu Sans" : font_user_name(face);
+        char nm[40];
+        kstrlcpy(nm, name, sizeof(nm));
+        if ((int)strlen(nm) > (ui_col() - x - 30) / 8) nm[(ui_col() - x - 30) / 8] = 0;
+        gfx_draw_text(x + 6, ry + 4, nm, C_TEXT, (i & 1) ? 0x00222932u : 0x001F252Eu);
+        /* a sample in the font itself */
+        if (face >= 0 && t) font_draw(t, stride, x, ry, ui_col() - 30, ry + FROW_H - 2, face, 15, x + 6, ry + 28,
+                                      "The quick brown fox 0123", 24, 0x00C8D4E4u, 0);
+        else if (face == -2) gfx_draw_text(x + 6, ry + 18, "The quick brown fox 0123", 0x00C8D4E4u, (i & 1) ? 0x00222932u : 0x001F252Eu);
+        int ui_on = face == -2 ? !gfx_smooth_text() : gfx_smooth_text() && font_ui() == face;
+        if (face != FONT_SANS) radio(ui_col(), ry + 9, ui_on);
+        if (face != -2 && face != FONT_MONO) radio(doc_col() + 20, ry + 9, face == FONT_SANS ? font_doc() < 0 : font_doc() == face);
+        if (r >= 3) button(x + cw() - 30, ry + 6, 26, "X", 0);       /* uninstall */
+    }
+    if (n > rows) label(x + cw() - 120, ly + rows * FROW_H + 2, "(wheel: more)", C_DIM);
+    int by = g_win.y + g_win.h - 50;
+    button(x, by, 120, "Install font...", 0);
+    label(x + 132, by + 6, "a .ttf file (or right-click one in Files)", C_DIM);
+}
+
+/* ── installing a font ── */
+int settings_install_font(const char* path, char* msg, int cap) {
+    const char* b = strrchr(path, '/');
+    b = b ? b + 1 : path;
+    char dst[FS_PATH_LEN], err[96];
+    ksnprintf(dst, sizeof(dst), "%s/%s", FONT_DIR, b);
+    int copied = 0;
+    if (strcmp(dst, path) != 0) {
+        if (fs_find_file(dst) >= 0) {
+            int have = font_user_find(dst);
+            if (have >= 0) { ksnprintf(msg, (uint32_t)cap, "%s is installed already", font_user_name(have)); return -1; }
+        }
+        fs_mkdir_p(FONT_DIR);
+        if (fs_copy(path, dst) < 0) { ksnprintf(msg, (uint32_t)cap, "could not copy it to %s", FONT_DIR); return -1; }
+        copied = 1;
+    }
+    int face = font_user_load(dst, err, sizeof(err));
+    if (face < 0) {
+        if (copied) fs_delete(dst, 0);
+        ksnprintf(msg, (uint32_t)cap, "%s: %s", b, err);
+        return -1;
+    }
+    ksnprintf(msg, (uint32_t)cap, "Installed %s - choose where it is used in Settings > Fonts", font_user_name(face));
+    g_gen++;
+    return 0;
+}
+
+static int is_ttf(const char* n) {
+    uint32_t l = (uint32_t)strlen(n);
+    return l > 4 && (!strcmp(n + l - 4, ".ttf") || !strcmp(n + l - 4, ".TTF"));
+}
+static int is_picture(const char* n) { return wallpaper_is_image_name(n); }
+
+static void font_chosen(const char* path) {
+    settings_install_font(path, g_status, sizeof(g_status));
+    g_gen++;
+}
+
+static void picture_chosen(const char* path) {
+    char err[80];
+    if (wallpaper_set_file(path, IMAGE_FILL, err, sizeof(err)) == 0) {
+        const char* b = strrchr(path, '/');
+        ksnprintf(g_status, sizeof(g_status), "Wallpaper: %s", b ? b + 1 : path);
+    } else ksnprintf(g_status, sizeof(g_status), "Not a usable picture: %s", err);
+    g_gen++;
+}
+
+static void apply_text_change(void) {
+    gui_text_changed();
+    g_gen++;
+}
+
+static void click_fonts(int mx, int my) {
+    int x = cx0(), y = cy0();
+    for (int s = 0; s < GFX_TEXT_SIZES; s++)
+        if (inside(mx, my, x + s * 92, y + 18, 86, 20)) {
+            gfx_set_text_size(s);
+            char v[4];
+            ksnprintf(v, sizeof(v), "%d", s);
+            save_setting("text_size", v);
+            ksnprintf(g_status, sizeof(g_status), "Text size: %s", gfx_text_size_name(s));
+            apply_text_change();
+            return;
+        }
+    int by = g_win.y + g_win.h - 50;
+    if (inside(mx, my, x, by, 120, 20)) {
+        fc_open("Choose a font to install (.ttf)", "/home/banana/Downloads", is_ttf, font_chosen);
+        return;
+    }
+    int ly = fonts_list_y(), n = font_rows_total(), rows = fonts_rows();
+    for (int i = 0; i < rows && g_font_top + i < n; i++) {
+        int r = g_font_top + i, face = row_face(r);
+        int ry = ly + i * FROW_H;
+        if (!inside(mx, my, x, ry, cw(), FROW_H)) continue;
+        if (r >= 3 && inside(mx, my, x + cw() - 30, ry + 6, 26, 20)) {
+            char path[FS_PATH_LEN], nm[48];
+            kstrlcpy(path, font_user_path(face), sizeof(path));
+            kstrlcpy(nm, font_user_name(face), sizeof(nm));
+            int was_ui = font_ui() == face, was_doc = font_doc() == face;
+            font_user_unload(face);
+            fs_delete(path, 0);
+            if (was_ui) save_setting("ui_face", "");
+            if (was_doc) save_setting("doc_font", "");
+            ksnprintf(g_status, sizeof(g_status), "Removed %s", nm);
+            apply_text_change();
+            return;
+        }
+        if (mx >= ui_col() - 6 && mx < ui_col() + 40 && face != FONT_SANS) {
+            if (face == -2) {
+                gfx_set_smooth_text(0);
+                save_setting("ui_font", "classic");
+            } else {
+                gfx_set_smooth_text(1);
+                font_set_ui(face);
+                save_setting("ui_font", "smooth");
+                save_setting("ui_face", face == FONT_MONO ? "" : font_user_path(face));
+            }
+            ksnprintf(g_status, sizeof(g_status), "Interface font: %s", face == -2 ? "classic" : face == FONT_MONO ? "DejaVu Sans Mono" : font_user_name(face));
+            apply_text_change();
+            return;
+        }
+        if (mx >= doc_col() && mx < doc_col() + 70 && face != -2 && face != FONT_MONO) {
+            font_set_doc(face == FONT_SANS ? -1 : face);
+            save_setting("doc_font", face == FONT_SANS ? "" : font_user_path(face));
+            ksnprintf(g_status, sizeof(g_status), "Documents font: %s", face == FONT_SANS ? "DejaVu Sans" : font_user_name(face));
+            apply_text_change();
+            return;
+        }
+        return;
+    }
+}
+
+void settings_wheel(int mx, int my, int dz) {
+    (void)mx; (void)my;
+    if (!g_open) return;
+    if (fc_active()) { fc_wheel(dz); g_gen++; return; }
+    if (g_page == PG_FONTS) { g_font_top += dz; g_gen++; }
 }
 
 static void draw_sound(void) {
@@ -249,8 +478,83 @@ static void draw_keyboard(void) {
     }
 }
 
+/* Screen, on any PC: the sizes the firmware offers, set by the boot loader
+ * (from the next start on an installed system) */
+#define BM_COL_W 150
+static int  g_restart_pending;
+static int bm_cols(void) { int c = cw() / BM_COL_W; return c < 1 ? 1 : c; }
+static void bm_rect(int i, int* x, int* y) {     /* i = 0: automatic, then the modes */
+    *x = cx0() + (i % bm_cols()) * BM_COL_W;
+    *y = cy0() + 64 + (i / bm_cols()) * 22;
+}
+
+static void draw_screen_boot(void) {
+    int x = cx0(), y = cy0();
+    label(x, y, "Screen resolution", C_HEAD);
+    const fb_info_t* fi = fb_info();
+    char line[112], saved[24] = "";
+    ksnprintf(line, sizeof(line), "Now: %u x %u", fi ? fi->width : 0, fi ? fi->height : 0);
+    label(x, y + 18, line, C_DIM);
+    display_mode_t modes[48];
+    int n = display_boot_modes(modes, 48);
+    if (!n) {
+        label(x, y + 44, "This display keeps the size it was started with: the boot loader", C_DIM);
+        label(x, y + 60, "gave no list of sizes (started by another loader).", C_DIM);
+        return;
+    }
+    cfg_get(CFG_SETTINGS, "boot_resolution", saved, sizeof(saved));
+    int installed = fsdisk_is_installed();
+    label(x, y + 40, installed ? "Choose a size; it is used from the next start:"
+                               : "The sizes this computer offers:", C_TEXT);
+    for (int i = 0; i <= n; i++) {
+        int bx, by;
+        bm_rect(i, &bx, &by);
+        if (by + 20 > g_win.y + g_win.h - 60) break;
+        char nm[32], val[24];
+        if (i == 0) { kstrlcpy(nm, "Automatic", sizeof(nm)); kstrlcpy(val, "auto", sizeof(val)); }
+        else {
+            ksnprintf(val, sizeof(val), "%dx%d", modes[i - 1].w, modes[i - 1].h);
+            int now = fi && modes[i - 1].w == (int)fi->width && modes[i - 1].h == (int)fi->height;
+            ksnprintf(nm, sizeof(nm), "%d x %d%s", modes[i - 1].w, modes[i - 1].h, now ? " *" : "");
+        }
+        int on = installed && (saved[0] ? !strcmp(saved, val) : i == 0);
+        radio(bx, by, on);
+        label(bx + 22, by + 3, nm, on ? C_HEAD : C_TEXT);
+    }
+    int ry = g_win.y + g_win.h - 54;
+    label(x, ry - 16, "* the size now", C_DIM);
+    if (g_restart_pending) button(x, ry, 130, "Restart now", 1);
+    else if (!installed) label(x, ry + 4, "Banana Boot menu: Left / Right changes the screen size.", C_DIM);
+}
+
+static void click_screen_boot(int mx, int my) {
+    display_mode_t modes[48];
+    int n = display_boot_modes(modes, 48);
+    int ry = g_win.y + g_win.h - 54;
+    if (g_restart_pending && inside(mx, my, cx0(), ry, 130, 20)) { shell_power(1); return; }
+    for (int i = 0; i <= n; i++) {
+        int bx, by;
+        bm_rect(i, &bx, &by);
+        if (!inside(mx, my, bx, by - 3, BM_COL_W - 4, 20)) continue;
+        int w = i ? modes[i - 1].w : 0, h = i ? modes[i - 1].h : 0;
+        kstrlcpy(g_status, "Saving the boot settings...", sizeof(g_status));
+        int rc = display_set_boot_mode(w, h);
+        if (rc == 0) {
+            if (i) ksnprintf(g_status, sizeof(g_status), "%d x %d from the next start", w, h);
+            else kstrlcpy(g_status, "Automatic size from the next start", sizeof(g_status));
+            g_restart_pending = 1;
+        } else if (rc == -2) {
+            kstrlcpy(g_status, "Live CD: choose the size in the Banana Boot menu (Left / Right)", sizeof(g_status));
+        } else {
+            kstrlcpy(g_status, "Could not write the boot settings to the disk", sizeof(g_status));
+        }
+        return;
+    }
+}
+
 /* Screen: the resolution */
 static void draw_screen(void) {
+    if (!display_can_change()) { draw_screen_boot(); return; }
     int x = cx0(), y = cy0();
     label(x, y, "Screen resolution", C_HEAD);
     const fb_info_t* fi = fb_info();
@@ -268,8 +572,6 @@ static void draw_screen(void) {
         if (on) gfx_fill_rect(x + 4, ry + 4, 6, 6, C_ACCENT);
         label(x + 24, ry + 3, nm, on ? C_HEAD : C_TEXT);
     }
-    if (!display_can_change())
-        label(x, y + 44 + n * ITEM_H + 8, "This display keeps the mode set at boot (changing it needs QEMU, Bochs or VirtualBox graphics).", C_DIM);
 }
 
 /* Startup: what starts at boot (/etc/rc.conf), and the SSH password */
@@ -439,6 +741,7 @@ static void click_startup(int mx, int my) {
 /* typing into the password fields */
 void settings_key(char c) {
     if (!g_open) return;
+    if (fc_active()) { fc_key(c); g_gen++; return; }
     if (g_page != PG_STARTUP || g_pw_focus < 0) {
         if (c == 27) settings_close();              /* Esc closes, as in the other windows */
         return;
@@ -499,7 +802,7 @@ static void draw_time(void) {
 
 static void draw_about(void) {
     int x = cx0(), y = cy0();
-    gfx_draw_text_scaled(x, y, 2, "Banana OS 0.5", C_HEAD, C_PANEL);
+    gfx_draw_text_scaled(x, y, 2, "Banana OS 0.6", C_HEAD, C_PANEL);
     const sysinfo_t* si = sysinfo_get();
     char line[112];
     int ly = y + 32;
@@ -563,8 +866,15 @@ void settings_draw(const fb_info_t* fi) {
         gfx_draw_text(x + 18, iy + 7, PAGE_NAMES[i], i == g_page ? C_HEAD : C_DIM, bg);
     }
 
+    if (fc_active()) {
+        fc_draw(cx0(), cy0(), cw(), g_win.y + g_win.h - 26 - cy0());
+        if (g_status[0]) gfx_draw_text(x + 10, y + H - 18, g_status, C_DIM, C_PANEL);
+        gfx_draw_grip(x + W, y + H);
+        return;
+    }
     switch (g_page) {
     case PG_DISPLAY:  draw_display(); break;
+    case PG_FONTS:    draw_fonts(); break;
     case PG_SCREEN:   draw_screen(); break;
     case PG_SOUND:    draw_sound(); break;
     case PG_KEYBOARD: draw_keyboard(); break;
@@ -595,19 +905,34 @@ void settings_click(int mx, int my) {
     /* sidebar */
     if (lx >= 8 && lx < 8 + SIDE_W - 4) {
         int i = (ly - BODY_Y - 4) / ITEM_H;
-        if (ly >= BODY_Y + 4 && i >= 0 && i < PG_COUNT) g_page = i;
+        if (ly >= BODY_Y + 4 && i >= 0 && i < PG_COUNT) { g_page = i; fc_close(); }
         return;
     }
+    if (fc_active()) { fc_click(mx, my); return; }
 
     int x = cx0(), y = cy0();
+    if (g_page == PG_FONTS) { click_fonts(mx, my); return; }
     if (g_page == PG_DISPLAY) {
-        if (inside(mx, my, FONT_BX(x), y - 6, 64, 20) || inside(mx, my, FONT_BX(x) + 68, y - 6, 72, 20)) {
-            int smooth = mx < FONT_BX(x) + 66;
-            gfx_set_smooth_text(smooth);
-            save_setting("ui_font", smooth ? "smooth" : "classic");
-            ksnprintf(g_status, sizeof(g_status), "Font: %s", smooth ? "smooth (DejaVu Sans Mono)" : "classic (8x8)");
+        for (int i = 0; i < wallpaper_recent_count(); i++) {
+            int tx, ty;
+            pic_rect(i, &tx, &ty);
+            if (tx + THUMB_W > x + cw()) break;
+            if (inside(mx, my, tx + THUMB_W - 12, ty, 12, 12)) { wallpaper_recent_remove(i); return; }
+            if (inside(mx, my, tx, ty, THUMB_W, THUMB_H + 18)) { picture_chosen(wallpaper_recent(i)); return; }
+        }
+        int by = wp_buttons_y();
+        if (inside(mx, my, x, by, 96, 20)) {
+            fc_open("Choose a picture for the wallpaper", WALLPAPER_DIR, is_picture, picture_chosen);
             return;
         }
+        for (int m = 0; m < 4; m++)
+            if (inside(mx, my, x + 192 + m * 68, by, 64, 20)) {
+                char err[80];
+                if (wallpaper_set_mode(MODES[m], err, sizeof(err)) == 0)
+                    ksnprintf(g_status, sizeof(g_status), "Position: %s", MODE_NAMES[m]);
+                else ksnprintf(g_status, sizeof(g_status), "Choose a picture first (Browse...)");
+                return;
+            }
         for (int i = 0; i < wallpaper_preset_count(); i++) {
             int tx, ty;
             thumb_rect(i, &tx, &ty);
@@ -630,6 +955,8 @@ void settings_click(int mx, int my) {
             return;
         }
         if (inside(mx, my, x + 112, sy + 36, 120, 20)) { audio_beep(880, 150); return; }
+    } else if (g_page == PG_SCREEN && !display_can_change()) {
+        click_screen_boot(mx, my);
     } else if (g_page == PG_SCREEN) {
         display_mode_t modes[16];
         int n = display_modes(modes, 16);
@@ -733,6 +1060,7 @@ void settings_open(void) {
 
 void settings_close(void) {
     g_open = 0;
+    fc_close();
     memset(g_pw, 0, sizeof(g_pw));
     g_pw_focus = -1;
     g_win.dragging = g_win.resizing = 0;
@@ -751,7 +1079,8 @@ uint32_t settings_signature(void) {
         if (s != g_tick_s) { g_tick_s = s; g_gen++; }
     }
     return g_gen * 2654435761u ^ (uint32_t)(g_win.x << 16 | g_win.y) ^ (uint32_t)(g_win.w << 20 | g_win.h << 4) ^
-           (uint32_t)g_page << 28 ^ (uint32_t)audio_get_volume() << 8 ^ (uint32_t)mouse_get_speed() << 15 ^ wallpaper_generation() ^ (uint32_t)gfx_smooth_text() << 27;
+           (uint32_t)g_page << 28 ^ (uint32_t)audio_get_volume() << 8 ^ (uint32_t)mouse_get_speed() << 15 ^ wallpaper_generation() ^ (uint32_t)gfx_smooth_text() << 27 ^
+           (fc_active() ? fc_generation() * 40503u : 0);
 }
 
 void settings_boot(void) {
@@ -768,6 +1097,25 @@ void settings_boot(void) {
         if (k_parse_u32(v, &n)) mouse_set_speed((int)n);
     }
     if (cfg_get(CFG_SETTINGS, "ui_font", v, sizeof(v))) gfx_set_smooth_text(strcmp(v, "classic") != 0);
+    /* the installed fonts, and which ones are used */
+    {
+        static int idx[64];
+        int n = fs_list_files(FONT_DIR, idx, 64);
+        for (int i = 0; i < n && i < 64; i++) {
+            fs_file_t* f = fs_file_info(idx[i]);
+            char p[FS_PATH_LEN], err[96];
+            if (!f || !is_ttf(f->name)) continue;
+            ksnprintf(p, sizeof(p), "%s/%s", FONT_DIR, f->name);
+            if (font_user_load(p, err, sizeof(err)) < 0) klog("fonts: %s: %s\n", p, err);
+        }
+        char p[FS_PATH_LEN];
+        if (cfg_get(CFG_SETTINGS, "ui_face", p, sizeof(p)) && p[0]) font_set_ui(font_user_find(p));
+        if (cfg_get(CFG_SETTINGS, "doc_font", p, sizeof(p)) && p[0]) font_set_doc(font_user_find(p));
+    }
+    if (cfg_get(CFG_SETTINGS, "text_size", v, sizeof(v))) {
+        uint32_t n = 0;
+        if (k_parse_u32(v, &n)) gfx_set_text_size((int)n);
+    }
     if (cfg_get(CFG_SETTINGS, "resolution", v, sizeof(v))) {       /* "1024x768" */
         uint32_t w = 0, h = 0;
         const char* xp = strchr(v, 'x');

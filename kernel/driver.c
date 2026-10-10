@@ -284,7 +284,7 @@ static void api_init(void) {
     g_api.version = BANANA_DRV_VERSION;
     g_api.size = sizeof(g_api);
     g_api.arch = BANANA_ARCH;
-    g_api.os_version = "0.5";
+    g_api.os_version = "0.6";
     g_api.log = d_log;
     g_api.vlog = d_vlog;
     g_api.pci_get = d_pci_get;

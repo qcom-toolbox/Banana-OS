@@ -44,6 +44,18 @@ void wallpaper_set_preset(int i);
  * Returns 0, or -1 with the reason in err (the current wallpaper stays). */
 int  wallpaper_set_file(const char* path, image_mode_t mode, char* err, uint32_t errlen);
 
+/* The pictures used as the wallpaper lately (newest first, up to
+ * WALLPAPER_RECENT_MAX; saved in /etc/wallpaper): Settings shows them next
+ * to the presets. */
+#define WALLPAPER_RECENT_MAX 5
+int          wallpaper_recent_count(void);
+const char*  wallpaper_recent(int i);
+/* a w x h (FILL) thumbnail of it, made once and kept; NULL if it cannot be read */
+const uint32_t* wallpaper_recent_thumb(int i, int w, int h);
+void         wallpaper_recent_remove(int i);
+/* the current picture again in another mode (Fill, Fit...) */
+int          wallpaper_set_mode(image_mode_t mode, char* err, uint32_t errlen);
+
 /* Applies /etc/wallpaper once, the first time the desktop starts. */
 void wallpaper_load_config(void);
 

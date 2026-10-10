@@ -21,8 +21,8 @@
 #define TOOL_Y   23
 #define TOOL_H   20
 #define TEXT_Y   (TOOL_Y + TOOL_H + 4)
-#define LINE_H   11
-#define CHAR_W   8
+#define LINE_H   (gfx_cell_h() + 3)     /* the text size's cells (Settings > Fonts) */
+#define CHAR_W   gfx_cell_w()
 #define SB       12
 #define STATUS_H 16
 
@@ -610,7 +610,7 @@ void notepad_draw(const fb_info_t* fi) {
             char ch = (cp == '\t' || cp < 32) ? ' ' : u8_cell(cp);
             uint32_t bg = in ? C_SELBG : C_PAGE;
             if (in) gfx_fill_rect(px + 3 + cidx * CHAR_W, ty - 1, CHAR_W, LINE_H, bg);
-            if (ch != ' ') gfx_draw_char(px + 3 + cidx * CHAR_W, ty, ch, C_INK, bg);
+            if (ch != ' ') gfx_draw_cell_char(px + 3 + cidx * CHAR_W, ty, ch, C_INK, bg);
         }
     }
     /* caret */

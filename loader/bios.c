@@ -214,6 +214,9 @@ static int iso_find(const char* path, u32* lba, u32* size) {
 /* ── VBE: a linear 32-bit mode, the size the kernel asks for if there is one ─ */
 typedef struct { u32 addr, pitch, w, h, bpp; u8 rp, rs, gp, gs, bp, bs; int ok; } fbinfo_t;
 
+static vmode_t g_modes[MAX_VMODES];
+static int     g_nmodes, g_vsel = -1;          /* the size chosen (-1: automatic) */
+
 static int vbe_mode_info(u16 mode, u8* mi) {
     rm_regs_t r = {0};
     r.eax = 0x4F01;
@@ -226,8 +229,8 @@ static int vbe_mode_info(u16 mode, u8* mi) {
     return 0;
 }
 
-static void set_video(u32 want_w, u32 want_h, fbinfo_t* fb) {
-    fb->ok = 0;
+/* the controller's mode list (VBE 2 info), 0xFFFF-terminated; 0 without VBE */
+static const u16* vbe_list(u16* version) {
     u8* vi = (u8*)(BUF_SEG * 16);
     memset(vi, 0, 512);
     memcpy(vi, "VBE2", 4);
@@ -236,23 +239,44 @@ static void set_video(u32 want_w, u32 want_h, fbinfo_t* fb) {
     r.es = BUF_SEG;
     r.edi = 0;
     bios_int(0x10, &r);
-    if ((r.eax & 0xFFFF) != 0x004F || !c_memeq(vi, "VESA", 4)) return;
-    u16 version = rd16(vi + 4);
-    u32 list = (u32)rd16(vi + 16) * 16 + rd16(vi + 14);
+    if ((r.eax & 0xFFFF) != 0x004F || !c_memeq(vi, "VESA", 4)) return 0;
+    *version = rd16(vi + 4);
+    return (const u16*)((u32)rd16(vi + 16) * 16 + rd16(vi + 14));
+}
+
+/* a mode the kernel can use: graphics, linear, 32-bit direct colour */
+static int vbe_usable(const u8* mi) {
+    return (rd16(mi) & 0x91) == 0x91 && mi[25] == 32 && mi[27] == 6 && rd32(mi + 40);
+}
+
+/* the sizes for the menu (and the kernel's Settings) */
+static void vbe_modes(void) {
+    u16 version, modes[256];
+    const u16* list = vbe_list(&version);
+    if (!list) return;
+    int n = 0;
+    for (; n < 256 && list[n] != 0xFFFF; n++) modes[n] = list[n];   /* the next calls reuse the buffer */
+    u8 mi[256];
+    for (int i = 0; i < n; i++)
+        if (vbe_mode_info(modes[i], mi) == 0 && vbe_usable(mi))
+            vmode_add(g_modes, &g_nmodes, rd16(mi + 18), rd16(mi + 20), modes[i]);
+}
+
+static void set_video(u32 want_w, u32 want_h, fbinfo_t* fb) {
+    fb->ok = 0;
+    u16 version;
+    const u16* list = vbe_list(&version);
+    if (!list) return;
     u16 modes[256];
     int n = 0;
-    for (; n < 256; n++) {
-        u16 m = *(u16*)(list + 2u * (u32)n);
-        if (m == 0xFFFF) break;
-        modes[n] = m;
-    }
+    for (; n < 256 && list[n] != 0xFFFF; n++) modes[n] = list[n];
     u8 mi[256];
+    rm_regs_t r;
     int best = -1;
     u32 best_score = 0xFFFFFFFFu;
     for (int i = 0; i < n; i++) {
         if (vbe_mode_info(modes[i], mi) != 0) continue;
-        u16 attr = rd16(mi);
-        if ((attr & 0x91) != 0x91 || mi[25] != 32 || mi[27] != 6 || !rd32(mi + 40)) continue;
+        if (!vbe_usable(mi)) continue;
         u32 w = rd16(mi + 18), h = rd16(mi + 20);
         /* the size asked for; else the nearest (by area, a bigger one costs more) */
         u32 want = want_w * want_h, have = w * h;
@@ -349,6 +373,8 @@ static const u8* find_rsdp(void) {
 
 /* The line `install` rewrites in the disk's copy of this file (see common.h). */
 static const char MEDIUM_LINE[] = "set banana_medium=live-cd";
+/* ... and the screen size (common.h): the value is padded to 12 characters */
+static const char VIDEO_LINE[] = "set banana_video=auto        ";
 
 /* ── the menu: the kernels, then what else the BIOS can do ─────────────── */
 #define ENTRY_NEXT    (KERNEL_ENTRIES)       /* the next boot device (INT 18h) */
@@ -372,8 +398,13 @@ static void draw_menu(int sel, int secs) {
         put_at(r, 4, label(i), i == sel ? 0x70 : 0x07);
         if (i == sel) { VGA[r * 80 + 3] = (u16)(' ' | 0x70 << 8); for (int c = 4 + (int)c_strlen(label(i)); c < 60; c++) VGA[r * 80 + c] = (u16)(' ' | 0x70 << 8); }
     }
+    char vl[80];
+    vmode_label(vl, g_modes, g_nmodes, g_vsel);
+    fill_row(13, 0x07);
+    put_at(13, 4, vl, 0x07);
     fill_row(15, 0x07);
-    put_at(15, 4, "Up / Down choose, Enter starts.", 0x08);
+    put_at(15, 4, g_nmodes ? "Up / Down choose, Left / Right: screen size, Enter starts."
+                           : "Up / Down choose, Enter starts.", 0x08);
     fill_row(16, 0x07);
     if (secs >= 0) {
         char line[64] = "Starting the highlighted entry in ";
@@ -395,6 +426,8 @@ static int menu(int def) {
             u8 scan = (u8)(k >> 8), ch = (u8)k;
             if (scan == 0x48) sel = (sel + ENTRIES - 1) % ENTRIES;
             else if (scan == 0x50) sel = (sel + 1) % ENTRIES;
+            else if (scan == 0x4B) g_vsel = vmode_step(g_vsel, g_nmodes, -1);
+            else if (scan == 0x4D) g_vsel = vmode_step(g_vsel, g_nmodes, 1);
             else if (ch == '\r') return sel;
             draw_menu(sel, -1);
             continue;
@@ -431,6 +464,17 @@ void loader_main(u32 drive, u32 cd) {
         r.esi = 0xE00;
         bios_int(0x13, &r);
         if (!CF(r) && rd16(dp + 24) == 2048) g_cd = 1;
+    }
+
+    /* the screen sizes, and the one this disk is set to (its line may have
+     * been rewritten: read it through an opaque pointer, never folded) */
+    vbe_modes();
+    {
+        const char* vl = VIDEO_LINE;
+        __asm__ volatile("" : "+r"(vl));
+        u32 vw, vh;
+        video_value(vl, sizeof(VIDEO_LINE) - 1, &vw, &vh);
+        g_vsel = vw ? vmode_find(g_modes, g_nmodes, vw, vh) : -1;
     }
 
     int entry = menu(has_long_mode() ? 0 : 2);
@@ -490,9 +534,11 @@ void loader_main(u32 drive, u32 cd) {
     *(u32*)(basic + 12) = upper;
     const u8* rsdp = find_rsdp();
     if (rsdp) mb2_rsdp(&m, rsdp);
+    mb2_modes(&m, g_modes, g_nmodes);
     /* the graphics mode last: no more text after it */
     u32 fw = 800, fh = 600, fd = 32;
     mb2_fb_request(g_head, hlen, &fw, &fh, &fd);
+    if (g_vsel >= 0) { fw = g_modes[g_vsel].w; fh = g_modes[g_vsel].h; }
     fbinfo_t fb;
     set_video(fw ? fw : 800, fh ? fh : 600, &fb);
     if (fb.ok) mb2_framebuffer(&m, fb.addr, fb.pitch, fb.w, fb.h, fb.bpp, fb.rp, fb.rs, fb.gp, fb.gs, fb.bp, fb.bs);

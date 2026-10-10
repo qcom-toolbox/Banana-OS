@@ -145,7 +145,7 @@ static void raise_app(int a) {
 /* the topmost app window at a point, -1 if none (with_front: also the one above the terminals) */
 /* the mouse wheel, per app window (NULL: it does not scroll) */
 static void (*const g_app_wheel[APP_COUNT])(int mx, int my, int dz) = {
-    explorer_wheel, browser_wheel, notepad_wheel, NULL, NULL, NULL, NULL, appwin_wheel,
+    explorer_wheel, browser_wheel, notepad_wheel, NULL, NULL, settings_wheel, NULL, appwin_wheel,
 };
 
 static int app_at(int mx, int my, int with_front) {
@@ -364,7 +364,7 @@ static void clamp_win(const fb_info_t* fi, term_win_t* w) {
 /* the window's client area decides its shell's text grid */
 static void term_apply_size(term_win_t* w) {
     if (!w->vt) return;
-    terminal_vt_set_size(w->vt, (w->w - TERM_PAD * 2) / 8, (w->h - TERM_TITLE_H - TERM_PAD * 2) / 8);
+    terminal_vt_set_size(w->vt, (w->w - TERM_PAD * 2) / gfx_cell_w(), (w->h - TERM_TITLE_H - TERM_PAD * 2) / gfx_cell_h());
 }
 
 /* first buffer row shown (the view follows the cursor) */
@@ -383,10 +383,10 @@ static void term_cell_at(const term_win_t* w, int mx, int my, int* r, int* c) {
     const uint8_t* cols;
     int tw, th, stride;
     terminal_vt_get_buffer(w->vt, &chars, &cols, &tw, &th, &stride);
-    int max_cols = (w->w - TERM_PAD * 2) / 8, max_rows = (w->h - TERM_TITLE_H - TERM_PAD * 2) / 8;
+    int max_cols = (w->w - TERM_PAD * 2) / gfx_cell_w(), max_rows = (w->h - TERM_TITLE_H - TERM_PAD * 2) / gfx_cell_h();
     if (max_cols > tw) max_cols = tw;
     if (max_rows > th) max_rows = th;
-    int x = (mx - (w->x + TERM_PAD)) / 8, y = (my - (w->y + TERM_TITLE_H + TERM_PAD)) / 8;
+    int x = (mx - (w->x + TERM_PAD)) / gfx_cell_w(), y = (my - (w->y + TERM_TITLE_H + TERM_PAD)) / gfx_cell_h();
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x >= max_cols) x = max_cols - 1;
@@ -514,8 +514,9 @@ static void draw_terminal_window(const fb_info_t* fi, const term_win_t* win) {
     int tw, th, stride;
     terminal_vt_get_buffer(win->vt, &chars, &cols, &tw, &th, &stride);
 
-    int max_cols = cw / 8;
-    int max_rows = ch / 8;
+    int CW = gfx_cell_w(), CH = gfx_cell_h();
+    int max_cols = cw / CW;
+    int max_rows = ch / CH;
     if (max_cols > tw) max_cols = tw;
     if (max_rows > th) max_rows = th;
 
@@ -538,13 +539,13 @@ static void draw_terminal_window(const fb_info_t* fi, const term_win_t* win) {
             uint8_t color = cols[idx];
             char c = chars[idx];
             if (term_cell_selected(win, y + row_off, x)) {     /* selection: inverted */
-                gfx_draw_char(cx + x * 8, cy + y * 8, c ? c : ' ', 0x00101010u, 0x00C8D8F0u);
+                gfx_draw_cell_char(cx + x * CW, cy + y * CH, c ? c : ' ', 0x00101010u, 0x00C8D8F0u);
                 continue;
             }
             /* the client area is already black: skip blank black cells */
             if ((c == ' ' || c == 0) && (color & 0xF0) == 0) continue;
-            gfx_draw_char(cx + x * 8, cy + y * 8, c,
-                          vga_color_rgb(color & 0x0F), vga_color_rgb((color >> 4) & 0x0F));
+            gfx_draw_cell_char(cx + x * CW, cy + y * CH, c,
+                               vga_color_rgb(color & 0x0F), vga_color_rgb((color >> 4) & 0x0F));
         }
     }
 
@@ -556,7 +557,7 @@ static void draw_terminal_window(const fb_info_t* fi, const term_win_t* win) {
             int idx = (int)cr * stride + (int)cc;
             uint8_t color = cols[idx];
             uint8_t fg = color & 0x0F;
-            gfx_fill_rect(cx + (int)cc * 8, cy + scr_row * 8 + 7, 8, 1, vga_color_rgb(fg));
+            gfx_fill_rect(cx + (int)cc * CW, cy + scr_row * CH + CH - 1, CW, 1, vga_color_rgb(fg));
         }
     }
 }
@@ -2200,6 +2201,10 @@ int gui_open_installer(void) {
 }
 
 /* a new resolution: the desktop's buffers and every window follow at the next frame */
+void gui_text_changed(void) {
+    for (int i = 0; i < TERM_WIN_MAX; i++) if (g_terms[i].open) term_apply_size(&g_terms[i]);
+}
+
 void gui_screen_changed(void) {
     if (g_backbuf_active) { fb_clear_backbuffer(); g_backbuf_active = 0; }
     g_force_redraw = 1;

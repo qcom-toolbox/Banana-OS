@@ -32,6 +32,18 @@ static int g_fb_ok = 0;
 static uint32_t* g_bb = NULL;
 static uint32_t g_bb_w = 0, g_bb_h = 0;
 
+/* the sizes the firmware offers (Banana Boot's tag 0xBA00): Settings >
+ * Screen, on displays without a graphics driver */
+#define BOOT_MODES_MAX 48
+static uint16_t g_boot_w[BOOT_MODES_MAX], g_boot_h[BOOT_MODES_MAX];
+static int      g_boot_n;
+
+int fb_boot_modes(int* w, int* h, int max) {
+    int n = g_boot_n < max ? g_boot_n : max;
+    for (int i = 0; i < n; i++) { w[i] = g_boot_w[i]; h[i] = g_boot_h[i]; }
+    return n;
+}
+
 static uint32_t align_up(uint32_t v, uint32_t a) {
     return (v + (a - 1u)) & ~(a - 1u);
 }
@@ -53,6 +65,18 @@ int fb_init_multiboot2(uint32_t mb2_info_addr) {
         mb2_tag_t* tag = (mb2_tag_t*)(uintptr_t)(mb2_info_addr + off);
         if (tag->type == 0) break;
 
+        if (tag->type == 0xBA00u && tag->size >= 12) {
+            const uint8_t* t = (const uint8_t*)tag;
+            uint32_t n = *(const uint32_t*)(t + 8);
+            if (n > BOOT_MODES_MAX) n = BOOT_MODES_MAX;
+            if (12 + 4 * n > tag->size) n = (tag->size - 12) / 4;
+            for (uint32_t i = 0; i < n; i++) {
+                g_boot_w[i] = *(const uint16_t*)(t + 12 + 4 * i);
+                g_boot_h[i] = *(const uint16_t*)(t + 14 + 4 * i);
+            }
+            g_boot_n = (int)n;
+        }
+
         if (tag->type == 8 && tag->size >= sizeof(mb2_tag_fb_t)) {
             mb2_tag_fb_t* fb = (mb2_tag_fb_t*)tag;
             g_fb.addr = (uintptr_t)fb->addr; /* identity-mapped assumption */
@@ -62,10 +86,8 @@ int fb_init_multiboot2(uint32_t mb2_info_addr) {
             g_fb.bpp = fb->bpp;
             g_fb.type = fb->fb_type;
 
-            if (g_fb.addr && g_fb.width && g_fb.height && (g_fb.bpp == 32) && (g_fb.type == 1)) {
-                g_fb_ok = 1;
-                return 1;
-            }
+            if (g_fb.addr && g_fb.width && g_fb.height && (g_fb.bpp == 32) && (g_fb.type == 1))
+                g_fb_ok = 1;                   /* (the tags after it are read too) */
         }
 
         /* Every valid tag is at least 8 bytes (its own type+size header).
@@ -75,7 +97,7 @@ int fb_init_multiboot2(uint32_t mb2_info_addr) {
         off += adv;
     }
 
-    return 0;
+    return g_fb_ok;
 }
 
 int fb_available(void) {

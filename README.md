@@ -1,6 +1,6 @@
-# 🍌 Banana OS 0.5
+# 🍌 Banana OS 0.6
 
-Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux kernel, no external OS kernel) - a **64-bit (x86_64) kernel with a 32-bit fallback**, booting on **UEFI and BIOS** machines and in VirtualBox/QEMU with **its own boot loader** (Banana Boot, Multiboot2) - now with **real networking**: its own drivers for the Intel e1000, AMD PCnet, virtio-net and Realtek RTL8139 network cards (every card VirtualBox offers) and its own TCP/IP stack, so `ping`, `curl` and `wget` talk to the actual Internet (HTTP and HTTPS).
+Banana OS 0.6 is a minimal x86 operating system written from scratch (no Linux kernel, no external OS kernel) - a **64-bit (x86_64) kernel with a 32-bit fallback**, booting on **UEFI and BIOS** machines and in VirtualBox/QEMU with **its own boot loader** (Banana Boot, Multiboot2) - now with **real networking**: its own drivers for the Intel e1000, AMD PCnet, virtio-net and Realtek RTL8139 network cards (every card VirtualBox offers) and its own TCP/IP stack, so `ping`, `curl` and `wget` talk to the actual Internet (HTTP and HTTPS).
 
 ```
   ____                               ____  ____
@@ -23,6 +23,10 @@ Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux k
 - **`$PATH`** - commands that are not built in are looked for in the folders of `$PATH` (`/bin:/apps:/home/banana/bin` by default): programs (SDK ELF files) and shell scripts run by name, `/apps` holds the installed apps; `export PATH=...` changes it, `which` / `type` say where a command is
 - **ACPI power-off** - `shutdown` and Start > Shut down turn the computer off the ACPI way (the FADT's registers and the DSDT's `\_S5_` sleep type, switching ACPI on first if the firmware left it off): VMware, VirtualBox, QEMU and real PCs
 - **Secure Boot, 32-bit UEFI, more in the boot menu** - the UEFI loaders are signed with Banana OS's own key and boot with Secure Boot on once the key is enrolled: from the boot menu in Secure Boot's setup mode (*Enroll Banana OS's Secure Boot keys*), or by hand in the firmware's settings from `EFI/BananaOS/BananaOS.cer` on the CD or stick. Under Secure Boot the loader starts only the kernels it was built with (their SHA-256 is in it). `BOOTIA32.EFI` boots on 32-bit UEFI firmware (tablets, early UEFI PCs) - both kernels, the 64-bit one when the processor has long mode. The menu also has *Boot the next boot option* / *Boot from the next device*, *UEFI firmware settings* (restarts into the firmware's setup screen) and *Restart the computer* - see [Secure Boot](#secure-boot)
+- **New in 0.6: the screen size on any PC** - without a graphics driver for the card (most real PCs: recent Intel, AMD, NVIDIA) Banana OS used to keep the firmware's size. Now Banana Boot asks the firmware (UEFI GOP or BIOS VBE) which sizes it offers: the boot menu shows a *Screen:* line (Left / Right to change it for this start), and *Settings > Screen* (or `resolution WxH` / `resolution auto`) saves the choice on an installed system - it is written into the disk's boot loader settings and used from the next start. With a graphics driver (QEMU, VirtualBox, VMware...) the size still changes at once
+- **New in 0.6: fonts and text size** - *Settings > Fonts*: install your own TrueType fonts (*Install font...*, or right-click / double-click a `.ttf` in Files; they are kept in `/usr/share/fonts`), choose the **interface font** (the whole desktop's text) and the **documents font** (web pages, apps, desktop icon names), and the **text size** - Normal, Large, Larger, Largest - for terminal windows, Notepad and the desktop icons' names
+- **New in 0.6: your own wallpapers in Settings** - *Settings > Wallpaper* now has *Your pictures*: the pictures you used lately (from *Browse...*, Files' *Set as desktop background* or Photos) as thumbnails next to the presets, and the position (Fill, Fit, Stretch, Center)
+- **New in 0.6: Photos** - double-clicking a picture in Files opens it in the new Photos app (it used to become the wallpaper): the other pictures of the folder with Left / Right, zoom with the wheel or + / - (drag to move), 1:1 / fit, rotate, *Set as wallpaper*
 - **Our own boot loader: Banana Boot** - GRUB is gone. One image boots on **legacy BIOS and UEFI**, from a **CD, a USB stick or a hard disk**, and starts the **64-bit or the 32-bit kernel** (the same menu as before, 64-bit by default when the CPU can). On BIOS: a 440-byte MBR or a 2 KiB El Torito entry loads a 10 KiB loader that runs in 32-bit protected mode and calls the BIOS through a real-mode thunk; it reads the kernel from the ISO9660 file system and sets the VBE graphics mode. On UEFI: `BOOTX64.EFI` (10 KiB, our C, no EDK2/gnu-efi) reads the kernel from its EFI partition, takes the GOP framebuffer and the firmware's memory map, leaves the firmware and steps down from 64-bit long mode to 32-bit protected mode. Both hand the kernels exactly what GRUB did (Multiboot2), so nothing changed for them - see [loader/](loader/)
 - **A much bigger filesystem** - up to 65,536 files and 16,384 folders (was 1,024 and 256), found by name through hash tables, so a folder of thousands of files lists and opens as fast as a small one; files up to 128 MB. On an installed disk, files are read in the first time they are used instead of all at boot: what you can store is no longer limited by the RAM, and boot does not slow down as the disk fills. IDE disks larger than 128 GB are used whole (48-bit addressing)
 - **File data is a cache** - like other systems, files in RAM are a cache of what is on the disk: when memory runs low, the files used longest ago are dropped from RAM (only once saved; a file in use is never dropped) and read in again when next used. Big files are read in pieces straight from the disk - apps and `play` never need a whole file in RAM (a song streams 64 KiB at a time) - and saving no longer copies a changed file first. `free` counts the droppable file data as "available"
@@ -34,7 +38,7 @@ Banana OS 0.5 is a minimal x86 operating system written from scratch (no Linux k
 - **Sound** - Intel HD Audio (any codec: Realtek ALC, IDT/SigmaTel, Conexant, VIA... - every analog output, speakers and headphones together) and AC'97 drivers (QEMU, VirtualBox, real PCs) and the PC speaker: `play file.wav`, `beep`, `volume`, and sound for apps
 - **Windows-like taskbar** - a button per open window (click: focus, click again: minimize), minimize buttons, *Show the desktop*
 - **Task Manager** - windows and apps (Switch to / End task), the kernel's tasks with their CPU use, live CPU and memory graphs; from the desktop, the Start menu or a right-click on the taskbar
-- **Settings** - wallpaper, sound volume, keyboard layout, mouse pointer speed, network, date & time and information about the computer (`settings` in a terminal); volume, layout and pointer speed are kept in `/etc/settings.conf`
+- **Settings** - wallpaper, fonts and text size, screen resolution, sound volume, keyboard layout, mouse pointer speed, network, date & time and information about the computer (`settings` in a terminal); volume, layout and pointer speed are kept in `/etc/settings.conf`
 - **Window buttons** - every window has minimize, maximize / restore and close buttons in its title bar
 - **Right-click menus everywhere** - desktop, taskbar, terminals (copy, paste, clear), Files (open, install, rename, cut/copy/paste, delete, new file/folder, eject), the browser (open/save link, back, reload, page source...), Notepad
 - **Browser downloads** - anything that is not a web page (apps, archives, programs...) is saved to `~/Downloads`; *Save link as* / *Save page as* in the right-click menu
@@ -354,7 +358,7 @@ Laid out like Windows 7's Explorer:
 - The **details pane** at the bottom: the selected item's icon (a thumbnail for pictures), type, size, date modified and date created - or the folder's item count and total size; messages show there too
 - **Dates**: every file and folder records when it was made and last changed (a folder: when something in it was added, removed or renamed; a copy keeps the original's date, like Windows). They are saved on the installed disk with the files, and USB sticks show the dates their FAT32 entries hold (and get today's date for what Banana OS writes). The Details view has a *Date modified* column (sortable)
 - Icons by kind of file (pictures, songs, videos, apps, archives, programs, web pages, PDFs, source code...)
-- Click selects, double-click (or Enter) opens: folders, apps (.bpk) install, songs and videos play in their app, web pages and SVG open in the Browser, pictures become the wallpaper, text opens in Notepad; typing a letter jumps to the next item starting with it
+- Click selects, double-click (or Enter) opens: folders, apps (.bpk) install, songs and videos play in their app, web pages and SVG open in the Browser, pictures open in Photos, `.ttf` fonts install, text opens in Notepad; typing a letter jumps to the next item starting with it
 - Right-click an item or the empty space for its menu; F2 renames, Delete deletes (twice to confirm; folders with their contents), Ctrl+C / Ctrl+X / Ctrl+V copy / move, Ctrl+N new folder, F5 refresh
 - The window can be dragged by its title bar, resized from its bottom-right corner, and stacks with the terminal windows
 
@@ -379,7 +383,7 @@ Open it from the desktop (`startx`): the **Browser** icon or Start menu entry, o
 
 ## USB
 
-Banana OS 0.5 has its own USB stack: **xHCI** (USB 3.x) and **EHCI** (USB 2.0) host controllers, device enumeration and hot-plug (`usb rescan`), and these drivers:
+Banana OS 0.6 has its own USB stack: **xHCI** (USB 3.x) and **EHCI** (USB 2.0) host controllers, device enumeration and hot-plug (`usb rescan`), and these drivers:
 
 | Driver | Devices |
 |---|---|
@@ -484,7 +488,7 @@ wallpaper preset "Ocean Wave"
 wallpaper reset                             # back to Azure Flow
 ```
 
-In the GUI, the **Wallpaper** app lists the presets and everything in `~/Pictures` - click to apply. The choice is stored in `/etc/wallpaper`, so on an installed disk it survives reboots (run `sync`, or just shut down).
+In the GUI, **Settings > Wallpaper** shows the presets and *Your pictures* (the last five you used, with thumbnails; the small x takes one off the list); *Browse...* picks any picture on the disk or a USB stick, and the position buttons switch between Fill, Fit, Stretch and Center. Right-click a picture in Files (*Set as desktop background*) or use *Set as wallpaper* in Photos - it shows up there too. The choice is stored in `/etc/wallpaper`, so on an installed disk it survives reboots (run `sync`, or just shut down).
 
 Large photos are downscaled with area averaging (sharp, no aliasing) - a 3840x2160 JPEG decodes and applies in about a second in QEMU.
 
@@ -544,7 +548,7 @@ At boot every display controller gets the driver that knows it (`lsgpu` shows th
 | `bga` | Bochs VBE DISPI: QEMU `-vga std` and `bochs-display`, Bochs, VirtualBox VBoxVGA | Mode setting (ports or memory-mapped registers); sets a mode itself when the firmware gave none |
 | `intel` | Intel GMA 950 (945G/GM/GME), HD Graphics 2000 / 3000 (Sandy Bridge), HD Graphics 2500 / 4000 (Ivy Bridge) | Takes the display engine over from the firmware: reads the pipe, plane, mode and stolen memory; the cursor plane for the pointer (64x64 ARGB); waits for the vertical blank; the panel's backlight. The mode stays the panel's native one (the clocks and timings the firmware set are kept) |
 
-`resolution` lists the modes and switches (`resolution 1280x720`; also Settings > Screen); `brightness 60` sets a laptop panel's backlight. Tested in QEMU (`std`, `vmware`, `virtio`, `virtio-gpu-pci` without VGA, `bochs-display`); the Intel driver follows Intel's documentation and could not be tried on that hardware here.
+`resolution` lists the modes and switches (`resolution 1280x720`; also Settings > Screen). Without a driver it lists the sizes the firmware offers and sets the one used from the next start (`resolution auto`: the loader's choice) - see the boot menu's *Screen:* line; `brightness 60` sets a laptop panel's backlight. Tested in QEMU (`std`, `vmware`, `virtio`, `virtio-gpu-pci` without VGA, `bochs-display`); the Intel driver follows Intel's documentation and could not be tried on that hardware here.
 
 ## Driver Kit
 
@@ -618,7 +622,7 @@ include /path/to/banana-sdk/driver/driver.mk
 | `usbctl` | Show USB legacy handoff state |
 | `shutdown [now\|-c]` | Schedule shutdown (60s), immediate shutdown, or cancel - powers off the ACPI way (the firmware's FADT and `\_S5_`), which VMware, VirtualBox, QEMU and real PCs all accept |
 | `lsgpu` | Graphics cards: driver, mode, video memory, hardware pointer, backlight |
-| `resolution [WxH]` | The screen's modes, or switch to one |
+| `resolution [WxH\|auto]` | The screen's modes, or switch to one (without a graphics driver: the size from the next start) |
 | `brightness [0-100]` | A laptop panel's backlight (Intel graphics) |
 | `drivers` / `driver load <file>` | Drivers and driver modules (Driver Kit) / load one |
 | `mediaplayer [file]` / `music [file...]` | The Media Player and Music apps |

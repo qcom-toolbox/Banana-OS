@@ -79,6 +79,97 @@ static void render_preset(const uint8_t* pixels, uint32_t* dst, int w, int h, in
 
 static int set_file_at(const char* path, image_mode_t mode, int w, int h, char* err, uint32_t errlen, int persist);
 
+static void save_config_now(void);
+static int set_file(const char* path, image_mode_t mode, char* err, uint32_t errlen, int persist);
+
+/* ── the pictures used lately ── */
+static char      g_recent[WALLPAPER_RECENT_MAX][FS_PATH_LEN];
+static int       g_nrecent;
+static uint32_t* g_thumb[WALLPAPER_RECENT_MAX];
+static int       g_thumb_w[WALLPAPER_RECENT_MAX], g_thumb_h[WALLPAPER_RECENT_MAX];
+static int       g_thumb_bad[WALLPAPER_RECENT_MAX];
+
+int         wallpaper_recent_count(void) { return g_nrecent; }
+const char* wallpaper_recent(int i) { return i >= 0 && i < g_nrecent ? g_recent[i] : ""; }
+
+static void recent_drop(int i) {
+    kfree(g_thumb[i]);
+    for (int k = i; k < g_nrecent - 1; k++) {
+        memcpy(g_recent[k], g_recent[k + 1], FS_PATH_LEN);
+        g_thumb[k] = g_thumb[k + 1];
+        g_thumb_w[k] = g_thumb_w[k + 1]; g_thumb_h[k] = g_thumb_h[k + 1];
+        g_thumb_bad[k] = g_thumb_bad[k + 1];
+    }
+    g_nrecent--;
+    g_thumb[g_nrecent] = NULL;
+    g_thumb_bad[g_nrecent] = 0;
+}
+
+/* to the front of the list (added if new) */
+static void recent_add(const char* path) {
+    for (int i = 0; i < g_nrecent; i++)
+        if (!strcmp(g_recent[i], path)) {
+            if (i == 0) return;
+            char p[FS_PATH_LEN];
+            uint32_t* t = g_thumb[i];
+            int tw = g_thumb_w[i], th = g_thumb_h[i], bad = g_thumb_bad[i];
+            kstrlcpy(p, path, sizeof(p));
+            g_thumb[i] = NULL;
+            recent_drop(i);
+            for (int k = g_nrecent; k > 0; k--) {
+                memcpy(g_recent[k], g_recent[k - 1], FS_PATH_LEN);
+                g_thumb[k] = g_thumb[k - 1];
+                g_thumb_w[k] = g_thumb_w[k - 1]; g_thumb_h[k] = g_thumb_h[k - 1];
+                g_thumb_bad[k] = g_thumb_bad[k - 1];
+            }
+            kstrlcpy(g_recent[0], p, FS_PATH_LEN);
+            g_thumb[0] = t; g_thumb_w[0] = tw; g_thumb_h[0] = th; g_thumb_bad[0] = bad;
+            g_nrecent++;
+            return;
+        }
+    if (g_nrecent == WALLPAPER_RECENT_MAX) recent_drop(WALLPAPER_RECENT_MAX - 1);
+    for (int k = g_nrecent; k > 0; k--) {
+        memcpy(g_recent[k], g_recent[k - 1], FS_PATH_LEN);
+        g_thumb[k] = g_thumb[k - 1];
+        g_thumb_w[k] = g_thumb_w[k - 1]; g_thumb_h[k] = g_thumb_h[k - 1];
+        g_thumb_bad[k] = g_thumb_bad[k - 1];
+    }
+    kstrlcpy(g_recent[0], path, FS_PATH_LEN);
+    g_thumb[0] = NULL;
+    g_thumb_bad[0] = 0;
+    g_nrecent++;
+}
+
+void wallpaper_recent_remove(int i) {
+    if (i < 0 || i >= g_nrecent) return;
+    recent_drop(i);
+    g_gen++;
+    save_config_now();
+}
+
+const uint32_t* wallpaper_recent_thumb(int i, int w, int h) {
+    if (i < 0 || i >= g_nrecent || g_thumb_bad[i]) return NULL;
+    if (g_thumb[i] && g_thumb_w[i] == w && g_thumb_h[i] == h) return g_thumb[i];
+    kfree(g_thumb[i]);
+    g_thumb[i] = NULL;
+    int idx = fs_find_file(g_recent[i]);
+    fs_file_t* f = idx >= 0 ? fs_get_file(idx) : NULL;
+    image_t img;
+    char err[64];
+    if (!f) { g_thumb_bad[i] = 1; return NULL; }
+    fs_pin(idx);
+    int bad = image_decode((const uint8_t*)f->content, f->size, &img, err, sizeof(err)) != 0;
+    fs_unpin(idx);
+    if (bad) { g_thumb_bad[i] = 1; return NULL; }
+    uint32_t* px = (uint32_t*)kmalloc((uint32_t)w * (uint32_t)h * 4u);
+    if (px) image_render(&img, px, w, h, IMAGE_FILL, 0x00101418u);
+    image_free(&img);
+    g_thumb[i] = px;
+    g_thumb_w[i] = w;
+    g_thumb_h[i] = h;
+    return px;
+}
+
 void wallpaper_render(uint32_t* dst, int w, int h, int stride) {
     if (g_custom && (g_custom_w != w || g_custom_h != h)) {
         /* another size (a new resolution): the picture again, at this one */
@@ -96,15 +187,20 @@ void wallpaper_render(uint32_t* dst, int w, int h, int stride) {
 }
 
 static void save_config(void) {
-    char buf[FS_PATH_LEN + 64];
+    char buf[(FS_PATH_LEN + 16) * (WALLPAPER_RECENT_MAX + 1) + 96];
     if (g_custom)
-        ksnprintf(buf, sizeof(buf), "# Banana OS wallpaper - set with `wallpaper` or the Wallpaper app\n"
+        ksnprintf(buf, sizeof(buf), "# Banana OS wallpaper - set with `wallpaper` or Settings\n"
                                     "file %s %s\n", image_mode_name(g_mode), g_file);
     else
-        ksnprintf(buf, sizeof(buf), "# Banana OS wallpaper - set with `wallpaper` or the Wallpaper app\n"
+        ksnprintf(buf, sizeof(buf), "# Banana OS wallpaper - set with `wallpaper` or Settings\n"
                                     "preset %s\n", g_presets[g_preset].name);
+    for (int i = 0; i < g_nrecent; i++) {
+        uint32_t n = (uint32_t)strlen(buf);
+        ksnprintf(buf + n, sizeof(buf) - n, "recent %s\n", g_recent[i]);
+    }
     fs_write_path(WALLPAPER_CONFIG, buf, (uint32_t)strlen(buf));
 }
+static void save_config_now(void) { save_config(); }
 
 static void drop_custom(void) {
     kfree(g_custom);
@@ -147,9 +243,17 @@ static int set_file_at(const char* path, image_mode_t mode, int w, int h, char* 
     g_custom_h = h;
     g_mode = mode;
     fs_file_path(idx, g_file, sizeof(g_file));
+    recent_add(g_file);
     g_gen++;
     if (persist) save_config();
     return 0;
+}
+
+int wallpaper_set_mode(image_mode_t mode, char* err, uint32_t errlen) {
+    if (!g_custom) { ksnprintf(err, errlen, "the wallpaper is not a picture"); return -1; }
+    char path[FS_PATH_LEN];
+    kstrlcpy(path, g_file, sizeof(path));
+    return set_file(path, mode, err, errlen, 1);
 }
 
 /* at the screen's size (the desktop's buffers follow it, up to 2560x1600) */
@@ -185,7 +289,13 @@ void wallpaper_load_config(void) {
         line[n] = '\0';
         p = nl ? nl + 1 : p + n;
 
-        if (strncmp(line, "preset ", 7) == 0) {
+        if (strncmp(line, "recent ", 7) == 0) {
+            if (g_nrecent < WALLPAPER_RECENT_MAX && fs_find_file(line + 7) >= 0) {
+                int dup = 0;
+                for (int i = 0; i < g_nrecent; i++) dup |= !strcmp(g_recent[i], line + 7);
+                if (!dup) { kstrlcpy(g_recent[g_nrecent], line + 7, FS_PATH_LEN); g_nrecent++; }
+            }
+        } else if (strncmp(line, "preset ", 7) == 0) {
             int i = wallpaper_find_preset(line + 7);
             if (i >= 0) { drop_custom(); g_preset = i; g_gen++; }
         } else if (strncmp(line, "file ", 5) == 0) {

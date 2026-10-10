@@ -1,4 +1,4 @@
-# Banana OS 0.5 Makefile
+# Banana OS 0.6 Makefile
 # Requires: nasm, gcc-multilib, ld, objcopy, python3, xorriso, mtools
 #
 # Builds two kernels from the same sources - kernel.bin (i386, 32-bit) and
@@ -152,7 +152,7 @@ loader/keys/PK.auth: $(SB_CERT)
 isoroot/efi.img: loader/BOOTX64.EFI loader/BOOTIA32.EFI kernel.bin kernel64.bin loader/keys/PK.auth loader/keys/BananaOS.cer
 	mkdir -p isoroot
 	rm -f $@
-	printf 'set banana_medium=live-cd\n' > isoroot/medium.cfg
+	printf 'set banana_medium=live-cd\nset banana_video=auto        \n' > isoroot/medium.cfg
 	kb=$$(( ($$(stat -c %s kernel.bin) + $$(stat -c %s kernel64.bin) + 2 * $$(stat -c %s loader/BOOTX64.EFI)) / 1024 + 2048 )); \
 	    dd if=/dev/zero of=$@ bs=1024 count=$$kb status=none
 	mformat -i $@ -v BANANA_EFI ::
@@ -225,7 +225,7 @@ kernel/exbin.o kernel/exbin.o64: $(EXAMPLE_BPKS)
 # ── the apps that come with Banana OS (apps/): FFmpeg-based, built into the
 # kernel compressed and installed at boot (kernel/builtin_apps.c). FFmpeg
 # itself is built once by ports/ffmpeg/build.sh (the first build takes a while).
-APPS     = mediaplayer music amethyst
+APPS     = mediaplayer music amethyst photos
 APP_DEPS = $(SDK_DEPS) ports/ffmpeg/build.sh
 define APP_RULE
 apps/$(1)/$(1)-i686.bpk.z apps/$(1)/$(1)-x86_64.bpk.z: $$(wildcard apps/$(1)/*.c) apps/$(1)/Makefile $$(APP_DEPS)

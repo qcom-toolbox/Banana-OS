@@ -360,7 +360,7 @@ static int do_request(const url_t* u, const http_request_t* req, http_response_t
         "%s%s%s"
         "Connection: keep-alive\r\n"
         "\r\n",
-        method, u->path, host_hdr, req->user_agent ? req->user_agent : "BananaOS/0.5",
+        method, u->path, host_hdr, req->user_agent ? req->user_agent : "BananaOS/0.6",
         range_hdr, body_hdr, req->extra_headers ? req->extra_headers : "");
     if (rqlen >= (int)rqcap) rqlen = (int)rqcap - 1;
     if (req->on_request) req->on_request(req->ctx, rq);

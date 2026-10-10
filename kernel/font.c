@@ -12,24 +12,40 @@
 #include "kstring.h"
 #endif
 
-static ttf_t g_face[FONT_FACES];
-static int   g_ok[FONT_FACES];
+/* the built-in faces, then the user's (the glyph cache keys a face in 4 bits) */
+#define MAX_FACES (FONT_FACES + FONT_USER_MAX)
+
+static ttf_t g_face[MAX_FACES];
+static int   g_ok[MAX_FACES];
+static int   g_ui = FONT_MONO, g_doc = -1;
 
 void font_register(int face, const uint8_t* data, uint32_t len) {
     if (face < 0 || face >= FONT_FACES) return;
     g_ok[face] = ttf_init(&g_face[face], data, len) == 0;
 }
 
-int font_available(int face) { return face >= 0 && face < FONT_FACES && g_ok[face]; }
+/* the face drawn for a face number: the choices first, then a missing
+ * face falls back to its family's regular one, then to any; -1 if none */
+static int resolve(int face) {
+    if (face == FONT_UI) face = g_ui;
+    else if ((face == FONT_SANS || face == FONT_SANS_BOLD) && g_doc >= 0) face = g_doc;
+    if (face < 0 || face >= MAX_FACES) face = FONT_SANS;
+    if (g_ok[face]) return face;
+    if (face >= FONT_FACES && g_ok[FONT_MONO]) return FONT_MONO;     /* a removed user font */
+    if (face == FONT_MONO_BOLD && g_ok[FONT_MONO]) return FONT_MONO;
+    if (face == FONT_SANS_BOLD && g_ok[FONT_SANS]) return FONT_SANS;
+    for (int i = 0; i < FONT_FACES; i++) if (g_ok[i]) return i;
+    return -1;
+}
 
-/* a missing face falls back to its family's regular one, then to Sans */
+int font_available(int face) {
+    if (face == FONT_UI) return resolve(face) >= 0;
+    return face >= 0 && face < MAX_FACES && g_ok[face];
+}
+
 static const ttf_t* face_of(int face) {
-    if (face < 0 || face >= FONT_FACES) face = FONT_SANS;
-    if (g_ok[face]) return &g_face[face];
-    if (face == FONT_MONO_BOLD && g_ok[FONT_MONO]) return &g_face[FONT_MONO];
-    if (face == FONT_SANS_BOLD && g_ok[FONT_SANS]) return &g_face[FONT_SANS];
-    for (int i = 0; i < FONT_FACES; i++) if (g_ok[i]) return &g_face[i];
-    return NULL;
+    int r = resolve(face);
+    return r >= 0 ? &g_face[r] : NULL;
 }
 
 uint32_t utf8_next(const char** sp, const char* end) {
@@ -140,7 +156,7 @@ int font_draw(uint32_t* buf, int stride, int cx0, int cy0, int cx1, int cy1,
         if (cp == '\t') cp = ' ';
         int g = ttf_glyph(f, cp);
         if (prev) pen += ((ttf_kern(f, prev, g) * px * 64) + f->upem / 2) / f->upem;
-        const cglyph_t* c = (cp > ' ') ? glyph_bitmap(face, f, px, g) : NULL;
+        const cglyph_t* c = (cp > ' ') ? glyph_bitmap(resolve(face), f, px, g) : NULL;
         if (c && c->alpha) {
             int gx = ((pen + 32) >> 6) + c->left, gy = y - c->top;
             for (int r = 0; r < c->h; r++) {
@@ -163,6 +179,133 @@ int font_draw(uint32_t* buf, int stride, int cx0, int cy0, int cx1, int cy1,
     }
     return (pen + 32) >> 6;
 }
+
+/* ── the user's fonts ── */
+#ifndef FONT_HOST
+#include "fs.h"
+
+static uint8_t* g_udata[MAX_FACES];          /* the file, kept (the face points into it) */
+static char     g_uname[MAX_FACES][48];
+static char     g_upath[MAX_FACES][FS_PATH_LEN];
+
+/* drops a face's glyphs from the cache */
+static void cache_drop(int face) {
+    for (int i = 0; i < CACHE; i++)
+        if (g_cache[i].key && (g_cache[i].key >> 28) == (uint32_t)face + 1) {
+            kfree(g_cache[i].alpha);
+            g_cache[i].alpha = NULL;
+            g_cache[i].key = 0;
+        }
+}
+
+static uint32_t be16(const uint8_t* p) { return (uint32_t)p[0] << 8 | p[1]; }
+static uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+
+/* the font's full name (name table, ID 4; else the family, ID 1), ASCII */
+static void font_name(const uint8_t* d, uint32_t len, char* out, int cap) {
+    out[0] = 0;
+    if (len < 12) return;
+    uint32_t nt = be16(d + 4), name = 0, nlen = 0;
+    for (uint32_t i = 0; i < nt && 12 + i * 16 + 16 <= len; i++) {
+        const uint8_t* r = d + 12 + i * 16;
+        if (r[0] == 'n' && r[1] == 'a' && r[2] == 'm' && r[3] == 'e') { name = be32(r + 8); nlen = be32(r + 12); }
+    }
+    if (!name || name + 6 > len || nlen > len - name) return;
+    uint32_t count = be16(d + name + 2), strs = name + be16(d + name + 4);
+    int best = 0;
+    for (uint32_t i = 0; i < count && name + 6 + i * 12 + 12 <= len; i++) {
+        const uint8_t* r = d + name + 6 + i * 12;
+        uint32_t pid = be16(r), id = be16(r + 6), l = be16(r + 8), o = strs + be16(r + 10);
+        if ((id != 4 && id != 1) || (pid != 3 && pid != 1 && pid != 0) || o + l > len) continue;
+        int score = (id == 4 ? 2 : 1) * 2 + (pid != 1);
+        if (score <= best) continue;
+        int n = 0, wide = pid != 1;
+        for (uint32_t k = wide; k < l && n < cap - 1; k += wide ? 2 : 1) {
+            uint8_t c = d[o + k];
+            if (wide && d[o + k - 1]) c = '?';
+            out[n++] = (char)(c >= 32 && c < 127 ? c : '?');
+        }
+        out[n] = 0;
+        if (n) best = score;
+    }
+}
+
+int font_user_find(const char* path) {
+    for (int f = FONT_FACES; f < MAX_FACES; f++) if (g_ok[f] && !strcmp(g_upath[f], path)) return f;
+    return -1;
+}
+
+int font_user_load(const char* path, char* err, int cap) {
+    int have = font_user_find(path);
+    if (have >= 0) return have;
+    int face = -1;
+    for (int f = FONT_FACES; f < MAX_FACES; f++) if (!g_ok[f] && !g_udata[f]) { face = f; break; }
+    if (face < 0) { ksnprintf(err, (uint32_t)cap, "%d fonts at most", FONT_USER_MAX); return -1; }
+    int idx = fs_find_file(path);
+    fs_file_t* fl = idx >= 0 ? fs_get_file(idx) : NULL;
+    if (!fl || !fl->content || fl->size < 12) { ksnprintf(err, (uint32_t)cap, "cannot read %s", path); return -1; }
+    uint8_t* d = (uint8_t*)kmalloc(fl->size);
+    if (!d) { ksnprintf(err, (uint32_t)cap, "out of memory"); return -1; }
+    memcpy(d, fl->content, fl->size);
+    if (ttf_init(&g_face[face], d, fl->size) != 0) {
+        kfree(d);
+        ksnprintf(err, (uint32_t)cap, "not a TrueType font (.ttf with TrueType outlines)");
+        return -1;
+    }
+    /* it must draw: a few letters */
+    const char* probe = "Aag0";
+    for (const char* p = probe; *p; p++) {
+        ttf_bitmap_t bm;
+        int g = ttf_glyph(&g_face[face], (uint32_t)*p);
+        if (!g || ttf_render(&g_face[face], g, 16, &bm) != 0) {
+            kfree(d);
+            ksnprintf(err, (uint32_t)cap, "the font has no usable letters");
+            return -1;
+        }
+        kfree(bm.alpha);
+    }
+    g_udata[face] = d;
+    font_name(d, fl->size, g_uname[face], sizeof(g_uname[face]));
+    if (!g_uname[face][0]) {
+        const char* b = strrchr(path, '/');
+        kstrlcpy(g_uname[face], b ? b + 1 : path, sizeof(g_uname[face]));
+    }
+    kstrlcpy(g_upath[face], path, sizeof(g_upath[face]));
+    cache_drop(face);
+    g_ok[face] = 1;
+    return face;
+}
+
+void font_user_unload(int face) {
+    if (face < FONT_FACES || face >= MAX_FACES || !g_ok[face]) return;
+    if (g_ui == face) g_ui = FONT_MONO;
+    if (g_doc == face) g_doc = -1;
+    g_ok[face] = 0;
+    cache_drop(face);
+    kfree(g_udata[face]);
+    g_udata[face] = NULL;
+    g_uname[face][0] = g_upath[face][0] = 0;
+}
+
+int font_user_count(void) {
+    int n = 0;
+    for (int f = FONT_FACES; f < MAX_FACES; f++) n += g_ok[f];
+    return n;
+}
+
+int font_user_face(int i) {
+    for (int f = FONT_FACES; f < MAX_FACES; f++) if (g_ok[f] && i-- == 0) return f;
+    return -1;
+}
+
+const char* font_user_name(int face) { return face >= FONT_FACES && face < MAX_FACES && g_ok[face] ? g_uname[face] : ""; }
+const char* font_user_path(int face) { return face >= FONT_FACES && face < MAX_FACES && g_ok[face] ? g_upath[face] : ""; }
+
+void font_set_ui(int face) { g_ui = face >= 0 && face < MAX_FACES && g_ok[face] ? face : FONT_MONO; }
+int  font_ui(void) { return g_ui; }
+void font_set_doc(int face) { g_doc = face >= 0 && face < MAX_FACES && g_ok[face] ? face : -1; }
+int  font_doc(void) { return g_doc; }
+#endif
 
 /* ── the built-in fonts ── */
 #ifndef FONT_HOST

@@ -68,6 +68,11 @@ int  fsdisk_update(void);
 /* the installed disk's layout: 4 (128 MB boot area, slots over the whole
  * disk), 3 (before: 32 MB, fixed slots - `update` moves it), 0 none */
 int  fsdisk_install_layout(void);
+/* The boot loader's screen size on the installed disk ("1920x1080" or
+ * "auto"): rewritten in place in its boot image; how many copies of the
+ * line were changed (BIOS loader, UEFI medium.cfg), or -1. install /
+ * update carry the setting (boot_resolution in the settings) over. */
+int  fsdisk_set_boot_video(const char* value);
 /* the space the saved files take on the disk, and the space for them */
 void fsdisk_space(uint64_t* used_bytes, uint64_t* capacity_bytes);
 /* the installed disk's name ("SATA port 0") and model, for df ("" if none) */

@@ -81,6 +81,11 @@ static void smooth_text(int x, int y, int scale, const char* s, uint32_t fg, uin
     uint32_t* t = fb_target(&stride, &tw, &th);
     if (!t) return;
     int cell = 8 * scale, px = 13 * scale, base = y + 8 * scale;
+    if (font_ui() != FONT_MONO) {               /* another font: its baseline where Mono's would be */
+        int a, d;
+        font_metrics(FONT_UI, px, &a, &d, NULL);
+        base = y + (cell - (a + d)) / 2 + a + scale;
+    }
     const char* e = s + strlen(s);
     int cx = x;
     while (s < e) {
@@ -94,13 +99,61 @@ static void smooth_text(int x, int y, int scale, const char* s, uint32_t fg, uin
             const char* g = s;
             uint32_t cp = utf8_next(&s, line_end);
             if (cp != ' ') {
-                int adv = font_text_width(FONT_MONO, px, g, (uint32_t)(s - g));
-                font_draw(t, stride, 0, 0, tw, th, FONT_MONO, px, cx + (cell - adv) / 2, base, g, (uint32_t)(s - g), fg, 0);
+                int adv = font_text_width(FONT_UI, px, g, (uint32_t)(s - g));
+                font_draw(t, stride, 0, 0, tw, th, FONT_UI, px, cx + (cell - adv) / 2, base, g, (uint32_t)(s - g), fg, 0);
             }
             cx += cell;
         }
         if (s < e && *s == '\n') { s++; cx = x; y += cell; base += cell; }
     }
+}
+
+/* ── the text size: Terminal and Notepad cells, desktop icon names ── */
+static int g_tsize;
+/* per size: the smooth cell (w, h, pixels per em), the classic one (w, h,
+ * x and y scale of the 8x8 glyphs), the icon names' size */
+static const struct { int sw, sh, px, cw, ch, sx, sy, label; const char* name; } TSIZE[GFX_TEXT_SIZES] = {
+    {  8,  8, 13,  8,  8, 1, 1, 12, "Normal" },
+    {  9, 16, 14,  8, 16, 1, 2, 13, "Large" },
+    { 11, 20, 17, 16, 16, 2, 2, 14, "Larger" },
+    { 14, 26, 22, 16, 24, 2, 3, 15, "Largest" },
+};
+
+void gfx_set_text_size(int size) { g_tsize = size < 0 ? 0 : size >= GFX_TEXT_SIZES ? GFX_TEXT_SIZES - 1 : size; }
+int  gfx_text_size(void) { return g_tsize; }
+const char* gfx_text_size_name(int size) { return size >= 0 && size < GFX_TEXT_SIZES ? TSIZE[size].name : ""; }
+int  gfx_cell_w(void) { return gfx_smooth_text() ? TSIZE[g_tsize].sw : TSIZE[g_tsize].cw; }
+int  gfx_cell_h(void) { return gfx_smooth_text() ? TSIZE[g_tsize].sh : TSIZE[g_tsize].ch; }
+int  gfx_label_px(void) { return TSIZE[g_tsize].label; }
+
+void gfx_draw_cell_char(int x, int y, char c, uint32_t fg, uint32_t bg) {
+    if (!g_ok) return;
+    if (g_tsize == 0) { gfx_draw_char(x, y, c, fg, bg); return; }     /* the classic 8x8 cells */
+    int cw = gfx_cell_w(), ch = gfx_cell_h();
+    fb_fill_rect(x, y, cw, ch, bg);
+    uint8_t uc = (uint8_t)c;
+    if (uc == ' ' || uc == 0 || uc == 0xA0) return;
+    if (uc >= 128 && uc < 0xA0) uc = '?';
+    if (gfx_smooth_text()) {
+        int stride, tw, th;
+        uint32_t* t = fb_target(&stride, &tw, &th);
+        if (!t) return;
+        char u[3];
+        uint32_t n = 1;
+        if (uc < 0x80) u[0] = (char)uc;
+        else { u[0] = (char)(0xC0 | uc >> 6); u[1] = (char)(0x80 | (uc & 0x3F)); n = 2; }
+        int px = TSIZE[g_tsize].px, a, d;
+        font_metrics(FONT_UI, px, &a, &d, NULL);
+        int adv = font_text_width(FONT_UI, px, u, n);
+        font_draw(t, stride, x, y, x + cw + 2, y + ch, FONT_UI, px, x + (cw - adv) / 2, y + (ch - (a + d)) / 2 + a, u, n, fg, 0);
+        return;
+    }
+    const uint8_t* glyph = uc >= 0xA0 ? font8x8_latin1[uc - 0xA0] : font8x8_basic[uc];
+    int sx = TSIZE[g_tsize].sx, sy = TSIZE[g_tsize].sy;
+    int ox = x + (cw - 8 * sx) / 2, oy = y + (ch - 8 * sy) / 2;
+    for (int gy = 0; gy < 8; gy++)
+        for (int gx = 0; gx < 8; gx++)
+            if (glyph[gy] & (1u << gx)) fb_fill_rect(ox + gx * sx, oy + gy * sy, sx, sy, fg);
 }
 
 void gfx_draw_text(int x, int y, const char* s, uint32_t fg, uint32_t bg) {
@@ -169,8 +222,8 @@ static int label_w(const char* s, uint32_t n, int px) {
 
 int gfx_draw_label(int cx, int y, int max_w, const char* s, uint32_t fg, uint32_t highlight) {
     if (!g_ok || !s) return 0;
-    const int px = 12;
-    int lh = 14;
+    const int px = gfx_label_px();
+    int lh = px + 2;
     if (font_available(FONT_SANS)) { int a, d; font_metrics(FONT_SANS, px, &a, &d, &lh); }
     /* the lines: as many words as fit, at most two (the second cut short with "..") */
     uint32_t len = (uint32_t)strlen(s), start[2] = { 0, 0 }, cnt[2] = { 0, 0 };

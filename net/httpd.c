@@ -114,7 +114,7 @@ static void send_response(tcp_conn_t* c, int head_only, int code, const char* st
                           const char* type, const void* body, uint32_t len, const char* extra) {
     char hdr[512];
     ksnprintf(hdr, sizeof(hdr),
-              "HTTP/1.1 %d %s\r\nServer: BananaOS-httpd/0.5\r\nContent-Type: %s\r\n"
+              "HTTP/1.1 %d %s\r\nServer: BananaOS-httpd/0.6\r\nContent-Type: %s\r\n"
               "Content-Length: %u\r\n%sConnection: close\r\n\r\n",
               code, status, type, len, extra ? extra : "");
     if (send_all(c, hdr, (uint32_t)strlen(hdr)) != 0) return;

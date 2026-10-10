@@ -45,7 +45,7 @@
 extern char _kernel_end[];   /* boot/linker.ld */
 
 #define SHELL_USER "banana"
-#define SHELL_HOST "banana-os-0.5"
+#define SHELL_HOST "banana-os-0.6"
 
 /* ── string helpers ─────────────────────────────────────────────── */
 static int k_strlen(const char* s) { int n=0; while(s[n]) n++; return n; }
@@ -411,13 +411,13 @@ static void cmd_neofetch(int persona) {
         VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
 
     terminal_write_color("  Banana OS", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    terminal_writeln(" 0.5");
+    terminal_writeln(" 0.6");
     terminal_writeln("  --------------------");
 
     terminal_write_color("  OS:       ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln("Banana OS 0.5");
+    terminal_writeln("Banana OS 0.6");
     terminal_write_color("  KERNEL:   ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    terminal_writeln("Banana Kernel 0.5");
+    terminal_writeln("Banana Kernel 0.6");
     terminal_write_color("  ARCH:     ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     terminal_writeln(BANANA_ARCH_DESC);
     terminal_write_color("  BOOT:     ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
@@ -603,15 +603,40 @@ static void cmd_resolution(const char* args) {
     if (!*a) {
         ksnprintf(b, sizeof(b), "resolution: %ux%u", fi->width, fi->height);
         terminal_writeln(b);
-        if (!display_can_change()) { terminal_writeln("(this display stays at this mode)"); return; }
+        if (!display_can_change()) {
+            /* any PC: the firmware's sizes, which the boot loader sets */
+            display_mode_t bm[48];
+            int nb = display_boot_modes(bm, 48);
+            if (!nb) { terminal_writeln("(this display stays at this mode)"); return; }
+            terminal_write("at the next start (resolution WxH | auto):");
+            for (int i = 0; i < nb; i++) { ksnprintf(b, sizeof(b), " %dx%d", bm[i].w, bm[i].h); terminal_write(b); }
+            terminal_putchar(0x0A);
+            return;
+        }
         terminal_write("modes:");
         for (int i = 0; i < n; i++) { ksnprintf(b, sizeof(b), " %dx%d", m[i].w, m[i].h); terminal_write(b); }
         terminal_putchar(0x0A);
         return;
     }
     uint32_t w = 0, h = 0;
-    int k = k_parse_u32(a, &w);
-    if (!k || (a[k] != 'x' && a[k] != 'X') || !k_parse_u32(a + k + 1, &h)) { terminal_writeln("Usage: resolution [WIDTHxHEIGHT]"); return; }
+    int k = 0;
+    if (k_strcmp(a, "auto") != 0) {
+        k = k_parse_u32(a, &w);
+        if (!k || (a[k] != 'x' && a[k] != 'X') || !k_parse_u32(a + k + 1, &h)) { terminal_writeln("Usage: resolution [WIDTHxHEIGHT | auto]"); return; }
+    }
+    if (!display_can_change()) {
+        int rc = display_set_boot_mode((int)w, (int)h);
+        if (rc == -2) terminal_writeln("resolution: live CD - choose the size in the Banana Boot menu (Left / Right)");
+        else if (rc == -3) terminal_writeln("resolution: this computer does not offer that size (see: resolution)");
+        else if (rc < 0) terminal_writeln("resolution: could not write the boot settings");
+        else {
+            if (w) ksnprintf(b, sizeof(b), "resolution: %ux%u from the next start", w, h);
+            else ksnprintf(b, sizeof(b), "resolution: automatic from the next start");
+            terminal_writeln(b);
+        }
+        return;
+    }
+    if (!w) { terminal_writeln("resolution: auto is for the boot loader's sizes"); return; }
     if (display_set_mode((int)w, (int)h) < 0) { terminal_writeln("resolution: the display cannot show that mode (see: resolution)"); return; }
     ksnprintf(b, sizeof(b), "resolution: %ux%u", w, h);
     terminal_writeln(b);
@@ -710,7 +735,7 @@ static void cmd_top(void) {
         terminal_clear();
 
         /* ── HEADER ───────────────────────────── */
-        terminal_write_color("Banana OS 0.5 top - press q to quit (htop: the colour version)\n",
+        terminal_write_color("Banana OS 0.6 top - press q to quit (htop: the colour version)\n",
                              VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
         terminal_writeln("--------------------------------------------");
 
@@ -722,7 +747,7 @@ static void cmd_top(void) {
 
         /* OS VERSION */
         terminal_write_color("OS:  ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-        terminal_writeln("Banana OS 0.5 (Banana Kernel 0.5)");
+        terminal_writeln("Banana OS 0.6 (Banana Kernel 0.6)");
 
         /* PROCESSOR CORES (kernel/smp.c) */
         terminal_write_color("Cores: ", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
@@ -835,7 +860,7 @@ static void cmd_top(void) {
 
 static void cmd_help(void) {
     static const char* all_lines[] = {
-        "Banana OS 0.5 - available commands:",
+        "Banana OS 0.6 - available commands:",
         "",
         "  help               show this message",
         "  neofetch           system information",
@@ -1632,12 +1657,12 @@ static void cmd_chsh(const char* args, int persona) {
 }
 
 static void cmd_uname(int persona) {
-    if (persona == SHELL_KIND_BASH) terminal_writeln("Banana OS 0.5 " BANANA_ARCH " Banana Kernel 0.5 bash");
-    else                             terminal_writeln("Banana OS 0.5 " BANANA_ARCH " Banana Kernel 0.5 sh");
+    if (persona == SHELL_KIND_BASH) terminal_writeln("Banana OS 0.6 " BANANA_ARCH " Banana Kernel 0.6 bash");
+    else                             terminal_writeln("Banana OS 0.6 " BANANA_ARCH " Banana Kernel 0.6 sh");
 }
 
 static void cmd_whoami(void) { terminal_writeln("banana"); }
-static void cmd_hostname(void) { terminal_writeln("banana-os-0.5"); }
+static void cmd_hostname(void) { terminal_writeln("banana-os-0.6"); }
 
 static void cmd_date(void) {
     rtc_datetime_t dt;
@@ -1984,10 +2009,10 @@ static void print_prompt(int persona) {
     if (persona == SHELL_KIND_BASH) {
         /* real bash's default PS1: whole user@host in one bright-green
          * block, rather than sh's two-tone yellow/green split below. */
-        terminal_write_color("banana@banana-os-0.5", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        terminal_write_color("banana@banana-os-0.6", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     } else {
         terminal_write_color("banana",         VGA_COLOR_YELLOW,      VGA_COLOR_BLACK);
-        terminal_write_color("@banana-os-0.5", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        terminal_write_color("@banana-os-0.6", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     }
     terminal_write_color(":",     VGA_COLOR_WHITE,      VGA_COLOR_BLACK);
     terminal_write_color(cwd_buf, VGA_COLOR_LIGHT_BLUE,  VGA_COLOR_BLACK);
@@ -2662,7 +2687,7 @@ static void print_banner(int persona) {
         VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
 
     terminal_writeln("");
-    terminal_write_color("  Welcome to Banana OS 0.5  --  ",
+    terminal_write_color("  Welcome to Banana OS 0.6  --  ",
                          VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     if (persona == SHELL_KIND_BASH)
         terminal_writeln("bash-compatible shell. Type 'help' to get started.");
@@ -2672,7 +2697,7 @@ static void print_banner(int persona) {
 }
 
 static void print_banner_window(int persona) {
-    terminal_write_color("  Welcome to Banana OS 0.5  --  ",
+    terminal_write_color("  Welcome to Banana OS 0.6  --  ",
                          VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     if (persona == SHELL_KIND_BASH)
         terminal_writeln("bash-compatible shell. Type 'help' to get started.");
@@ -2819,7 +2844,7 @@ void shell_run_remote(int tty) {
             continue;
         }
 
-        terminal_write_color("Banana OS 0.5", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        terminal_write_color("Banana OS 0.6", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
         terminal_writeln(" - SSH session. Type 'help' for commands, 'exit' to log out.");
         terminal_writeln("");
         while (tty_active(tty)) {

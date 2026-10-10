@@ -227,7 +227,7 @@ int httpd_run_php(const char* fspath, const char* code, uint32_t code_len, const
     set_kv(I, srv, "SCRIPT_FILENAME", fspath);
     set_kv(I, srv, "DOCUMENT_ROOT", rq->docroot);
     set_kv(I, srv, "REMOTE_ADDR", rq->remote_addr);
-    set_kv(I, srv, "SERVER_SOFTWARE", "BananaOS-httpd/0.5 PHP/8.3.0-banana");
+    set_kv(I, srv, "SERVER_SOFTWARE", "BananaOS-httpd/0.6 PHP/8.3.0-banana");
     set_kv(I, srv, "SERVER_NAME", rq->host[0] ? rq->host : "banana-os");
     set_kv(I, srv, "HTTP_HOST", rq->host);
     set_kv(I, srv, "HTTP_USER_AGENT", rq->user_agent);

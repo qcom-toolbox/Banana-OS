@@ -46,6 +46,7 @@ int gui_open_taskmgr(void);
 int gui_open_settings(void);   /* the Settings window (0 without the desktop) */
 void gui_raise_files(void);
 int  gui_open_installer(void);       /* the live CD's installer window; 0 if not here */
+void gui_text_changed(void);         /* the text size / interface font (Settings > Fonts) */
 void gui_screen_changed(void);       /* a new resolution (kernel/display.c) */
 
 /* the open windows (taskbar order), for the Task Manager */

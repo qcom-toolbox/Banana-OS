@@ -2170,7 +2170,7 @@ value_t php_call_builtin(interp_t* I, const char* name, int argc, value_t* argv,
     }
     /* about */
     if (IS("phpversion")) return v_str(I, "8.3.0-banana");
-    if (IS("php_uname")) return v_str(I, "Banana OS 0.5 banana-os " BANANA_ARCH);
+    if (IS("php_uname")) return v_str(I, "Banana OS 0.6 banana-os " BANANA_ARCH);
     if (IS("php_sapi_name")) return v_str(I, "banana-httpd");
     if (IS("function_exists")) {
         char lname[64];

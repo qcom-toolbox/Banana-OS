@@ -20,6 +20,8 @@
 #include "smp.h"
 #include "webview.h"
 #include "font.h"
+#include "wallpaper.h"
+#include "image.h"
 
 #define APP_MAX     8
 #define APP_FD_MAX  16
@@ -608,6 +610,41 @@ static int  a_web_eval(int v, const char* js, char* out, int cap) { return webvi
 static int  a_web_message(int v, char* out, int cap) { return webview_message(owner_id(), v, out, cap); }
 static int  a_web_post(int v, const char* m) { return webview_post(owner_id(), v, m); }
 
+/* ── pictures ── */
+static unsigned int* a_image_load(const char* path, int* w, int* h, char* err, int ecap) {
+    char e[96];
+    if (!err || ecap <= 0) { err = e; ecap = sizeof(e); }
+    err[0] = 0;
+    int idx = path ? fs_find_file(path) : -1;
+    fs_file_t* f = idx >= 0 ? fs_get_file(idx) : NULL;
+    if (!f) { ksnprintf(err, (uint32_t)ecap, "no such file"); return NULL; }
+    image_t img;
+    fs_pin(idx);
+    int bad = image_decode((const uint8_t*)f->content, f->size, &img, err, (uint32_t)ecap) != 0;
+    fs_unpin(idx);
+    if (bad) return NULL;
+    unsigned int* px = (unsigned int*)a_malloc((unsigned long)img.w * (unsigned long)img.h * 4ul);
+    if (!px) { image_free(&img); ksnprintf(err, (uint32_t)ecap, "out of memory"); return NULL; }
+    for (int i = 0; i < img.w * img.h; i++)
+        px[i] = (unsigned int)img.rgb[i * 3] << 16 | (unsigned int)img.rgb[i * 3 + 1] << 8 | img.rgb[i * 3 + 2];
+    if (w) *w = img.w;
+    if (h) *h = img.h;
+    image_free(&img);
+    return px;
+}
+
+static int a_set_wallpaper(const char* path, int mode, char* err, int ecap) {
+    char e[96];
+    if (!err || ecap <= 0) { err = e; ecap = sizeof(e); }
+    if (!path) return -1;
+    if (mode < 0 || mode >= IMAGE_MODE_COUNT) mode = IMAGE_FILL;
+    char abs[FS_PATH_LEN];
+    int idx = fs_find_file(path);
+    if (idx < 0) { ksnprintf(err, (uint32_t)ecap, "no such file"); return -1; }
+    fs_file_path(idx, abs, sizeof(abs));
+    return wallpaper_set_file(abs, (image_mode_t)mode, err, (uint32_t)ecap);
+}
+
 /* the system fonts */
 static int clamp_size(int s) { return s < 4 ? 4 : s > 200 ? 200 : s; }
 static int a_font_draw(unsigned int* px, int stride, int w, int h, int x, int y, int font, int size, const char* text, unsigned int color) {
@@ -934,7 +971,7 @@ static void api_init(void) {
     g_api.version = BANANA_API_VERSION;
     g_api.size = sizeof(banana_api_t);
     g_api.arch = BANANA_ARCH;
-    g_api.os_version = "0.5";
+    g_api.os_version = "0.6";
     g_api.exit = G(a_exit);
     g_api.write = G(a_write);
     g_api.getchar = G(a_getchar);
@@ -1009,6 +1046,8 @@ static void api_init(void) {
     g_api.audio_volume = G(a_audio_volume);
     g_api.win_media_keys = G(a_win_media_keys);
     g_api.http_request = G(a_http_request);
+    g_api.image_load = G(a_image_load);
+    g_api.set_wallpaper = G(a_set_wallpaper);
 }
 
 /* ── the ELF loader ────────────────────────────────────────────────── */

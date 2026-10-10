@@ -73,6 +73,13 @@ int  bwin_font(bwin_t* win, int x, int y, int font, int size, const char* text, 
 int  banana_font_width(int font, int size, const char* text);
 void banana_font_metrics(int font, int size, int* ascent, int* descent, int* line_h);
 int  banana_has_fonts(void);
+
+/* ── pictures (API version 9) ──────────────────────────────────────── */
+/* a picture file decoded: *w x *h pixels 0x00RRGGBB (free() them), or
+ * NULL with err set */
+unsigned int* banana_image_load(const char* path, int* w, int* h, char* err, int errcap);
+/* the desktop's wallpaper: mode 0 fill, 1 fit, 2 stretch, 3 center */
+int  banana_set_wallpaper(const char* path, int mode, char* err, int errcap);
 /* a bevelled button-looking box with a centered label */
 void bwin_button(bwin_t* win, int x, int y, int w, int h, const char* label, int pressed);
 /* copies a w*h image (0x00RRGGBB) into the window at x, y */

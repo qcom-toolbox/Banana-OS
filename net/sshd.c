@@ -18,7 +18,7 @@
 #include "chacha20.h"
 #include "../shell/shell.h"
 
-#define SERVER_VERSION "SSH-2.0-BananaOS_0.5"
+#define SERVER_VERSION "SSH-2.0-BananaOS_0.6"
 #define HOSTKEY_FILE   "/etc/ssh/ssh_host_ed25519_key"
 #define PKT_MAX        35000u          /* largest packet_length accepted (RFC 4253 6.1) */
 #define BUF_SIZE       (PKT_MAX + 64u)

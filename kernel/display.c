@@ -5,6 +5,8 @@
 #include "fb.h"
 #include "gui.h"
 #include "terminal.h"
+#include "fsdisk.h"
+#include "kstring.h"
 
 int display_can_change(void) {
     gpu_t* g = gpu_active();
@@ -22,6 +24,27 @@ int display_modes(display_mode_t* out, int max) {
     const fb_info_t* fi = fb_info();
     if (fi && fi->width && max > 0) { out[0].w = (int)fi->width; out[0].h = (int)fi->height; return 1; }
     return 0;
+}
+
+int display_boot_modes(display_mode_t* out, int max) {
+    int w[48], h[48];
+    int n = fb_boot_modes(w, h, max < 48 ? max : 48);
+    for (int i = 0; i < n; i++) { out[i].w = w[i]; out[i].h = h[i]; }
+    return n;
+}
+
+int display_set_boot_mode(int w, int h) {
+    if (!fsdisk_is_installed()) return -2;
+    if (w > 0) {                                   /* one the firmware offers */
+        display_mode_t m[48];
+        int n = display_boot_modes(m, 48), ok = 0;
+        for (int i = 0; i < n; i++) ok |= m[i].w == w && m[i].h == h;
+        if (!ok) return -3;
+    }
+    char v[16];
+    if (w > 0) ksnprintf(v, sizeof(v), "%dx%d", w, h);
+    else kstrlcpy(v, "auto", sizeof(v));
+    return fsdisk_set_boot_video(v) > 0 ? 0 : -1;
 }
 
 int display_set_mode(int w, int h) {

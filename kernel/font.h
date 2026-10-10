@@ -15,6 +15,33 @@
 
 enum { FONT_SANS = 0, FONT_SANS_BOLD, FONT_MONO, FONT_MONO_BOLD, FONT_FACES };
 
+/*
+ * Fonts the user installs (Settings > Fonts, or "Install font" in Files):
+ * .ttf files kept in FONT_DIR, loaded at boot. Each gets a face number
+ * (FONT_FACES and up). Two choices use them:
+ *   the interface font  - the desktop's text (FONT_UI: one glyph per cell,
+ *                         gfx.c), DejaVu Sans Mono unless chosen
+ *   the documents font  - what FONT_SANS (and its bold) draws: web pages,
+ *                         apps, desktop icon names; DejaVu Sans unless chosen
+ */
+#define FONT_UI        64          /* a face number: the interface font */
+#define FONT_DIR       "/usr/share/fonts"
+#define FONT_USER_MAX  11
+
+/* loads a .ttf file as a user font: its face, or -1 with the reason in err */
+int  font_user_load(const char* path, char* err, int cap);
+void font_user_unload(int face);
+int  font_user_count(void);
+int  font_user_face(int i);                 /* the i-th user font's face */
+const char* font_user_name(int face);       /* its name (from the font), "" if none */
+const char* font_user_path(int face);       /* its file */
+int  font_user_find(const char* path);      /* the face loaded from path, -1 */
+
+void font_set_ui(int face);                 /* FONT_MONO: the default */
+int  font_ui(void);
+void font_set_doc(int face);                /* -1: the default (DejaVu Sans) */
+int  font_doc(void);
+
 void font_register(int face, const uint8_t* data, uint32_t len);   /* fonts_init() does the built-in ones */
 void fonts_init(void);
 int  font_available(int face);

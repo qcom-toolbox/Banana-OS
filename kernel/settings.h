@@ -19,8 +19,9 @@
 
 void settings_open(void);
 #define SETTINGS_PAGE_DISPLAY 0
-#define SETTINGS_PAGE_STARTUP 7
-#define SETTINGS_PAGE_ABOUT   8
+#define SETTINGS_PAGE_FONTS   1
+#define SETTINGS_PAGE_STARTUP 8
+#define SETTINGS_PAGE_ABOUT   9
 void settings_show_status(const char* msg);
 void settings_open_page(int page);
 void settings_close(void);
@@ -32,6 +33,11 @@ void settings_click(int mx, int my);
 void settings_mouse(int mx, int my, int left);
 void settings_rclick(int mx, int my);
 uint32_t settings_signature(void);
+void settings_wheel(int mx, int my, int dz);
+
+/* a .ttf file becomes an installed font (copied to FONT_DIR); 0, or -1 -
+ * msg says what happened either way */
+int  settings_install_font(const char* path, char* msg, int cap);
 
 /* applies /etc/settings.conf (boot, once the filesystem is there) */
 void settings_boot(void);

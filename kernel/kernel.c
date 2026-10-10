@@ -68,7 +68,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     fpu_init();
 
     serial_init();
-    klog("Banana OS 0.5 booting\n");
+    klog("Banana OS 0.6 booting\n");
 
     /* Parse Multiboot2 info first so the console can choose framebuffer mode. */
     if (magic == MULTIBOOT2_MAGIC) {

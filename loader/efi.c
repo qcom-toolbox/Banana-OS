@@ -111,6 +111,13 @@ static int g_setup;                            /* no platform key yet: keys can 
 static int g_fw_ui;                            /* the firmware can be asked to open its settings */
 static int g_enroll;                           /* setup mode, and Banana OS's signed keys are here */
 
+/* the screen: GOP's modes, and the one chosen (-1: as the firmware set it) */
+typedef EFI_STATUS (EFIAPI *gop_query_t)(EFI_GOP*, u32, UINTN*, EFI_GOP_MODE_INFO**);
+typedef EFI_STATUS (EFIAPI *gop_set_t)(EFI_GOP*, u32);
+static EFI_GOP* g_gop;
+static vmode_t  g_modes[MAX_VMODES];
+static int      g_nmodes, g_vsel = -1;
+
 /* ── files on our partition ──────────────────────────────────────────── */
 static u8* read_file(const char* path, UINTN* size, int must) {
     EFI_FILE* f;
@@ -166,7 +173,14 @@ static void draw_menu(int sel, int secs) {
         print_at(3, i < KERNEL_ENTRIES ? 3 + i : 4 + i, line, i == sel ? 0x70 : 0x07);
     }
     int r = 5 + n;
-    print_at(4, r, "Up / Down choose, Enter starts.", 0x08);
+    char vl[80];
+    vmode_label(vl, g_modes, g_nmodes, g_vsel);
+    for (u32 k = c_strlen(vl); k < 64; k++) vl[k] = ' ';
+    vl[64] = 0;
+    print_at(4, r, vl, 0x07);
+    r += 2;
+    print_at(4, r, g_nmodes ? "Up / Down choose, Left / Right: screen size, Enter starts."
+                            : "Up / Down choose, Enter starts.", 0x08);
     print_at(4, r + 1, "                                                ", 0x07);
     if (secs >= 0) {
         char line[64] = "Starting the highlighted entry in ";
@@ -189,6 +203,8 @@ static int menu(int def) {
             ticks = -1;
             if (k.ScanCode == 1) sel = (sel + n - 1) % n;
             else if (k.ScanCode == 2) sel = (sel + 1) % n;
+            else if (k.ScanCode == 4) g_vsel = vmode_step(g_vsel, g_nmodes, -1);
+            else if (k.ScanCode == 3) g_vsel = vmode_step(g_vsel, g_nmodes, 1);
             else if (k.UnicodeChar == '\r') return sel;
             draw_menu(sel, -1);
             continue;
@@ -334,6 +350,25 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
         u8* f = read_file("\\EFI\\BananaOS\\PK.auth", &sz, 0);
         if (f) { g_enroll = 1; BS->FreePool(f); }
     }
+    /* the screen sizes (32-bit colour with a framebuffer), and the one set
+     * in medium.cfg */
+    UINTN msz = 0;
+    u8* mfile = read_file("\\EFI\\BananaOS\\medium.cfg", &msz, 0);
+    if (BS->LocateProtocol(&GOP_GUID, 0, (void**)&g_gop) == EFI_SUCCESS && g_gop->Mode) {
+        for (u32 i = 0; i < g_gop->Mode->MaxMode && i < 256; i++) {
+            UINTN isz;
+            EFI_GOP_MODE_INFO* mi;
+            if (((gop_query_t)g_gop->QueryMode)(g_gop, i, &isz, &mi) != EFI_SUCCESS) continue;
+            if (mi->PixelFormat != 3) vmode_add(g_modes, &g_nmodes, mi->HorizontalResolution, mi->VerticalResolution, i);
+            BS->FreePool(mi);
+        }
+        u32 vw, vh;
+        video_value(mfile ? (const char*)mfile : "", mfile ? (u32)msz : 0, &vw, &vh);
+        g_vsel = vw ? vmode_find(g_modes, g_nmodes, vw, vh) : -1;
+    } else {
+        g_gop = 0;
+    }
+
     g_extra[g_nextra++] = X_NEXT;
     if (g_fw_ui) g_extra[g_nextra++] = X_FIRMWARE;
     if (g_enroll) g_extra[g_nextra++] = X_ENROLL;
@@ -350,6 +385,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
         if (x == X_ENROLL) enroll_keys();
         if (x == X_RESTART) RT->ResetSystem(EfiResetCold, 0, 0, 0);
     }
+    if (g_gop && g_vsel >= 0 && g_modes[g_vsel].id != g_gop->Mode->Mode)
+        ((gop_set_t)g_gop->SetMode)(g_gop, g_modes[g_vsel].id);    /* refused: the size stays */
     ST->ConOut->ClearScreen(ST->ConOut);
     int is64 = entry_is64(entry);
     print(is64 ? "Loading Banana OS (64-bit)...\r\n" : "Loading Banana OS (32-bit)...\r\n");
@@ -405,8 +442,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     mb2_t m;
     mb2_begin(&m, (u8*)PTR(info));
     char medium[16], cmd[96];
-    UINTN msz;
-    u8* mfile = read_file("\\EFI\\BananaOS\\medium.cfg", &msz, 0);
     medium_value(mfile ? (const char*)mfile : "", mfile ? (u32)msz : 0, medium, sizeof(medium));
     build_cmdline(cmd, entry, medium);
     mb2_string(&m, 1, cmd);
@@ -426,6 +461,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
         if (guid_eq(&c->VendorGuid, &ACPI10_GUID)) rsdp = (const u8*)c->VendorTable;
     }
     if (rsdp) mb2_rsdp(&m, rsdp);
+    mb2_modes(&m, g_modes, g_nmodes);
     EFI_GOP* gop;
     if (BS->LocateProtocol(&GOP_GUID, 0, (void**)&gop) == EFI_SUCCESS && gop->Mode && gop->Mode->Info &&
         gop->Mode->Info->PixelFormat != 3) {

@@ -377,3 +377,18 @@ int banana_url_encode(const char* s, char* out, int cap) {
     if (cap > 0) out[n] = 0;
     return n;
 }
+
+static int has_v9(void) {
+    return __banana->version >= 9 && __banana->size >= __builtin_offsetof(banana_api_t, set_wallpaper) + sizeof(void*);
+}
+static void too_old(char* err, int errcap) {
+    if (err && errcap > 0) { const char* m = "needs a newer Banana OS"; int i = 0; for (; m[i] && i < errcap - 1; i++) err[i] = m[i]; err[i] = 0; }
+}
+unsigned int* banana_image_load(const char* path, int* w, int* h, char* err, int errcap) {
+    if (!has_v9()) { too_old(err, errcap); return 0; }
+    return __banana->image_load(path, w, h, err, errcap);
+}
+int banana_set_wallpaper(const char* path, int mode, char* err, int errcap) {
+    if (!has_v9()) { too_old(err, errcap); return -1; }
+    return __banana->set_wallpaper(path, mode, err, errcap);
+}

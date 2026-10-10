@@ -1,4 +1,6 @@
 #include "fsdisk.h"
+#include "config.h"
+#include "settings.h"
 #include "fs.h"
 #include "ata.h"
 #include "atapi.h"
@@ -194,8 +196,37 @@ static void medium_line(char* out, const char* word) {
     kstrlcpy(out + 18, word, 12);
 }
 
+/* the boot loader's screen size line, "set banana_video=" and a value
+ * padded to 12 characters (loader/common.h) - put together at run time
+ * like the medium line */
+#define VIDEO_FIELD 12
+static char g_video_new[VIDEO_FIELD + 1];        /* what install / update write ("" : as the CD has it) */
+
+static uint32_t video_key(char* out) {
+    kstrlcpy(out, "set banana_", 32);
+    kstrlcpy(out + 11, "video=", 16);
+    return 17;
+}
+
+/* every video line in b[0..n) gets the value; how many there were */
+static int patch_video(uint8_t* b, uint32_t n, const char* value) {
+    char key[32], field[VIDEO_FIELD];
+    uint32_t K = video_key(key);
+    uint32_t vl = (uint32_t)strlen(value);
+    for (uint32_t i = 0; i < VIDEO_FIELD; i++) field[i] = i < vl ? value[i] : ' ';
+    int hits = 0;
+    for (uint32_t k = 0; k + K + VIDEO_FIELD <= n; k++)
+        if (b[k] == 's' && memcmp(b + k, key, K) == 0) {
+            memcpy(b + k + K, field, VIDEO_FIELD);
+            hits++;
+            k += K + VIDEO_FIELD - 1;
+        }
+    return hits;
+}
+
 /* the CD's bytes as they go onto the disk */
 static void patch_marker(uint8_t* b, uint32_t n) {
+    if (g_video_new[0]) patch_video(b, n, g_video_new);
     char cd[32], disk[32];
     medium_line(cd, "live-cd");
     medium_line(disk, "install");
@@ -225,6 +256,10 @@ void fsdisk_progress(uint32_t* done, uint32_t* total) { *done = g_prog_done; *to
 
 static int stream_image(const img_src_t* src, uint32_t iso_bytes, image_sink_t sink, void* ctx) {
     uint32_t total = iso_bytes / 2048u;
+    char vv[24];
+    g_video_new[0] = 0;
+    if (cfg_get(CFG_SETTINGS, "boot_resolution", vv, sizeof(vv)) && vv[0] && strlen(vv) <= VIDEO_FIELD)
+        kstrlcpy(g_video_new, vv, sizeof(g_video_new));
     g_prog_done = 0;
     g_prog_total = total + 1;
     find_marker(src, total);
@@ -1460,4 +1495,38 @@ int fsdisk_update(void) {
     g_fi_state = -1;
     g_prog_done = g_prog_total;
     return FSDISK_OK;
+}
+
+/* ── the boot loader's screen size, on the installed disk ── */
+int fsdisk_set_boot_video(const char* value) {
+    if (!fsdisk_is_installed() || !g_have_target || strlen(value) > VIDEO_FIELD) return -1;
+    const uint32_t CH = 256;                          /* sectors per read (128 KB) */
+    uint8_t* buf = (uint8_t*)kmalloc((CH + 1) * FSDISK_SECTOR);
+    if (!buf) return -1;
+    dlock();
+    /* the boot image's size: its ISO9660 volume descriptor */
+    uint32_t sectors = 0;
+    if (disk_read(&g_target, 16 * 4, 4, buf) == 0 && buf[0] == 1 && memcmp(buf + 1, "CD001", 5) == 0)
+        sectors = ((uint32_t)buf[80] | (uint32_t)buf[81] << 8 | (uint32_t)buf[82] << 16 | (uint32_t)buf[83] << 24) * 4u;
+    if (sectors > V4_BASE_LBA) sectors = V4_BASE_LBA;
+    int hits = 0, rc = 0;
+    for (uint32_t s = 0; s < sectors && rc == 0; s += CH) {
+        /* one sector more: a line across the chunk's end is found whole */
+        uint32_t n = sectors - s < CH ? sectors - s : CH;
+        uint32_t rd = s + n < sectors ? n + 1 : n;
+        if (disk_read(&g_target, s, rd, buf) != 0) { rc = -1; break; }
+        int h = patch_video(buf, n * FSDISK_SECTOR + (rd > n ? 29u : 0u), value);
+        if (h) {
+            if (disk_write(&g_target, s, rd, buf) != 0) rc = -1;
+            hits += h;
+        }
+        if ((s / CH) % 16 == 0) task_yield();
+    }
+    dunlock();
+    kfree(buf);
+    if (rc == 0 && hits) {
+        cfg_set(CFG_SETTINGS, "boot_resolution", value, "# Banana OS settings (the Settings app writes this)\n");
+        cfg_persist();
+    }
+    return rc == 0 ? hits : -1;
 }

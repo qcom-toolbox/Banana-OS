@@ -613,10 +613,10 @@ void fs_init(void) {
     int f;
     f = create_file_in(etc, "motd");
     if (f >= 0) fs_set_text(f,
-        "Welcome to Banana OS 0.5 - a from-scratch, Unix-like x86 OS.\n");
+        "Welcome to Banana OS 0.6 - a from-scratch, Unix-like x86 OS.\n");
 
     f = create_file_in(etc, "hostname");
-    if (f >= 0) fs_set_text(f, "banana-os-0.5\n");
+    if (f >= 0) fs_set_text(f, "banana-os-0.6\n");
 
     f = create_file_in(etc, "passwd");
     if (f >= 0) fs_set_text(f,

@@ -30,11 +30,11 @@ static void c_strcat(char* d, const char* s) { d += c_strlen(d); while (*s) *d++
 #define KERNEL_ENTRIES 5
 static __attribute__((unused)) const char* entry_label(int i) {
     switch (i) {
-    case 0: return "Banana OS 0.5 (64-bit)";
-    case 1: return "Banana OS 0.5 (64-bit, one CPU core)";
-    case 2: return "Banana OS 0.5 (32-bit)";
-    case 3: return "Banana OS 0.5 (64-bit, boot messages)";
-    default: return "Banana OS 0.5 (32-bit, boot messages)";
+    case 0: return "Banana OS 0.6 (64-bit)";
+    case 1: return "Banana OS 0.6 (64-bit, one CPU core)";
+    case 2: return "Banana OS 0.6 (32-bit)";
+    case 3: return "Banana OS 0.6 (64-bit, boot messages)";
+    default: return "Banana OS 0.6 (32-bit, boot messages)";
     }
 }
 static int entry_is64(int i) { return i == 0 || i == 1 || i == 3; }
@@ -47,6 +47,81 @@ static __attribute__((unused)) void medium_value(const char* line, u32 len, char
     while (i < len && n + 1 < cap && line[i] > ' ') out[n++] = line[i++];
     out[n] = 0;
     if (!n) { const char* d = "live-cd"; while (*d) out[n++] = *d++; out[n] = 0; }
+}
+
+/* ── the screen size: a line "set banana_video=1920x1080" ("auto": the
+ *    loader's own choice), its value padded with spaces to a fixed width so
+ *    that Settings can rewrite it in place on the installed disk
+ *    (kernel/fsdisk.c). The BIOS loader holds the line; the UEFI one reads it
+ *    from EFI/BananaOS/medium.cfg, after the medium line. The menu changes it
+ *    for one start (Left / Right). ── */
+static __attribute__((unused)) void video_value(const char* s, u32 len, u32* w, u32* h) {
+    static const char key[] = "banana_video=";
+    *w = *h = 0;
+    for (u32 i = 0; i + 13 <= len; i++) {
+        u32 k = 0;
+        while (k < 13 && s[i + k] == key[k]) k++;
+        if (k < 13) continue;
+        u32 p = i + 13, a = 0, b = 0;
+        while (p < len && s[p] >= '0' && s[p] <= '9' && a < 100000) a = a * 10 + (u32)(s[p++] - '0');
+        if (p >= len || s[p] != 'x') return;
+        p++;
+        while (p < len && s[p] >= '0' && s[p] <= '9' && b < 100000) b = b * 10 + (u32)(s[p++] - '0');
+        if (a >= 320 && b >= 200 && a <= 16384 && b <= 16384) { *w = a; *h = b; }
+        return;
+    }
+}
+
+/* the graphics modes the firmware offers (32-bit colour, a linear
+ * framebuffer), sorted by size, each size once; id: the firmware's number */
+typedef struct { u32 w, h, id; } vmode_t;
+#define MAX_VMODES 48
+
+static __attribute__((unused)) void vmode_add(vmode_t* v, int* n, u32 w, u32 h, u32 id) {
+    if (w < 640 || h < 480 || w > 8192 || h > 8192) return;
+    int i = 0;
+    while (i < *n && (v[i].w * v[i].h < w * h || (v[i].w * v[i].h == w * h && v[i].w < w))) i++;
+    if (i < *n && v[i].w == w && v[i].h == h) return;
+    if (*n >= MAX_VMODES) return;
+    for (int k = *n; k > i; k--) v[k] = v[k - 1];
+    v[i].w = w; v[i].h = h; v[i].id = id;
+    (*n)++;
+}
+
+/* w x h's place in the list; -1 (automatic) if it is not there or w is 0 */
+static __attribute__((unused)) int vmode_find(const vmode_t* v, int n, u32 w, u32 h) {
+    for (int i = 0; i < n; i++) if (v[i].w == w && v[i].h == h) return i;
+    return -1;
+}
+
+static void c_utoa(u32 v, char* out) {
+    char t[12]; int n = 0;
+    do { t[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (n) *out++ = t[--n];
+    *out = 0;
+}
+
+/* the menu's line: "Screen: 1920 x 1080  (Left / Right to change)" */
+static __attribute__((unused)) void vmode_label(char* out, const vmode_t* v, int n, int sel) {
+    char num[12];
+    out[0] = 0;
+    c_strcat(out, "Screen: ");
+    if (sel < 0 || sel >= n) c_strcat(out, "automatic");
+    else {
+        c_utoa(v[sel].w, num); c_strcat(out, num);
+        c_strcat(out, " x ");
+        c_utoa(v[sel].h, num); c_strcat(out, num);
+    }
+    if (n) c_strcat(out, "   (Left / Right to change)");
+}
+
+/* Left (-1) / Right (+1): the next size, "automatic" between the ends */
+static __attribute__((unused)) int vmode_step(int sel, int n, int dir) {
+    if (!n) return -1;
+    sel += dir;
+    if (sel < -1) sel = n - 1;
+    if (sel >= n) sel = -1;
+    return sel;
 }
 
 /* "medium=live-cd nosmp" ... */
@@ -156,6 +231,20 @@ static void mb2_framebuffer(mb2_t* m, u64 addr, u32 pitch, u32 w, u32 h, u32 bpp
     t[28] = (u8)bpp;
     t[29] = 1;                                            /* RGB */
     t[32] = rpos; t[33] = rsize; t[34] = gpos; t[35] = gsize; t[36] = bpos; t[37] = bsize;
+}
+
+/* Banana OS's own tag: the sizes the firmware offers (Settings > Screen
+ * lists them on displays without a graphics driver): a count, then
+ * 16-bit width and height pairs */
+#define MB2_TAG_BANANA_MODES 0xBA00u
+static __attribute__((unused)) void mb2_modes(mb2_t* m, const vmode_t* v, int n) {
+    if (n <= 0) return;
+    u8* t = mb2_tag(m, MB2_TAG_BANANA_MODES, 12 + 4 * (u32)n);
+    *(u32*)(t + 8) = (u32)n;
+    for (int i = 0; i < n; i++) {
+        *(u16*)(t + 12 + 4 * i) = (u16)v[i].w;
+        *(u16*)(t + 14 + 4 * i) = (u16)v[i].h;
+    }
 }
 
 /* the ACPI RSDP: tag 14 (version 1, 20 bytes) or 15 (version 2+, 36) */

@@ -2,7 +2,7 @@
  * Files: the file explorer, laid out like Windows 7's Explorer.
  *
  *   [<][>]  Computer > home > banana            [Search banana    ]
- *   Organize v   New folder   Open in terminal         Details | Icons
+ *   Organize ▾   New folder   Open in terminal         Details | Icons
  *   +-----------------+-----------------------------------------------+
  *   | * Favorites     | Name                 Type          Size       |
  *   |    Downloads    | [] Documents         File folder              |
@@ -21,7 +21,7 @@
  * (sortable columns) or Large icons, a navigation pane and a details pane
  * with a picture's thumbnail. Right-click menus, copy / cut / paste,
  * rename (F2), delete, new folder, apps (.bpk) install, media open in
- * their app, pictures become the wallpaper, USB sticks eject.
+ * their app, pictures open in Photos, fonts install, USB sticks eject.
  */
 #include "explorer.h"
 #include "keyboard.h"
@@ -33,6 +33,7 @@
 #include "timer.h"
 #include "image.h"
 #include "wallpaper.h"
+#include "settings.h"
 #include "winframe.h"
 #include "gui.h"
 #include "pkg.h"
@@ -506,6 +507,25 @@ static void set_wallpaper(const char* path, const char* name) {
     else { ksnprintf(msg, sizeof(msg), "Not a usable picture: %s", err); set_status_c(msg, 1); }
 }
 
+/* pictures open in Photos (else the Browser shows them) */
+static void open_picture(const char* path, const char* name) {
+    pkg_info_t pi;
+    if (pkg_get("photos", &pi) == 0) {
+        char err[96], msg[112];
+        char* argv[2] = { (char*)"photos", (char*)path };
+        if (pkg_run("photos", 2, argv, 1, err, sizeof(err)) >= 0) { ksnprintf(msg, sizeof(msg), "Opened %s", name); set_status(msg); return; }
+    }
+    gui_open_browser(path);
+}
+
+static int is_font_name(const char* name) { return has_ext(name, ".ttf") || has_ext(name, ".TTF"); }
+
+static void install_font(const char* path) {
+    char msg[112];
+    int rc = settings_install_font(path, msg, sizeof(msg));
+    set_status_c(msg, rc != 0);
+}
+
 static void open_item(int i) {
     if (i < 0 || i >= g_count) return;
     const item_t* it = &g_items[i];
@@ -520,7 +540,8 @@ static void open_item(int i) {
         gui_open_browser(path);
         return;
     }
-    if (is_image_file(it->idx)) { set_wallpaper(path, item_name(it)); return; }
+    if (is_image_file(it->idx)) { open_picture(path, item_name(it)); return; }
+    if (is_font_name(item_name(it))) { install_font(path); return; }
     gui_open_notepad(path);          /* text: the desktop's Notepad */
 }
 
@@ -678,7 +699,7 @@ static void properties(void) {
 
 enum { M_OPEN = 1, M_EDIT, M_INSTALL, M_PLAY, M_WALLPAPER, M_COPY, M_CUT, M_PASTE, M_RENAME, M_DELETE,
        M_NEWFOLDER, M_NEWFILE, M_TERMINAL, M_REFRESH, M_USB, M_EJECT, M_PROPS, M_CLOSE, M_VIEW_DETAILS, M_VIEW_ICONS,
-       M_SELECT_NONE, M_BROWSER };
+       M_SELECT_NONE, M_BROWSER, M_FONT };
 
 static void menu_cb(int id, void* arg) {
     (void)arg;
@@ -694,6 +715,7 @@ static void menu_cb(int id, void* arg) {
     case M_INSTALL: if (path[0]) install_package(path); break;
     case M_PLAY: if (path[0] && g_sel >= 0 && !open_media(path, item_name(&g_items[g_sel]))) play_sound(path); break;
     case M_WALLPAPER: if (path[0]) set_wallpaper(path, item_name(&g_items[g_sel])); break;
+    case M_FONT: if (path[0]) install_font(path); break;
     case M_COPY: clip_selected(0); break;
     case M_CUT: clip_selected(1); break;
     case M_PASTE: paste_here(); break;
@@ -727,6 +749,7 @@ static void item_menu(int mx, int my, int row) {
             if (has_ext(name, ".bpk")) items[n++] = (ctx_item_t){ "Install app", M_INSTALL, 0 };
             if (has_ext(name, ".wav") || media_app(name)) items[n++] = (ctx_item_t){ "Play", M_PLAY, 0 };
             if (is_image_file(it->idx)) items[n++] = (ctx_item_t){ "Set as desktop background", M_WALLPAPER, 0 };
+            if (is_font_name(name)) items[n++] = (ctx_item_t){ "Install font", M_FONT, 0 };
             if (has_ext(name, ".html") || has_ext(name, ".htm") || has_ext(name, ".svg") || is_image_file(it->idx))
                 items[n++] = (ctx_item_t){ "Open in Browser", M_BROWSER, 0 };
             items[n++] = (ctx_item_t){ "Edit in Notepad", M_EDIT, 0 };
@@ -1236,8 +1259,15 @@ static void cmd_button(int t, const char* label, int pressed) {
     x += g_x; y += g_y;
     if (pressed) frame(x, y, w, h, 0x00C4DDF6u, 0x007DA2CEu);
     else if (g_hover_tool == t) frame(x, y, w, h, 0x00E3EFFCu, 0x00A9C6EAu);
-    int tw = (int)strlen(label) * 8;
-    gfx_draw_text(x + (w - tw) / 2, y + 7, label, C_TEXT, pressed ? 0x00C4DDF6u : g_hover_tool == t ? 0x00E3EFFCu : C_CMD);
+    /* a menu button: its label, then a small drop-down arrow */
+    int arrow = t == T_ORGANIZE;
+    int tw = (int)strlen(label) * 8 + (arrow ? 10 : 0);
+    int tx = x + (w - tw) / 2;
+    gfx_draw_text(tx, y + 7, label, C_TEXT, pressed ? 0x00C4DDF6u : g_hover_tool == t ? 0x00E3EFFCu : C_CMD);
+    if (arrow) {
+        int ax = tx + (int)strlen(label) * 8 + 4, ay = y + 10;
+        for (int r = 0; r < 3; r++) gfx_fill_rect(ax + r, ay + r, 5 - 2 * r, 1, C_TEXT);
+    }
 }
 
 static void draw_toolbars(void) {
@@ -1298,7 +1328,7 @@ static void draw_toolbars(void) {
     /* the command bar */
     gradient(x + 3, y + CMD_Y, WIN_W - 6, CMD_H, C_CMD, C_CMD2);
     gfx_fill_rect(x + 3, y + CMD_Y + CMD_H - 1, WIN_W - 6, 1, C_LINE);
-    cmd_button(T_ORGANIZE, "Organize v", 0);
+    cmd_button(T_ORGANIZE, "Organize", 0);
     cmd_button(T_NEWFOLDER, "New folder", 0);
     if (WIN_W >= 600) cmd_button(T_TERMINAL, "Open in terminal", 0);
     cmd_button(T_UP, "Up", 0);
