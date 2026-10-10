@@ -265,9 +265,10 @@ static void draw_startup(void) {
     su_rows(y, ry);
     char line[96];
 
-    checkbox(x, ry[3], login_enabled());
-    label(x + 24, ry[3] + 3, passwd_is_set(PASSWD_USER) ? "Ask for the password at boot (login screen)"
-                                                        : "Ask for the password at boot (set one below first)", C_TEXT);
+    /* auto-login: the login screen's switch, the other way round */
+    checkbox(x, ry[3], !login_required());
+    label(x + 24, ry[3] + 3, passwd_is_set(PASSWD_USER) ? "Log in automatically (no password asked at boot)"
+                                                        : "Log in automatically (always: no password is set)", C_TEXT);
 
     checkbox(x, ry[0], rc_on("desktop"));
     label(x + 24, ry[0] + 3, "Desktop (start the GUI instead of the text console)", C_TEXT);
@@ -366,11 +367,14 @@ static void click_startup(int mx, int my) {
         return;
     }
     if (inside(mx, my, x, ry[3] - 4, w - 100, 24)) {
-        int on = !login_enabled();
-        login_set_enabled(on);
-        kstrlcpy(g_status, !on ? "No login screen at boot"
-                 : passwd_is_set(PASSWD_USER) ? "The password is asked at boot"
-                 : "The password will be asked at boot once one is set", sizeof(g_status));
+        if (!passwd_is_set(PASSWD_USER)) {
+            kstrlcpy(g_status, "No password is set: Banana OS always logs in by itself", sizeof(g_status));
+            return;
+        }
+        int ask = !login_enabled();
+        login_set_enabled(ask);
+        kstrlcpy(g_status, ask ? "The password is asked at boot" : "Logs in automatically at boot (the lock screen still asks)",
+                 sizeof(g_status));
         return;
     }
     /* the password fields and button */

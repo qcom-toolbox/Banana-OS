@@ -17,5 +17,7 @@ void irq_install(int irq, void (*handler)(void));
 void idt_ap_init(int cpu);
 /* 64-bit: the timer (IRQ 0's handlers) runs from the local APIC timer (1) or the PIT (0) */
 void irq_timer_from_lapic(int on);
+/* before a restart (in a VM): the local APIC as a BIOS expects it */
+void lapic_before_reset(void);
 
 #endif

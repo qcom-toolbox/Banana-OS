@@ -349,6 +349,30 @@ static void lapic_off(void) {
     __asm__ volatile("wrmsr" : : "a"(lo), "d"(hi), "c"(0x1Bu));
 }
 
+/* Before a restart, in a virtual machine: the local APIC back on, its LINT0
+ * passing the 8259's interrupts through (ExtINT), as a BIOS leaves it. QEMU
+ * (and maybe others) keeps an APIC switched off by lapic_off() off across
+ * the reset, with LINT0 masked: the BIOS then never got its timer interrupt
+ * and Banana Boot's countdown stood still. A real PC's reset clears it all
+ * (and some processors cannot switch a disabled APIC back on: not there). */
+void lapic_before_reset(void) {
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    if (!(c & (1u << 31)) || !(d & (1u << 5))) return;  /* not a VM / no MSRs */
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x1Bu));
+    if (!(lo & (1u << 11))) {
+        lo |= 1u << 11;
+        __asm__ volatile("wrmsr" : : "a"(lo), "d"(hi), "c"(0x1Bu));
+    }
+    uintptr_t base = (uintptr_t)(lo & 0xFFFFF000u);
+    if (!base || hi) return;
+    volatile uint32_t* apic = (volatile uint32_t*)base;
+    apic[0xF0 / 4] = 0x1FF;                             /* SVR: on, spurious vector 0xFF */
+    apic[0x350 / 4] = 0x700;                            /* LINT0: ExtINT */
+    apic[0x360 / 4] = 0x400;                            /* LINT1: NMI */
+}
+
 #ifdef __x86_64__
 /* A TSS for its interrupt stack table: page faults, stack faults and double
  * faults run on a stack of their own, so an app that ran into the guard

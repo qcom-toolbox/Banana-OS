@@ -31,6 +31,9 @@
 #include "../kernel/examples.h"
 #include "../kernel/settings.h"
 #include "../kernel/login.h"
+#include "../kernel/passwd.h"
+#include "../kernel/idt.h"
+#include "../kernel/acpi.h"
 #include "../kernel/meminfo.h"
 
 extern char _kernel_end[];   /* boot/linker.ld */
@@ -261,31 +264,39 @@ static void expand_line(const char* in, char* out, int outlen, int persona) {
 
 /* ── ACPI power off ──────────────────────────────────────────────── */
 static void acpi_poweroff(void) {
-    /*
-     * Try several well-known ACPI PM1a control port + SLP_TYP combos.
-     * VirtualBox:  port 0x4004, value 0x3400
-     * QEMU (-M pc): port 0xB004, value 0x2000  (PIIX4 ACPI)
-     * QEMU (-M q35): port 0x0604, value 0x2000
-     * Bochs:       port 0xB004, value 0x2000
-     * Fallback: triple-fault (halts in most VMs)
-     */
+    /* the firmware's own registers (FADT + the DSDT's \_S5_): VMware, real PCs... */
+    acpi_s5_poweroff();
+    /* still on: the well-known ports (VirtualBox 0x4004, QEMU PIIX4 and
+     * Bochs 0xB004, QEMU q35 0x604) */
     __asm__ volatile("outw %0, %1"::"a"((uint16_t)0x3400),"Nd"((uint16_t)0x4004));
     __asm__ volatile("outw %0, %1"::"a"((uint16_t)0x2000),"Nd"((uint16_t)0xB004));
     __asm__ volatile("outw %0, %1"::"a"((uint16_t)0x2000),"Nd"((uint16_t)0x0604));
-    /* last resort: triple fault */
-    __asm__ volatile("cli; lidt 0; int $0");
+    /* nothing worked: stop the CPU quietly (no triple fault: VMware takes
+     * that for a crash) */
+    for (;;) __asm__ volatile("cli; hlt");
 }
 
-/* ── reboot via 8042 pulse ───────────────────────────────────────── */
+/* ── reboot: three ways, each tried if the one before did nothing ──── */
 static void do_reboot(void) {
-    /* drain 8042 buffer */
-    while (__extension__({
-        uint8_t v; __asm__ volatile("inb %1,%0":"=a"(v):"Nd"((uint16_t)0x64));
-        v;
-    }) & 0x02);
-    /* pulse reset line */
-    __asm__ volatile("outb %0,%1"::"a"((uint8_t)0xFE),"Nd"((uint16_t)0x64));
-    __asm__ volatile("hlt");
+    __asm__ volatile("cli");
+    lapic_before_reset();                    /* (VMs: the BIOS needs it after the reset) */
+    /* 1. the keyboard controller's reset line (waiting for it a bounded
+     *    time: some controllers - or none, behind USB - never get ready) */
+    for (int i = 0; i < 100000; i++) {
+        uint8_t v;
+        __asm__ volatile("inb %1,%0" : "=a"(v) : "Nd"((uint16_t)0x64));
+        if (!(v & 0x02)) break;
+    }
+    __asm__ volatile("outb %0,%1" :: "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64));
+    for (volatile int i = 0; i < 10000000; i++) { }
+    /* 2. the chipset's reset control register (Intel PIIX/ICH and most others) */
+    __asm__ volatile("outb %0,%1" :: "a"((uint8_t)0x02), "Nd"((uint16_t)0xCF9));
+    __asm__ volatile("outb %0,%1" :: "a"((uint8_t)0x06), "Nd"((uint16_t)0xCF9));
+    for (volatile int i = 0; i < 10000000; i++) { }
+    /* 3. a triple fault: no interrupt table, then an interrupt */
+    static const struct __attribute__((packed)) { uint16_t limit; uintptr_t base; } none = { 0, 0 };
+    __asm__ volatile("lidt %0; int $3" :: "m"(none));
+    for (;;) __asm__ volatile("hlt");
 }
 
 /* ── deferred power actions (non-blocking) ──────────────────────── */
@@ -313,7 +324,35 @@ static void poll_deferred_actions(void) {
     acpi_poweroff();
 }
 
+/* the desktop's Start > Shut down: the files saved, then off or restart */
+void shell_power(int restart) {
+    sync_if_installed();
+    timer_sleep_ms(150);
+    if (restart) do_reboot();
+    else acpi_poweroff();
+}
+
+/* Installing and updating are the live CD's (or USB stick's) work: on an
+ * installed system these commands are not there at all. */
+static int live_only(const char* name) {
+    return k_strcmp(name, "install") == 0 || k_strcmp(name, "update") == 0 || k_strcmp(name, "installer") == 0;
+}
+static int cmd_hidden(const char* name) { return live_only(name) && !sysinfo_live_boot(); }
+
 /* ── commands ────────────────────────────────────────────────────── */
+
+/* autologin [on|off]: no password asked at boot (the login screen's switch,
+ * Settings > Startup). The lock screen still asks for it. */
+static void cmd_autologin(const char* args) {
+    if (k_strcmp(args, "on") == 0) login_set_enabled(0);
+    else if (k_strcmp(args, "off") == 0) login_set_enabled(1);
+    else if (args[0]) { terminal_writeln("Usage: autologin [on|off]"); return; }
+    if (!passwd_is_set(PASSWD_USER))
+        terminal_writeln("autologin: on - no password is set, so none is ever asked (passwd sets one)");
+    else
+        terminal_writeln(login_enabled() ? "autologin: off - the password is asked at boot"
+                                         : "autologin: on - Banana OS logs in at boot without the password");
+}
 
 static void cmd_reboot(const char* args) {
     (void)args;
@@ -743,7 +782,7 @@ static void cmd_top(void) {
 }
 
 static void cmd_help(void) {
-    static const char* lines[] = {
+    static const char* all_lines[] = {
         "Banana OS 0.5 - available commands:",
         "",
         "  help               show this message",
@@ -778,6 +817,7 @@ static void cmd_help(void) {
         "  unset <name>       remove an environment variable",
         "  env                list environment variables",
         "  chsh [sh|bash]     show/set the DEFAULT shell for new sessions",
+        "  autologin [on|off] log in at boot without the password (Settings > Startup)",
         "  ($VAR expands to env vars; \"!!\" repeats the last command)",
         "  run <file.sh>      run script file line by line",
         "  uptime             print current uptime",
@@ -847,7 +887,14 @@ static void cmd_help(void) {
         "  Editor: arrows move, ^O/^S save, ^X exit, ^K cut line, ^U paste",
         "",
     };
-    const int line_count = (int)(sizeof(lines) / sizeof(lines[0]));
+    /* (installing and updating: only on the live system) */
+    static const char* lines[sizeof(all_lines) / sizeof(all_lines[0])];
+    int line_count = 0;
+    for (int i = 0; i < (int)(sizeof(all_lines) / sizeof(all_lines[0])); i++) {
+        const char* l = all_lines[i];
+        if (!sysinfo_live_boot() && (k_strncmp(l, "  install ", 10) == 0 || k_strncmp(l, "  update ", 9) == 0 || k_strncmp(l, "  installer ", 12) == 0)) continue;
+        lines[line_count++] = l;
+    }
     if (terminal_is_capturing()) {           /* help > file: no pager */
         for (int i = 0; i < line_count; i++) terminal_writeln(lines[i]);
         return;
@@ -1232,7 +1279,7 @@ static const char* const known_cmds[] = {
     "uptime", "top", "exit", "start", "stop", "startx", "stopx",
     "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
     "hw_info", "shutdown", "reboot", "halt", "install", "sync", "update", "installer", "disks", "history", "which", "type",
-    "alias", "unalias", "export", "unset", "env", "chsh",
+    "alias", "unalias", "export", "unset", "env", "chsh", "autologin",
     "grep", "wc", "head", "tail", "find", "time",
     /* shell/netcmds.c + shell/wpcmd.c */
     "ifconfig", "dhcp", "ping", "nslookup", "host", "netstat", "arp", "curl", "wget",
@@ -1251,7 +1298,7 @@ static void cmd_which(const char* args) {
         return;
     }
     for (int i = 0; known_cmds[i]; i++) {
-        if (k_strcmp(tok, known_cmds[i]) == 0) {
+        if (k_strcmp(tok, known_cmds[i]) == 0 && !cmd_hidden(tok)) {
             terminal_write(tok);
             terminal_writeln(": shell builtin");
             return;
@@ -1279,7 +1326,7 @@ static void cmd_type(const char* args) {
         return;
     }
     for (int i = 0; known_cmds[i]; i++) {
-        if (k_strcmp(tok, known_cmds[i]) == 0) {
+        if (k_strcmp(tok, known_cmds[i]) == 0 && !cmd_hidden(tok)) {
             terminal_write(tok);
             terminal_writeln(" is a shell builtin");
             return;
@@ -2045,12 +2092,28 @@ static void shell_readline(char* buf, int maxlen, int persona) {
     }
 }
 
+/* The desktop is the machine's own screen: an SSH session does not start or
+ * stop it (that went wrong - the remote shell and the desktop then fought
+ * over the screen and the keyboard), and a terminal window does not close
+ * the desktop it is part of (Start > Shut down > Exit to the shell does). */
 static void cmd_startx(void) {
+    if (tty_current() >= 0) {
+        terminal_writeln("startx: not over SSH - the desktop belongs to the computer's own screen");
+        return;
+    }
     gui_set_enabled(1);
     terminal_writeln("startx: GUI enabled (Ctrl+T or click [Start]). Type 'stopx' to return to shell-only view.");
 }
 
 static void cmd_stopx(void) {
+    if (tty_current() >= 0) {
+        terminal_writeln("stopx: not over SSH - the desktop belongs to the computer's own screen");
+        return;
+    }
+    if (terminal_vt_get_active() != 0) {            /* a terminal window of the desktop */
+        terminal_writeln("stopx: not from a desktop window - use Start > Shut down > Exit to the shell");
+        return;
+    }
     gui_set_enabled(0);
     terminal_writeln("stopx: GUI disabled.");
 }
@@ -2173,6 +2236,26 @@ static void dispatch_cmd(const char* raw_line, int persona) {
 
     const char* line = k_skip_spaces(final_buf);
     if (!*line) return;
+
+    /* install / update / installer: not there on an installed system */
+    {
+        char first[16];
+        int n = 0;
+        while (line[n] && line[n] != ' ' && n < 15) { first[n] = line[n]; n++; }
+        first[n] = 0;
+        if (cmd_hidden(first)) {
+            terminal_write_color(shell_kind_name(persona), VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            terminal_write_color(": command not found: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            terminal_writeln(first);
+            terminal_write_color("(installing and updating Banana OS are done from the live CD or USB stick)\n",
+                                 VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK);
+            return;
+        }
+    }
+    if (k_strcmp(line, "autologin") == 0 || k_strncmp(line, "autologin ", 10) == 0) {
+        cmd_autologin(k_skip_spaces(line + 9));
+        return;
+    }
 
     /* exact matches */
     if (k_strcmp(line, "help")     == 0) { cmd_help();       return; }

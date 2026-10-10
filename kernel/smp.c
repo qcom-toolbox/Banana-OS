@@ -32,6 +32,84 @@ static int          g_found = 1;
 int cpu_count(void) { return g_cpus; }
 int smp_cores_found(void) { return g_found; }
 
+/* ── ACPI tables: where the cores are, and the power-off registers ── */
+
+typedef struct __attribute__((packed)) {
+    char     sig[8];
+    uint8_t  sum;
+    char     oem[6];
+    uint8_t  rev;
+    uint32_t rsdt;
+    uint32_t len;
+    uint64_t xsdt;
+    uint8_t  xsum;
+    uint8_t  res[3];
+} rsdp_t;
+
+typedef struct __attribute__((packed)) {
+    char     sig[4];
+    uint32_t len;
+    uint8_t  rev, sum;
+    char     oem[6];
+    char     oem_table[8];
+    uint32_t oem_rev, creator, creator_rev;
+} sdt_t;
+
+static int sum_ok(const uint8_t* p, uint32_t n) {
+    uint8_t s = 0;
+    while (n--) s += *p++;
+    return s == 0;
+}
+
+static const rsdp_t* scan_rsdp(uintptr_t a, uintptr_t end) {
+    for (; a + 20 <= end; a += 16)
+        if (memcmp((const void*)a, "RSD PTR ", 8) == 0 && sum_ok((const uint8_t*)a, 20)) return (const rsdp_t*)a;
+    return NULL;
+}
+
+static const rsdp_t* find_rsdp(void) {
+    const sysinfo_t* si = sysinfo_get();
+    if (si->has_rsdp) return (const rsdp_t*)si->rsdp;           /* GRUB's copy (UEFI too) */
+    const rsdp_t* r = scan_rsdp(0x9FC00, 0xA0000);              /* the usual EBDA */
+    return r ? r : scan_rsdp(0xE0000, 0x100000);                /* the BIOS area */
+}
+
+static const sdt_t* table_at(uint64_t a, const char* sig) {
+    if (!a || a + sizeof(sdt_t) > (4ull << 30)) return NULL;    /* (the low 4 GiB are mapped) */
+    const sdt_t* t = (const sdt_t*)(uintptr_t)a;
+    return memcmp(t->sig, sig, 4) == 0 ? t : NULL;
+}
+
+/* an ACPI table by its signature, through the XSDT or the RSDT */
+static const sdt_t* find_table(const rsdp_t* r, const char* sig) {
+    const sdt_t* x = r->rev >= 2 ? table_at(r->xsdt, "XSDT") : NULL;
+    if (x) {
+        for (uint32_t o = sizeof(sdt_t); o + 8 <= x->len; o += 8) {
+            uint64_t a;
+            memcpy(&a, (const uint8_t*)x + o, 8);
+            const sdt_t* t = table_at(a, sig);
+            if (t) return t;
+        }
+    }
+    const sdt_t* rs = table_at(r->rsdt, "RSDT");
+    if (rs) {
+        for (uint32_t o = sizeof(sdt_t); o + 4 <= rs->len; o += 4) {
+            uint32_t a;
+            memcpy(&a, (const uint8_t*)rs + o, 4);
+            const sdt_t* t = table_at(a, sig);
+            if (t) return t;
+        }
+    }
+    return NULL;
+}
+
+const void* acpi_find_table(const char* sig) {
+    const rsdp_t* r = find_rsdp();
+    return r ? find_table(r, sig) : NULL;
+}
+
+const void* acpi_table_at(uint64_t addr, const char* sig) { return table_at(addr, sig); }
+
 #ifndef __x86_64__
 
 /* the 32-bit kernel uses one core */
@@ -87,75 +165,6 @@ void smp_send_ipi(int cpu, int vector) {
     icr_send(g_apic_id[cpu], (uint32_t)vector | (1u << 14));      /* fixed, assert */
 }
 
-/* ── ACPI: where the cores are ───────────────────────────────────── */
-
-typedef struct __attribute__((packed)) {
-    char     sig[8];
-    uint8_t  sum;
-    char     oem[6];
-    uint8_t  rev;
-    uint32_t rsdt;
-    uint32_t len;
-    uint64_t xsdt;
-    uint8_t  xsum;
-    uint8_t  res[3];
-} rsdp_t;
-
-typedef struct __attribute__((packed)) {
-    char     sig[4];
-    uint32_t len;
-    uint8_t  rev, sum;
-    char     oem[6];
-    char     oem_table[8];
-    uint32_t oem_rev, creator, creator_rev;
-} sdt_t;
-
-static int sum_ok(const uint8_t* p, uint32_t n) {
-    uint8_t s = 0;
-    while (n--) s += *p++;
-    return s == 0;
-}
-
-static const rsdp_t* scan_rsdp(uintptr_t a, uintptr_t end) {
-    for (; a + 20 <= end; a += 16)
-        if (memcmp((const void*)a, "RSD PTR ", 8) == 0 && sum_ok((const uint8_t*)a, 20)) return (const rsdp_t*)a;
-    return NULL;
-}
-
-static const rsdp_t* find_rsdp(void) {
-    const sysinfo_t* si = sysinfo_get();
-    if (si->has_rsdp) return (const rsdp_t*)si->rsdp;           /* GRUB's copy (UEFI too) */
-    const rsdp_t* r = scan_rsdp(0x9FC00, 0xA0000);              /* the usual EBDA */
-    return r ? r : scan_rsdp(0xE0000, 0x100000);                /* the BIOS area */
-}
-
-static const sdt_t* table_at(uint64_t a, const char* sig) {
-    if (!a || a + sizeof(sdt_t) > (4ull << 30)) return NULL;    /* (the low 4 GiB are mapped) */
-    const sdt_t* t = (const sdt_t*)(uintptr_t)a;
-    return memcmp(t->sig, sig, 4) == 0 ? t : NULL;
-}
-
-static const sdt_t* find_madt(const rsdp_t* r) {
-    const sdt_t* x = r->rev >= 2 ? table_at(r->xsdt, "XSDT") : NULL;
-    if (x) {
-        for (uint32_t o = sizeof(sdt_t); o + 8 <= x->len; o += 8) {
-            uint64_t a;
-            memcpy(&a, (const uint8_t*)x + o, 8);
-            const sdt_t* t = table_at(a, "APIC");
-            if (t) return t;
-        }
-    }
-    const sdt_t* rs = table_at(r->rsdt, "RSDT");
-    if (rs) {
-        for (uint32_t o = sizeof(sdt_t); o + 4 <= rs->len; o += 4) {
-            uint32_t a;
-            memcpy(&a, (const uint8_t*)rs + o, 4);
-            const sdt_t* t = table_at(a, "APIC");
-            if (t) return t;
-        }
-    }
-    return NULL;
-}
 
 /* ── the I/O APICs ───────────────────────────────────────────────────
  * Not used for devices (the 8259 is), so their inputs are masked once the
@@ -363,7 +372,7 @@ void smp_init(void) {
      * Every 64-bit processor has one; the MADT below says how many cores.) */
     if (!(d & (1u << 5))) { klog("smp: no MSRs - using one core\n"); return; }
     const rsdp_t* r = find_rsdp();
-    const sdt_t* madt = r ? find_madt(r) : NULL;
+    const sdt_t* madt = r ? find_table(r, "APIC") : NULL;
     if (!madt) { klog("smp: no ACPI MADT - using one core\n"); return; }
 
     uint8_t ids[64];

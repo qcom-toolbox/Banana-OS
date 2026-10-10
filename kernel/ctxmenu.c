@@ -114,3 +114,7 @@ void ctxmenu_draw(void) {
 uint32_t ctxmenu_signature(void) {
     return g_open ? (g_gen * 2654435761u ^ (uint32_t)(g_x << 16 | g_y) ^ (uint32_t)(g_hover + 2)) : 0;
 }
+
+int ctxmenu_contains(int mx, int my) {
+    return g_open && mx >= g_x && mx < g_x + g_w && my >= g_y && my < g_y + g_h;
+}

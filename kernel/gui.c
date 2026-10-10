@@ -28,6 +28,7 @@
 #include "launcher.h"
 #include "taskmgr.h"
 #include "settings.h"
+#include "pkg.h"
 #include "../net/net.h"
 #include "../shell/shell.h"
 
@@ -36,32 +37,46 @@
 
 #define TASKBAR_ROW (VGA_HEIGHT - 1)
 
-/* the Start menu and the desktop shortcuts: the same entries */
-/* (About and Wallpaper live in Settings now: past MENU_ITEMS, reached from the desktop's menu) */
-enum { ACT_TERMINAL = 0, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_SETTINGS, ACT_QUIT, ACT_ABOUT, ACT_WALLPAPER, ACT_LOCK, ACT_INSTALL };
+/* The Start menu, Windows 95 style: Programs (a submenu of the installed
+ * apps), the built-in programs, and Shut down (a submenu: Restart, Shut
+ * down, Lock, Exit to shell). */
+/* (About and Wallpaper live in Settings now: reached from the desktop's menu) */
+enum { ACT_TERMINAL = 0, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_SETTINGS, ACT_QUIT, ACT_ABOUT,
+       ACT_WALLPAPER, ACT_LOCK, ACT_INSTALL, ACT_PROGRAMS, ACT_POWER, ACT_RESTART, ACT_SHUTDOWN, ACT_RUN_APP };
 /* slots: the installer's ("Install Banana OS") is there only on the live CD */
-#define MENU_ITEMS_MAX 9
-#define MENU_SLOT_INSTALL 7
+#define MENU_ITEMS_MAX 10
+#define MENU_SLOT_INSTALL 8
 static const int MENU_ACTS[MENU_ITEMS_MAX] = {
-    ACT_TERMINAL, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_SETTINGS, ACT_INSTALL, ACT_QUIT,
+    ACT_PROGRAMS, ACT_TERMINAL, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_SETTINGS, ACT_INSTALL, ACT_POWER,
 };
 static const char* const MENU_LABELS[MENU_ITEMS_MAX] = {
-    "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Install Banana OS", "Exit to shell",
-};
-static const char* const ICON_LABELS[MENU_ITEMS_MAX] = {
-    "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Install", "Quit GUI",
+    "Programs", "Terminal", "Files", "Browser", "Notepad", "Apps", "Task Manager", "Settings", "Install Banana OS", "Shut down",
 };
 static int menu_count(void) { return installer_available() ? MENU_ITEMS_MAX : MENU_ITEMS_MAX - 1; }
 /* a visible slot's entry in the tables above */
 static int menu_idx(int slot) { return (!installer_available() && slot >= MENU_SLOT_INSTALL) ? slot + 1 : slot; }
+static int menu_has_sub(int slot) { int a = MENU_ACTS[menu_idx(slot)]; return a == ACT_PROGRAMS || a == ACT_POWER; }
 #define MENU_ITEMS menu_count()
 #define START_MENU_W 236
 #define START_MENU_H (16 + MENU_ITEMS * 28)
-#define ICON_W 132
-#define ICON_H 38
-#define ICON_X 18
-#define ICON_Y 22
-#define ICON_STEP (ICON_H + 10)
+
+/* The desktop: big icons with their names under them, like Windows - the
+ * built-in programs, then every installed app; in columns from the top
+ * left. One click selects, a double click opens. */
+#define CELL_W 80
+#define CELL_H 74
+#define DESK_X 4
+#define DESK_Y 6
+#define DESK_MAX 48
+typedef struct {
+    int      act;                       /* ACT_*; ACT_RUN_APP: an installed app */
+    char     label[48];
+    char     app[PKG_NAME_MAX];
+} desk_item_t;
+static desk_item_t g_desk[DESK_MAX];
+static int         g_ndesk, g_desk_sel = -1, g_last_click_i = -1;
+static uint32_t    g_desk_sig, g_desk_checked, g_last_click_ms;
+static int         g_sub_slot = -1;     /* the Start menu item whose submenu is open */
 
 static int g_menu_open = 0;
 static int g_lock_pending = 0;   /* "Lock screen" was chosen */
@@ -205,85 +220,119 @@ static void draw_bevel_box(int x, int y, int w, int h, uint32_t base, uint32_t h
 }
 
 
+/* The icons: 14x14 drawings, at g_is times their size (1 in the menus,
+ * 2 on the desktop). IR: a rectangle in the icon's own coordinates. */
+static int g_is = 1;
+#define IR(dx, dy, w, h, c) gfx_fill_rect(x + (dx) * g_is, y + (dy) * g_is, (w) * g_is, (h) * g_is, (c))
+static void icon_bevel(int x, int y, int w, int h, uint32_t base, uint32_t hi, uint32_t lo) {
+    draw_bevel_box(x, y, w * g_is, h * g_is, base, hi, lo);
+}
+
 static void draw_icon_terminal(int x, int y, uint32_t bg) {
     (void)bg;
-    draw_bevel_box(x, y, 14, 12, 0x00161D28u, 0x00475A78u, 0x000E1118u);
-    gfx_draw_text(x + 2, y + 2, ">", 0x00E8EEF6u, 0x00161D28u);
+    icon_bevel(x, y, 14, 12, 0x00161D28u, 0x00475A78u, 0x000E1118u);
+    gfx_draw_text_scaled(x + 2 * g_is, y + 2 * g_is, g_is, ">", 0x00E8EEF6u, 0x00161D28u);
 }
 
 static void draw_icon_files(int x, int y, uint32_t bg) {
     (void)bg;
-    gfx_fill_rect(x, y + 1, 6, 2, 0x00F4D35Eu);
-    gfx_fill_rect(x, y + 3, 14, 9, 0x00F4D35Eu);
-    gfx_fill_rect(x + 1, y + 4, 12, 1, 0x00FFF1A8u);
+    IR(0, 1, 6, 2, 0x00F4D35Eu);
+    IR(0, 3, 14, 9, 0x00F4D35Eu);
+    IR(1, 4, 12, 1, 0x00FFF1A8u);
 }
 
 /* a sheet of paper with lines */
 static void draw_icon_notepad(int x, int y, uint32_t bg) {
     (void)bg;
-    gfx_fill_rect(x + 1, y, 11, 12, 0x00F2F2EAu);
-    gfx_fill_rect(x + 1, y, 11, 2, 0x005A86C8u);
-    for (int i = 0; i < 3; i++) gfx_fill_rect(x + 3, y + 4 + i * 3, 7, 1, 0x00808890u);
+    IR(1, 0, 11, 12, 0x00F2F2EAu);
+    IR(1, 0, 11, 2, 0x005A86C8u);
+    for (int i = 0; i < 3; i++) IR(3, 4 + i * 3, 7, 1, 0x00808890u);
 }
 
 /* a little globe */
 static void draw_icon_browser(int x, int y, uint32_t bg) {
     (void)bg;
-    gfx_fill_rect(x + 4, y, 6, 12, 0x003A7BD5u);
-    gfx_fill_rect(x + 1, y + 2, 12, 8, 0x003A7BD5u);
-    gfx_fill_rect(x + 2, y + 1, 10, 10, 0x003A7BD5u);
-    gfx_fill_rect(x + 3, y + 3, 4, 3, 0x0057B65Au);
-    gfx_fill_rect(x + 8, y + 6, 3, 3, 0x0057B65Au);
-    gfx_fill_rect(x + 1, y + 6, 12, 1, 0x00A9CCF5u);
-    gfx_fill_rect(x + 6, y, 1, 12, 0x00A9CCF5u);
+    IR(4, 0, 6, 12, 0x003A7BD5u);
+    IR(1, 2, 12, 8, 0x003A7BD5u);
+    IR(2, 1, 10, 10, 0x003A7BD5u);
+    IR(3, 3, 4, 3, 0x0057B65Au);
+    IR(8, 6, 3, 3, 0x0057B65Au);
+    IR(1, 6, 12, 1, 0x00A9CCF5u);
+    IR(6, 0, 1, 12, 0x00A9CCF5u);
 }
 
 /* four tiles */
 static void draw_icon_apps(int x, int y, uint32_t bg) {
     (void)bg;
-    gfx_fill_rect(x + 1, y, 5, 5, 0x003A7BD5u);
-    gfx_fill_rect(x + 8, y, 5, 5, 0x0057B65Au);
-    gfx_fill_rect(x + 1, y + 7, 5, 5, 0x00F4D35Eu);
-    gfx_fill_rect(x + 8, y + 7, 5, 5, 0x00E07040u);
+    IR(1, 0, 5, 5, 0x003A7BD5u);
+    IR(8, 0, 5, 5, 0x0057B65Au);
+    IR(1, 7, 5, 5, 0x00F4D35Eu);
+    IR(8, 7, 5, 5, 0x00E07040u);
 }
 
 /* a little CPU graph */
 static void draw_icon_taskmgr(int x, int y, uint32_t bg) {
     (void)bg;
-    draw_bevel_box(x, y, 14, 12, 0x00161D28u, 0x00475A78u, 0x000E1118u);
-    gfx_fill_rect(x + 2, y + 7, 2, 3, 0x0057B65Au);
-    gfx_fill_rect(x + 5, y + 4, 2, 6, 0x0057B65Au);
-    gfx_fill_rect(x + 8, y + 6, 2, 4, 0x0057B65Au);
-    gfx_fill_rect(x + 11, y + 2, 2, 8, 0x0057B65Au);
+    icon_bevel(x, y, 14, 12, 0x00161D28u, 0x00475A78u, 0x000E1118u);
+    IR(2, 7, 2, 3, 0x0057B65Au);
+    IR(5, 4, 2, 6, 0x0057B65Au);
+    IR(8, 6, 2, 4, 0x0057B65Au);
+    IR(11, 2, 2, 8, 0x0057B65Au);
 }
 
 /* a gear */
 static void draw_icon_settings(int x, int y, uint32_t bg) {
     const uint32_t c = 0x00C8D2E0u;
-    gfx_fill_rect(x + 5, y, 4, 14, c);
-    gfx_fill_rect(x, y + 5, 14, 4, c);
-    gfx_fill_rect(x + 2, y + 2, 10, 10, c);
-    gfx_fill_rect(x + 1, y + 1, 3, 3, c);
-    gfx_fill_rect(x + 10, y + 1, 3, 3, c);
-    gfx_fill_rect(x + 1, y + 10, 3, 3, c);
-    gfx_fill_rect(x + 10, y + 10, 3, 3, c);
-    gfx_fill_rect(x + 5, y + 5, 4, 4, bg);
+    IR(5, 0, 4, 14, c);
+    IR(0, 5, 14, 4, c);
+    IR(2, 2, 10, 10, c);
+    IR(1, 1, 3, 3, c);
+    IR(10, 1, 3, 3, c);
+    IR(1, 10, 3, 3, c);
+    IR(10, 10, 3, 3, c);
+    IR(5, 5, 4, 4, bg);
 }
 
 static void draw_icon_install(int x, int y, uint32_t bg) {
     (void)bg;
-    gfx_fill_rect(x + 5, y, 4, 6, 0x0080E080u);           /* the arrow */
-    gfx_fill_rect(x + 2, y + 5, 10, 2, 0x0080E080u);
-    gfx_fill_rect(x + 4, y + 7, 6, 1, 0x0080E080u);
-    gfx_fill_rect(x + 6, y + 8, 2, 1, 0x0080E080u);
-    gfx_fill_rect(x, y + 10, 14, 4, 0x00C8D2E0u);         /* the disk */
-    gfx_fill_rect(x + 10, y + 11, 2, 2, 0x0080E080u);
+    IR(5, 0, 4, 6, 0x0080E080u);           /* the arrow */
+    IR(2, 5, 10, 2, 0x0080E080u);
+    IR(4, 7, 6, 1, 0x0080E080u);
+    IR(6, 8, 2, 1, 0x0080E080u);
+    IR(0, 10, 14, 4, 0x00C8D2E0u);         /* the disk */
+    IR(10, 11, 2, 2, 0x0080E080u);
 }
 
 static void draw_icon_power(int x, int y, uint32_t bg) {
     (void)bg;
-    draw_bevel_box(x, y, 12, 12, 0x00412A2Au, 0x00764A4Au, 0x00170D0Du);
-    gfx_draw_text(x + 3, y + 2, "o", 0x00FFFFFFu, 0x00412A2Au);
+    icon_bevel(x, y, 12, 12, 0x00412A2Au, 0x00764A4Au, 0x00170D0Du);
+    gfx_draw_text_scaled(x + 3 * g_is, y + 2 * g_is, g_is, "o", 0x00FFFFFFu, 0x00412A2Au);
+}
+
+/* Programs: a folder with app tiles in it */
+static void draw_icon_programs(int x, int y, uint32_t bg) {
+    (void)bg;
+    IR(0, 1, 6, 2, 0x00D9B44Au);
+    IR(0, 3, 14, 10, 0x00D9B44Au);
+    IR(2, 5, 4, 3, 0x003A7BD5u);
+    IR(8, 5, 4, 3, 0x0057B65Au);
+    IR(2, 9, 4, 3, 0x00E07040u);
+    IR(8, 9, 4, 3, 0x00F4F8FFu);
+}
+
+/* an installed app: a little window, its colour and initial from its name */
+static const char* g_app_icon_name = "";
+static void draw_icon_app(int x, int y, uint32_t bg) {
+    (void)bg;
+    static const uint32_t COLORS[6] = { 0x003A7BD5u, 0x0057B65Au, 0x00E07040u, 0x009B59B6u, 0x00D9B44Au, 0x0020A0A0u };
+    uint32_t h = 0;
+    for (const char* p = g_app_icon_name; *p; p++) h = h * 31u + (uint8_t)*p;
+    uint32_t c = COLORS[h % 6];
+    icon_bevel(x, y, 14, 13, 0x00E8ECF2u, 0x00FFFFFFu, 0x00707888u);
+    IR(0, 0, 14, 3, c);
+    char ini[2] = { g_app_icon_name[0] ? g_app_icon_name[0] : '?', 0 };
+    if (ini[0] >= 'a' && ini[0] <= 'z') ini[0] = (char)(ini[0] - 32);
+    gfx_draw_text_scaled(x + 3 * g_is, y + 4 * g_is, g_is, ini, c, 0x00E8ECF2u);
 }
 
 /* a tiny "photo" glyph: sky, sun, hill */
@@ -1005,12 +1054,17 @@ typedef struct {
     int term_w[TERM_WIN_MAX], term_h[TERM_WIN_MAX], term_sel[TERM_WIN_MAX], term_min[TERM_WIN_MAX];
     int front_app, app_order[APP_COUNT], app_min[APP_COUNT];
     uint32_t sec, term_gen, wp_gen, net_state, app_sig[APP_COUNT], ctx_sig, tb_gen;
+    uint32_t desk_sig;
+    int desk_sel, sub_slot;
 } gui_view_t;
 
 static void capture_view(gui_view_t* v, uint32_t sec) {
     memset(v, 0, sizeof(*v));
     v->menu_open = g_menu_open;
     v->menu_sel = g_menu_sel;
+    v->desk_sig = g_desk_sig;
+    v->desk_sel = g_desk_sel;
+    v->sub_slot = g_sub_slot;
     for (int i = 0; i < TERM_WIN_MAX; i++) {
         v->term_open[i] = g_terms[i].open;
         v->term_x[i] = g_terms[i].x;
@@ -1039,23 +1093,155 @@ static gui_view_t g_last_view;
 static int        g_force_redraw = 1;
 
 static void (*const g_menu_icons[MENU_ITEMS_MAX])(int, int, uint32_t) = {
-    draw_icon_terminal, draw_icon_files, draw_icon_browser, draw_icon_notepad,
+    draw_icon_programs, draw_icon_terminal, draw_icon_files, draw_icon_browser, draw_icon_notepad,
     draw_icon_apps, draw_icon_taskmgr, draw_icon_settings, draw_icon_install, draw_icon_power,
 };
 
 static int start_menu_y(const fb_info_t* fi) { return (int)fi->height - BAR_H - START_MENU_H - 4; }
 
+/* the Start menu item under (mx, my), or -1 */
+static int start_item_at(const fb_info_t* fi, int mx, int my) {
+    if (!g_menu_open || mx < START_X + 24 || mx >= START_X + START_MENU_W - 8) return -1;
+    int menu_y = start_menu_y(fi);
+    for (int i = 0; i < MENU_ITEMS; i++) {
+        int y0 = menu_y + 8 + i * 28;
+        if (my >= y0 && my < y0 + 24) return i;
+    }
+    return -1;
+}
+
+/* ── the desktop's icons ─────────────────────────────────────────────── */
+
+static void desk_add(int act, const char* label, const char* app) {
+    if (g_ndesk >= DESK_MAX) return;
+    desk_item_t* d = &g_desk[g_ndesk++];
+    d->act = act;
+    kstrlcpy(d->label, label, sizeof(d->label));
+    kstrlcpy(d->app, app ? app : "", sizeof(d->app));
+}
+
+/* the built-in programs, then the installed apps (looked at again every
+ * 2 s: an app installed or removed shows up by itself) */
+static pkg_info_t g_pkgs[DESK_MAX];
+static void desk_refresh(int force) {
+    if (!force && g_ndesk && timer_ms() - g_desk_checked < 2000) return;
+    g_desk_checked = timer_ms();
+    g_ndesk = 0;
+    desk_add(ACT_TERMINAL, "Terminal", NULL);
+    desk_add(ACT_FILES, "Files", NULL);
+    desk_add(ACT_BROWSER, "Browser", NULL);
+    desk_add(ACT_NOTEPAD, "Notepad", NULL);
+    desk_add(ACT_APPS, "Apps", NULL);
+    desk_add(ACT_TASKMGR, "Task Manager", NULL);
+    desk_add(ACT_SETTINGS, "Settings", NULL);
+    if (installer_available()) desk_add(ACT_INSTALL, "Install Banana OS", NULL);
+    int n = pkg_list(g_pkgs, DESK_MAX);
+    for (int i = 0; i < n && i < DESK_MAX; i++)
+        desk_add(ACT_RUN_APP, g_pkgs[i].title[0] ? g_pkgs[i].title : g_pkgs[i].name, g_pkgs[i].name);
+    uint32_t sig = (uint32_t)g_ndesk;
+    for (int i = 0; i < g_ndesk; i++)
+        for (const char* p = g_desk[i].label; *p; p++) sig = sig * 31u + (uint8_t)*p;
+    if (sig != g_desk_sig) { g_desk_sig = sig; if (g_desk_sel >= g_ndesk) g_desk_sel = -1; }
+}
+
+static int desk_rows(const fb_info_t* fi) {
+    int r = ((int)fi->height - BAR_H - DESK_Y) / CELL_H;
+    return r < 1 ? 1 : r;
+}
+static void desk_cell(const fb_info_t* fi, int i, int* x, int* y) {
+    int rows = desk_rows(fi);
+    *x = DESK_X + (i / rows) * CELL_W;
+    *y = DESK_Y + (i % rows) * CELL_H;
+}
+
+static void desk_icon(int act, int x, int y, const char* app) {
+    switch (act) {
+    case ACT_TERMINAL: draw_icon_terminal(x, y, 0); break;
+    case ACT_FILES:    draw_icon_files(x, y, 0); break;
+    case ACT_BROWSER:  draw_icon_browser(x, y, 0); break;
+    case ACT_NOTEPAD:  draw_icon_notepad(x, y, 0); break;
+    case ACT_APPS:     draw_icon_apps(x, y, 0); break;
+    case ACT_TASKMGR:  draw_icon_taskmgr(x, y, 0); break;
+    case ACT_SETTINGS: draw_icon_settings(x, y, 0x00303A48u); break;
+    case ACT_INSTALL:  draw_icon_install(x, y, 0); break;
+    default:           g_app_icon_name = app; draw_icon_app(x, y, 0); break;
+    }
+}
+
+static void draw_desktop_icons(const fb_info_t* fi) {
+    g_is = 2;                                   /* 28 x 28 */
+    for (int i = 0; i < g_ndesk; i++) {
+        int x, y;
+        desk_cell(fi, i, &x, &y);
+        if (x + CELL_W > (int)fi->width) break;
+        int sel = i == g_desk_sel;
+        if (sel) gfx_fill_rect(x + (CELL_W - 36) / 2, y + 2, 36, 34, 0x00315A9Cu);   /* selected: tinted */
+        desk_icon(g_desk[i].act, x + (CELL_W - 28) / 2, y + 5, g_desk[i].app);
+        gfx_draw_label(x + CELL_W / 2, y + 40, CELL_W - 6, g_desk[i].label, 0x00FFFFFFu, sel ? 0x00315A9Cu : 0);
+    }
+    g_is = 1;
+}
+
+/* the icon under (mx, my), or -1 */
+static int icon_at(int mx, int my) {
+    const fb_info_t* fi = fb_info();
+    if (!fi) return -1;
+    for (int i = 0; i < g_ndesk; i++) {
+        int x, y;
+        desk_cell(fi, i, &x, &y);
+        if (mx >= x + 4 && mx < x + CELL_W - 4 && my >= y + 2 && my < y + CELL_H - 4) return i;
+    }
+    return -1;
+}
+
+/* ── the Start menu's submenus (drawn by the right-click menu code) ──── */
+
+static void do_action(int act);
+static void run_app(const char* name);
+static char g_prog_names[CTX_MAX_ITEMS][PKG_NAME_MAX];
+
+static void programs_cb(int id, void* arg) {
+    (void)arg;
+    g_sub_slot = -1;
+    g_menu_open = 0;
+    if (id == 1000) { do_action(ACT_APPS); return; }
+    if (id >= 0 && id < CTX_MAX_ITEMS) run_app(g_prog_names[id]);
+}
+static void power_cb(int id, void* arg) { (void)arg; g_sub_slot = -1; do_action(id); }
+
+static void open_submenu(const fb_info_t* fi, int slot) {
+    ctx_item_t items[CTX_MAX_ITEMS];
+    int n = 0;
+    int x = START_X + START_MENU_W - 6, y = start_menu_y(fi) + 6 + slot * 28;
+    if (MENU_ACTS[menu_idx(slot)] == ACT_PROGRAMS) {
+        int k = pkg_list(g_pkgs, DESK_MAX);
+        for (int i = 0; i < k && n < CTX_MAX_ITEMS - 2; i++) {
+            kstrlcpy(g_prog_names[n], g_pkgs[i].name, PKG_NAME_MAX);
+            items[n].label = g_pkgs[i].title[0] ? g_pkgs[i].title : g_pkgs[i].name;
+            items[n].id = n;
+            items[n].disabled = 0;
+            n++;
+        }
+        if (!n) items[n++] = (ctx_item_t){ "(no apps installed)", -1, 1 };
+        items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
+        items[n++] = (ctx_item_t){ "All apps...", 1000, 0 };
+        ctxmenu_open(x, y, items, n, programs_cb, NULL);
+    } else {
+        items[n++] = (ctx_item_t){ "Restart", ACT_RESTART, 0 };
+        items[n++] = (ctx_item_t){ "Shut down", ACT_SHUTDOWN, 0 };
+        items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
+        items[n++] = (ctx_item_t){ "Lock the screen", ACT_LOCK, 0 };
+        items[n++] = (ctx_item_t){ "Exit to the shell", ACT_QUIT, 0 };
+        ctxmenu_open(x, y, items, n, power_cb, NULL);
+    }
+    g_sub_slot = slot;
+}
+
 static void render_desktop(const fb_info_t* fi, int mx, int my) {
     refresh_wallpaper_cache(fi);
     blit_wallpaper_cache();
 
-    /* desktop shortcuts */
-    for (int i = 0; i < MENU_ITEMS; i++) {
-        int iy = ICON_Y + ICON_STEP * i;
-        draw_bevel_box(ICON_X, iy, ICON_W, ICON_H, 0x0029313Du, 0x00586678u, 0x0010151Eu);
-        g_menu_icons[menu_idx(i)](ICON_X + 8, iy + 12, 0x0029313Du);
-        gfx_draw_text(ICON_X + 30, iy + 13, ICON_LABELS[menu_idx(i)], 0x00F0F6FFu, 0x0029313Du);
-    }
+    draw_desktop_icons(fi);
 
     /* windows back to front: the app windows behind the terminals, the
      * terminals, then the app window in front of them (if any) */
@@ -1076,10 +1262,13 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
         gfx_fill_rect(menu_x + 2, menu_y + 2, 18, START_MENU_H - 4, 0x00354463u);
         gfx_draw_text(menu_x + 5, menu_y + 8, "B", 0x00F4F8FFu, 0x00354463u);
         for (int i = 0; i < MENU_ITEMS; i++) {
-            uint32_t bg = (g_menu_sel == i) ? 0x003A4A66u : 0x001D232Cu;
+            uint32_t bg = (g_menu_sel == i || g_sub_slot == i) ? 0x003A4A66u : 0x001D232Cu;
+            if (MENU_ACTS[menu_idx(i)] == ACT_POWER)                 /* a line above Shut down */
+                gfx_fill_rect(menu_x + 24, menu_y + 5 + i * 28, START_MENU_W - 32, 1, 0x00404B5Cu);
             gfx_fill_rect(menu_x + 24, menu_y + 8 + i * 28, START_MENU_W - 32, 24, bg);
             g_menu_icons[menu_idx(i)](menu_x + 28, menu_y + 14 + i * 28, bg);
             gfx_draw_text(menu_x + 48, menu_y + 16 + i * 28, MENU_LABELS[menu_idx(i)], 0x00E8EEF6u, bg);
+            if (menu_has_sub(i)) gfx_draw_text(menu_x + START_MENU_W - 22, menu_y + 16 + i * 28, ">", 0x00B8C4D6u, bg);
         }
     }
 
@@ -1114,13 +1303,31 @@ static void open_desktop_menu(int mx, int my) {
     ctxmenu_open(mx, my, items, (int)(sizeof(items) / sizeof(items[0])), desktop_menu_cb, NULL);
 }
 
-static void icon_menu_cb(int id, void* arg) { (void)arg; do_action(id); }
+/* a desktop icon: open it (an installed app: also remove it) */
+static int g_icon_menu_i;
+enum { ICM_OPEN = 1, ICM_REMOVE };
+static void icon_menu_cb(int id, void* arg) {
+    (void)arg;
+    int i = g_icon_menu_i;
+    if (i < 0 || i >= g_ndesk) return;
+    if (id == ICM_OPEN) {
+        if (g_desk[i].act == ACT_RUN_APP) run_app(g_desk[i].app);
+        else do_action(g_desk[i].act);
+    } else if (id == ICM_REMOVE && g_desk[i].act == ACT_RUN_APP) {
+        char msg[96];
+        pkg_remove(g_desk[i].app, msg, sizeof(msg));
+        g_desk_sel = -1;
+        desk_refresh(1);
+    }
+}
 
-static void open_icon_menu(int slot, int mx, int my) {
-    char open[40];
-    ksnprintf(open, sizeof(open), "Open %s", ICON_LABELS[menu_idx(slot)]);
-    ctx_item_t items[] = { { open, MENU_ACTS[menu_idx(slot)], 0 } };
-    ctxmenu_open(mx, my, items, 1, icon_menu_cb, NULL);
+static void open_icon_menu(int i, int mx, int my) {
+    char open[64];
+    ksnprintf(open, sizeof(open), "Open %s", g_desk[i].label);
+    ctx_item_t items[3] = { { open, ICM_OPEN, 0 }, { CTX_SEP, 0, 0 }, { "Remove this app", ICM_REMOVE, 0 } };
+    g_icon_menu_i = i;
+    g_desk_sel = i;
+    ctxmenu_open(mx, my, items, g_desk[i].act == ACT_RUN_APP ? 3 : 1, icon_menu_cb, NULL);
 }
 
 /* taskbar: Task Manager & co, or one window's button */
@@ -1229,13 +1436,6 @@ static void explorer_rclick_menu(int mx, int my) {
 }
 
 /* ── the desktop loop ───────────────────────────────────────────────── */
-
-static int icon_at(int mx, int my) {
-    for (int i = 0; i < MENU_ITEMS; i++)
-        if (mx >= ICON_X && mx < ICON_X + ICON_W && my >= ICON_Y + ICON_STEP * i && my < ICON_Y + ICON_STEP * i + ICON_H)
-            return i;
-    return -1;
-}
 
 int gui_appwin_focused(void) {
     return gfx_available() && g_gui_enabled && g_front_app == APP_APPWIN && appwin_any_visible() && tty_current() < 0;
@@ -1369,6 +1569,24 @@ static void gui_poll_body(void) {
 
         ctxmenu_hover(mx, my);
 
+        /* the Start menu follows the pointer, and its submenus open by
+         * themselves under it - Windows 95 style */
+        if (!ctxmenu_is_open()) g_sub_slot = -1;
+        if (g_menu_open && !ctxmenu_contains(mx, my)) {
+            static int hover_slot = -1;
+            static uint32_t hover_since;
+            int si = start_item_at(fi, mx, my);
+            if (si != hover_slot) { hover_slot = si; hover_since = timer_ms(); }
+            /* with a submenu open, another item takes over only once the
+             * pointer rests on it (0.3 s): on the way to the submenu it may
+             * cross the items below or above */
+            if (si >= 0 && (g_sub_slot < 0 || timer_ms() - hover_since >= 300)) {
+                g_menu_sel = si;
+                if (menu_has_sub(si)) { if (g_sub_slot != si) open_submenu(fi, si); }
+                else if (g_sub_slot >= 0) { ctxmenu_close(); g_sub_slot = -1; }
+            }
+        }
+
         if (rclick) {
             /* right-click: the menu of whatever is under the mouse */
             ctxmenu_close();
@@ -1393,8 +1611,10 @@ static void gui_poll_body(void) {
         }
 
         if (click && ctxmenu_is_open()) {
-            ctxmenu_click(mx, my);        /* an item, or a click outside that just closes it */
-            click = 0;
+            /* a Start submenu: a click beside it goes on to the Start menu (or closes it) */
+            int beside = g_sub_slot >= 0 && !ctxmenu_contains(mx, my);
+            if (beside) { ctxmenu_close(); g_sub_slot = -1; }
+            else { ctxmenu_click(mx, my); click = 0; }   /* an item, or a click outside that just closes it */
             if (!g_gui_enabled) return;
         }
 
@@ -1420,19 +1640,14 @@ static void gui_poll_body(void) {
 
             /* click in menu items (the open menu is above every window) */
             if (click && g_menu_open) {
-                int menu_y = start_menu_y(fi);
-                int item_x0 = START_X + 24;
-                int item_x1 = START_X + START_MENU_W - 8;
-                if (mx >= item_x0 && mx < item_x1) {
-                    for (int i = 0; i < MENU_ITEMS; i++) {
-                        int y0 = menu_y + 8 + i * 28;
-                        if (my >= y0 && my < y0 + 24) {
-                            g_menu_sel = i;
-                            menu_activate();
-                            click = 0;
-                            break;
-                        }
-                    }
+                int si = start_item_at(fi, mx, my);
+                if (si >= 0) {
+                    g_menu_sel = si;
+                    menu_activate();
+                    click = 0;
+                } else if (mx >= START_X && mx < START_X + START_MENU_W && my >= start_menu_y(fi) &&
+                           my < start_menu_y(fi) + START_MENU_H) {
+                    click = 0;                /* the menu's own margin */
                 }
                 if (!g_gui_enabled) return;
                 if (click) g_menu_open = 0;   /* a click elsewhere closes the menu */
@@ -1518,10 +1733,19 @@ static void gui_poll_body(void) {
                 }
             }
 
-            /* desktop shortcuts */
+            /* the desktop's icons: a click selects, a double click opens */
             if (click && !g_menu_open) {
-                int slot = icon_at(mx, my);
-                if (slot >= 0) do_action(MENU_ACTS[menu_idx(slot)]);
+                int i = icon_at(mx, my);
+                uint32_t now = timer_ms();
+                if (i >= 0 && i == g_last_click_i && now - g_last_click_ms < 500) {
+                    g_last_click_i = -1;
+                    if (g_desk[i].act == ACT_RUN_APP) run_app(g_desk[i].app);
+                    else do_action(g_desk[i].act);
+                } else {
+                    g_last_click_i = i;
+                    g_last_click_ms = now;
+                }
+                g_desk_sel = i;
                 if (!g_gui_enabled) return;
             }
         }
@@ -1562,6 +1786,7 @@ static void gui_poll_body(void) {
         }
         for (int a = 0; a < APP_COUNT; a++) if (g_apps[a].is_open()) g_apps[a].mouse(mx, my, left);
 
+        desk_refresh(0);
         gui_view_t view;
         capture_view(&view, sec);
         int changed = g_force_redraw || memcmp(&view, &g_last_view, sizeof(view)) != 0;
@@ -1693,6 +1918,8 @@ static void do_action(int act) {
     case ACT_WALLPAPER: settings_open_page(SETTINGS_PAGE_DISPLAY); g_app_min[APP_SETTINGS] = 0; raise_app(APP_SETTINGS); break;
     case ACT_QUIT: gui_set_enabled(0); break;
     case ACT_INSTALL: installer_open(); g_app_min[APP_INSTALLER] = 0; raise_app(APP_INSTALLER); break;
+    case ACT_RESTART: shell_power(1); break;          /* (saves the files first) */
+    case ACT_SHUTDOWN: shell_power(0); break;
     case ACT_LOCK:
         if (passwd_is_set(PASSWD_USER)) {
             g_lock_pending = 1;            /* gui_poll() shows it, outside any menu */
@@ -1706,12 +1933,27 @@ static void do_action(int act) {
     }
 }
 
+/* an installed app, from the desktop or Programs (as the Apps window does) */
+static void run_app(const char* name) {
+    char err[96];
+    g_menu_open = 0;
+    if (pkg_run(name, 0, NULL, 1, err, sizeof(err)) < 0) klog("gui: %s: %s\n", name, err);
+}
+
 static void menu_activate(void) {
     int act = MENU_ACTS[menu_idx(g_menu_sel)];
-    if (gfx_available()) { do_action(act); return; }
+    if (gfx_available()) {
+        if (menu_has_sub(g_menu_sel)) {               /* Programs, Shut down: their submenu */
+            const fb_info_t* fi = fb_info();
+            if (fi) open_submenu(fi, g_menu_sel);
+            return;
+        }
+        do_action(act);
+        return;
+    }
     /* text mode: the desktop's apps need the framebuffer */
     menu_close_redraw();
-    if (act == ACT_QUIT) gui_set_enabled(0);
+    if (act == ACT_QUIT || act == ACT_POWER) gui_set_enabled(0);
 }
 
 /* ── windows for the Task Manager ──────────────────────────────────── */

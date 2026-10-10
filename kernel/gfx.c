@@ -134,3 +134,81 @@ void gfx_draw_grip(int right, int bottom) {
         for (int k = 0; k <= row; k++)
             gfx_fill_rect(right - 5 - (row - k) * 4, bottom - 5 - k * 4, 2, 2, 0x008A96AAu);
 }
+
+/* ── desktop icon labels: no background - the text straight on the
+ * wallpaper with a dark shadow, so it reads on light and dark pictures
+ * alike - centred under the icon, wrapped onto up to two lines ── */
+
+/* one line, centred on cx, drawn transparently (fg) */
+static void label_line(int cx, int y, const char* s, uint32_t n, uint32_t fg, int px) {
+    int stride, tw, th;
+    uint32_t* t = fb_target(&stride, &tw, &th);
+    if (!t || !n) return;
+    if (font_available(FONT_SANS)) {
+        int asc, desc, lh;
+        font_metrics(FONT_SANS, px, &asc, &desc, &lh);
+        int w = font_text_width(FONT_SANS, px, s, n);
+        font_draw(t, stride, 0, 0, tw, th, FONT_SANS, px, cx - w / 2, y + asc, s, n, fg, 0);
+        return;
+    }
+    /* no TrueType font: the 8x8 one, only its set pixels */
+    int x = cx - (int)n * 4;
+    for (uint32_t i = 0; i < n; i++, x += 8) {
+        uint8_t uc = (uint8_t)s[i];
+        if (uc >= 128) uc = '?';
+        const uint8_t* g = font8x8_basic[uc];
+        for (int gy = 0; gy < 8; gy++)
+            for (int gx = 0; gx < 8; gx++)
+                if (g[gy] & (1u << gx)) fb_fill_rect(x + gx, y + gy, 1, 1, fg);
+    }
+}
+
+static int label_w(const char* s, uint32_t n, int px) {
+    return font_available(FONT_SANS) ? font_text_width(FONT_SANS, px, s, n) : (int)n * 8;
+}
+
+int gfx_draw_label(int cx, int y, int max_w, const char* s, uint32_t fg, uint32_t highlight) {
+    if (!g_ok || !s) return 0;
+    const int px = 12;
+    int lh = 14;
+    if (font_available(FONT_SANS)) { int a, d; font_metrics(FONT_SANS, px, &a, &d, &lh); }
+    /* the lines: as many words as fit, at most two (the second cut short with "..") */
+    uint32_t len = (uint32_t)strlen(s), start[2] = { 0, 0 }, cnt[2] = { 0, 0 };
+    int lines = 0;
+    uint32_t p = 0;
+    while (p < len && lines < 2) {
+        while (p < len && s[p] == ' ') p++;
+        uint32_t best = 0, q = p;
+        while (q <= len) {
+            if (q == len || s[q] == ' ') {
+                if (label_w(s + p, q - p, px) <= max_w || !best) best = q - p;
+                else break;
+                if (q == len) break;
+            }
+            q++;
+        }
+        if (!best) break;
+        start[lines] = p;
+        cnt[lines] = best;
+        lines++;
+        p += best;
+    }
+    char tail[64];
+    const char* l2 = s + start[1];
+    if (lines == 2 && start[1] + cnt[1] < len) {          /* more than fits: ".." */
+        uint32_t n = cnt[1] < sizeof(tail) - 3 ? cnt[1] : sizeof(tail) - 3;
+        while (n && label_w(s + start[1], n, px) + label_w("..", 2, px) > max_w) n--;
+        memcpy(tail, s + start[1], n);
+        tail[n] = '.'; tail[n + 1] = '.'; tail[n + 2] = 0;
+        l2 = tail;
+        cnt[1] = n + 2;
+    }
+    for (int i = 0; i < lines; i++) {
+        const char* ls = i ? l2 : s + start[0];
+        int w = label_w(ls, cnt[i], px), ly = y + i * lh;
+        if (highlight) gfx_fill_rect(cx - w / 2 - 2, ly - 1, w + 4, lh + 1, highlight);
+        else label_line(cx + 1, ly + 1, ls, cnt[i], 0x00000000u, px);   /* the shadow */
+        label_line(cx, ly, ls, cnt[i], fg, px);
+    }
+    return lines * lh;
+}

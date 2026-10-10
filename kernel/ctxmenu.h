@@ -29,6 +29,8 @@ int  ctxmenu_is_open(void);
  * click was the menu's (it never reaches the windows below then) */
 int  ctxmenu_click(int mx, int my);
 void ctxmenu_hover(int mx, int my);
+/* the open menu covers (mx, my) */
+int  ctxmenu_contains(int mx, int my);
 void ctxmenu_draw(void);
 uint32_t ctxmenu_signature(void);
 

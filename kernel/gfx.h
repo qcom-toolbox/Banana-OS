@@ -19,5 +19,10 @@ void gfx_draw_grip(int right, int bottom);
 void gfx_set_smooth_text(int on);
 int  gfx_smooth_text(void);
 
+/* a desktop icon's name: centred on cx, wrapped onto up to two lines max_w wide,
+ * straight on the wallpaper with a dark shadow (or on highlight, if not 0);
+ * returns its height */
+int  gfx_draw_label(int cx, int y, int max_w, const char* s, uint32_t fg, uint32_t highlight);
+
 #endif
 

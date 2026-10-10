@@ -202,14 +202,8 @@ Banana-OS/
   - network status (`eth0 10.0.2.15`)
   - `Quit` button
   - live clock
-- Start menu and desktop shortcuts, both with the same entries:
-  - About app
-  - Terminal
-  - Files
-  - Browser
-  - Notepad
-  - Wallpaper
-  - Quit GUI
+- Start menu (Windows 95 style): **Programs** (a submenu with every installed app, and *All apps...*), Terminal, Files, Browser, Notepad, Apps, Task Manager, Settings, and **Shut down** (a submenu: *Restart*, *Shut down*, *Lock the screen*, *Exit to the shell*); submenus open when the pointer rests on their entry
+- Desktop icons like on Windows: the icon with its name under it, straight on the wallpaper (no box behind the text, a shadow keeps it readable); every installed app gets its own icon too. Click selects, double-click opens, right-click an app's icon for *Open* / *Remove this app*
 - Files - the file explorer (below)
 - Browser - the web browser (below)
 - Notepad - a text editor window: click to place the cursor, drag to select, double-click selects a word; Ctrl+A/C/X/V, Ctrl+S save, Ctrl+O open, Ctrl+N new, Ctrl+F find and Ctrl+G find next, right-click pastes; closing it with unsaved changes asks whether to save them
@@ -565,17 +559,18 @@ Bash-flavored extras (available in both personas, since they share one engine):
 | `free [-h\|-k\|-m\|-g]` | RAM: total, used, free, file data in RAM |
 | `df [-h\|-k\|-m] [-i]` | Disk space of `/` and the USB sticks: size, used, free (`-i`: files and folders) |
 | `ram_info [-t -u -h -f -p -m]` | Memory usage, including the kernel heap (`-h`) |
-| `startx` | Start GUI desktop |
-| `stopx` | Quit GUI desktop |
+| `startx` | Start GUI desktop (on the machine's own screen: not over SSH) |
+| `stopx` | Quit GUI desktop (not over SSH, nor from a terminal window inside the desktop: use Start > Shut down > Exit to the shell) |
 | `start` | Alias of `startx` |
 | `stop` | Alias of `stopx` |
 | `keyboardctl [layout]` | Show/set keyboard layout (`EN (Default)`, `fr_CH`, `FR`, `DE`, `de_CH`, `BEPO`) |
 | `loadctl [layout]` | Alias of `keyboardctl` |
 | `usbctl` | Show USB legacy handoff state |
-| `shutdown [now\|-c]` | Schedule shutdown (60s), immediate shutdown, or cancel |
+| `shutdown [now\|-c]` | Schedule shutdown (60s), immediate shutdown, or cancel - powers off the ACPI way (the firmware's FADT and `\_S5_`), which VMware, VirtualBox, QEMU and real PCs all accept |
+| `autologin [on\|off]` | Log in without the password at boot (also in Settings > Startup) |
 | `reboot` | Immediate reboot |
 | `halt` | Hard CPU halt |
-| `install` | Install Banana OS onto a dedicated IDE, SATA or NVMe disk - bootable, with a persistent filesystem |
+| `install` | Install Banana OS onto a dedicated IDE, SATA or NVMe disk - bootable, with a persistent filesystem (live CD/USB only: `install` and `update` do not exist on an installed system) |
 | `disks` | List the IDE, SATA (AHCI) and NVMe disks and CD/DVD drives |
 | `sync` | Re-write the filesystem to the installed disk on demand |
 | **Storage** | |

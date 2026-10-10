@@ -16,4 +16,8 @@ void shell_run_window(int vt);
  * waits for a client, serves it until it logs out, repeats. Never returns. */
 void shell_run_remote(int tty);
 
+/* the desktop's Start > Shut down: saves the files to the installed disk,
+ * then powers off (0) or restarts (1); does not return */
+void shell_power(int restart);
+
 #endif

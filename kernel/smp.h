@@ -29,4 +29,9 @@ void smp_eoi(void);
 /* the cores found in the ACPI tables (including ones not started) */
 int  smp_cores_found(void);
 
+/* an ACPI table by its 4-letter signature ("FACP", "APIC"...), NULL if none;
+ * one at a physical address, if it has that signature (kernel/acpi.c) */
+const void* acpi_find_table(const char* sig);
+const void* acpi_table_at(uint64_t addr, const char* sig);
+
 #endif
