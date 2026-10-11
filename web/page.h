@@ -44,6 +44,8 @@ typedef struct page_env {
     int  (*media_open)(void* ctx, void* owner, const char* url);
     void (*media_cmd)(void* ctx, int id, int cmd, int a, int b, int c);   /* SET: volume %, muted, loop */
     int  (*media_status)(void* ctx, int id, page_media_status_t* out);
+    /* optional: a local file's bytes (uploads: <input type=file>), kmalloc'd; 0 = ok */
+    int  (*read_file)(void* ctx, const char* path, char** data, uint32_t* len);
     void* ctx;
 } page_env_t;
 
@@ -83,6 +85,13 @@ typedef struct page {
     int          nav_newtab;          /* ...in a new tab (target=_blank, window.open) */
     char*        nav_post;            /* ...as a POST with this form body (NULL: GET) */
     uint32_t     nav_post_len;
+    char         nav_post_type[96];   /* its Content-Type ("": a urlencoded form) */
+    /* an <input type=file> was clicked (or its click()): the browser shows a
+     * file chooser, then calls page_set_files() */
+    dom_node_t*  file_pick;
+    int          file_pick_pending;
+    const char*  chosen[16];          /* paths the user chose for this page: the only files it may read */
+    int          nchosen;
     int          scroll_req;          /* scroll position requested (#fragment), -1 none */
     char*        write_buf;           /* document.write() collected during a script */
     uint32_t     write_len, write_cap;
@@ -91,7 +100,9 @@ typedef struct page {
     int          nmods, mods_cap;
     obj_t*       importmap;           /* <script type=importmap>: its "imports" */
     value_t*     onload;              /* window.onload / DOMContentLoaded handlers */
+    uint8_t*     onload_load;         /* 1: a "load" one (after the DOMContentLoaded ones) */
     int          nonload;
+    int          ready;               /* document.readyState: 0 loading, 1 interactive, 2 complete */
     int          js_disabled;
     arena_t      LA;                  /* styles + layout, emptied on each relayout */
     int          dispatch_depth;      /* jsdom: handlers running (nested dispatch) */
@@ -141,6 +152,22 @@ int     page_data_url(const char* url, char** data, uint32_t* len, char* ctype, 
 
 /* jsdom.c */
 void    jsdom_install(page_t* p);
+/* the end of loading: phase 0 DOMContentLoaded (readyState "interactive"),
+ * phase 1 load ("complete") - their listeners run, with an event */
+void    jsdom_loaded(page_t* p, int phase);
+/* the file chosen for an <input type=file> (path NULL: the chooser was cancelled) */
+void    page_set_files(page_t* p, dom_node_t* input, const char* path);
+int     page_file_chosen(page_t* p, const char* path);   /* 1 if the user chose it */
+void    jsdom_set_files(page_t* p, dom_node_t* input, const char* path, const char* name, uint32_t size, const char* type);
+/* a MIME type from a file name ("image/png"; "application/octet-stream") */
+const char* page_mime_of(const char* name);
+/* multipart/form-data bodies (uploads): fields and files, then end; m->buf is
+ * kmalloc'd, the Content-Type is "multipart/form-data; boundary=" + boundary */
+typedef struct { char* buf; uint32_t len, cap; int oom; char boundary[48]; } mpart_t;
+void    mpart_init(mpart_t* m, uint32_t seed);
+void    mpart_field(mpart_t* m, const char* name, const char* value, uint32_t vlen);
+void    mpart_file(mpart_t* m, const char* name, const char* filename, const char* type, const uint8_t* data, uint32_t len);
+void    mpart_end(mpart_t* m);
 int     jsdom_dispatch(page_t* p, dom_node_t* target, const char* type);   /* 1 = default prevented */
 int     jsdom_dispatch_key(page_t* p, dom_node_t* target, const char* type, const char* key);
 void    jsdom_run_handlers_from_attrs(page_t* p);

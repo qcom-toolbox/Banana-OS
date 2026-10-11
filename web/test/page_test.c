@@ -56,7 +56,72 @@ static int fetch(void* ctx, const char* url, char** data, uint32_t* len, char* c
     return 0;
 }
 
+/* uploads: a local file's bytes */
+static int read_file(void* ctx, const char* path, char** data, uint32_t* len) {
+    (void)ctx;
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char* buf = malloc((size_t)n + 1);
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(buf); return -1; }
+    fclose(f);
+    buf[n] = 0;
+    *data = buf;
+    *len = (uint32_t)n;
+    return 0;
+}
+
+/* POST and friends through curl; REDIRECT=from=to sends one URL prefix elsewhere (a mock server) */
+static int request(void* ctx, const char* url, const char* method, const char* body, uint32_t blen, const char* btype,
+                   char** data, uint32_t* len, char* rtype, int rcap, char* err, int ecap) {
+    (void)ctx; (void)rtype; (void)rcap; (void)err; (void)ecap;
+    char u[2048];
+    snprintf(u, sizeof(u), "%s", url);
+    const char* rd = getenv("REDIRECT");
+    if (rd && strchr(rd, '=')) {
+        const char* eq = strchr(rd, '=');
+        size_t fl = (size_t)(eq - rd);
+        if (!strncmp(url, rd, fl)) snprintf(u, sizeof(u), "%s%s", eq + 1, url + fl);
+    }
+    FILE* bf = fopen("/tmp/page_test_body", "wb");
+    if (body && blen) fwrite(body, 1, blen, bf);
+    fclose(bf);
+    char cmd[3000];
+    snprintf(cmd, sizeof(cmd), "curl -s --max-time 20 -X '%s' -H 'Content-Type: %s' --data-binary @/tmp/page_test_body '%s'",
+             method, btype ? btype : "", u);
+    fprintf(stderr, "[request] %s %s (%u bytes, %s)\n", method, u, blen, btype ? btype : "");
+    FILE* f = popen(cmd, "r");
+    if (!f) return -1;
+    size_t cap = 1 << 16, n = 0, r;
+    char* buf = malloc(cap);
+    while ((r = fread(buf + n, 1, cap - n - 1, f)) > 0) { n += r; if (n + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); } }
+    pclose(f);
+    buf[n] = 0;
+    *data = buf;
+    *len = (uint32_t)n;
+    return 0;
+}
+
 static dom_node_t* by_id(page_t* p, const char* id) { return dom_find_id(p->doc, id); }
+
+static dom_node_t* by_sel(page_t* p, const char* sel) {
+    /* #id, or .class: the first element with that class */
+    if (sel[0] == '#') return by_id(p, sel + 1);
+    dom_node_t* stack[4096];
+    int sp = 0;
+    stack[sp++] = p->doc;
+    while (sp) {
+        dom_node_t* e = stack[--sp];
+        if (e->type == DOM_ELEM && sel[0] == '.') {
+            const char* c = dom_attr(e, "class");
+            if (c && strstr(c, sel + 1)) return e;
+        }
+        for (dom_node_t* k = e->last; k && sp < 4096; k = k->prev) stack[sp++] = k;
+    }
+    return NULL;
+}
 
 /* BOXDUMP=depth: the element tree with display, position and boxes */
 static void boxdump(dom_node_t* e, int d, int maxd) {
@@ -82,7 +147,7 @@ int main(int argc, char** argv) {
     static char src[8 << 20];
     size_t n = fread(src, 1, sizeof(src) - 1, f);
     fclose(f);
-    page_env_t env = { .fetch = fetch, .now_ms = now_ms, .log = logf_ };
+    page_env_t env = { .fetch = fetch, .now_ms = now_ms, .log = logf_, .read_file = read_file, .request = request };
     page_t* p = page_new(&env, 64u << 20);
     char url[600];
     if (getenv("PAGE_URL")) snprintf(url, sizeof(url), "%s", getenv("PAGE_URL"));   /* the page's real address */
@@ -92,7 +157,17 @@ int main(int argc, char** argv) {
     for (int i = 3; i < argc; i++) {
         const char* a = argv[i];
         page_update(p, width);
-        if (strncmp(a, "click:#", 7) == 0) {
+        if (strncmp(a, "click:.", 7) == 0) {
+            dom_node_t* e = by_sel(p, a + 6);
+            if (!e) { fprintf(stderr, "no %s\n", a + 6); continue; }
+            page_click(p, e->box_x + e->box_w / 2, e->box_y + e->box_h / 2);
+        } else if (strncmp(a, "pick:", 5) == 0) {
+            /* the browser's chooser answering: pick:/path/to/file */
+            if (!p->file_pick_pending) { fprintf(stderr, "pick: no file input asked for one\n"); continue; }
+            p->file_pick_pending = 0;
+            fprintf(stderr, "[pick] %s for <%s>\n", a + 5, p->file_pick ? p->file_pick->tag : "?");
+            page_set_files(p, p->file_pick, a + 5);
+        } else if (strncmp(a, "click:#", 7) == 0) {
             dom_node_t* e = by_id(p, a + 7);
             if (!e) { fprintf(stderr, "no #%s\n", a + 7); continue; }
             page_click(p, e->box_x + e->box_w / 2, e->box_y + e->box_h / 2);
@@ -113,7 +188,11 @@ int main(int argc, char** argv) {
             printf("#%s html = '%s'\n", a + 6, e ? dom_html(&p->A, e, 0) : "(none)");
         }
         if (p->alert_pending) { printf("ALERT: %s\n", p->alert); p->alert_pending = 0; }
-        if (p->nav_pending) { printf("NAV: %s\n", p->nav); p->nav_pending = 0; }
+        if (p->nav_pending) {
+            printf("NAV: %s%s%s (%u bytes)\n", p->nav, p->nav_post ? " POST " : "", p->nav_post_type, p->nav_post_len);
+            if (p->nav_post && getenv("POSTDUMP")) { FILE* d = fopen(getenv("POSTDUMP"), "wb"); fwrite(p->nav_post, 1, p->nav_post_len, d); fclose(d); }
+            p->nav_pending = 0;
+        }
         if (p->status[0]) { printf("STATUS: %s\n", p->status); p->status[0] = 0; }
     }
     page_update(p, width);

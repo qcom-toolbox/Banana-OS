@@ -18,6 +18,8 @@
 #include "../web/page.h"
 #include "../web/render.h"
 #include "media.h"
+#include "filechooser.h"
+#include "kbnav.h"
 
 /*
  * The web browser window. Everything that touches a page (loading,
@@ -752,8 +754,10 @@ static int env_request(void* ctx, const char* url, const char* method, const cha
                        const char* btype, char** data, uint32_t* len, char* rtype, int rcap, char* err, int ecap) {
     (void)ctx;
     char fin[URL_MAX];
-    return fetch_url(url, method, body ? body : "", body ? blen : 0, btype, data, len, rtype, rcap, fin, sizeof(fin),
-                     err, ecap, NULL);
+    int rc = fetch_url(url, method, body ? body : "", body ? blen : 0, btype, data, len, rtype, rcap, fin, sizeof(fin),
+                       err, ecap, NULL);
+    if (rc == 0) set_status("", 0);              /* a script's request (an upload...) is done */
+    return rc;
 }
 
 static int env_decode_image(void* ctx, const uint8_t* data, uint32_t len, img_data_t* out, arena_t* A) {
@@ -772,6 +776,24 @@ static int env_decode_image(void* ctx, const uint8_t* data, uint32_t len, img_da
     out->w = img.w;
     out->h = img.h;
     image_free(&img);
+    return 0;
+}
+
+/* a file the user chose for an upload */
+static int env_read_file(void* ctx, const char* path, char** data, uint32_t* len) {
+    (void)ctx;
+    int fi = fs_find_file(path);
+    if (fi < 0) return -1;
+    fs_pin(fi);
+    fs_file_t* f = fs_get_file(fi);
+    if (!f || (!f->content && f->size)) { fs_unpin(fi); return -1; }
+    char* d = (char*)kmalloc(f->size + 1);
+    if (!d) { fs_unpin(fi); return -1; }
+    if (f->size) memcpy(d, f->content, f->size);
+    d[f->size] = 0;
+    fs_unpin(fi);
+    *data = d;
+    *len = f->size;
     return 0;
 }
 
@@ -1006,6 +1028,21 @@ static void download(tab_t* t, const char* url_in) {
     g_status_tab = NULL;
 }
 
+/* the next load's POST body type (a multipart form: uploads) */
+static char g_load_btype[128];
+
+/* "Choose a file" for an <input type=file>: opened from the page's task,
+ * drawn and clicked in the desktop's, the answer handed to the page here */
+static volatile int g_pick_on, g_pick_done;
+static page_t*      g_pick_page;
+static dom_node_t*  g_pick_node;
+static char         g_pick_path[FS_PATH_LEN];
+
+static void pick_chosen(const char* path) {
+    kstrlcpy(g_pick_path, path, sizeof(g_pick_path));
+    g_pick_done = 1;
+}
+
 static void load(tab_t* t, const char* url_in, const char* post, uint32_t post_len, int add_history) {
     char url[URL_MAX], final_url[URL_MAX], ctype[96], err[200];
     normalize_url(url_in, url, sizeof(url));
@@ -1023,8 +1060,9 @@ static void load(tab_t* t, const char* url_in, const char* post, uint32_t post_l
     memset(&dl, 0, sizeof(dl));
     /* view-source:URL shows the page's text */
     int vsrc = strncmp(url, "view-source:", 12) == 0;
-    int frc = fetch_url(vsrc ? url + 12 : url, NULL, post, post_len, NULL, &data, &len, ctype, sizeof(ctype), final_url,
-                        sizeof(final_url), err, sizeof(err), vsrc ? NULL : &dl);
+    int frc = fetch_url(vsrc ? url + 12 : url, NULL, post, post_len, post && g_load_btype[0] ? g_load_btype : NULL,
+                        &data, &len, ctype, sizeof(ctype), final_url, sizeof(final_url), err, sizeof(err), vsrc ? NULL : &dl);
+    g_load_btype[0] = 0;
     if (frc == 0 && vsrc) {
         char fin[URL_MAX];
         ksnprintf(fin, sizeof(fin), "view-source:%s", final_url);
@@ -1133,6 +1171,17 @@ static void after_page_event(tab_t* t) {
         p->alert_pending = 0;
         g_gen++;
     }
+    if (p->file_pick_pending) {
+        p->file_pick_pending = 0;
+        if (t == cur_tab() && !g_pick_on && p->file_pick) {
+            g_pick_page = p;
+            g_pick_node = p->file_pick;
+            g_pick_done = 0;
+            g_pick_on = 1;
+            fc_open("Choose a file to upload", "/home/banana", NULL, pick_chosen);
+            g_gen++;
+        }
+    }
     if (p->status[0]) {
         g_status_tab = t;
         char msg[200];
@@ -1157,6 +1206,7 @@ static void after_page_event(tab_t* t) {
             if (body) {
                 memcpy(body, p->nav_post, n);
                 body[n] = 0;
+                kstrlcpy(g_load_btype, p->nav_post_type, sizeof(g_load_btype));
                 load(t, nav, body, n, 1);
                 kfree(body);
             }
@@ -1272,6 +1322,22 @@ static void read_keys(void) {
     for (int k = 0; k < 64; k++) {
         char c = keyboard_try_getchar();
         if (!c) return;
+        if (g_pick_on && fc_active()) {                /* the file chooser has the keys */
+            if (c == 27) {
+                char c2 = keyboard_try_getchar();
+                if (c2 == '[') {
+                    char c3 = keyboard_try_getchar();
+                    if (c3 >= '0' && c3 <= '9') keyboard_try_getchar();
+                    int code = c3 == 'A' ? KB_UP : c3 == 'B' ? KB_DOWN : c3 == 'C' ? KB_RIGHT : c3 == 'D' ? KB_LEFT :
+                               c3 == 'H' ? KB_HOME : c3 == 'F' ? KB_END : (c3 == '5' || c3 == 'I') ? KB_PGUP :
+                               (c3 == '6' || c3 == 'G') ? KB_PGDN : 0;
+                    if (code) fc_nav(code);
+                } else fc_key(27);
+            } else if (c == '\t') fc_nav(KB_TAB);
+            else fc_key(c);
+            g_gen++;
+            continue;
+        }
         if (c == 27) {
             char c2 = keyboard_try_getchar();
             if (c2 == '[') {
@@ -1422,6 +1488,7 @@ static void env_setup(void) {
     g_env.media_open = env_media_open;
     g_env.media_cmd = env_media_cmd;
     g_env.media_status = env_media_status;
+    g_env.read_file = env_read_file;
     g_env.ctx = NULL;
     /* a page may use a share of the heap (big pages, images, script-heavy
      * sites like GitHub need ~200 MB), within reason */
@@ -1512,6 +1579,20 @@ static void browser_task(void) {
         read_keys();
         run_commands();
         if (!g_ntabs) { g_go_url[0] = 0; new_tab(NULL); }
+        if (g_pick_on && (g_pick_done || !fc_active())) {
+            int done = g_pick_done;
+            g_pick_on = 0;
+            g_pick_done = 0;
+            for (int i = 0; i < g_ntabs; i++) {
+                tab_t* pt = g_tabs[i];
+                if (pt->page != g_pick_page || pt->loading) continue;
+                page_set_files(pt->page, g_pick_node, done ? g_pick_path : NULL);
+                after_page_event(pt);
+                g_render_req = 1;
+            }
+            if (done) fc_close();
+            g_gen++;
+        }
         /* every tab's timers run; the current one is drawn */
         for (int i = 0; i < g_ntabs; i++) {
             tab_t* t = g_tabs[i];
@@ -1705,6 +1786,12 @@ void browser_draw(const fb_info_t* fi) {
     if (t) draw_clipped(x + 8, sy + 4, t->status, (W - 30) / 8, t->status_err ? C_ERR : C_DIM, 0x00161B22u, 0);
     gfx_draw_grip(x + W, y + H);
 
+    /* "Choose a file to upload" */
+    if (g_pick_on && fc_active()) {
+        int fw = W - 40 < 640 ? W - 40 : 640, fh = H - VIEW_Y - 40 < 420 ? H - VIEW_Y - 40 : 420;
+        fc_draw(x + (W - fw) / 2, y + VIEW_Y + 10, fw, fh);
+    }
+
     /* alert() */
     if (g_alert[0]) {
         int aw2 = 420, lines = 1;
@@ -1735,6 +1822,7 @@ void browser_click(int mx, int my) {
     tab_t* t = cur_tab();
     g_gen++;
     if (g_alert[0]) { g_alert[0] = 0; return; }
+    if (g_pick_on && fc_active() && ly >= VIEW_Y) { fc_click(mx, my); return; }
     if (ly < TITLE_H + 2) {
         int b = win_button_press(&g_win, 5, 14, mx, my);
         if (b == WIN_BTN_CLOSE) { browser_close(); return; }

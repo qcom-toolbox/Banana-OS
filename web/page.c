@@ -561,6 +561,7 @@ void page_load(page_t* p, const char* url, const char* html, uint32_t len, int w
     }
     init_forms(p->doc);
     init_forms_text(p, p->doc);
+    p->ready = 0;
     if (!p->js_disabled) {
         p->js = script_new(&p->A, LANG_JS);
         /* long enough for big apps and challenge scripts; the env's yield
@@ -581,12 +582,10 @@ void page_load(page_t* p, const char* url, const char* html, uint32_t len, int w
     if (p->js) {
         dom_node_t* body = dom_find_tag(p->doc, "body");
         const char* ol = body ? dom_attr(body, "onload") : NULL;
+        jsdom_loaded(p, 0);                      /* DOMContentLoaded */
         if (ol && script_run(p->js, ol, (uint32_t)strlen(ol), "onload") != 0)
             kstrlcpy(p->status, script_error(p->js), sizeof(p->status));
-        for (int i = 0; i < p->nonload; i++) {
-            if (script_call(p->js, p->onload[i], v_undef(), 0, NULL, NULL) != 0)
-                kstrlcpy(p->status, script_error(p->js), sizeof(p->status));
-        }
+        jsdom_loaded(p, 1);                      /* load */
         init_forms(p->doc);
         init_forms_text(p, p->doc);
         /* images added by scripts */
@@ -653,6 +652,155 @@ static void add_field(char* q, int cap, const char* name, const char* value) {
     url_append_enc(q, cap, value ? value : "");
 }
 
+/* ── uploads ── */
+
+const char* page_mime_of(const char* name) {
+    static const char* const M[][2] = {
+        { "png", "image/png" }, { "jpg", "image/jpeg" }, { "jpeg", "image/jpeg" }, { "gif", "image/gif" },
+        { "webp", "image/webp" }, { "bmp", "image/bmp" }, { "svg", "image/svg+xml" }, { "ico", "image/x-icon" },
+        { "mp4", "video/mp4" }, { "webm", "video/webm" }, { "mkv", "video/x-matroska" }, { "mov", "video/quicktime" },
+        { "avi", "video/x-msvideo" }, { "mp3", "audio/mpeg" }, { "wav", "audio/wav" }, { "ogg", "audio/ogg" },
+        { "flac", "audio/flac" }, { "txt", "text/plain" }, { "html", "text/html" }, { "htm", "text/html" },
+        { "css", "text/css" }, { "js", "text/javascript" }, { "json", "application/json" }, { "pdf", "application/pdf" },
+        { "zip", "application/zip" }, { "gz", "application/gzip" }, { "tar", "application/x-tar" },
+        { "c", "text/plain" }, { "h", "text/plain" }, { "md", "text/markdown" }, { "csv", "text/csv" },
+        { "ttf", "font/ttf" }, { "bpk", "application/octet-stream" },
+    };
+    const char* dot = strrchr(name, '.');
+    if (dot) for (uint32_t i = 0; i < sizeof(M) / sizeof(M[0]); i++) if (!strcasecmp(dot + 1, M[i][0])) return M[i][1];
+    return "application/octet-stream";
+}
+
+static void mp_put(mpart_t* m, const void* d, uint32_t n) {
+    if (m->oom) return;
+    if (m->len + n + 1 > m->cap) {
+        uint32_t cap = (m->len + n + 1) * 2;
+        char* nb = (char*)krealloc(m->buf, cap);
+        if (!nb) { m->oom = 1; return; }
+        m->buf = nb;
+        m->cap = cap;
+    }
+    memcpy(m->buf + m->len, d, n);
+    m->len += n;
+    m->buf[m->len] = 0;
+}
+static void mp_str(mpart_t* m, const char* s) { mp_put(m, s, (uint32_t)strlen(s)); }
+
+/* a name in a header: no quotes or line breaks */
+static void mp_name(mpart_t* m, const char* s) {
+    for (; *s; s++) {
+        if (*s == '"') mp_str(m, "%22");
+        else if (*s == '\r') mp_str(m, "%0D");
+        else if (*s == '\n') mp_str(m, "%0A");
+        else mp_put(m, s, 1);
+    }
+}
+
+void mpart_init(mpart_t* m, uint32_t seed) {
+    memset(m, 0, sizeof(*m));
+    static const char H[] = "0123456789abcdef";
+    uint32_t x = seed * 2654435761u + 0x9E3779B9u;
+    char r[17];
+    for (int i = 0; i < 16; i++) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; r[i] = H[x & 15]; }
+    r[16] = 0;
+    ksnprintf(m->boundary, sizeof(m->boundary), "----BananaFormBoundary%s", r);
+}
+
+static void mp_head(mpart_t* m, const char* name) {
+    mp_str(m, "--");
+    mp_str(m, m->boundary);
+    mp_str(m, "\r\nContent-Disposition: form-data; name=\"");
+    mp_name(m, name);
+    mp_str(m, "\"");
+}
+
+void mpart_field(mpart_t* m, const char* name, const char* value, uint32_t vlen) {
+    mp_head(m, name);
+    mp_str(m, "\r\n\r\n");
+    mp_put(m, value, vlen);
+    mp_str(m, "\r\n");
+}
+
+void mpart_file(mpart_t* m, const char* name, const char* filename, const char* type, const uint8_t* data, uint32_t len) {
+    mp_head(m, name);
+    mp_str(m, "; filename=\"");
+    mp_name(m, filename);
+    mp_str(m, "\"\r\nContent-Type: ");
+    mp_str(m, type && *type ? type : "application/octet-stream");
+    mp_str(m, "\r\n\r\n");
+    if (len) mp_put(m, data, len);
+    mp_str(m, "\r\n");
+}
+
+void mpart_end(mpart_t* m) {
+    mp_str(m, "--");
+    mp_str(m, m->boundary);
+    mp_str(m, "--\r\n");
+}
+
+/* a form's fields as multipart/form-data, files read from the disk */
+static void form_multipart(page_t* p, dom_node_t* n, dom_node_t* submitter, mpart_t* m) {
+    for (dom_node_t* c = n->first; c; c = c->next) {
+        if (c->type != DOM_ELEM) continue;
+        const char* name = dom_attr(c, "name");
+        if (name && !dom_attr(c, "disabled")) {
+            const char* t = dom_attr(c, "type");
+            if (!t) t = "text";
+            if (strcmp(c->tag, "input") == 0) {
+                if (strcasecmp(t, "checkbox") == 0 || strcasecmp(t, "radio") == 0) {
+                    if (c->checked) { const char* v = dom_attr(c, "value") ? dom_attr(c, "value") : "on"; mpart_field(m, name, v, (uint32_t)strlen(v)); }
+                } else if (strcasecmp(t, "submit") == 0 || strcasecmp(t, "button") == 0 || strcasecmp(t, "image") == 0) {
+                    if (c == submitter) { const char* v = dom_attr(c, "value") ? dom_attr(c, "value") : ""; mpart_field(m, name, v, (uint32_t)strlen(v)); }
+                } else if (strcasecmp(t, "file") == 0) {
+                    /* the chosen file (its path is the node's value) */
+                    const char* path = c->form_init && c->value ? c->value : "";
+                    char* d = NULL;
+                    uint32_t len = 0;
+                    if (page_file_chosen(p, path) && p->env && p->env->read_file && p->env->read_file(p->env->ctx, path, &d, &len) == 0) {
+                        const char* base = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+                        mpart_file(m, name, base, page_mime_of(base), (const uint8_t*)d, len);
+                        kfree(d);
+                    } else mpart_file(m, name, "", "application/octet-stream", NULL, 0);
+                } else if (strcasecmp(t, "reset") != 0) {
+                    const char* v = c->form_init ? (c->value ? c->value : "") : (dom_attr(c, "value") ? dom_attr(c, "value") : "");
+                    mpart_field(m, name, v, (uint32_t)strlen(v));
+                }
+            } else if (strcmp(c->tag, "textarea") == 0 || strcmp(c->tag, "select") == 0) {
+                const char* v = c->value ? c->value : "";
+                mpart_field(m, name, v, (uint32_t)strlen(v));
+            } else if (strcmp(c->tag, "button") == 0 && c == submitter) {
+                const char* v = dom_attr(c, "value") ? dom_attr(c, "value") : "";
+                mpart_field(m, name, v, (uint32_t)strlen(v));
+            }
+        }
+        form_multipart(p, c, submitter, m);
+    }
+}
+
+int page_file_chosen(page_t* p, const char* path) {
+    if (!path || !*path) return 0;
+    for (int i = 0; i < p->nchosen; i++) if (!strcmp(p->chosen[i], path)) return 1;
+    return 0;
+}
+
+void page_set_files(page_t* p, dom_node_t* in, const char* path) {
+    if (!in) return;
+    if (!path) { jsdom_dispatch(p, in, "cancel"); return; }
+    in->value = arena_strdup(&p->A, path, (uint32_t)strlen(path));
+    if (!page_file_chosen(p, path)) {
+        if (p->nchosen == 16) { memmove(p->chosen, p->chosen + 1, sizeof(p->chosen[0]) * 15); p->nchosen--; }
+        p->chosen[p->nchosen++] = in->value;
+    }
+    in->form_init = 1;
+    uint32_t size = 0;
+    char* d = NULL;
+    uint32_t len = 0;
+    if (p->env && p->env->read_file && p->env->read_file(p->env->ctx, path, &d, &len) == 0) { size = len; kfree(d); }
+    const char* name = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+    if (p->js) jsdom_set_files(p, in, path, name, size, page_mime_of(name));
+    p->dirty = 1;
+}
+
 static void form_fields(dom_node_t* n, dom_node_t* submitter, char* q, int cap) {
     for (dom_node_t* c = n->first; c; c = c->next) {
         if (c->type != DOM_ELEM) continue;
@@ -693,7 +841,26 @@ static void submit_form(page_t* p, dom_node_t* form, dom_node_t* submitter) {
     char* hm = strchr(base, '#');
     if (hm) *hm = 0;
     const char* method = dom_attr(form, "method");
-    if (method && strcasecmp(method, "post") == 0) {
+    const char* enctype = dom_attr(form, "enctype");
+    p->nav_post_type[0] = 0;
+    if (method && strcasecmp(method, "post") == 0 && enctype && strncasecmp(enctype, "multipart/form-data", 19) == 0) {
+        /* uploads: the files go along */
+        mpart_t m;
+        mpart_init(&m, p->env && p->env->now_ms ? p->env->now_ms() : 1);
+        form_multipart(p, form, submitter, &m);
+        mpart_end(&m);
+        if (!m.oom && m.buf) {
+            char* body = (char*)arena_alloc(&p->A, m.len + 1);
+            if (!p->A.oom) {
+                memcpy(body, m.buf, m.len + 1);
+                kstrlcpy(p->nav, base, sizeof(p->nav));
+                p->nav_post = body;
+                p->nav_post_len = m.len;
+                ksnprintf(p->nav_post_type, sizeof(p->nav_post_type), "multipart/form-data; boundary=%s", m.boundary);
+            }
+        }
+        if (m.buf) kfree(m.buf);
+    } else if (method && strcasecmp(method, "post") == 0) {
         kstrlcpy(p->nav, base, sizeof(p->nav));
         p->nav_post = q;
         p->nav_post_len = (uint32_t)strlen(q);
@@ -783,9 +950,27 @@ void page_click(page_t* p, int x, int y) {
             return;
         }
         if (is_text_field(e)) { p->focus = e; return; }
+        if (strcmp(tag, "label") == 0) {
+            /* a label stands for its control: <label for=id>, or the one inside it */
+            dom_node_t* c = NULL;
+            const char* f = dom_attr(e, "for");
+            if (f && *f) c = dom_find_id(p->doc, f);
+            if (!c) { dom_node_t* l[1]; if (collect_tags(e, "input", l, 1, 0) == 1) c = l[0]; }
+            if (c && c != n && strcmp(c->tag, "input") == 0 && dom_attr(c, "type") && strcasecmp(dom_attr(c, "type"), "file") == 0 &&
+                !dom_attr(c, "disabled") && !jsdom_dispatch(p, c, "click")) {
+                p->file_pick = c;
+                p->file_pick_pending = 1;
+                return;
+            }
+            if (c && c != n && is_text_field(c)) { p->focus = c; return; }
+        }
         if (strcmp(tag, "input") == 0) {
             const char* t = dom_attr(e, "type");
             if (!t) t = "text";
+            if (strcasecmp(t, "file") == 0) {
+                if (!dom_attr(e, "disabled")) { p->file_pick = e; p->file_pick_pending = 1; }
+                return;
+            }
             if (strcasecmp(t, "submit") == 0 || strcasecmp(t, "image") == 0) { submit_form(p, ancestor(e, "form"), e); return; }
             if (strcasecmp(t, "reset") == 0) return;
             return;

@@ -242,16 +242,32 @@ if (typeof Headers === 'undefined') W.Headers = class Headers {
   entries(){ var a = []; for (var k in this._h) a.push([k, this._h[k]]); return a[Symbol.iterator](); }
   [Symbol.iterator](){ return this.entries(); }
 };
-if (typeof FormData === 'undefined') W.FormData = class FormData {
-  constructor(){ this._l = []; } append(k, v){ this._l.push([k, String(v)]); } set(k, v){ this.delete(k); this.append(k, v); }
-  get(k){ for (var p of this._l) if (p[0] === k) return p[1]; return null; } getAll(k){ return this._l.filter(function(p){ return p[0] === k; }).map(function(p){ return p[1]; }); }
+W.FormData = class FormData {
+  constructor(form){ this._l = [];
+    if (form && form.querySelectorAll) { var els = form.querySelectorAll('input,select,textarea');
+      for (var i = 0; i < els.length; i++) { var e = els[i], n = e.getAttribute('name'); if (!n || e.hasAttribute('disabled')) continue;
+        var t = (e.getAttribute('type') || '').toLowerCase();
+        if (t === 'submit' || t === 'button' || t === 'reset' || t === 'image') continue;
+        if ((t === 'checkbox' || t === 'radio') && !e.checked) continue;
+        if (t === 'file') { var fl = e.files; if (fl && fl.length) for (var k = 0; k < fl.length; k++) this.append(n, fl[k]);
+          else this.append(n, new File([], '', {type: 'application/octet-stream'})); continue; }
+        this.append(n, (t === 'checkbox' || t === 'radio') ? (e.getAttribute('value') || 'on') : (e.value || '')); } } }
+  append(k, v, fn){ k = String(k); if (v instanceof Blob) this._l.push([k, v, fn !== undefined ? String(fn) : (v.name !== undefined ? v.name : 'blob')]); else this._l.push([k, String(v)]); }
+  set(k, v, fn){ this.delete(k); this.append(k, v, fn); }
+  get(k){ for (var p of this._l) if (p[0] === k) return p[1]; return null; }
+  getAll(k){ return this._l.filter(function(p){ return p[0] === k; }).map(function(p){ return p[1]; }); }
   has(k){ return this.get(k) !== null; } delete(k){ this._l = this._l.filter(function(p){ return p[0] !== k; }); }
-  entries(){ return this._l.slice()[Symbol.iterator](); } [Symbol.iterator](){ return this.entries(); }
+  entries(){ return this._l.map(function(p){ return [p[0], p[1]]; })[Symbol.iterator](); }
+  keys(){ return this._l.map(function(p){ return p[0]; })[Symbol.iterator](); }
+  values(){ return this._l.map(function(p){ return p[1]; })[Symbol.iterator](); }
+  forEach(f, t){ var me = this; this._l.forEach(function(p){ f.call(t, p[1], p[0], me); }); }
+  [Symbol.iterator](){ return this.entries(); }
 };
 if (typeof Blob === 'undefined') W.Blob = class Blob {
-  constructor(parts, o){ this._s = (parts || []).map(function(p){ return p && p.byteLength !== undefined && typeof p !== 'string' ? __utf8_decode(p) : String(p); }).join('');
+  constructor(parts, o){ this._s = (parts || []).map(function(p){ return p && p._path !== undefined ? __utf8_decode(__readFile(p._path) || new Uint8Array(0)) :
+      p && p._s !== undefined ? p._s : p && p.byteLength !== undefined && typeof p !== 'string' ? __utf8_decode(p) : String(p); }).join('');
     this.type = (o && o.type) || ''; }
-  get size(){ return this._s.length; }
+  get size(){ return this._path !== undefined ? this._size : __utf8_encode(this._s).length; }
   text(){ return Promise.resolve(this._s); }
   arrayBuffer(){ return Promise.resolve(__utf8_encode(this._s).buffer); }
   slice(a, b, t){ var r = new Blob([this._s.slice(a, b)]); r.type = t || ''; return r; }
@@ -363,9 +379,10 @@ if (typeof W.FileReader === 'undefined') W.FileReader = class FileReader {
   constructor(){ this.result = null; this.readyState = 0; this.onload = this.onloadend = this.onerror = null; }
   _done(r){ var me = this; me.result = r; me.readyState = 2; setTimeout(function(){ var e = {type: 'load', target: me};
     if (me.onload) me.onload(e); if (me.onloadend) me.onloadend(e); }, 0); }
-  readAsText(b){ this._done(b && b._s !== undefined ? b._s : String(b)); }
-  readAsDataURL(b){ this._done('data:' + ((b && b.type) || 'application/octet-stream') + ';base64,' + btoa(b && b._s !== undefined ? b._s : '')); }
-  readAsArrayBuffer(b){ this._done(__utf8_encode(b && b._s !== undefined ? b._s : '').buffer); }
+  readAsText(b){ this._done(__blobStr(b)); }
+  readAsDataURL(b){ this._done('data:' + ((b && b.type) || 'application/octet-stream') + ';base64,' + btoa(__blobStr(b))); }
+  readAsArrayBuffer(b){ this._done((b && b._path !== undefined ? (__readFile(b._path) || new Uint8Array(0)) : __utf8_encode(__blobStr(b))).buffer); }
+  readAsBinaryString(b){ this._done(__blobStr(b)); }
   abort(){} addEventListener(t, f){ if (t === 'load') this.onload = f; else if (t === 'loadend') this.onloadend = f; else if (t === 'error') this.onerror = f; }
 };
 if (typeof W.Response === 'undefined') W.Response = class Response {
@@ -565,3 +582,36 @@ W.__banana_deliver = function(data){
 
 /* PerformanceObserver.supportedEntryTypes: pages ask before observing */
 try { if (typeof PerformanceObserver !== 'undefined' && !PerformanceObserver.supportedEntryTypes) PerformanceObserver.supportedEntryTypes = []; } catch (e) {}
+
+/* uploads: the file chosen in an <input type=file> is a File read from the
+ * disk when sent (FormData + fetch / XMLHttpRequest) or read (text(), FileReader) */
+window.__blobStr = function(b){ return b && b._path !== undefined ? __utf8_decode(__readFile(b._path) || new Uint8Array(0)) : (b && b._s !== undefined ? b._s : String(b)); };
+window.FileList = class FileList { constructor(a){ a = a || []; for (var i = 0; i < a.length; i++) this[i] = a[i]; this.length = a.length; }
+  item(i){ return this[i] || null; } [Symbol.iterator](){ return Array.prototype.slice.call(this)[Symbol.iterator](); } };
+(function(){
+  var BP = Blob.prototype;
+  BP.text = function(){ return Promise.resolve(__blobStr(this)); };
+  BP.arrayBuffer = function(){ return Promise.resolve((this._path !== undefined ? (__readFile(this._path) || new Uint8Array(0)) : __utf8_encode(this._s)).buffer); };
+  BP.bytes = function(){ return Promise.resolve(this._path !== undefined ? (__readFile(this._path) || new Uint8Array(0)) : __utf8_encode(this._s)); };
+  BP.slice = function(a, b, t){ var r = new Blob([]); r._s = __blobStr(this).slice(a, b); r.type = t || ''; return r; };
+  BP.stream = function(){ var me = this; return { getReader: function(){ var done = false; return { read: function(){
+    if (done) return Promise.resolve({done: true, value: undefined}); done = true;
+    return me.bytes().then(function(v){ return {done: false, value: v}; }); }, releaseLock: function(){}, cancel: function(){ return Promise.resolve(); } }; } }; };
+  Object.defineProperty(Element.prototype, 'files', { configurable: true,
+    get: function(){ if (this.tagName !== 'INPUT' || (this.getAttribute('type') || '').toLowerCase() !== 'file') return undefined;
+      return this.__files || (this.__files = new FileList()); },
+    set: function(v){ this.__files = v; } });
+})();
+window.__setFiles = function(el, path, name, size, type){
+  var f = Object.create(File.prototype); f._path = path; f.name = name; f.type = type || ''; f.lastModified = Date.now(); f.webkitRelativePath = '';
+  f._size = size;
+  el.__files = new FileList([f]);
+  el.dispatchEvent(new Event('input', {bubbles: true}));
+  el.dispatchEvent(new Event('change', {bubbles: true}));
+};
+/* document.implementation: detached documents (jQuery builds HTML in one) */
+try { if (!document.implementation || !document.implementation.createHTMLDocument) document.implementation = {
+  createHTMLDocument: function(t){ var d = new DOMParser().parseFromString(""); d.title = t || ""; return d; },
+  createDocument: function(){ return new DOMParser().parseFromString(""); },
+  createDocumentType: function(){ return null; }, hasFeature: function(){ return true; } }; } catch (e) {}
+try { if (typeof document.close !== 'function') document.close = function(){}; if (typeof document.open !== 'function') document.open = function(){ return document; }; } catch (e) {}

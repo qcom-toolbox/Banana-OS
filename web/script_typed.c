@@ -502,6 +502,22 @@ static value_t js_utf8_decode(interp_t* I, value_t self, int argc, value_t* argv
     return v_strn(I, s, n);
 }
 
+/* a Uint8Array holding a copy of d */
+value_t typed_u8_new(interp_t* I, const uint8_t* d, uint32_t n) {
+    obj_t* o = alloc_typed(I, T_U8, n);
+    if (n) memcpy(((tarr_t*)o->host)->buf->data, d, n);
+    return v_obj(o);
+}
+
+/* the bytes of a typed array, DataView or ArrayBuffer: 1, or 0 if v is none */
+int typed_bytes(value_t v, const uint8_t** d, uint32_t* n) {
+    tarr_t* t = typed_of(v);
+    abuf_t* b = buf_of(v);
+    if (t) { *d = AT(t, 0); *n = t->len * T_SIZE[t->kind]; return 1; }
+    if (b) { *d = b->data; *n = b->len; return 1; }
+    return 0;
+}
+
 static value_t js_isView(interp_t* I, value_t self, int argc, value_t* argv) {
     (void)I; (void)self;
     value_t a = ARG(0);

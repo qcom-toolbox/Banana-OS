@@ -92,6 +92,13 @@ static value_t find_list(interp_t* I, dom_node_t* root, int mode, const char* wh
 /* ══ form values ══════════════════════════════════════════════════════ */
 
 static const char* node_value(page_t* p, dom_node_t* n) {
+    if (n->form_init && n->value && *n->value && strcmp(n->tag, "input") == 0 && dom_attr(n, "type") &&
+        strcasecmp(dom_attr(n, "type"), "file") == 0) {
+        const char* b = strrchr(n->value, '/');
+        char* s = (char*)arena_alloc(&p->A, (uint32_t)strlen(n->value) + 16);
+        ksnprintf(s, strlen(n->value) + 16, "C:\\fakepath\\%s", b ? b + 1 : n->value);
+        return s;
+    }
     if (n->form_init) return n->value ? n->value : "";
     if (strcmp(n->tag, "textarea") == 0) return dom_text(&p->A, n);
     if (strcmp(n->tag, "option") == 0) {
@@ -515,7 +522,7 @@ static value_t doc_get(interp_t* I, page_t* p, dom_node_t* d, const char* key, i
     }
     if (K("URL") || K("documentURI")) return v_str(I, p->url);
     if (K("location")) return v_obj(p->loc_obj);
-    if (K("readyState")) return v_str(I, "complete");
+    if (K("readyState")) return v_str(I, p->ready == 0 ? "loading" : p->ready == 1 ? "interactive" : "complete");
     if (K("defaultView")) return v_obj(p->win_obj);
     if (K("nodeType")) return v_num(9);
     if (K("nodeName")) return v_str(I, "#document");
@@ -1225,16 +1232,29 @@ static value_t m_addEventListener(interp_t* I, value_t self, int argc, value_t* 
     const char* type = arg_str(I, argc, argv, 0);
     if (!n || !v_isfunc(ARG(1))) return v_undef();
     if (n->type == DOM_DOC && (strcmp(type, "DOMContentLoaded") == 0 || strcmp(type, "load") == 0)) {
-        if (p->nonload < MAX_ONLOAD) p->onload[p->nonload++] = ARG(1);
+        if (p->nonload < MAX_ONLOAD) { p->onload_load[p->nonload] = type[0] == 'l'; p->onload[p->nonload++] = ARG(1); }
         return v_undef();
     }
     add_handler(p, n, type, ARG(1));
     return v_undef();
 }
 
+/* a DOMContentLoaded / load listener taken back */
+static int onload_remove(page_t* p, const char* type, value_t fn) {
+    if (strcmp(type, "DOMContentLoaded") != 0 && strcmp(type, "load") != 0) return 0;
+    if (fn.t != V_FUNC) return 1;
+    for (int i = 0; i < p->nonload; i++)
+        if (p->onload[i].t == V_FUNC && p->onload[i].f == fn.f && p->onload_load[i] == (type[0] == 'l')) {
+            p->onload[i] = v_undef();                  /* (the list is being walked: no shifting) */
+            break;
+        }
+    return 1;
+}
+
 static value_t m_removeEventListener(interp_t* I, value_t self, int argc, value_t* argv) {
     dom_node_t* n = self_node(I, self);
     value_t fn = ARG(1);
+    if (n && n->type == DOM_DOC && onload_remove(P(I), arg_str(I, argc, argv, 0), fn)) return v_undef();
     if (n) remove_handler(n, arg_str(I, argc, argv, 0), &fn);
     return v_undef();
 }
@@ -1250,7 +1270,12 @@ static value_t m_click(interp_t* I, value_t self, int argc, value_t* argv) {
             n->checked = !n->checked;
         }
     }
-    dispatch(P(I), n, "click", NULL);
+    int prevented = dispatch(P(I), n, "click", NULL);
+    if (!prevented && is_elem(n, "input") && dom_attr(n, "type") && strcasecmp(dom_attr(n, "type"), "file") == 0 &&
+        !dom_attr(n, "disabled")) {
+        P(I)->file_pick = n;
+        P(I)->file_pick_pending = 1;
+    }
     return v_undef();
 }
 
@@ -1546,7 +1571,7 @@ static int win_set(interp_t* I, obj_t* self, const char* key, value_t v) {
     (void)self;
     page_t* p = P(I);
     if (K("onload")) {
-        if (v_isfunc(v) && p->nonload < MAX_ONLOAD) p->onload[p->nonload++] = v;
+        if (v_isfunc(v) && p->nonload < MAX_ONLOAD) { p->onload_load[p->nonload] = 1; p->onload[p->nonload++] = v; }
         return 1;
     }
     if (K("location")) { url_resolve(p->base, v_cstr(I, v), p->nav, sizeof(p->nav)); p->nav_pending = 1; return 1; }
@@ -1560,7 +1585,7 @@ static value_t w_addEventListener(interp_t* I, value_t self, int argc, value_t* 
     const char* type = arg_str(I, argc, argv, 0);
     if (!v_isfunc(ARG(1))) return v_undef();
     if (strcmp(type, "load") == 0 || strcmp(type, "DOMContentLoaded") == 0) {
-        if (p->nonload < MAX_ONLOAD) p->onload[p->nonload++] = ARG(1);
+        if (p->nonload < MAX_ONLOAD) { p->onload_load[p->nonload] = type[0] == 'l'; p->onload[p->nonload++] = ARG(1); }
     } else {
         add_handler(p, p->doc, type, ARG(1));       /* keys etc. bubble up to the document */
     }
@@ -1571,6 +1596,7 @@ static value_t w_removeEventListener(interp_t* I, value_t self, int argc, value_
     (void)self;
     page_t* p = P(I);
     value_t fn = ARG(1);
+    if (onload_remove(p, arg_str(I, argc, argv, 0), fn)) return v_undef();
     remove_handler(p->doc, arg_str(I, argc, argv, 0), &fn);
     return v_undef();
 }
@@ -1878,7 +1904,7 @@ static value_t w_requestIdleCallback(interp_t* I, value_t self, int argc, value_
 
 /* ── fetch() and XMLHttpRequest: done right away (the browser task may wait on the network) ── */
 
-static int do_request(page_t* p, const char* url_in, const char* method, const char* body, uint32_t blen,
+static int do_request(page_t* p, const char* url_in, const char* method, const char* body, uint32_t blen, const char* btype,
                       char** data, uint32_t* len, char* ctype, int ccap, char* err, int ecap, char* final_url) {
     char url[1024];
     url_resolve(p->base, url_in, url, sizeof(url));
@@ -1889,11 +1915,103 @@ static int do_request(page_t* p, const char* url_in, const char* method, const c
     }
     if (!p->env) { kstrlcpy(err, "no network", (size_t)ecap); return -1; }
     if (p->env->request && (strcasecmp(method, "GET") != 0 || body))
-        return p->env->request(p->env->ctx, url, method, body, blen, "application/x-www-form-urlencoded",
+        return p->env->request(p->env->ctx, url, method, body, blen, btype && *btype ? btype : "application/x-www-form-urlencoded",
                                data, len, ctype, ccap, err, ecap);
     if (!p->env->fetch) { kstrlcpy(err, "no network", (size_t)ecap); return -1; }
     char fin[1024];
     return p->env->fetch(p->env->ctx, url, data, len, ctype, ccap, fin, sizeof(fin), err, ecap);
+}
+
+/* a request body from what a script gave: a string, FormData (multipart/form-data,
+ * files read from the disk - only ones the user chose), URLSearchParams, a Blob or
+ * File, or bytes. *owned: a kmalloc'd buffer to free afterwards. btype: in, the
+ * Content-Type the script set ("" none); out, the one to send. */
+static void make_body(page_t* p, interp_t* I, value_t b, const char** out, uint32_t* olen, char** owned, char* btype, int bcap) {
+    *out = NULL;
+    *olen = 0;
+    *owned = NULL;
+    if (b.t == V_UNDEF || b.t == V_NULL) return;
+    const uint8_t* bytes;
+    uint32_t n;
+    if (typed_bytes(b, &bytes, &n)) {
+        *out = (const char*)bytes;
+        *olen = n;
+        return;
+    }
+    if (b.t == V_OBJ) {
+        value_t l = obj_get(I, b.o, "_l");
+        value_t fdc = script_get_global(I, "FormData");
+        if (l.t == V_OBJ && fdc.t == V_FUNC && es_instanceof(I, b, fdc)) {
+            mpart_t m;
+            mpart_init(&m, p->env && p->env->now_ms ? p->env->now_ms() : 7);
+            for (uint32_t i = 0; i < l.o->len; i++) {
+                value_t e = arr_get(l.o, i);
+                if (e.t != V_OBJ) continue;
+                const char* name = v_cstr(I, arr_get(e.o, 0));
+                value_t v = arr_get(e.o, 1);
+                value_t path = v.t == V_OBJ ? obj_get(I, v.o, "_path") : v_undef();
+                value_t str = v.t == V_OBJ ? obj_get(I, v.o, "_s") : v_undef();
+                if (v.t == V_OBJ && (path.t == V_STR || str.t == V_STR)) {           /* a File / Blob */
+                    value_t fnv = arr_get(e.o, 2);
+                    const char* fname = fnv.t == V_STR ? fnv.s->s : "blob";
+                    value_t ty = obj_get(I, v.o, "type");
+                    const char* type = ty.t == V_STR && ty.s->len ? ty.s->s : page_mime_of(fname);
+                    if (path.t == V_STR) {
+                        char* d = NULL;
+                        uint32_t dl = 0;
+                        if (page_file_chosen(p, path.s->s) && p->env && p->env->read_file &&
+                            p->env->read_file(p->env->ctx, path.s->s, &d, &dl) == 0) {
+                            mpart_file(&m, name, fname, type, (const uint8_t*)d, dl);
+                            kfree(d);
+                        } else mpart_file(&m, name, fname, type, NULL, 0);
+                    } else mpart_file(&m, name, fname, type, (const uint8_t*)str.s->s, str.s->len);
+                } else {
+                    str_t* s = v_tostr(I, v);
+                    mpart_field(&m, name, s->s, s->len);
+                }
+            }
+            mpart_end(&m);
+            if (m.oom) { if (m.buf) kfree(m.buf); return; }
+            *out = m.buf;
+            *olen = m.len;
+            *owned = m.buf;
+            ksnprintf(btype, (size_t)bcap, "multipart/form-data; boundary=%s", m.boundary);   /* (it must name this boundary) */
+            return;
+        }
+        value_t path = obj_get(I, b.o, "_path"), str = obj_get(I, b.o, "_s"), ty = obj_get(I, b.o, "type");
+        if (path.t == V_STR || str.t == V_STR) {                                    /* a File / Blob */
+            if (!btype[0] && ty.t == V_STR && ty.s->len) kstrlcpy(btype, ty.s->s, (size_t)bcap);
+            if (!btype[0]) kstrlcpy(btype, "application/octet-stream", (size_t)bcap);
+            if (path.t == V_STR) {
+                char* d = NULL;
+                uint32_t dl = 0;
+                if (page_file_chosen(p, path.s->s) && p->env && p->env->read_file &&
+                    p->env->read_file(p->env->ctx, path.s->s, &d, &dl) == 0) { *out = d; *olen = dl; *owned = d; }
+                return;
+            }
+            *out = str.s->s;
+            *olen = str.s->len;
+            return;
+        }
+        value_t usp = script_get_global(I, "URLSearchParams");
+        if (usp.t == V_FUNC && es_instanceof(I, b, usp) && !btype[0])
+            kstrlcpy(btype, "application/x-www-form-urlencoded;charset=UTF-8", (size_t)bcap);
+    }
+    str_t* bs = v_tostr(I, b);
+    *out = bs->s;
+    *olen = bs->len;
+}
+
+/* the Content-Type in fetch()'s headers (an object or a Headers) */
+static void header_ctype(interp_t* I, value_t h, char* out, int cap) {
+    if (h.t != V_OBJ) return;
+    value_t inner = obj_get(I, h.o, "_h");
+    obj_t* o = inner.t == V_OBJ ? inner.o : h.o;
+    for (uint32_t i = 0; i < o->n; i++)
+        if (o->props[i].key && !strcasecmp(o->props[i].key->s, "content-type")) {
+            str_t* s = v_tostr(I, o->props[i].v);
+            kstrlcpy(out, s->s, (size_t)cap);
+        }
 }
 
 static value_t resp_text(interp_t* I, value_t self, int argc, value_t* argv) {
@@ -1926,16 +2044,21 @@ static value_t js_fetch(interp_t* I, value_t self, int argc, value_t* argv) {
     const char* method = "GET";
     const char* body = NULL;
     uint32_t blen = 0;
+    char* owned = NULL;
+    char btype[128] = "";
     if (argc > 1 && argv[1].t == V_OBJ) {
         value_t m = obj_get(I, argv[1].o, "method"), b = obj_get(I, argv[1].o, "body");
         if (m.t == V_STR) method = m.s->s;
-        if (b.t != V_UNDEF && b.t != V_NULL) { str_t* bs = v_tostr(I, b); body = bs->s; blen = bs->len; }
+        header_ctype(I, obj_get(I, argv[1].o, "headers"), btype, sizeof(btype));
+        make_body(p, I, b, &body, &blen, &owned, btype, sizeof(btype));
     }
     char* data = NULL;
     uint32_t len = 0;
     char ctype[96] = "", err[160] = "", final_url[1024];
     value_t pr = es_promise_new(I);
-    if (do_request(p, url, method, body, blen, &data, &len, ctype, sizeof(ctype), err, sizeof(err), final_url) != 0) {
+    int rc = do_request(p, url, method, body, blen, btype, &data, &len, ctype, sizeof(ctype), err, sizeof(err), final_url);
+    if (owned) kfree(owned);
+    if (rc != 0) {
         obj_t* e = obj_new(I, OBJ_PLAIN);
         obj_set(I, e, "name", v_str(I, "TypeError"));
         obj_set(I, e, "message", v_str(I, err[0] ? err : "Failed to fetch"));
@@ -1968,6 +2091,26 @@ static value_t xhr_open(interp_t* I, value_t self, int argc, value_t* argv) {
     return v_undef();
 }
 
+/* a ProgressEvent on x (the request, or its upload) */
+static void xhr_progress(interp_t* I, value_t x, const char* name, uint32_t loaded, uint32_t total) {
+    value_t h = obj_get(I, x.o, name);
+    if (h.t != V_FUNC) return;
+    obj_t* ev = obj_new(I, OBJ_PLAIN);
+    obj_set(I, ev, "type", v_str(I, name + 2));
+    obj_set(I, ev, "target", x);
+    obj_set(I, ev, "loaded", v_num(loaded));
+    obj_set(I, ev, "total", v_num(total));
+    obj_set(I, ev, "lengthComputable", v_bool(1));
+    value_t evv = v_obj(ev);
+    call_value(I, h, x, 1, &evv);
+}
+
+static value_t xhr_setRequestHeader(interp_t* I, value_t self, int argc, value_t* argv) {
+    if (self.t != V_OBJ) return v_undef();
+    if (!strcasecmp(arg_str(I, argc, argv, 0), "content-type")) obj_set(I, self.o, "__ctype", v_str(I, arg_str(I, argc, argv, 1)));
+    return v_undef();
+}
+
 static void xhr_fire(interp_t* I, value_t x, const char* name) {
     value_t h = obj_get(I, x.o, name);
     if (h.t != V_FUNC) return;
@@ -1983,12 +2126,25 @@ static value_t xhr_send(interp_t* I, value_t self, int argc, value_t* argv) {
     page_t* p = P(I);
     const char* body = NULL;
     uint32_t blen = 0;
-    if (argc && argv[0].t != V_UNDEF && argv[0].t != V_NULL) { str_t* bs = v_tostr(I, argv[0]); body = bs->s; blen = bs->len; }
+    char* owned = NULL;
+    char btype[128] = "";
+    value_t ct = obj_get(I, self.o, "__ctype");
+    if (ct.t == V_STR) kstrlcpy(btype, ct.s->s, sizeof(btype));
+    if (argc) make_body(p, I, argv[0], &body, &blen, &owned, btype, sizeof(btype));
     char* data = NULL;
     uint32_t len = 0;
     char ctype[96] = "", err[160] = "", final_url[1024];
+    value_t up = obj_get(I, self.o, "upload");
+    if (body && up.t == V_OBJ) { xhr_progress(I, up, "onloadstart", 0, blen); xhr_progress(I, up, "onprogress", 0, blen); }
     int rc = do_request(p, v_cstr(I, obj_get(I, self.o, "__url")), v_cstr(I, obj_get(I, self.o, "__method")),
-                        body, blen, &data, &len, ctype, sizeof(ctype), err, sizeof(err), final_url);
+                        body, blen, btype, &data, &len, ctype, sizeof(ctype), err, sizeof(err), final_url);
+    if (owned) kfree(owned);
+    /* the upload is done (sent in one go): its progress, then the answer */
+    if (body && up.t == V_OBJ && rc == 0) {
+        xhr_progress(I, up, "onprogress", blen, blen);
+        xhr_progress(I, up, "onload", blen, blen);
+        xhr_progress(I, up, "onloadend", blen, blen);
+    }
     obj_set(I, self.o, "readyState", v_num(4));
     obj_set(I, self.o, "status", v_num(rc == 0 ? 200 : 0));
     obj_set(I, self.o, "responseURL", v_str(I, final_url));
@@ -2022,7 +2178,11 @@ static value_t js_XMLHttpRequest(interp_t* I, value_t self, int argc, value_t* a
     obj_set(I, x, "responseType", v_str(I, ""));
     obj_set(I, x, "open", v_native(I, "open", xhr_open));
     obj_set(I, x, "send", v_native(I, "send", xhr_send));
-    obj_set(I, x, "setRequestHeader", v_native(I, "setRequestHeader", m_nothing));
+    obj_set(I, x, "setRequestHeader", v_native(I, "setRequestHeader", xhr_setRequestHeader));
+    obj_t* up = obj_new(I, OBJ_PLAIN);                    /* xhr.upload: progress of what is sent */
+    obj_set(I, up, "addEventListener", v_native(I, "addEventListener", xhr_addEventListener));
+    obj_set(I, up, "removeEventListener", v_native(I, "removeEventListener", m_nothing));
+    obj_set(I, x, "upload", v_obj(up));
     obj_set(I, x, "abort", v_native(I, "abort", m_nothing));
     obj_set(I, x, "addEventListener", v_native(I, "addEventListener", xhr_addEventListener));
     obj_set(I, x, "getResponseHeader", v_native(I, "getResponseHeader", xhr_getResponseHeader));
@@ -2299,12 +2459,57 @@ void jsdom_importmap(page_t* p, const char* text, uint32_t len) {
     if (imps.t == V_OBJ) p->importmap = imps.o;
 }
 
+void jsdom_set_files(page_t* p, dom_node_t* in, const char* path, const char* name, uint32_t size, const char* type) {
+    interp_t* I = p->js;
+    if (!I) return;
+    value_t fn = script_get_global(I, "__setFiles");
+    if (fn.t != V_FUNC) return;
+    value_t args[5] = { wrap(p, in), v_str(I, path), v_str(I, name), v_num(size), v_str(I, type) };
+    script_call(I, fn, v_undef(), 5, args, NULL);
+    changed(p);
+}
+
+/* __readFile(path): a chosen file's bytes (Uint8Array), or null */
+static value_t js_readFile(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)self;
+    page_t* p = P(I);
+    const char* path = arg_str(I, argc, argv, 0);
+    char* d = NULL;
+    uint32_t n = 0;
+    if (!page_file_chosen(p, path) || !p->env || !p->env->read_file || p->env->read_file(p->env->ctx, path, &d, &n) != 0)
+        return v_null();
+    value_t r = typed_u8_new(I, (const uint8_t*)d, n);
+    kfree(d);
+    return r;
+}
+
+void jsdom_loaded(page_t* p, int phase) {
+    interp_t* I = p->js;
+    if (!I) return;
+    p->ready = phase ? 2 : 1;
+    dispatch(p, p->doc, "readystatechange", NULL);
+    for (int i = 0; i < p->nonload; i++) {             /* (listeners added meanwhile run too) */
+        if (p->onload[i].t != V_FUNC || p->onload_load[i] != phase) continue;
+        obj_t* ev = obj_new(I, OBJ_PLAIN);
+        ev->proto = event_proto(p);
+        obj_set(I, ev, "type", v_str(I, phase ? "load" : "DOMContentLoaded"));
+        obj_set(I, ev, "target", wrap(p, p->doc));
+        obj_set(I, ev, "currentTarget", wrap(p, p->doc));
+        obj_set(I, ev, "bubbles", v_bool(!phase));
+        obj_set(I, ev, "defaultPrevented", v_bool(0));
+        value_t evv = v_obj(ev);
+        value_t fn = p->onload[i];
+        if (script_call(I, fn, v_undef(), 1, &evv, NULL) != 0) kstrlcpy(p->status, script_error(I), sizeof(p->status));
+    }
+}
+
 void jsdom_install(page_t* p) {
     interp_t* I = p->js;
     script_set_host(I, p);
     script_set_log(I, js_log, p);
     script_set_output(I, js_out, p);
     p->onload = (value_t*)arena_alloc(&p->A, MAX_ONLOAD * (uint32_t)sizeof(value_t));
+    p->onload_load = (uint8_t*)arena_alloc(&p->A, MAX_ONLOAD);
     p->nonload = 0;
 
     p->elem_proto = TABLE(I, ELEM_METHODS, NULL);
@@ -2376,6 +2581,7 @@ void jsdom_install(page_t* p) {
     }
     script_def_global(I, "Image", v_native(I, "Image", js_Image));
     script_def_global(I, "fetch", v_native(I, "fetch", js_fetch));
+    script_def_global(I, "__readFile", v_native(I, "__readFile", js_readFile));
     script_def_global(I, "XMLHttpRequest", v_native(I, "XMLHttpRequest", js_XMLHttpRequest));
     script_def_global(I, "matchMedia", v_native(I, "matchMedia", js_matchMedia));
     script_def_global(I, "getSelection", v_native(I, "getSelection", w_getSelection));

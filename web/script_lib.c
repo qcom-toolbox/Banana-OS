@@ -1253,12 +1253,31 @@ static const fn_entry_t STRING_METHODS[] = {
     { "replaceAll", s_replaceAll }, { "repeat", s_repeat }, { "padStart", s_padStart }, { "padEnd", s_padEnd },
     { "concat", s_concat }, { "toString", s_toString }, { "valueOf", s_toString },
 };
+/* the changing methods on an array-like object ([].push.call(obj, x) - jQuery
+ * keeps its results in one): on a copy, which is then stored back */
+static value_t on_array_like(interp_t* I, value_t self, int argc, value_t* argv, value_t (*fn)(interp_t*, value_t, int, value_t*)) {
+    if (self.t != V_OBJ || self.o->kind == OBJ_ARRAY || self.o->kind == OBJ_HOST) return fn(I, self, argc, argv);
+    obj_t* A = as_array(I, self);
+    num_t oldn = v_tonum(I, obj_get(I, self.o, "length"));
+    uint32_t old = oldn > 0 ? (oldn > 1000000 ? 1000000 : (uint32_t)oldn) : 0;
+    value_t r = fn(I, v_obj(A), argc, argv);
+    char k[16];
+    for (uint32_t i = 0; i < A->len; i++) { ksnprintf(k, sizeof(k), "%u", i); obj_set(I, self.o, k, A->items[i]); }
+    for (uint32_t i = A->len; i < old; i++) { ksnprintf(k, sizeof(k), "%u", i); prop_del(self.o, k); }
+    obj_set(I, self.o, "length", v_num(A->len));
+    if (r.t == V_OBJ && r.o == A) return self;             /* sort, reverse, fill: the object itself */
+    return r;
+}
+#define ALIKE(name) static value_t g_##name(interp_t* I, value_t self, int argc, value_t* argv) { return on_array_like(I, self, argc, argv, a_##name); }
+ALIKE(push) ALIKE(pop) ALIKE(shift) ALIKE(unshift) ALIKE(splice) ALIKE(reverse) ALIKE(sort) ALIKE(fill)
+#undef ALIKE
+
 static const fn_entry_t ARRAY_METHODS[] = {
-    { "push", a_push }, { "pop", a_pop }, { "shift", a_shift }, { "unshift", a_unshift }, { "join", a_join },
-    { "indexOf", a_indexOf }, { "includes", a_includes }, { "slice", a_slice }, { "splice", a_splice },
-    { "reverse", a_reverse }, { "concat", a_concat }, { "forEach", a_forEach }, { "map", a_map },
+    { "push", g_push }, { "pop", g_pop }, { "shift", g_shift }, { "unshift", g_unshift }, { "join", a_join },
+    { "indexOf", a_indexOf }, { "includes", a_includes }, { "slice", a_slice }, { "splice", g_splice },
+    { "reverse", g_reverse }, { "concat", a_concat }, { "forEach", a_forEach }, { "map", a_map },
     { "filter", a_filter }, { "find", a_find }, { "findIndex", a_findIndex }, { "some", a_some },
-    { "every", a_every }, { "reduce", a_reduce }, { "sort", a_sort }, { "fill", a_fill }, { "at", a_at },
+    { "every", a_every }, { "reduce", a_reduce }, { "sort", g_sort }, { "fill", g_fill }, { "at", a_at },
     { "toString", a_join },
 };
 static const fn_entry_t NUMBER_METHODS[] = {

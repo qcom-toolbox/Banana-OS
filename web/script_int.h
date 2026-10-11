@@ -254,5 +254,7 @@ value_t php_array_get(interp_t* I, obj_t* o, value_t key, int* found);
 /* script_typed.c: ArrayBuffer, typed arrays, DataView */
 void typed_init(interp_t* I);
 int  typed_instanceof(value_t v, const char* ctor);   /* 1/0, or -1 if ctor is not one of them */
+value_t typed_u8_new(interp_t* I, const uint8_t* d, uint32_t n);
+int  typed_bytes(value_t v, const uint8_t** d, uint32_t* n);
 
 #endif

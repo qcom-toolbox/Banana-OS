@@ -2833,6 +2833,26 @@ static value_t key_of(interp_t* I, value_t k, char* buf, int cap, const char** o
 }
 
 /* where an assignment writes: variable or property */
+/* obj.name = v / obj[key] = v with obj (ov) and key (kv) already evaluated (JS) */
+static void store_member(interp_t* I, node_t* target, value_t ov, value_t kv, value_t v) {
+    const char* key;
+    char kb[24];
+    if (target->k == N_MEMBER) key = target->s->s;
+    else if (target->b) key_of(I, kv, kb, sizeof(kb), &key);
+    else key = NULL;
+    if (ov.t == V_FUNC && key) {                     /* F.prototype = ..., F.x = ..., F[k] = ... */
+        if (!ov.f->statics) ov.f->statics = obj_new(I, OBJ_PLAIN);
+        obj_set(I, ov.f->statics, key, v);
+        return;
+    }
+    if (ov.t != V_OBJ) {
+        if (ov.t == V_UNDEF || ov.t == V_NULL) script_throw(I, "TypeError: cannot set properties of undefined");
+        return;
+    }
+    if (!key) { arr_push(I, ov.o, v); return; }
+    obj_set(I, ov.o, key, v);
+}
+
 static void assign_to(interp_t* I, node_t* target, value_t v) {
     if (target->k == N_ARRAY || target->k == N_OBJECT) { destructure(I, target, v, 0); return; }
     if (target->k == N_IDENT) {
@@ -2870,9 +2890,17 @@ static void assign_to(interp_t* I, node_t* target, value_t v) {
             ov = eval(I, target->a);
         }
         if (I->ctl) return;
-        if (ov.t == V_FUNC && target->k == N_MEMBER) {      /* F.prototype = ..., F.x = ... */
+        if (ov.t == V_FUNC && (target->k == N_MEMBER || target->b)) {   /* F.prototype = ..., F.x = ..., F[k] = ... */
+            const char* key;
+            char kb[24];
+            if (target->k == N_MEMBER) key = target->s->s;
+            else {
+                value_t k = eval(I, target->b);
+                if (I->ctl) return;
+                key_of(I, k, kb, sizeof(kb), &key);
+            }
             if (!ov.f->statics) ov.f->statics = obj_new(I, OBJ_PLAIN);
-            obj_set(I, ov.f->statics, target->s->s, v);
+            obj_set(I, ov.f->statics, key, v);
             return;
         }
         if (ov.t != V_OBJ) {
@@ -3630,6 +3658,18 @@ static value_t eval(interp_t* I, node_t* n) {
     case N_ASSIGN: {
         value_t v;
         if (n->op == '=') {
+            if (I->lang != LANG_PHP && (n->a->k == N_MEMBER || n->a->k == N_INDEX)) {
+                /* JS order: the object, the key, then the value - (b = x).y = b.z needs b first */
+                value_t ov = eval(I, n->a->a);
+                if (I->ctl) return v_undef();
+                value_t kv = v_undef();
+                if (n->a->k == N_INDEX && n->a->b) { kv = eval(I, n->a->b); if (I->ctl) return v_undef(); }
+                v = eval(I, n->b);
+                if (I->ctl) return v_undef();
+                if (ov.t == V_OBJ && ov.o->kind == OBJ_PHPARRAY) assign_to(I, n->a, v);
+                else store_member(I, n->a, ov, kv, v);
+                return v;
+            }
             v = eval(I, n->b);
             if (I->ctl) return v_undef();
             if (I->lang == LANG_PHP) v = php_array_copy(I, v);

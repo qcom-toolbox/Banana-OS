@@ -444,6 +444,16 @@ static int out_of_sight(const style_t* st) {
     return 0;
 }
 
+/* a block right inside <center> (or <div align=center>) is centered, as
+ * browsers do (-webkit-center) */
+static int in_center(dom_node_t* e) {
+    dom_node_t* p = e->parent;
+    if (!p || p->type != DOM_ELEM) return 0;
+    if (strcmp(p->tag, "center") == 0) return 1;
+    const char* al = dom_attr(p, "align");
+    return al && strcasecmp(al, "center") == 0 && (strcmp(p->tag, "div") == 0 || strcmp(p->tag, "td") == 0 || strcmp(p->tag, "th") == 0 || strcmp(p->tag, "p") == 0);
+}
+
 /* max-content / min-content widths, once per element per layout */
 static void measure(ctx_t* C, dom_node_t* e, int* maxw, int* minw) {
     if (e->meas_gen == g_layout_gen) { *maxw = e->meas_max; *minw = e->meas_min; return; }
@@ -631,13 +641,18 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
         mark_box(C, first, hh);
         return;
     }
+    int is_file = is_input && strcasecmp(type, "file") == 0;
     int button = !is_input || strcasecmp(type, "submit") == 0 || strcasecmp(type, "button") == 0 ||
-                 strcasecmp(type, "reset") == 0;
+                 strcasecmp(type, "reset") == 0 || is_file;
     int is_select = strcmp(tag, "select") == 0;
     if (is_select) button = 0;
     const char* label;
     if (button) {
-        if (is_input) label = dom_attr(e, "value") ? dom_attr(e, "value") : (strcasecmp(type, "reset") == 0 ? "Reset" : "Submit");
+        if (is_file) {
+            /* "Choose a file..." until one is chosen, then its name */
+            const char* v = e->form_init && e->value && *e->value ? e->value : NULL;
+            label = v ? (strrchr(v, '/') ? strrchr(v, '/') + 1 : v) : "Choose a file...";
+        } else if (is_input) label = dom_attr(e, "value") ? dom_attr(e, "value") : (strcasecmp(type, "reset") == 0 ? "Reset" : "Submit");
         else label = dom_text(C->L->A, e);
     } else if (is_select) {
         label = "";
@@ -1201,7 +1216,7 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     if (force_w > 0) { cw = force_w - (bl + br + pl + pr); explicit_w = 1; }
     if (cw < 8) cw = 8;
     int bw = cw + bl + br + pl + pr;
-    if (explicit_w && st->margin_auto_lr && bw < avail) ml = (avail - bw) / 2;
+    if (explicit_w && (st->margin_auto_lr || in_center(e)) && bw < avail) ml = (avail - bw) / 2;
     if (bw > avail - ml && !explicit_w) bw = avail - ml;
     int bx = x + ml, by = y + mt;
     uint32_t bg_index = C->dry ? 0 : C->L->n;
@@ -1446,7 +1461,7 @@ static int layout_table(ctx_t* C, dom_node_t* t, int x, int y, int avail) {
         int room = inner - sum_min, want = sum_max - sum_min;
         for (int c = 0; c < ncols; c++) colw[c] = colmin[c] + (want ? room * (colmax[c] - colmin[c]) / want : 0);
     }
-    if (st->margin_auto_lr && tw < avail) ml = (avail - tw) / 2;
+    if ((st->margin_auto_lr || in_center(t)) && tw < avail) ml = (avail - tw) / 2;
     int tx = x + ml, ty = y + mt;
     uint32_t bg_index = C->dry ? 0 : C->L->n;
     if (st->has_bg) rect(C, tx, ty, tw, 1, st->bg, t);
