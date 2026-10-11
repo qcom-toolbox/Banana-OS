@@ -89,6 +89,18 @@ int  banana_key_mods(void);                /* BANANA_MOD_SHIFT / _CTRL / _ALT he
 void bwin_wheel(bwin_t* win);              /* the wheel as BANANA_EV_WHEEL (ev.y notches) */
 int  banana_pkg_install(const char* path, char* msg, int mcap);
 int  banana_app_run(const char* name, int argc, char** argv, char* err, int ecap);
+/* ── packages (API version 11): what apt and the App Store use ───────
+ * banana_repo_list() fills banana_pkg_t entries (banana_api.h): every
+ * package in the repositories and every installed one. Installing
+ * downloads what a package depends on too; it takes a while - do it in a
+ * thread and show banana_repo_status() (percent, -1 when done). */
+int  banana_repo_update(char* msg, int mcap);              /* packages known, or -1 */
+int  banana_repo_list(banana_pkg_t* out, int max);
+int  banana_repo_install(const char* name, char* msg, int mcap);
+int  banana_repo_remove(const char* name, char* msg, int mcap);
+int  banana_repo_status(char* msg, int mcap);
+int  banana_repo_icon(const char* name, char* path, int pcap);   /* 0: path of a picture */
+int  banana_repo_upgrade(char* msg, int mcap);             /* how many, or -1 */
 /* a bevelled button-looking box with a centered label */
 void bwin_button(bwin_t* win, int x, int y, int w, int h, const char* label, int pressed);
 /* copies a w*h image (0x00RRGGBB) into the window at x, y */

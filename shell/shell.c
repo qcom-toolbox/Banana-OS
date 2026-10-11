@@ -1377,7 +1377,7 @@ static const char* const known_cmds[] = {
     "ifconfig", "dhcp", "ping", "nslookup", "host", "netstat", "arp", "curl", "wget",
     "cryptotest", "wallpaper", "lsusb", "usb", "httpd", "sshd", "passwd", "files", "browser", "notepad",
     /* shell/syscmds.c */
-    "mount", "umount", "eject", "pkg", "apps", "taskmgr", "settings", "play", "beep", "volume", "lsaudio",
+    "mount", "umount", "eject", "pkg", "apt", "apt-get", "apps", "taskmgr", "settings", "play", "beep", "volume", "lsaudio",
     /* shell/moncmds.c */
     "free", "df", "htop", "sched", "renice", "lscpu", "kptest", "lsgpu", "brightness", "resolution", "drivers", "driver", (void*)0
 };

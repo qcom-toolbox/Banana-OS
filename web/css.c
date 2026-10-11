@@ -772,6 +772,7 @@ static const char DEFAULT_CSS[] =
     "s, strike, del { text-decoration: line-through }"
     "a:link { color: #0645ad; text-decoration: underline }"
     "center { text-align: center }"
+    "center table { text-align: left }"   /* (quirks mode, as browsers do: HN) */
     "big { font-size: 20px }"
     "small, sub, sup { font-size: 13px }"
     "code, kbd, samp, tt { color: #333; font-family: monospace }"

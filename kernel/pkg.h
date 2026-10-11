@@ -9,7 +9,8 @@
  *   "BPK1"  uint32 count  count x { char name[56]; uint32 offset; uint32 size; }  data...
  *
  * (little endian). Every package has a "manifest" (key=value lines: name,
- * title, version, type = console | gui | driver, description, author) and the
+ * title, version, type = console | gui | driver, description, author,
+ * category, depends) and the
  * program for one or both CPUs: "app-i686", "app-x86_64". Any other file
  * is app data. `pkg install` unpacks it all into /apps/<name>/.
  */
@@ -24,6 +25,8 @@ typedef struct {
     char type[8];            /* "console" or "gui" */
     char description[96];
     char author[48];
+    char category[24];       /* "Games", "Graphics"... (the App Store's shelves) */
+    char depends[128];       /* "a, b (>= 1.2), c | d" - apt installs them first */
     int  has_i686, has_x86_64;
     uint32_t files, bytes;
 } pkg_info_t;

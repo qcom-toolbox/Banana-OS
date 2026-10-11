@@ -58,6 +58,20 @@ static int fetch(void* ctx, const char* url, char** data, uint32_t* len, char* c
 
 static dom_node_t* by_id(page_t* p, const char* id) { return dom_find_id(p->doc, id); }
 
+/* BOXDUMP=depth: the element tree with display, position and boxes */
+static void boxdump(dom_node_t* e, int d, int maxd) {
+    if (!e || d > maxd) return;
+    if (e->type == DOM_ELEM) {
+        const char* id = dom_attr(e, "id");
+        const char* cl = dom_attr(e, "class");
+        fprintf(stderr, "%*s<%s id=%s class=%.40s> disp=%d pos=%d ovh=%d h=%d box=%d,%d %dx%d\n", d * 2, "",
+                e->tag, id ? id : "", cl ? cl : "", e->style ? e->style->display : -1,
+                e->style ? e->style->position : -1, e->style ? e->style->overflow_hidden : -1,
+                e->style ? e->style->height : -1, e->box_x, e->box_y, e->box_w, e->box_h);
+    }
+    for (dom_node_t* c = e->first; c; c = c->next) if (c->type == DOM_ELEM) boxdump(c, d + 1, maxd);
+}
+
 int main(int argc, char** argv) {
     host_fonts();
     if (argc < 3) { fprintf(stderr, "usage: page_test file.html out.ppm [actions]\n"); return 2; }
@@ -104,7 +118,7 @@ int main(int argc, char** argv) {
     }
     page_update(p, width);
     layout_t* L = p->layout;
-    int h = L->height < 100 ? 100 : L->height;
+    int h = L->height < 600 ? 600 : L->height;
     if (h > 4000) h = 4000;
     uint32_t* buf = calloc((size_t)width * h, 4);
     render_page(L, buf, width, width, h, 0, 0, width, h, 0);
@@ -113,6 +127,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < width * h; i++) { unsigned char px[3] = { buf[i] >> 16, buf[i] >> 8, buf[i] }; fwrite(px, 1, 3, o); }
     fclose(o);
     fprintf(stderr, "layout: %u items, height %d, arena %u KB\n", L->n, L->height, p->A.total / 1024);
+    if (getenv("BOXDUMP")) boxdump(dom_find_tag(p->doc, "html"), 0, atoi(getenv("BOXDUMP")));
     page_free(p);
     return 0;
 }

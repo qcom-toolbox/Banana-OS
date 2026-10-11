@@ -612,7 +612,7 @@ static value_t elem_get(interp_t* I, obj_t* self, const char* key, int* found) {
         const char* v = dom_attr(n, key);
         if (!v) return v_str(I, "");
         char out[1024];
-        url_resolve(p->url, v, out, sizeof(out));
+        url_resolve(p->base, v, out, sizeof(out));
         return v_str(I, out);
     }
     if (K("type")) {
@@ -708,7 +708,7 @@ static int elem_set(interp_t* I, obj_t* self, const char* key, value_t v) {
             if (t) set_text(p, t, p->title);
             return 1;
         }
-        if (K("location")) { url_resolve(p->url, v_cstr(I, v), p->nav, sizeof(p->nav)); p->nav_pending = 1; return 1; }
+        if (K("location")) { url_resolve(p->base, v_cstr(I, v), p->nav, sizeof(p->nav)); p->nav_pending = 1; return 1; }
         if (K("cookie")) {                               /* one cookie: "name=value; path=/; max-age=..." */
             if (p->env && p->env->cookie_set) p->env->cookie_set(p->env->ctx, p->url, v_cstr(I, v));
             return 1;
@@ -1324,7 +1324,7 @@ static value_t m_submit(interp_t* I, value_t self, int argc, value_t* argv) {
     page_t* p = P(I);
     char base[1024];
     const char* action = dom_attr(n, "action");
-    if (action && *action) url_resolve(p->url, action, base, sizeof(base));
+    if (action && *action) url_resolve(p->base, action, base, sizeof(base));
     else kstrlcpy(base, p->url, sizeof(base));
     char* q = strchr(base, '?');
     if (q) *q = 0;
@@ -1502,7 +1502,7 @@ static value_t w_open(interp_t* I, value_t self, int argc, value_t* argv) {
     (void)self;
     page_t* p = P(I);
     if (!argc || argv[0].t == V_UNDEF) return v_null();
-    url_resolve(p->url, v_cstr(I, argv[0]), p->nav, sizeof(p->nav));
+    url_resolve(p->base, v_cstr(I, argv[0]), p->nav, sizeof(p->nav));
     p->nav_post = NULL;
     p->nav_newtab = 1;
     p->nav_pending = 1;
@@ -1549,7 +1549,7 @@ static int win_set(interp_t* I, obj_t* self, const char* key, value_t v) {
         if (v_isfunc(v) && p->nonload < MAX_ONLOAD) p->onload[p->nonload++] = v;
         return 1;
     }
-    if (K("location")) { url_resolve(p->url, v_cstr(I, v), p->nav, sizeof(p->nav)); p->nav_pending = 1; return 1; }
+    if (K("location")) { url_resolve(p->base, v_cstr(I, v), p->nav, sizeof(p->nav)); p->nav_pending = 1; return 1; }
     script_def_global(I, key, v);
     return 1;
 }
@@ -1641,7 +1641,7 @@ static int loc_set(interp_t* I, obj_t* self, const char* key, value_t v) {
     (void)self;
     page_t* p = P(I);
     const char* s = v_cstr(I, v);
-    if (K("href")) { url_resolve(p->url, s, p->nav, sizeof(p->nav)); p->nav_pending = 1; return 1; }
+    if (K("href")) { url_resolve(p->base, s, p->nav, sizeof(p->nav)); p->nav_pending = 1; return 1; }
     if (K("hash")) {
         char* h = strchr(p->url, '#');
         if (h) *h = 0;
@@ -1654,7 +1654,7 @@ static int loc_set(interp_t* I, obj_t* self, const char* key, value_t v) {
     if (K("search")) {
         char rel[1024];
         ksnprintf(rel, sizeof(rel), "%s%s", *s == '?' ? "" : "?", s);
-        url_resolve(p->url, rel, p->nav, sizeof(p->nav));
+        url_resolve(p->base, rel, p->nav, sizeof(p->nav));
         p->nav_pending = 1;
         return 1;
     }
@@ -1672,7 +1672,7 @@ static value_t l_reload(interp_t* I, value_t self, int argc, value_t* argv) {
 static value_t l_assign(interp_t* I, value_t self, int argc, value_t* argv) {
     (void)self;
     page_t* p = P(I);
-    url_resolve(p->url, arg_str(I, argc, argv, 0), p->nav, sizeof(p->nav));
+    url_resolve(p->base, arg_str(I, argc, argv, 0), p->nav, sizeof(p->nav));
     p->nav_pending = 1;
     return v_undef();
 }
@@ -1881,8 +1881,12 @@ static value_t w_requestIdleCallback(interp_t* I, value_t self, int argc, value_
 static int do_request(page_t* p, const char* url_in, const char* method, const char* body, uint32_t blen,
                       char** data, uint32_t* len, char* ctype, int ccap, char* err, int ecap, char* final_url) {
     char url[1024];
-    url_resolve(p->url, url_in, url, sizeof(url));
+    url_resolve(p->base, url_in, url, sizeof(url));
     kstrlcpy(final_url, url, 1024);
+    if (strcasecmp(method, "GET") == 0) {
+        int d = page_data_url(url, data, len, ctype, ccap);
+        if (d != -2) { if (d) kstrlcpy(err, "a broken data: URL", (size_t)ecap); return d; }
+    }
     if (!p->env) { kstrlcpy(err, "no network", (size_t)ecap); return -1; }
     if (p->env->request && (strcasecmp(method, "GET") != 0 || body))
         return p->env->request(p->env->ctx, url, method, body, blen, "application/x-www-form-urlencoded",
@@ -2131,14 +2135,14 @@ static int module_resolve(page_t* p, const char* spec, const char* base, char* o
     if (!map) return -1;
     int found = 0;
     value_t v = prop_get_raw(map, spec, &found);
-    if (found && v.t == V_STR) { url_resolve(p->url, v.s->s, out, cap); return 0; }
+    if (found && v.t == V_STR) { url_resolve(p->base, v.s->s, out, cap); return 0; }
     for (uint32_t i = 0; i < map->n; i++) {         /* "pkg/": "https://cdn/pkg/" */
         str_t* k = map->props[i].key;
         value_t pv = map->props[i].v;
         if (k->len && k->s[k->len - 1] == '/' && pv.t == V_STR && strncmp(spec, k->s, k->len) == 0) {
             char joined[1024];
             ksnprintf(joined, sizeof(joined), "%s%s", pv.s->s, spec + k->len);
-            url_resolve(p->url, joined, out, cap);
+            url_resolve(p->base, joined, out, cap);
             return 0;
         }
     }
@@ -2165,8 +2169,8 @@ static obj_t* module_load(page_t* p, const char* url) {
     char* data;
     uint32_t len;
     char ct[96], fin[1024], err[160];
-    if (!p->env || !p->env->fetch ||
-        p->env->fetch(p->env->ctx, url, &data, &len, ct, sizeof(ct), fin, sizeof(fin), err, sizeof(err)) != 0) {
+    if (page_data_url(url, &data, &len, ct, sizeof(ct)) != 0 && (!p->env || !p->env->fetch ||
+        p->env->fetch(p->env->ctx, url, &data, &len, ct, sizeof(ct), fin, sizeof(fin), err, sizeof(err)) != 0)) {
         mod_log(p, "browser: cannot load ", url);
         return NULL;
     }
@@ -2219,7 +2223,7 @@ static value_t w_media_open(interp_t* I, value_t self, int argc, value_t* argv) 
     page_t* p = P(I);
     if (!p->env || !p->env->media_open || p->nmedia >= 16) return v_num(-1);
     char url[1024];
-    url_resolve(p->url, arg_str(I, argc, argv, 0), url, sizeof(url));
+    url_resolve(p->base, arg_str(I, argc, argv, 0), url, sizeof(url));
     int id = p->env->media_open(p->env->ctx, p, url);
     if (id >= 0) p->media[p->nmedia++] = id;
     return v_num(id);

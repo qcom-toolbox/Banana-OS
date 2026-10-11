@@ -1,4 +1,4 @@
-/* generated from prelude.js by web/test/embed.pl: do not edit */
+/* generated from web/prelude.js by web/test/embed.pl: do not edit */
 static const char k_prelude[] =
     "/* Run in every page before its own scripts: the web APIs that are easier to\n"
     " * write in script than in C.  web/prelude.h is generated from this file by\n"
@@ -564,4 +564,7 @@ static const char k_prelude[] =
     "  if (W.navigator && !W.navigator.mediaSession) W.navigator.mediaSession = { metadata: null, playbackState: 'none', setActionHandler: function(){}, setPositionState: function(){} };\n"
     "})();\n"
     "})();\n"
+    "\n"
+    "/* PerformanceObserver.supportedEntryTypes: pages ask before observing */\n"
+    "try { if (typeof PerformanceObserver !== 'undefined' && !PerformanceObserver.supportedEntryTypes) PerformanceObserver.supportedEntryTypes = []; } catch (e) {}\n"
 ;

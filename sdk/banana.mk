@@ -10,6 +10,9 @@
 #     AUTHOR      = You
 #     SRCS        = main.c                # your C files
 #     DATA        = levels.txt            # optional: files shipped with the app
+#     CATEGORY    = Games                 # optional: the App Store's shelf
+#     DEPENDS     = libfoo (>= 1.0)       # optional: packages apt installs first
+#     ICON        = icon.png              # optional: a 64x64 PNG for Apps and the App Store
 #     include /path/to/banana-sdk/banana.mk
 #
 # `make` builds the app for both CPUs Banana OS runs on (i686 and x86_64)
@@ -29,6 +32,9 @@ DESCRIPTION ?=
 AUTHOR      ?=
 SRCS        ?= main.c
 DATA        ?=
+CATEGORY    ?=
+DEPENDS     ?=
+ICON        ?=
 BUILD       ?= build
 # extra libraries (.a) linked after the objects, per CPU
 LIBS_i686   ?=
@@ -96,20 +102,22 @@ $(BUILD)/app-x86_64: $(LOBJS_x86_64) $(OBJS_x86_64)
 
 $(BUILD)/manifest: $(MAKEFILE_LIST)
 	@mkdir -p $(BUILD)
-	@printf 'name=%s\ntitle=%s\nversion=%s\ntype=%s\ndescription=%s\nauthor=%s\n' \
-	    '$(APP)' '$(TITLE)' '$(VERSION)' '$(TYPE)' '$(DESCRIPTION)' '$(AUTHOR)' > $@
+	@printf 'name=%s\ntitle=%s\nversion=%s\ntype=%s\ndescription=%s\nauthor=%s\ncategory=%s\ndepends=%s\n' \
+	    '$(APP)' '$(TITLE)' '$(VERSION)' '$(TYPE)' '$(DESCRIPTION)' '$(AUTHOR)' '$(CATEGORY)' '$(DEPENDS)' > $@
 
-$(APP).bpk: $(BUILD)/manifest $(BUILD)/app-i686 $(BUILD)/app-x86_64 $(DATA)
-	$(PYTHON) $(BANANA_SDK)/tools/bpkg pack -o $@ $(BUILD)/manifest $(BUILD)/app-i686 $(BUILD)/app-x86_64 $(DATA)
+ICON_FILE = $(if $(ICON),icon.png=$(ICON))
+
+$(APP).bpk: $(BUILD)/manifest $(BUILD)/app-i686 $(BUILD)/app-x86_64 $(DATA) $(ICON)
+	$(PYTHON) $(BANANA_SDK)/tools/bpkg pack -o $@ $(BUILD)/manifest $(BUILD)/app-i686 $(BUILD)/app-x86_64 $(DATA) $(ICON_FILE)
 	@$(PYTHON) $(BANANA_SDK)/tools/bpkg check $@
 
 # one package per CPU, compressed (apps built into Banana OS: the Makefile's APPS)
 .PHONY: bundle
 bundle: $(APP)-i686.bpk.z $(APP)-x86_64.bpk.z
-$(APP)-i686.bpk: $(BUILD)/manifest $(BUILD)/app-i686 $(DATA)
-	$(PYTHON) $(BANANA_SDK)/tools/bpkg pack -o $@ $^
-$(APP)-x86_64.bpk: $(BUILD)/manifest $(BUILD)/app-x86_64 $(DATA)
-	$(PYTHON) $(BANANA_SDK)/tools/bpkg pack -o $@ $^
+$(APP)-i686.bpk: $(BUILD)/manifest $(BUILD)/app-i686 $(DATA) $(ICON)
+	$(PYTHON) $(BANANA_SDK)/tools/bpkg pack -o $@ $(BUILD)/manifest $(BUILD)/app-i686 $(DATA) $(ICON_FILE)
+$(APP)-x86_64.bpk: $(BUILD)/manifest $(BUILD)/app-x86_64 $(DATA) $(ICON)
+	$(PYTHON) $(BANANA_SDK)/tools/bpkg pack -o $@ $(BUILD)/manifest $(BUILD)/app-x86_64 $(DATA) $(ICON_FILE)
 %.bpk.z: %.bpk
 	$(PYTHON) -c "import sys, zlib; open(sys.argv[2], 'wb').write(zlib.compress(open(sys.argv[1], 'rb').read(), 9))" $< $@
 

@@ -562,3 +562,6 @@ W.__banana_deliver = function(data){
   if (W.navigator && !W.navigator.mediaSession) W.navigator.mediaSession = { metadata: null, playbackState: 'none', setActionHandler: function(){}, setPositionState: function(){} };
 })();
 })();
+
+/* PerformanceObserver.supportedEntryTypes: pages ask before observing */
+try { if (typeof PerformanceObserver !== 'undefined' && !PerformanceObserver.supportedEntryTypes) PerformanceObserver.supportedEntryTypes = []; } catch (e) {}

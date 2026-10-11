@@ -3,7 +3,7 @@
 #include "kstring.h"
 
 /*
- * Ed25519 signing (RFC 8032), after TweetNaCl (Bernstein, van Gastel,
+ * Ed25519 signing and verifying (RFC 8032), after TweetNaCl (Bernstein, van Gastel,
  * Janssen, Lange, Schwabe, Smetsers - public domain): field elements
  * mod 2^255-19 as 16 limbs of 16 bits, extended twisted Edwards
  * coordinates, constant-time ladder.
@@ -13,6 +13,10 @@ typedef int64_t gf[16];
 
 static const gf gf0 = { 0 };
 static const gf gf1 = { 1 };
+static const gf D = { 0x78a3, 0x1359, 0x4dca, 0x75eb, 0xd8ab, 0x4141, 0x0a4d, 0x0070,
+                      0xe898, 0x7779, 0x4079, 0x8cc7, 0xfe73, 0x2b6f, 0x6cee, 0x5203 };
+static const gf I = { 0xa0b0, 0x4a0e, 0x1b27, 0xc4ee, 0xe478, 0xad2f, 0x1806, 0x2f43,
+                      0xd7a7, 0x3dfb, 0x0099, 0x2b4d, 0xdf0b, 0x4fc1, 0x2480, 0x2b83 };
 static const gf D2 = { 0xf159, 0x26b2, 0x9b94, 0xebd6, 0xb156, 0x8283, 0x149a, 0x00e0,
                        0xd130, 0xeef3, 0x80f2, 0x198e, 0xfce7, 0x56df, 0xd9dc, 0x2406 };
 static const gf X = { 0xd51a, 0x8f25, 0x2d60, 0xc956, 0xa7b2, 0x9525, 0xc760, 0x692c,
@@ -241,4 +245,94 @@ void ed25519_sign(uint8_t sig[64], const uint8_t* msg, uint32_t len,
     modL(sig + 32, x);
     memset(d, 0, sizeof(d));
     memset(r, 0, sizeof(r));
+}
+
+/* ── verifying ────────────────────────────────────────────────────── */
+
+static int verify32(const uint8_t* a, const uint8_t* b) {
+    uint32_t d = 0;
+    for (int i = 0; i < 32; i++) d |= (uint32_t)(a[i] ^ b[i]);
+    return (int)((1 & ((d - 1) >> 8)) - 1);         /* 0 equal, -1 not */
+}
+
+static int neq25519(const gf a, const gf b) {
+    uint8_t c[32], d[32];
+    pack25519(c, a);
+    pack25519(d, b);
+    return verify32(c, d);
+}
+
+static void unpack25519(gf o, const uint8_t* n) {
+    for (int i = 0; i < 16; i++) o[i] = n[2 * i] + ((int64_t)n[2 * i + 1] << 8);
+    o[15] &= 0x7fff;
+}
+
+static void pow2523(gf o, const gf i) {
+    gf c;
+    for (int a = 0; a < 16; a++) c[a] = i[a];
+    for (int a = 250; a >= 0; a--) {
+        S(c, c);
+        if (a != 1) M(c, c, i);
+    }
+    for (int a = 0; a < 16; a++) o[a] = c[a];
+}
+
+/* -A from the public key's 32 bytes; -1 if they are not a curve point */
+static int unpackneg(gf r[4], const uint8_t p[32]) {
+    gf t, chk, num, den, den2, den4, den6;
+    set25519(r[2], gf1);
+    unpack25519(r[1], p);
+    S(num, r[1]);
+    M(den, num, D);
+    Z(num, num, r[2]);
+    A(den, r[2], den);
+    S(den2, den);
+    S(den4, den2);
+    M(den6, den4, den2);
+    M(t, den6, num);
+    M(t, t, den);
+    pow2523(t, t);
+    M(t, t, num);
+    M(t, t, den);
+    M(t, t, den);
+    M(r[0], t, den);
+    S(chk, r[0]);
+    M(chk, chk, den);
+    if (neq25519(chk, num)) M(r[0], r[0], I);
+    S(chk, r[0]);
+    M(chk, chk, den);
+    if (neq25519(chk, num)) return -1;
+    if (par25519(r[0]) == (p[31] >> 7)) Z(r[0], gf0, r[0]);
+    M(r[3], r[0], r[1]);
+    return 0;
+}
+
+/* S must be below the group order L (no second signature for one message) */
+static int s_canonical(const uint8_t s32[32]) {
+    static const uint8_t L[32] = { 0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+                                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10 };
+    for (int i = 31; i >= 0; i--) {
+        if (s32[i] < L[i]) return 1;
+        if (s32[i] > L[i]) return 0;
+    }
+    return 0;
+}
+
+int ed25519_verify(const uint8_t sig[64], const uint8_t* msg, uint32_t len, const uint8_t pk[32]) {
+    gf p[4], q[4];
+    uint8_t h[64], t[32];
+    sha512_ctx_t c;
+    if (!s_canonical(sig + 32)) return -1;
+    if (unpackneg(q, pk)) return -1;
+    sha512_init(&c);
+    sha512_update(&c, sig, 32);
+    sha512_update(&c, pk, 32);
+    sha512_update(&c, msg, len);
+    sha512_final(&c, h);
+    reduce(h);
+    scalarmult(p, q, h);           /* h(-A) */
+    scalarbase(q, sig + 32);       /* SB */
+    add(p, q);                     /* SB - hA, which is R for a good signature */
+    pack(t, p);
+    return verify32(sig, t) ? -1 : 0;
 }

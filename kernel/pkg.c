@@ -51,6 +51,8 @@ static void parse_manifest(const char* mf, uint32_t len, pkg_info_t* p) {
     mf_get(mf, len, "type", p->type, sizeof(p->type));
     mf_get(mf, len, "description", p->description, sizeof(p->description));
     mf_get(mf, len, "author", p->author, sizeof(p->author));
+    mf_get(mf, len, "category", p->category, sizeof(p->category));
+    mf_get(mf, len, "depends", p->depends, sizeof(p->depends));
     if (!p->title[0]) kstrlcpy(p->title, p->name, sizeof(p->title));
     if (strcmp(p->type, "gui") != 0 && strcmp(p->type, "driver") != 0) kstrlcpy(p->type, "console", sizeof(p->type));
 }

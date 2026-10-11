@@ -11,6 +11,7 @@
 #include "../kernel/gui.h"
 #include "../kernel/audio.h"
 #include "../kernel/settings.h"
+#include "aptcmd.h"
 
 static void say(const char* fmt, ...) {
     char buf[256];
@@ -130,6 +131,7 @@ static void cmd_pkg(int argc, char** argv) {
         terminal_writeln("       pkg remove <name>...        uninstall");
         terminal_writeln("       pkg run <name> [args]       run one (or just type its name)");
         terminal_writeln("       pkg ps                      running apps");
+        terminal_writeln("From repositories: apt update / search / install <name> / upgrade (or the App Store).");
         terminal_writeln("Apps are built on Linux with the Banana OS SDK (sdk/ in the source tree).");
     }
 }
@@ -185,6 +187,10 @@ int syscmd_dispatch(const char* line) {
     if (argc == 0) return 0;
     if (strcmp(argv[0], "mount") == 0) { cmd_mount(argc, argv); return 1; }
     if (strcmp(argv[0], "umount") == 0 || strcmp(argv[0], "eject") == 0) { cmd_umount(argc, argv); return 1; }
+    if (strcmp(argv[0], "apt") == 0 || strcmp(argv[0], "apt-get") == 0) { cmd_apt(argc, argv); return 1; }
+    if (strcmp(argv[0], "pkg") == 0 && argc >= 2 &&
+        (!strcmp(argv[1], "update") || !strcmp(argv[1], "upgrade") || !strcmp(argv[1], "search") ||
+         !strcmp(argv[1], "show") || !strcmp(argv[1], "autoremove") || !strcmp(argv[1], "sources"))) { cmd_apt(argc, argv); return 1; }
     if (strcmp(argv[0], "pkg") == 0) { cmd_pkg(argc, argv); return 1; }
     if (strcmp(argv[0], "play") == 0) { cmd_play(argc, argv); return 1; }
     if (strcmp(argv[0], "beep") == 0) { cmd_beep(argc, argv); return 1; }

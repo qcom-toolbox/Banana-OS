@@ -17,7 +17,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 10u
+#define BANANA_API_VERSION 11u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -30,6 +30,25 @@
 #define BANANA_SEEK_SET 0
 #define BANANA_SEEK_CUR 1
 #define BANANA_SEEK_END 2
+
+/* a package (repo_list) */
+#define BANANA_PKG_INSTALLED  1    /* installed (installed: its version) */
+#define BANANA_PKG_UPGRADABLE 2    /* a newer version is in a repository */
+#define BANANA_PKG_AVAILABLE  4    /* in a repository (version: the newest) */
+#define BANANA_PKG_AUTO       8    /* installed only because another one needs it */
+typedef struct {
+    char         name[25];
+    char         title[48];
+    char         version[24];      /* the repository's */
+    char         installed[24];    /* "" if not installed */
+    char         type[8];          /* console, gui, driver */
+    char         category[24];
+    char         description[160];
+    char         author[48];
+    char         depends[128];
+    unsigned int size;             /* download size */
+    int          flags;            /* BANANA_PKG_* */
+} banana_pkg_t;
 
 /* window events */
 #define BANANA_EV_NONE        0
@@ -294,6 +313,22 @@ typedef struct banana_api {
     int   (*pkg_install)(const char* path, char* msg, int mcap);
     /* starts an installed app (a console app in a terminal window of its own) */
     int   (*app_run)(const char* name, int argc, char** argv, char* err, int ecap);
+
+    /* ── version 11: the package manager (apt, the App Store) ── */
+    /* fetches the repositories' package lists: how many packages, or -1 (msg) */
+    int   (*repo_update)(char* msg, int mcap);
+    /* every package: the repositories' (newest for this computer) and the
+     * installed ones; how many there are (fills out up to max) */
+    int   (*repo_list)(banana_pkg_t* out, int max);
+    /* installs a package and what it depends on, or upgrades it: 0 / -1 (msg) */
+    int   (*repo_install)(const char* name, char* msg, int mcap);
+    int   (*repo_remove)(const char* name, char* msg, int mcap);
+    /* what an update / install is doing: percent, or -1 when nothing runs */
+    int   (*repo_status)(char* msg, int mcap);
+    /* a picture file for the package (downloaded once): 0 with its path, -1 */
+    int   (*repo_icon)(const char* name, char* path, int pcap);
+    /* upgrades every package that has a newer version: how many, or -1 */
+    int   (*repo_upgrade)(char* msg, int mcap);
 } banana_api_t;
 
 /* the app's entry point (the SDK's crt0 provides it) */

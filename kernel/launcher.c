@@ -178,7 +178,11 @@ void launcher_click(int mx, int my) {
     if (win_grip_press(&g_win, mx, my)) return;
     kbnav_mouse(&g_nav);
     if (ly >= TOOL_Y && ly < TOOL_Y + 18) {
-        if (lx >= 8 && lx < 120) { explorer_open("/home/banana/Examples"); gui_raise_files(); set_status("Double-click a .bpk to install it"); }
+        if (lx >= 8 && lx < 120) {
+            char err[96];
+            if (pkg_run("store", 0, NULL, 1, err, sizeof(err)) >= 0) set_status("Opening the App Store...");
+            else { explorer_open("/home/banana/Examples"); gui_raise_files(); set_status("Double-click a .bpk to install it"); }
+        }
         else if (lx >= 126 && lx < 206) { rescan(); set_status("Refreshed"); }
         return;
     }
@@ -216,7 +220,7 @@ void launcher_draw(const fb_info_t* fi) {
 
     if (g_napps == 0) {
         gfx_draw_text(x + 16, y + GRID_Y + 10, "No apps installed yet.", C_TEXT, C_PANEL);
-        gfx_draw_text(x + 16, y + GRID_Y + 30, "Install one: double-click a .bpk file in Files", C_DIM, C_PANEL);
+        gfx_draw_text(x + 16, y + GRID_Y + 30, "Get apps... opens the App Store; or double-click a .bpk", C_DIM, C_PANEL);
         gfx_draw_text(x + 16, y + GRID_Y + 44, "(try ~/Examples, a USB stick in /mnt/usb, or a", C_DIM, C_PANEL);
         gfx_draw_text(x + 16, y + GRID_Y + 58, "download), or type: pkg install <file.bpk>", C_DIM, C_PANEL);
         gfx_draw_text(x + 16, y + GRID_Y + 82, "Build your own with the Linux SDK (sdk/).", C_DIM, C_PANEL);

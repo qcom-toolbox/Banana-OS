@@ -125,8 +125,84 @@ static void plog(page_t* p, const char* fmt, const char* a) {
 
 static uint32_t now(page_t* p) { return p->env && p->env->now_ms ? p->env->now_ms() : 0; }
 
+static uint32_t strtoul_hex(const char* h) {
+    uint32_t v = 0;
+    for (; *h; h++) {
+        int c = *h;
+        v <<= 4;
+        if (c >= '0' && c <= '9') v |= (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') v |= (uint32_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v |= (uint32_t)(c - 'A' + 10);
+        else return v >> 4;
+    }
+    return v;
+}
+
+static int b64v(int c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+' || c == '-') return 62;
+    if (c == '/' || c == '_') return 63;
+    return -1;
+}
+
+int page_data_url(const char* url, char** data, uint32_t* len, char* ctype, int ccap) {
+    if (strncasecmp(url, "data:", 5) != 0) return -2;
+    const char* comma = strchr(url + 5, ',');
+    if (!comma) return -1;
+    /* the type: "image/png;base64" */
+    int b64 = 0;
+    const char* semi = url + 5;
+    int tl = 0;
+    while (semi + tl < comma && semi[tl] != ';') tl++;
+    if (ctype && ccap > 0) {
+        int n = tl < ccap - 1 ? tl : ccap - 1;
+        memcpy(ctype, semi, (size_t)n);
+        ctype[n] = 0;
+        if (!n) kstrlcpy(ctype, "text/plain", (size_t)ccap);
+    }
+    for (const char* q = semi; q < comma; q++) if (!strncasecmp(q, ";base64", 7)) b64 = 1;
+    const char* s = comma + 1;
+    uint32_t n = (uint32_t)strlen(s);
+    char* out = (char*)kmalloc(n + 1);
+    if (!out) return -1;
+    uint32_t o = 0;
+    if (b64) {
+        uint32_t acc = 0;
+        int bits = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            int c = (unsigned char)s[i];
+            if (c == '%' && i + 2 < n) {                 /* (an escaped character inside base64) */
+                char h[3] = { s[i + 1], s[i + 2], 0 };
+                c = (int)strtoul_hex(h);
+                i += 2;
+            }
+            int v = b64v(c);
+            if (v < 0) continue;                         /* '=', spaces */
+            acc = acc << 6 | (uint32_t)v;
+            bits += 6;
+            if (bits >= 8) { bits -= 8; out[o++] = (char)(acc >> bits & 0xFF); }
+        }
+    } else {
+        for (uint32_t i = 0; i < n; i++) {
+            if (s[i] == '%' && i + 2 < n) {
+                char h[3] = { s[i + 1], s[i + 2], 0 };
+                out[o++] = (char)strtoul_hex(h);
+                i += 2;
+            } else out[o++] = s[i];
+        }
+    }
+    out[o] = 0;
+    *data = out;
+    *len = o;
+    return 0;
+}
+
 static int fetch(page_t* p, const char* url, char** data, uint32_t* len, char* ctype, int ccap) {
     char fin[1024], err[160];
+    int d = page_data_url(url, data, len, ctype, ccap);
+    if (d != -2) return d;
     if (!p->env || !p->env->fetch) return -1;
     int r = p->env->fetch(p->env->ctx, url, data, len, ctype, ccap, fin, sizeof(fin), err, sizeof(err));
     if (r != 0) plog(p, "browser: cannot load %s", url);
@@ -193,7 +269,7 @@ static void collect_sheets(page_t* p, dom_node_t* n) {
             const char* href = dom_attr(c, "href");
             if (rel && href && strcasecmp(rel, "stylesheet") == 0) {
                 char url[1024], ct[96];
-                url_resolve(p->url, href, url, sizeof(url));
+                url_resolve(p->base, href, url, sizeof(url));
                 const char* media = dom_attr(c, "media");
                 if (media && strstr(media, "print") && !strstr(media, "screen") && !strstr(media, "all")) continue;
                 uint32_t h = url_hash(url);
@@ -288,7 +364,7 @@ static void run_script(page_t* p, dom_node_t* s) {
     const char* name;
     if (src_attr) {
         char url[1024], ct[96];
-        url_resolve(p->url, src_attr, url, sizeof(url));
+        url_resolve(p->base, src_attr, url, sizeof(url));
         if (module) {                               /* fetched (once) and run by jsdom */
             p->cur_script = s;
             jsdom_module(p, url, NULL, 0);
@@ -340,7 +416,7 @@ static void load_images(page_t* p, dom_node_t* n, int* count) {
             c->img = img;
             if (src && *src && p->env) {                 /* SVG needs no decoder; other formats do */
                 char url[1024], ct[96];
-                url_resolve(p->url, src, url, sizeof(url));
+                url_resolve(p->base, src, url, sizeof(url));
                 char* data;
                 uint32_t len;
                 (*count)++;
@@ -417,7 +493,7 @@ static void load_bg_images(page_t* p, dom_node_t* n) {
             uint32_t l = st->bg_url_len < sizeof(rel) - 1 ? st->bg_url_len : sizeof(rel) - 1;
             memcpy(rel, st->bg_url, l);
             rel[l] = 0;
-            url_resolve(p->url, rel, url, sizeof(url));
+            url_resolve(p->base, rel, url, sizeof(url));
             if (!c->bg_img || !c->bg_img_url || strcmp(c->bg_img_url, url) != 0) {
                 c->bg_img = bg_image_for(p, url);
                 c->bg_img_url = c->bg_img ? p->bgcache[p->nbg - 1].url : NULL;
@@ -475,8 +551,14 @@ void page_update(page_t* p, int width) {
 
 void page_load(page_t* p, const char* url, const char* html, uint32_t len, int width) {
     kstrlcpy(p->url, url, sizeof(p->url));
+    kstrlcpy(p->base, url, sizeof(p->base));
     p->width = width;
     p->doc = html_parse(&p->A, html, len);
+    {   /* <base href="..."> */
+        dom_node_t* b = dom_find_tag(p->doc, "base");
+        const char* h = b ? dom_attr(b, "href") : NULL;
+        if (h && *h) { char b2[PAGE_URL_MAX]; url_resolve(p->url, h, b2, sizeof(b2)); kstrlcpy(p->base, b2, sizeof(p->base)); }
+    }
     init_forms(p->doc);
     init_forms_text(p, p->doc);
     if (!p->js_disabled) {
@@ -546,7 +628,7 @@ static void navigate(page_t* p, const char* href) {
         p->dirty = 1;
         return;
     }
-    url_resolve(p->url, href, p->nav, sizeof(p->nav));
+    url_resolve(p->base, href, p->nav, sizeof(p->nav));
     p->nav_post = NULL;
     p->nav_newtab = 0;
     p->nav_pending = 1;
@@ -604,7 +686,7 @@ static void submit_form(page_t* p, dom_node_t* form, dom_node_t* submitter) {
     form_fields(form, submitter, q, qcap);
     const char* action = dom_attr(form, "action");
     char base[1024];
-    if (action && *action) url_resolve(p->url, action, base, sizeof(base));
+    if (action && *action) url_resolve(p->base, action, base, sizeof(base));
     else kstrlcpy(base, p->url, sizeof(base));
     char* qm = strchr(base, '?');
     if (qm) *qm = 0;
@@ -630,7 +712,7 @@ int page_link_at(page_t* p, int x, int y, char* out, int cap) {
         if (strcmp(e->tag, "a") == 0 && dom_attr(e, "href")) {
             const char* href = dom_attr(e, "href");
             if (strncasecmp(href, "javascript:", 11) == 0) return 0;
-            url_resolve(p->url, href, out, cap);
+            url_resolve(p->base, href, out, cap);
             return 1;
         }
     }
@@ -768,7 +850,17 @@ int page_key(page_t* p, char c) {
     if (p->focus != f) return 1;           /* the handler moved the focus */
     const char* v = f->value ? f->value : "";
     uint32_t len = (uint32_t)strlen(v);
-    if (c == '\n' && strcmp(f->tag, "textarea") != 0) {
+    /* a one-line search box made of a textarea (Bing, Google): their
+     * scripts submit it on Enter - so does the browser when they did not */
+    int search_area = 0;
+    if (c == '\n' && strcmp(f->tag, "textarea") == 0 && ancestor(f, "form")) {
+        const char* rows = dom_attr(f, "rows");
+        const char* ty = dom_attr(f, "type");
+        const char* role = dom_attr(f, "role");
+        search_area = (rows && strcmp(rows, "1") == 0) &&
+                      ((ty && strcasecmp(ty, "search") == 0) || (role && strcasecmp(role, "combobox") == 0));
+    }
+    if (c == '\n' && (strcmp(f->tag, "textarea") != 0 || search_area)) {
         jsdom_dispatch(p, f, "change");
         submit_form(p, ancestor(f, "form"), NULL);
         return 1;

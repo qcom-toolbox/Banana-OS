@@ -23,6 +23,9 @@ Banana OS 0.6 is a minimal x86 operating system written from scratch (no Linux k
 - **`$PATH`** - commands that are not built in are looked for in the folders of `$PATH` (`/bin:/apps:/home/banana/bin` by default): programs (SDK ELF files) and shell scripts run by name, `/apps` holds the installed apps; `export PATH=...` changes it, `which` / `type` say where a command is
 - **ACPI power-off** - `shutdown` and Start > Shut down turn the computer off the ACPI way (the FADT's registers and the DSDT's `\_S5_` sleep type, switching ACPI on first if the firmware left it off): VMware, VirtualBox, QEMU and real PCs
 - **Secure Boot, 32-bit UEFI, more in the boot menu** - the UEFI loaders are signed with Banana OS's own key and boot with Secure Boot on once the key is enrolled: from the boot menu in Secure Boot's setup mode (*Enroll Banana OS's Secure Boot keys*), or by hand in the firmware's settings from `EFI/BananaOS/BananaOS.cer` on the CD or stick. Under Secure Boot the loader starts only the kernels it was built with (their SHA-256 is in it). `BOOTIA32.EFI` boots on 32-bit UEFI firmware (tablets, early UEFI PCs) - both kernels, the 64-bit one when the processor has long mode. The menu also has *Boot the next boot option* / *Boot from the next device*, *UEFI firmware settings* (restarts into the firmware's setup screen) and *Restart the computer* - see [Secure Boot](#secure-boot)
+- **New in 0.6: apt and the App Store** - packages now come from **repositories**, like Debian's: `apt update`, `apt search`, `apt install <name>` (it installs what the app depends on first), `apt upgrade`, `apt remove`, `apt autoremove`, `apt list --upgradable`, `apt add-repo <url> key=<key>`. The **App Store** (desktop, Apps > *Get apps...*, or `store`) does the same with the mouse: Discover by category, search, an app's page with *Install* / *Open* / *Update* / *Remove*, Updates with *Update all*, Installed. Repositories are **signed** (Ed25519: a list whose signature does not match its key is refused, and every download must match the signed index's SHA-256). The examples that come with Banana OS are a repository of their own (`file:///home/banana/Examples`). See [Packages: apt and the App Store](#packages-apt-and-the-app-store)
+- **New in 0.6: host your own repository on Linux** - `tools/repo/banana-repo` (Python 3, nothing else) makes one (`init`, `add app.bpk`, `remove`, `list`, `verify`, `key`) and serves it (`serve`); `tools/repo/install-server.sh` sets up a server - nginx (or a systemd service), HTTPS with Let's Encrypt - on Debian, Ubuntu, Fedora or Arch. Apps say their category, what they depend on and their picture in their Makefile (`CATEGORY`, `DEPENDS`, `ICON`); an app's `icon.png` is also its icon on the desktop, the taskbar and the Start menu
+- **New in 0.6: the browser and Bing** - searching from Bing's home page works (one-line search boxes made of a `<textarea>`, as Bing and Google have, submit on Enter), `<base href>` and `data:` URLs (pictures, scripts, fetch), `Function.prototype.toString`, `in` inside a `for (...)` head's parentheses, and a layout fix for nested flex rows that made headers and some tables (Hacker News) far too wide or squeezed
 - **New in 0.6: a real desktop, drag and drop, the Recycle Bin** - the desktop shows the files and folders of `~/Desktop` beside the programs (double-click opens them; right-click: Open, Show in Files, Cut, Copy, Delete, Rename; on the desktop itself: New folder, New text document, Paste, Arrange icons) and **icons stay where you drag them**. **Drag a box** to select several (desktop and Files; Ctrl+click adds one, Shift+click a range, Ctrl+A all). **Drag and drop**: files between Files' folders (onto a folder row or a place of the left pane), from Files onto the desktop and back, onto a desktop folder, onto a program's icon (it opens the file), onto the **Recycle Bin**; Ctrl held copies. **Delete** moves things to the Recycle Bin (`~/.Trash`; Shift+Delete, and on USB sticks: for good after asking); the Recycle Bin (desktop icon, Files' left pane) shows them with *Restore* (back where they were) and *Empty Recycle Bin*. Names starting with a dot are hidden in Files (Organize > Show hidden items)
 - **New in 0.6: pin apps to the taskbar, icons-only or titles-only taskbar** - pinned programs sit right of Start (Browser and Files to begin with; a line under one shows it is open): right-click a window's taskbar button or an app's desktop icon - *Pin to taskbar*, right-click a pinned one - *Unpin*. **Settings > Taskbar** (or the taskbar's menu): *Icons and titles*, *Icons only*, *Titles only*
 - **New in 0.6: the whole desktop by keyboard** - **Alt+Tab** (the window switcher; Shift goes back), **Win+Tab** (task view: every window as a card - arrows, Enter, Delete closes one), **Win+D** (the desktop: then the arrows go through its icons, Enter opens, the Menu key shows an icon's menu), **Win+T** (the taskbar's buttons), Win+E Files, Win+I Settings, Win+R a terminal, Win+L lock, Win+M / Win+Down minimize, Win+Up bring back, Win+1...9 the taskbar's windows, Ctrl+Esc the Start menu, the **Menu key** or Shift+F10 (right-click menus, which the arrows and Enter drive). In **Settings, Task Manager and Apps**, Tab / Shift+Tab and the arrows move a yellow focus ring between the controls and Enter or Space presses them (Settings' file chooser: arrows, Enter, Tab through the places). Files, Notepad, the Browser and the Start menu had their keys already
@@ -122,6 +125,7 @@ Banana-OS/
 │   ├── app.c, appcall*.asm # App loader (PIE ELF) + the app API table
 │   ├── appwin.c        # Windows of apps
 │   ├── pkg.c           # .bpk packages (pkg install / remove / run)
+│   ├── repo.c          # package repositories: sources, signed indexes, dependencies (apt, the App Store)
 │   ├── launcher.c      # "Apps" window
 │   ├── taskmgr.c       # "Task Manager" window
 │   ├── settings.c      # "Settings" window
@@ -156,6 +160,7 @@ Banana-OS/
 │   ├── netcmds.c       # ifconfig, ping, curl, wget, ...
 │   ├── srvcmds.c       # sshd, httpd, passwd, files, browser, notepad
 │   ├── wpcmd.c         # wallpaper command
+│   ├── aptcmd.c        # apt / apt-get (repositories, kernel/repo.c)
 │   └── editor.c/h      # Nano-like text editor
 ├── sdk/                # The Linux SDK for apps: include/, lib/, banana.mk, tools/bpkg, examples/
 ├── third_party/        # stb_image (runtime image decoding), lodepng
@@ -168,6 +173,7 @@ Banana-OS/
 │   ├── keys/           # Secure Boot: Banana OS's certificate (the private key is not here)
 │   └── common.h        # the menu, the command line, ELF and Multiboot2 for both
 ├── tools/mkimage.py    # makes the ISO a hybrid CD/disk image (MBR, EFI partition)
+├── tools/repo/         # banana-repo (make, sign and serve package repositories), install-server.sh
 ├── Makefile
 ├── build.sh
 └── README.md
@@ -455,7 +461,67 @@ Apps are made with the **Banana OS SDK** on Linux - see [sdk/README.md](sdk/READ
 - **Run**: type its name in a terminal (a console app runs there; a desktop app opens its window), or click it in **Apps** (Start menu or desktop)
 - **Manage**: `pkg list`, `pkg info <name>`, `pkg remove <name>` (or right-click in Apps), `pkg ps`; End task in the Task Manager
 
-The examples are built into the system: `pkg install ~/Examples/paint.bpk ~/Examples/clock.bpk` and open them from Apps.
+The examples are built into the system: `pkg install ~/Examples/paint.bpk ~/Examples/clock.bpk` (or `apt install paint clock`, or the App Store) and open them from Apps.
+
+### Packages: apt and the App Store
+
+`pkg` installs a `.bpk` file you have; **`apt`** gets packages from **repositories** - folders of packages on a web server (or a USB stick) with a signed index - and the **App Store** is the same thing with the mouse.
+
+| | |
+|---|---|
+| `apt update` | fetch every repository's list of packages (the App Store does it when it opens, and with *Refresh*) |
+| `apt search <words>` / `apt show <name>` | find packages / one package's details |
+| `apt install <name>...` | download and install - first what it depends on, marked *automatic* (also: `apt install file.bpk`) |
+| `apt upgrade` / `apt list --upgradable` | every installed package that has a newer version |
+| `apt remove <name>` / `apt autoremove` | uninstall / remove what was only installed for apps that are gone |
+| `apt list [--installed]`, `apt reinstall <name>` | |
+| `apt sources`, `apt add-repo <url> key=<key>`, `apt remove-repo <url or number>` | the repositories (`/etc/pkg/sources.list`) |
+
+`apt-get` is the same command, and `pkg update / upgrade / search / show` go to it too.
+
+**The App Store** (its desktop icon, Apps > *Get apps...*, or `store` in a terminal): *Discover* (everything, and the categories), *Updates* (with *Update all*), *Installed*; type to search; click an app for its page - *Install* (with what it needs), *Open* / *Run*, *Update*, *Remove*. Esc goes back, Up / Down / Enter pick an app, F5 refreshes.
+
+**Sources** - `/etc/pkg/sources.list`, one repository per line:
+
+```
+repo https://packages.example.org/banana key=<the repository's public key, 64 hex digits>
+repo file:///mnt/usb/repo trusted
+repo file:///home/banana/Examples trusted      # (there from the start)
+```
+
+A repository on the network must be signed: `apt update` checks the index's Ed25519 signature against the `key=` and ignores the repository if it does not match; each package downloaded must then have the size and SHA-256 the signed index says, or it is not installed. `trusted` (no signature) is for local folders - a folder of `.bpk` files without an index works too: its packages are read from the files.
+
+**The index** (`Packages`) has one paragraph per package - `Package`, `Version`, `Title`, `Type`, `Category`, `Description`, `Author`, `Depends` (`libfoo (>= 1.2), bar | baz`), `Arch` (`i686 x86_64`), `Filename`, `Size`, `SHA256`, `Icon` - and versions compare the way Debian's do (`1.10` > `1.9`, `1.0~rc1` < `1.0`). An app says its category, what it needs and its picture in its Makefile:
+
+```make
+CATEGORY = Games
+DEPENDS  = libfoo (>= 1.0)
+ICON     = icon.png          # a square PNG, 64x64 is plenty
+```
+
+### Hosting a repository (Linux)
+
+`tools/repo/banana-repo` (Python 3 only) makes and serves repositories:
+
+```sh
+tools/repo/banana-repo init ~/myrepo                 # a repository and its signing key (~/.config/banana-repo/myrepo.key)
+tools/repo/banana-repo add ~/myrepo game.bpk         # publish (a new version: add it again - Banana OS upgrades)
+tools/repo/banana-repo list ~/myrepo
+tools/repo/banana-repo key ~/myrepo https://pkgs.example.org     # the line for Banana OS (apt add-repo ...)
+tools/repo/banana-repo serve ~/myrepo --port 8080    # a quick server (tests, a LAN)
+tools/repo/banana-repo verify ~/myrepo               # signature and every file
+```
+
+For a real server, `tools/repo/install-server.sh` (as root, on Debian / Ubuntu / Fedora / Arch) installs nginx, makes the repository in `/srv/banana-repo` owned by the user who publishes, serves it (the index never cached, hidden files refused) and with `--domain` + `--email` gets an HTTPS certificate:
+
+```sh
+sudo tools/repo/install-server.sh --owner alice --domain pkgs.example.org --email alice@example.org
+# or without nginx: a systemd service on a port
+sudo tools/repo/install-server.sh --owner alice --no-nginx --port 8080
+# --dry-run shows what it would do
+```
+
+The signing key never goes in the served folder - keep a copy somewhere safe: whoever has it can publish packages your users will trust. In QEMU's user network the host is `10.0.2.2` (`apt add-repo http://10.0.2.2:8080 key=...`).
 
 ## Sound
 
@@ -515,13 +581,13 @@ Banana OS seeds a small Unix-style root hierarchy at boot (in-memory, reset on r
 ```
 /
 ├── bin/
-├── etc/            (motd, hostname, passwd, wallpaper)
+├── etc/            (motd, hostname, passwd, wallpaper; pkg/sources.list: the package repositories)
 ├── home/
 │   └── banana/     ($HOME - shell starts here, readme.txt)
 │       └── Pictures/  (your wallpapers)
 ├── root/
 ├── usr/
-├── var/
+├── var/            (lib/pkg/lists: the repositories' package lists; cache/pkg: App Store pictures)
 ├── tmp/
 └── dev/
 ```
@@ -658,6 +724,11 @@ include /path/to/banana-sdk/driver/driver.mk
 | `pkg list` / `pkg info <name\|file>` / `pkg remove <name>` | Installed apps, details, uninstall |
 | `<app> [args]` / `pkg run <app>` | Run an installed app |
 | `pkg ps` | Running apps |
+| `apt update` / `apt search <words>` / `apt show <name>` | Package lists from the repositories, find, details |
+| `apt install <name>...` / `apt remove <name>...` / `apt autoremove` | Install (with what it needs) / uninstall from repositories |
+| `apt upgrade` / `apt list [--installed\|--upgradable]` | Upgrade everything / list packages |
+| `apt sources` / `apt add-repo <url> key=<hex>` / `apt remove-repo <url>` | The repositories (`/etc/pkg/sources.list`) |
+| `store` | The App Store (desktop) |
 | `apps` / `taskmgr` | Open Apps / the Task Manager (desktop running) |
 | **Sound** | |
 | `play <file.wav>` / `play -s` | Play a WAV file in the background / stop |

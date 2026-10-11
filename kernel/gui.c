@@ -33,6 +33,7 @@
 #include "taskmgr.h"
 #include "settings.h"
 #include "pkg.h"
+#include "image.h"
 #include "gpu.h"
 #include "audio.h"
 #include "app.h"
@@ -346,10 +347,93 @@ static __attribute__((unused)) void draw_icon_programs(int x, int y, uint32_t bg
     IR(8, 9, 4, 3, 0x00F4F8FFu);
 }
 
-/* an installed app: a little window, its colour and initial from its name */
+/* an installed app's own picture (/apps/<name>/icon.png), decoded once at
+ * 28 x 28; the colour of its four corners (when they agree) is see-through */
+#define PIC_N 28
+#define PIC_CACHE 24
+#define PIC_CLEAR 0xFF000000u
+typedef struct { char name[PKG_NAME_MAX]; int file; uint32_t size; int ok; uint32_t px[PIC_N * PIC_N]; } app_pic_t;
+static app_pic_t* g_pics;
+static int        g_pic_next;
+
+static const uint32_t* app_picture(const char* name) {
+    if (!name || !name[0] || strlen(name) >= PKG_NAME_MAX) return NULL;
+    char path[FS_PATH_LEN];
+    ksnprintf(path, sizeof(path), "%s/%s/icon.png", PKG_DIR, name);
+    int fi = fs_find_file(path);
+    if (fi < 0) return NULL;
+    fs_file_t* info = fs_file_info(fi);
+    uint32_t size = info ? info->size : 0;
+    if (!g_pics) g_pics = (app_pic_t*)kzalloc(sizeof(app_pic_t) * PIC_CACHE);
+    if (!g_pics) return NULL;
+    for (int i = 0; i < PIC_CACHE; i++)
+        if (g_pics[i].name[0] && !strcmp(g_pics[i].name, name)) {
+            if (g_pics[i].file == fi && g_pics[i].size == size) return g_pics[i].ok ? g_pics[i].px : NULL;
+            g_pics[i].name[0] = 0;                 /* the app was installed again */
+        }
+    app_pic_t* e = &g_pics[g_pic_next];
+    g_pic_next = (g_pic_next + 1) % PIC_CACHE;
+    kstrlcpy(e->name, name, sizeof(e->name));
+    e->file = fi;
+    e->size = size;
+    e->ok = 0;
+    if (size == 0 || size > (512u << 10)) return NULL;
+    fs_pin(fi);
+    fs_file_t* f = fs_get_file(fi);
+    image_t img;
+    char err[64];
+    if (f && f->content && image_decode((const uint8_t*)f->content, f->size, &img, err, sizeof(err)) == 0) {
+        for (int yy = 0; yy < PIC_N; yy++)
+            for (int xx = 0; xx < PIC_N; xx++) {
+                /* the average of the pixels this one covers */
+                int x0 = xx * img.w / PIC_N, x1 = (xx + 1) * img.w / PIC_N, y0 = yy * img.h / PIC_N, y1 = (yy + 1) * img.h / PIC_N;
+                if (x1 <= x0) x1 = x0 + 1;
+                if (y1 <= y0) y1 = y0 + 1;
+                uint32_t r = 0, g = 0, b = 0, n = 0;
+                for (int sy = y0; sy < y1 && sy < img.h; sy++)
+                    for (int sx = x0; sx < x1 && sx < img.w; sx++) {
+                        const uint8_t* q = img.rgb + ((long)sy * img.w + sx) * 3;
+                        r += q[0]; g += q[1]; b += q[2]; n++;
+                    }
+                if (!n) n = 1;
+                e->px[yy * PIC_N + xx] = (r / n) << 16 | (g / n) << 8 | (b / n);
+            }
+        const uint8_t* c = img.rgb;
+        const uint8_t* c2 = img.rgb + (long)(img.w - 1) * 3;
+        const uint8_t* c3 = img.rgb + (long)(img.h - 1) * img.w * 3;
+        const uint8_t* c4 = img.rgb + ((long)img.h * img.w - 1) * 3;
+        if (!memcmp(c, c2, 3) && !memcmp(c, c3, 3) && !memcmp(c, c4, 3)) {
+            uint32_t key = (uint32_t)c[0] << 16 | (uint32_t)c[1] << 8 | c[2];
+            for (int k = 0; k < PIC_N * PIC_N; k++) if (e->px[k] == key) e->px[k] = PIC_CLEAR;
+        }
+        image_free(&img);
+        e->ok = 1;
+    }
+    fs_unpin(fi);
+    return e->ok ? e->px : NULL;
+}
+
+/* an installed app: its picture, or a little window with its colour and
+ * initial from its name */
 static const char* g_app_icon_name = "";
 static void draw_icon_app(int x, int y, uint32_t bg) {
     (void)bg;
+    const uint32_t* pic = app_picture(g_app_icon_name);
+    if (pic) {
+        int n = 14 * g_is;                          /* 14 or 28 pixels */
+        for (int yy = 0; yy < n; yy++) {
+            const uint32_t* row = pic + (yy * PIC_N / n) * PIC_N;
+            int xx = 0;
+            while (xx < n) {                        /* runs of one colour: one rectangle */
+                uint32_t c = row[xx * PIC_N / n];
+                int run = 1;
+                while (xx + run < n && row[(xx + run) * PIC_N / n] == c) run++;
+                if (c != PIC_CLEAR) gfx_fill_rect(x + xx, y + yy, run, 1, c);
+                xx += run;
+            }
+        }
+        return;
+    }
     static const uint32_t COLORS[6] = { 0x003A7BD5u, 0x0057B65Au, 0x00E07040u, 0x009B59B6u, 0x00D9B44Au, 0x0020A0A0u };
     uint32_t h = 0;
     for (const char* p = g_app_icon_name; *p; p++) h = h * 31u + (uint8_t)*p;

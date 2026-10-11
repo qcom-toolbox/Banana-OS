@@ -1240,7 +1240,16 @@ static node_t* parse_template(parser_t* P, tok_t* t) {
 
 /* ── expressions ── */
 
+static node_t* parse_args0(parser_t* P);
 static node_t* parse_args(parser_t* P) {
+    int ni = P->no_in;
+    P->no_in = 0;
+    node_t* r = parse_args0(P);
+    P->no_in = ni;
+    return r;
+}
+
+static node_t* parse_args0(parser_t* P) {
     node_t* head = NULL;
     node_t** tail = &head;
     if (accept(P, ")")) return NULL;
@@ -1621,13 +1630,16 @@ static node_t* parse_primary(parser_t* P) {
         return n;
     case T_OP:
         if (accept(P, "(")) {
+            int ni = P->no_in;
+            P->no_in = 0;
             n = parse_expr(P);
+            P->no_in = ni;
             expect(P, ")");
             P->depth--;
             return n;
         }
-        if (accept(P, "[")) { n = parse_array_lit(P, "]"); P->depth--; return n; }
-        if (!P->php && accept(P, "{")) { n = parse_object_lit(P); P->depth--; return n; }
+        if (accept(P, "[")) { int ni = P->no_in; P->no_in = 0; n = parse_array_lit(P, "]"); P->no_in = ni; P->depth--; return n; }
+        if (!P->php && accept(P, "{")) { int ni = P->no_in; P->no_in = 0; n = parse_object_lit(P); P->no_in = ni; P->depth--; return n; }
         break;
     default:
         break;
@@ -1676,7 +1688,10 @@ static node_t* parse_postfix(parser_t* P) {
         } else if (accept(P, "[")) {
             node_t* ix = mk(P, N_INDEX);
             ix->a = e;
+            int ni = P->no_in;
+            P->no_in = 0;
             if (!(P->php && is_op(P, "]"))) ix->b = parse_expr(P);
+            P->no_in = ni;
             expect(P, "]");
             e = ix;
         } else if (is_op(P, "{") && P->php && 0) {

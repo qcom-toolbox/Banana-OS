@@ -79,6 +79,19 @@ Then install it:
 - in a terminal: `pkg install /mnt/usb/myapp.bpk`, or
 - in **Files**: double-click the `.bpk` (or right-click > *Install app*).
 
+Or publish it in a **repository** - then everyone who has added it installs
+it with `apt install myapp` or the **App Store**, and gets your new versions
+with `apt upgrade` / *Update*:
+
+```bash
+../tools/repo/banana-repo init ~/myrepo          # once (from sdk/: the repo tools are in tools/repo)
+../tools/repo/banana-repo add ~/myrepo myapp.bpk
+../tools/repo/banana-repo serve ~/myrepo         # or a real server: tools/repo/install-server.sh
+../tools/repo/banana-repo key ~/myrepo http://<your-ip>:8080   # what to type on Banana OS
+```
+
+(see *Packages: apt and the App Store* in the main README).
+
 Run it by typing its name (`myapp`), with `pkg run myapp`, or from **Apps** on
 the desktop. `pkg list`, `pkg info myapp` and `pkg remove myapp` do what they
 say. Installed apps live in `/apps/<name>/` (kept on an installed disk).
@@ -237,10 +250,24 @@ examples in `driver/examples`) into `.bpk` packages of type `driver`.
 `make` runs `tools/bpkg pack` with:
 
 - `manifest` - key=value lines: `name`, `title`, `version`, `type`,
-  `description`, `author` (generated from your Makefile)
+  `description`, `author`, `category`, `depends` (generated from your Makefile)
 - `app-i686`, `app-x86_64` - the program, as a static position-independent ELF
   (only relative relocations: `bpkg check` verifies it)
 - your `DATA` files, installed next to the program in `/apps/<name>/`
+- `icon.png` - from `ICON = picture.png` in the Makefile: the app's picture
+  on the desktop, the taskbar, the Start menu and in the App Store (square;
+  its four corners' colour, when they agree, is see-through)
+
+For repositories, three optional Makefile lines:
+
+```make
+CATEGORY = Games                  # the App Store's shelf
+DEPENDS  = libfoo (>= 1.0), bar   # packages apt installs first (| for "one of")
+ICON     = icon.png
+```
+
+Give every new release a higher `VERSION` - Banana OS compares versions the
+way Debian does (`1.10` is newer than `1.9`, `2.0~beta` older than `2.0`).
 
 ```bash
 python3 tools/bpkg list myapp.bpk
@@ -261,6 +288,19 @@ mouse wheel come as `BANANA_EV_WHEEL` (`ev.y` notches) instead of Up / Down
 keys; `banana_pkg_install(path, msg, cap)` installs a `.bpk` and
 `banana_app_run(name, argc, argv, err, cap)` starts an installed app. Banana
 Code (`apps/code`) is built on them.
+
+### Packages (API version 11): what the App Store uses
+
+`banana_repo_list(pkgs, max)` fills `banana_pkg_t` entries (name, title,
+version, installed version, type, category, description, author, depends,
+size, `flags`: `BANANA_PKG_INSTALLED`, `_UPGRADABLE`, `_AVAILABLE`, `_AUTO`) -
+every package of the repositories and every installed one.
+`banana_repo_update`, `banana_repo_install(name, ...)` (with its dependencies),
+`banana_repo_remove`, `banana_repo_upgrade` do what `apt update / install /
+remove / upgrade` do; they take a while, so call them from a thread
+(`banana_thread`) and show `banana_repo_status(msg, cap)` - the percent, -1
+once nothing runs. `banana_repo_icon(name, path, cap)` gives a picture file
+for a package. `apps/store` (the App Store) is a complete example.
 
 The C library also has `setjmp` / `longjmp`, `gettimeofday` (`<sys/time.h>`),
 `realpath`, `strtold` and `ldexpl`.

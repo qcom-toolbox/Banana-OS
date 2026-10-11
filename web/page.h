@@ -61,6 +61,7 @@ typedef struct page {
     arena_t      A;
     page_env_t*  env;
     char         url[PAGE_URL_MAX];
+    char         base[PAGE_URL_MAX];   /* <base href>, else url: relative URLs resolve against it */
     dom_node_t*  doc;
 #define PAGE_MAX_SHEETS 64
     css_sheet_t* sheets[PAGE_MAX_SHEETS];
@@ -134,6 +135,9 @@ int     page_link_at(page_t* p, int x, int y, char* out, int cap);
 
 /* resolves a link against a base URL */
 void    url_resolve(const char* base, const char* rel, char* out, int cap);
+/* a data: URL decoded (base64 or %-escaped) into a kmalloc'd buffer: 0, or
+ * -1 if it is broken; -2 if url is not a data: URL */
+int     page_data_url(const char* url, char** data, uint32_t* len, char* ctype, int ccap);
 
 /* jsdom.c */
 void    jsdom_install(page_t* p);

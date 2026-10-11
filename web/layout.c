@@ -1029,6 +1029,7 @@ static int layout_flex(ctx_t* C, dom_node_t* e, int x, int y, int w, int hgiven)
             }
             int cnt = end - start;
             int free = w - sum;
+            if (C->dry && free > 0) free = 0;           /* measuring: no growing into the room given */
             int grow = 0;
             long shrink = 0;
             for (int i = start; i < end; i++) { grow += items[i]->style->flex_grow; shrink += (long)items[i]->style->flex_shrink * basez[i]; }
@@ -1051,7 +1052,7 @@ static int layout_flex(ctx_t* C, dom_node_t* e, int x, int y, int w, int hgiven)
             for (int i = start; i < end; i++) used += mainsz[i] + items[i]->style->margin[1] + items[i]->style->margin[3];
             used += gap_main * (cnt - 1);
             int off, spacing;
-            flex_justify(st->justify, w - used, cnt, &off, &spacing);
+            flex_justify(st->justify, C->dry ? 0 : w - used, cnt, &off, &spacing);
             /* row-reverse: the main axis starts at the right edge */
             int pos = rev ? x + w - off : x + off;
             for (int k = 0; k < cnt; k++) {
@@ -1244,7 +1245,13 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     int abs_from = C->nabs;
     uint32_t first_item = C->dry ? 0 : C->L->n;
     int hgiven = st->height != LEN_AUTO && st->height > 0 ? st->height : force_h > 0 ? force_h - (bt + pt + pb + bb) : 0;
+    /* measuring: an auto-width block is as wide as what it holds, not the
+     * room it was given */
+    int mw_saved = C->max_w;
+    if (C->dry && !explicit_w) C->max_w = 0;
     int ch = st->flex ? layout_flex(C, e, bx + bl + pl, content_y, cw, hgiven) : layout_children(C, e, bx + bl + pl, content_y, cw);
+    int mw_inner = C->max_w;
+    if (C->dry && !explicit_w) C->max_w = mw_saved;
     if (st->height != LEN_AUTO && st->height > 0) ch = st->height;
     else if (force_h > 0 && force_h - (bt + pt + pb + bb) > ch) ch = force_h - (bt + pt + pb + bb);   /* stretched */
     int bh = bt + pt + ch + pb + bb;
@@ -1336,7 +1343,11 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     e->box_y = by;
     e->box_w = bw;
     e->box_h = bh;
-    if (C->max_w < ml + bw) C->max_w = ml + bw;
+    {
+        int rw = bw;
+        if (C->dry && !explicit_w && mw_inner + bl + br + pl + pr < bw) rw = mw_inner + bl + br + pl + pr;
+        if (C->max_w < ml + rw) C->max_w = ml + rw;
+    }
     return mt + bh + mb;
 }
 

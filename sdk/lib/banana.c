@@ -428,3 +428,29 @@ int  banana_app_run(const char* name, int argc, char** argv, char* err, int ecap
     if (!has_v10()) { too_old(err, ecap); return -1; }
     return __banana->app_run(name, argc, argv, err, ecap);
 }
+
+static int has_v11(void) {
+    return __banana->version >= 11 && __banana->size >= __builtin_offsetof(banana_api_t, repo_upgrade) + sizeof(void*);
+}
+int banana_repo_update(char* msg, int mcap) {
+    if (!has_v11()) { too_old(msg, mcap); return -1; }
+    return __banana->repo_update(msg, mcap);
+}
+int banana_repo_list(banana_pkg_t* out, int max) { return has_v11() ? __banana->repo_list(out, max) : 0; }
+int banana_repo_install(const char* name, char* msg, int mcap) {
+    if (!has_v11()) { too_old(msg, mcap); return -1; }
+    return __banana->repo_install(name, msg, mcap);
+}
+int banana_repo_remove(const char* name, char* msg, int mcap) {
+    if (!has_v11()) { too_old(msg, mcap); return -1; }
+    return __banana->repo_remove(name, msg, mcap);
+}
+int banana_repo_status(char* msg, int mcap) {
+    if (!has_v11()) { if (msg && mcap > 0) msg[0] = 0; return -1; }
+    return __banana->repo_status(msg, mcap);
+}
+int banana_repo_icon(const char* name, char* path, int pcap) { return has_v11() ? __banana->repo_icon(name, path, pcap) : -1; }
+int banana_repo_upgrade(char* msg, int mcap) {
+    if (!has_v11()) { too_old(msg, mcap); return -1; }
+    return __banana->repo_upgrade(msg, mcap);
+}

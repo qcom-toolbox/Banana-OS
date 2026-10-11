@@ -1068,6 +1068,19 @@ static value_t f_bind(interp_t* I, value_t self, int argc, value_t* argv) {
     return native(I, self.f->name ? self.f->name : "bound", bound_call, v_obj(d));
 }
 
+/* Function.prototype.toString: natives as browsers show them; a script's
+ * own function by its name (the engine keeps no source text) */
+static value_t f_toString(interp_t* I, value_t self, int argc, value_t* argv) {
+    (void)argc; (void)argv;
+    if (self.t != V_FUNC) { script_throw(I, "TypeError: Function.prototype.toString on a non-function"); return v_undef(); }
+    const char* n = self.f->name ? self.f->name : "";
+    char buf[160];
+    if (self.f->native) ksnprintf(buf, sizeof(buf), "function %s() { [native code] }", n);
+    else if (self.f->is_class) ksnprintf(buf, sizeof(buf), "class %s { }", n);
+    else ksnprintf(buf, sizeof(buf), "function %s() { [code] }", n);
+    return v_str(I, buf);
+}
+
 /* ══ Object / Array / String / Number / Math additions ═══════════════ */
 
 static value_t o_defineProperties(interp_t* I, value_t self, int argc, value_t* argv);
@@ -1596,6 +1609,7 @@ void es_init(interp_t* I) {
 
     /* Function.prototype.bind */
     if (I->proto_func) method(I, I->proto_func, "bind", f_bind);
+    if (I->proto_func) method(I, I->proto_func, "toString", f_toString);
 
     /* Object */
     value_t O = script_get_global(I, "Object");

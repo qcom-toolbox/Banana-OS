@@ -21,6 +21,7 @@
 #include "webview.h"
 #include "font.h"
 #include "pkg.h"
+#include "repo.h"
 #include "wallpaper.h"
 #include "image.h"
 
@@ -799,6 +800,82 @@ static int a_pkg_install(const char* path, char* msg, int mcap) {
     return pkg_install(path, msg, mcap) == 0 ? 0 : -1;
 }
 
+/* ── version 11: the package manager ── */
+static int a_repo_update(char* msg, int mcap) {
+    char m[200];
+    if (!msg || mcap <= 0) { msg = m; mcap = sizeof(m); }
+    return repo_update(NULL, NULL, msg, mcap);
+}
+
+static void to_api(banana_pkg_t* o, const repo_pkg_t* p, const pkg_info_t* inst) {
+    memset(o, 0, sizeof(*o));
+    const char* name = p ? p->name : inst->name;
+    kstrlcpy(o->name, name, sizeof(o->name));
+    kstrlcpy(o->title, p ? p->title : inst->title, sizeof(o->title));
+    kstrlcpy(o->version, p ? p->version : inst->version, sizeof(o->version));
+    kstrlcpy(o->type, p ? p->type : inst->type, sizeof(o->type));
+    kstrlcpy(o->category, p && p->category[0] ? p->category : inst ? inst->category : "", sizeof(o->category));
+    kstrlcpy(o->description, p ? p->description : inst->description, sizeof(o->description));
+    kstrlcpy(o->author, p ? p->author : inst->author, sizeof(o->author));
+    kstrlcpy(o->depends, p ? p->depends : inst->depends, sizeof(o->depends));
+    if (p) { o->size = p->size; o->flags |= BANANA_PKG_AVAILABLE; }
+    if (inst) {
+        kstrlcpy(o->installed, inst->version[0] ? inst->version : "0", sizeof(o->installed));
+        o->flags |= BANANA_PKG_INSTALLED;
+        if (repo_is_auto(name)) o->flags |= BANANA_PKG_AUTO;
+        if (p && repo_vercmp(p->version, inst->version) > 0) o->flags |= BANANA_PKG_UPGRADABLE;
+    }
+}
+
+static int a_repo_list(banana_pkg_t* out, int max) {
+    if (!out || max <= 0) return 0;
+    static pkg_info_t inst[64];
+    int ni = pkg_list(inst, 64);
+    if (ni > 64) ni = 64;
+    int n = 0, total = repo_count();
+    for (int i = 0; i < total; i++) {
+        const repo_pkg_t* p = repo_at(i);
+        if (!p || p != repo_candidate(p->name)) continue;
+        const pkg_info_t* in = NULL;
+        for (int k = 0; k < ni; k++) if (!strcmp(inst[k].name, p->name)) in = &inst[k];
+        if (n < max) to_api(&out[n], p, in);
+        n++;
+    }
+    for (int k = 0; k < ni; k++) {                       /* installed, in no repository */
+        if (repo_candidate(inst[k].name)) continue;
+        if (n < max) to_api(&out[n], NULL, &inst[k]);
+        n++;
+    }
+    return n < max ? n : max;
+}
+
+static int a_repo_install(const char* name, char* msg, int mcap) {
+    char m[200];
+    if (!msg || mcap <= 0) { msg = m; mcap = sizeof(m); }
+    if (!name) return -1;
+    return repo_install(name, 0, NULL, NULL, msg, mcap);
+}
+
+static int a_repo_remove(const char* name, char* msg, int mcap) {
+    char m[200];
+    if (!msg || mcap <= 0) { msg = m; mcap = sizeof(m); }
+    if (!name) return -1;
+    return repo_remove(name, msg, mcap);
+}
+
+static int a_repo_status(char* msg, int mcap) { return repo_status(msg, mcap); }
+
+static int a_repo_icon(const char* name, char* path, int pcap) {
+    if (!name || !path || pcap <= 0) return -1;
+    return repo_icon(name, path, pcap);
+}
+
+static int a_repo_upgrade(char* msg, int mcap) {
+    char m[200];
+    if (!msg || mcap <= 0) { msg = m; mcap = sizeof(m); }
+    return repo_upgrade(NULL, NULL, msg, mcap);
+}
+
 static int a_app_run(const char* name, int argc, char** argv, char* err, int ecap) {
     char e[128];
     if (!err || ecap <= 0) { err = e; ecap = sizeof(e); }
@@ -1110,6 +1187,13 @@ static void api_init(void) {
     g_api.win_wheel = G(a_win_wheel);
     g_api.pkg_install = G(a_pkg_install);
     g_api.app_run = G(a_app_run);
+    g_api.repo_update = G(a_repo_update);
+    g_api.repo_list = G(a_repo_list);
+    g_api.repo_install = G(a_repo_install);
+    g_api.repo_remove = G(a_repo_remove);
+    g_api.repo_status = G(a_repo_status);
+    g_api.repo_icon = G(a_repo_icon);
+    g_api.repo_upgrade = G(a_repo_upgrade);
 }
 
 /* ── the ELF loader ────────────────────────────────────────────────── */

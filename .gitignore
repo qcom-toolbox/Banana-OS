@@ -23,3 +23,6 @@ loader/keys/.nokey
 sdk/examples/*/build/
 *.bpk
 banana-sdk.tar.gz
+
+# Python
+__pycache__/

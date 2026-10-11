@@ -1,0 +1,550 @@
+#!/usr/bin/env python3
+"""banana-repo - make and serve a Banana OS package repository (for apt and the App Store).
+
+  banana-repo init DIR [--key KEYFILE] [--name NAME]
+                                     a new repository in DIR, and its signing key
+  banana-repo add DIR app.bpk...     put packages in it (index re-made and signed)
+  banana-repo remove DIR NAME [VERSION]
+                                     take a package out (all its versions, or one)
+  banana-repo list DIR               what is in it
+  banana-repo index DIR              re-make and sign the index (after copying
+                                     .bpk files into DIR/pool by hand)
+  banana-repo key DIR [URL]          the line Banana OS needs in /etc/pkg/sources.list
+  banana-repo verify DIR             check the index, its signature and every file
+  banana-repo serve DIR [--port 8080] [--bind 0.0.0.0]
+                                     serve it over HTTP (for tests and small setups;
+                                     see install-server.sh for nginx + HTTPS)
+
+The signing key is kept OUT of the served folder: by default
+~/.config/banana-repo/<name>.key (mode 600), or --key. Anyone with it can
+publish packages your users will trust - back it up, never put it online.
+
+Repository layout (what Banana OS fetches):
+  DIR/Packages       the index: one "Key: value" stanza per package
+  DIR/Packages.sig   Ed25519 signature of Packages (128 hex digits)
+  DIR/repo.pub       the public key (64 hex digits)
+  DIR/pool/          name_version.bpk files
+  DIR/icons/         name.png pictures for the App Store (from the packages' icon.png)
+
+Needs only Python 3 (3.6+), nothing else.
+"""
+import hashlib
+import http.server
+import json
+import os
+import re
+import shutil
+import socketserver
+import stat
+import struct
+import sys
+import time
+
+# ── Ed25519 (RFC 8032, section 6 - the reference code) ────────────────
+
+_p = 2 ** 255 - 19
+_q = 2 ** 252 + 27742317777372353535851937790883648493
+_d = -121665 * pow(121666, _p - 2, _p) % _p
+_sqrt_m1 = pow(2, (_p - 1) // 4, _p)
+
+
+def _inv(x):
+    return pow(x, _p - 2, _p)
+
+
+def _add(P, Q):
+    A = (P[1] - P[0]) * (Q[1] - Q[0]) % _p
+    B = (P[1] + P[0]) * (Q[1] + Q[0]) % _p
+    C = 2 * P[3] * Q[3] * _d % _p
+    D = 2 * P[2] * Q[2] % _p
+    E, F, G, H = B - A, D - C, D + C, B + A
+    return (E * F % _p, G * H % _p, F * G % _p, E * H % _p)
+
+
+def _mul(s, P):
+    Q = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1:
+            Q = _add(Q, P)
+        P = _add(P, P)
+        s >>= 1
+    return Q
+
+
+def _equal(P, Q):
+    if (P[0] * Q[2] - Q[0] * P[2]) % _p != 0:
+        return False
+    return (P[1] * Q[2] - Q[1] * P[2]) % _p == 0
+
+
+def _recover_x(y, sign):
+    if y >= _p:
+        return None
+    x2 = (y * y - 1) * _inv(_d * y * y + 1)
+    if x2 == 0:
+        return None if sign else 0
+    x = pow(x2, (_p + 3) // 8, _p)
+    if (x * x - x2) % _p != 0:
+        x = x * _sqrt_m1 % _p
+    if (x * x - x2) % _p != 0:
+        return None
+    if (x & 1) != sign:
+        x = _p - x
+    return x
+
+
+_gy = 4 * _inv(5) % _p
+_gx = _recover_x(_gy, 0)
+_G = (_gx, _gy, 1, _gx * _gy % _p)
+
+
+def _compress(P):
+    zi = _inv(P[2])
+    x, y = P[0] * zi % _p, P[1] * zi % _p
+    return int.to_bytes(y | ((x & 1) << 255), 32, "little")
+
+
+def _decompress(s):
+    if len(s) != 32:
+        return None
+    y = int.from_bytes(s, "little")
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    x = _recover_x(y, sign)
+    if x is None:
+        return None
+    return (x, y, 1, x * y % _p)
+
+
+def _h(m):
+    return int.from_bytes(hashlib.sha512(m).digest(), "little") % _q
+
+
+def _expand(secret):
+    h = hashlib.sha512(secret).digest()
+    a = int.from_bytes(h[:32], "little")
+    a &= (1 << 254) - 8
+    a |= 1 << 254
+    return a, h[32:]
+
+
+def ed25519_public(secret):
+    a, _ = _expand(secret)
+    return _compress(_mul(a, _G))
+
+
+def ed25519_sign(secret, msg):
+    a, prefix = _expand(secret)
+    A = _compress(_mul(a, _G))
+    r = _h(prefix + msg)
+    R = _compress(_mul(r, _G))
+    s = (r + _h(R + A + msg) * a) % _q
+    return R + int.to_bytes(s, 32, "little")
+
+
+def ed25519_verify(public, msg, sig):
+    if len(sig) != 64:
+        return False
+    A = _decompress(public)
+    R = _decompress(sig[:32])
+    if A is None or R is None:
+        return False
+    s = int.from_bytes(sig[32:], "little")
+    if s >= _q:
+        return False
+    h = _h(sig[:32] + public + msg)
+    return _equal(_mul(s, _G), _add(R, _mul(h, A)))
+
+
+# ── .bpk packages (same format as sdk/tools/bpkg) ─────────────────────
+
+ENT = struct.Struct("<56sII")
+
+
+def die(msg):
+    print("banana-repo: " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def read_bpk(path):
+    data = open(path, "rb").read()
+    if data[:4] != b"BPK1":
+        raise ValueError("not a .bpk package")
+    (count,) = struct.unpack_from("<I", data, 4)
+    if count == 0 or count > 256 or 8 + count * ENT.size > len(data):
+        raise ValueError("damaged package (file table)")
+    files = {}
+    for i in range(count):
+        raw, off, size = ENT.unpack_from(data, 8 + i * ENT.size)
+        name = raw.split(b"\0", 1)[0].decode("utf-8", "replace")
+        if off + size > len(data) or ".." in name or name.startswith("/"):
+            raise ValueError("damaged package (" + name + ")")
+        files[name] = data[off:off + size]
+    return data, files
+
+
+def manifest_of(files):
+    if "manifest" not in files:
+        raise ValueError("no manifest")
+    mf = {}
+    for line in files["manifest"].decode("utf-8", "replace").splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            mf[k.strip()] = v.strip()
+    name = mf.get("name", "")
+    if not re.fullmatch(r"[a-z0-9_-]{1,24}", name):
+        raise ValueError("bad package name '%s' (a-z, 0-9, - and _, at most 24)" % name)
+    if mf.get("type", "console") not in ("console", "gui", "driver"):
+        raise ValueError("type must be console, gui or driver")
+    if not re.fullmatch(r"[0-9A-Za-z.+~_-]{1,23}", mf.get("version", "0") or "0"):
+        raise ValueError("bad version '%s'" % mf.get("version"))
+    return mf
+
+
+def arches(files, kind):
+    pre = "driver-" if kind == "driver" else "app-"
+    a = [c for c in ("i686", "x86_64") if pre + c in files]
+    if not a:
+        raise ValueError("no program inside (app-i686 / app-x86_64)")
+    return a
+
+
+# ── versions: the order Banana OS uses (dpkg's) ───────────────────────
+
+def _order(c):
+    if c == "":
+        return 0
+    if c.isdigit():
+        return 0
+    if c.isalpha():
+        return ord(c)
+    if c == "~":
+        return -1
+    return ord(c) + 256
+
+
+def vercmp(a, b):
+    a, b = a or "", b or ""
+    i = j = 0
+    while i < len(a) or j < len(b):
+        while (i < len(a) and not a[i].isdigit()) or (j < len(b) and not b[j].isdigit()):
+            ac = _order(a[i] if i < len(a) else "")
+            bc = _order(b[j] if j < len(b) else "")
+            if ac != bc:
+                return ac - bc
+            i += 1
+            j += 1
+        while i < len(a) and a[i] == "0":
+            i += 1
+        while j < len(b) and b[j] == "0":
+            j += 1
+        first = 0
+        while i < len(a) and j < len(b) and a[i].isdigit() and b[j].isdigit():
+            if not first:
+                first = ord(a[i]) - ord(b[j])
+            i += 1
+            j += 1
+        if i < len(a) and a[i].isdigit():
+            return 1
+        if j < len(b) and b[j].isdigit():
+            return -1
+        if first:
+            return first
+    return 0
+
+
+# ── the repository ────────────────────────────────────────────────────
+
+def conf_path(d):
+    return os.path.join(d, ".banana-repo.json")
+
+
+def load_conf(d):
+    p = conf_path(d)
+    if not os.path.exists(p):
+        die("%s is not a repository (banana-repo init %s)" % (d, d))
+    return json.load(open(p))
+
+
+def load_key(conf):
+    kp = os.path.expanduser(conf["key"])
+    if not os.path.exists(kp):
+        die("the signing key %s is missing (restore your backup)" % kp)
+    raw = open(kp).read().strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", raw):
+        die("%s is not a banana-repo key" % kp)
+    return bytes.fromhex(raw)
+
+
+def one_line(s):
+    return " ".join((s or "").split())
+
+
+def build_index(d, quiet=False):
+    conf = load_conf(d)
+    secret = load_key(conf)
+    pool = os.path.join(d, "pool")
+    icons = os.path.join(d, "icons")
+    os.makedirs(pool, exist_ok=True)
+    os.makedirs(icons, exist_ok=True)
+    entries = []
+    used_icons = set()
+    for fn in sorted(os.listdir(pool)):
+        if not fn.endswith(".bpk"):
+            continue
+        path = os.path.join(pool, fn)
+        try:
+            data, files = read_bpk(path)
+            mf = manifest_of(files)
+            kind = mf.get("type", "console")
+            arch = arches(files, kind)
+        except ValueError as e:
+            print("  skipped %s: %s" % (fn, e), file=sys.stderr)
+            continue
+        name = mf["name"]
+        icon = ""
+        if "icon.png" in files and files["icon.png"][:8] == b"\x89PNG\r\n\x1a\n":
+            icon = "icons/%s_%s.png" % (name, mf.get("version", "0"))
+            ip = os.path.join(d, icon)
+            if not os.path.exists(ip):
+                open(ip, "wb").write(files["icon.png"])
+            used_icons.add(os.path.basename(icon))
+        st = [("Package", name), ("Version", mf.get("version", "0") or "0"),
+              ("Title", one_line(mf.get("title", name)) or name), ("Type", kind),
+              ("Category", one_line(mf.get("category", ""))), ("Description", one_line(mf.get("description", ""))),
+              ("Author", one_line(mf.get("author", ""))), ("Depends", one_line(mf.get("depends", ""))),
+              ("Arch", " ".join(arch)), ("Filename", "pool/" + fn), ("Size", str(len(data))),
+              ("SHA256", hashlib.sha256(data).hexdigest())]
+        if icon:
+            st.append(("Icon", icon))
+        entries.append(st)
+    for f in os.listdir(icons):                       # pictures of packages that are gone
+        if f.endswith(".png") and f not in used_icons:
+            os.remove(os.path.join(icons, f))
+    text = "# %s - Banana OS packages, %s\n\n" % (conf.get("name", "repository"), time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()))
+    for st in entries:
+        text += "".join("%s: %s\n" % (k, v) for k, v in st if v != "") + "\n"
+    body = text.encode("utf-8")
+    sig = ed25519_sign(secret, body)
+    tmp = os.path.join(d, ".Packages.tmp")
+    open(tmp, "wb").write(body)
+    open(tmp + ".sig", "w").write(sig.hex() + "\n")
+    os.replace(tmp, os.path.join(d, "Packages"))       # the index and its signature together
+    os.replace(tmp + ".sig", os.path.join(d, "Packages.sig"))
+    open(os.path.join(d, "repo.pub"), "w").write(ed25519_public(secret).hex() + "\n")
+    if not quiet:
+        print("banana-repo: %s: %d package file%s indexed and signed" % (d, len(entries), "" if len(entries) == 1 else "s"))
+    return entries
+
+
+def cmd_init(d, args):
+    name = os.path.basename(os.path.abspath(d)) or "repo"
+    key = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--key" and i + 1 < len(args):
+            key = args[i + 1]
+            i += 2
+        elif args[i] == "--name" and i + 1 < len(args):
+            name = args[i + 1]
+            i += 2
+        else:
+            die("unknown option " + args[i])
+    if os.path.exists(conf_path(d)):
+        die("%s is already a repository" % d)
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,48}", name):
+        die("a name is letters, digits, . _ -")
+    if key is None:
+        key = os.path.join("~", ".config", "banana-repo", name + ".key")
+    kp = os.path.expanduser(key)
+    if os.path.abspath(kp).startswith(os.path.abspath(d) + os.sep):
+        die("the key must not be inside the folder you serve")
+    os.makedirs(os.path.join(d, "pool"), exist_ok=True)
+    os.makedirs(os.path.join(d, "icons"), exist_ok=True)
+    if os.path.exists(kp):
+        print("banana-repo: using the existing key %s" % kp)
+    else:
+        os.makedirs(os.path.dirname(kp) or ".", exist_ok=True)
+        fd = os.open(kp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
+        os.write(fd, (os.urandom(32).hex() + "\n").encode())
+        os.close(fd)
+        print("banana-repo: new signing key %s - back it up, keep it secret" % kp)
+    json.dump({"name": name, "key": key}, open(conf_path(d), "w"), indent=1)
+    build_index(d, quiet=True)
+    print("banana-repo: repository %s ready in %s" % (name, d))
+    print("  add packages:   banana-repo add %s app.bpk" % d)
+    print("  serve it:       banana-repo serve %s     (or install-server.sh)" % d)
+    print("  on Banana OS:   banana-repo key %s <its URL>" % d)
+
+
+def cmd_add(d, files):
+    load_conf(d)
+    if not files:
+        die("usage: banana-repo add DIR app.bpk...")
+    pool = os.path.join(d, "pool")
+    os.makedirs(pool, exist_ok=True)
+    for f in files:
+        try:
+            data, content = read_bpk(f)
+            mf = manifest_of(content)
+            arches(content, mf.get("type", "console"))
+        except (OSError, ValueError) as e:
+            die("%s: %s" % (f, e))
+        ver = mf.get("version", "0") or "0"
+        dest = os.path.join(pool, "%s_%s.bpk" % (mf["name"], ver))
+        if os.path.exists(dest) and open(dest, "rb").read() != data:
+            print("  replacing %s %s (same version, other contents - give it a new version so Banana OS upgrades)"
+                  % (mf["name"], ver), file=sys.stderr)
+        shutil.copyfile(f, dest)
+        print("  %s %s (%s)" % (mf["name"], ver, mf.get("title", "")))
+    build_index(d)
+
+
+def cmd_remove(d, args):
+    load_conf(d)
+    if not args:
+        die("usage: banana-repo remove DIR NAME [VERSION]")
+    name, ver = args[0], (args[1] if len(args) > 1 else None)
+    pool = os.path.join(d, "pool")
+    gone = 0
+    for fn in os.listdir(pool):
+        m = re.fullmatch(r"(.+?)_(.+)\.bpk", fn)
+        if m and m.group(1) == name and (ver is None or m.group(2) == ver):
+            os.remove(os.path.join(pool, fn))
+            gone += 1
+    if not gone:
+        die("no %s%s in %s" % (name, " " + ver if ver else "", d))
+    print("  removed %d file%s" % (gone, "" if gone == 1 else "s"))
+    build_index(d)
+
+
+def cmd_list(d):
+    entries = build_index(d, quiet=True)
+    rows = sorted(entries, key=lambda st: dict(st)["Package"])
+    for st in rows:
+        e = dict(st)
+        print("%-24s %-10s %-8s %-14s %s" % (e["Package"], e["Version"], e["Type"], e.get("Arch", ""), e.get("Title", "")))
+    if not rows:
+        print("(empty - banana-repo add %s app.bpk)" % d)
+
+
+def cmd_key(d, args):
+    conf = load_conf(d)
+    pub = ed25519_public(load_key(conf)).hex()
+    url = args[0] if args else "https://<your server>/<path>"
+    print("public key: " + pub)
+    print("On Banana OS, either run:")
+    print("    apt add-repo %s key=%s" % (url, pub))
+    print("or add this line to /etc/pkg/sources.list:")
+    print("    repo %s key=%s" % (url, pub))
+    print("then: apt update")
+
+
+def cmd_verify(d):
+    conf = load_conf(d)
+    body = open(os.path.join(d, "Packages"), "rb").read()
+    sig = bytes.fromhex(open(os.path.join(d, "Packages.sig")).read().strip())
+    pub = ed25519_public(load_key(conf))
+    if not ed25519_verify(pub, body, sig):
+        die("Packages.sig does NOT match the index")
+    print("signature: good")
+    bad = 0
+    for stanza in body.decode().split("\n\n"):
+        f = dict(l.split(": ", 1) for l in stanza.splitlines() if ": " in l and not l.startswith("#"))
+        if "Filename" not in f:
+            continue
+        p = os.path.join(d, f["Filename"])
+        if not os.path.exists(p):
+            print("  missing: " + f["Filename"])
+            bad += 1
+            continue
+        data = open(p, "rb").read()
+        if hashlib.sha256(data).hexdigest() != f.get("SHA256") or str(len(data)) != f.get("Size"):
+            print("  changed since indexed: " + f["Filename"] + " (banana-repo index)")
+            bad += 1
+    if bad:
+        die("%d problem%s" % (bad, "" if bad == 1 else "s"))
+    print("every file matches the index")
+
+
+class _Handler(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        if self.path.split("?")[0].endswith(("/Packages", "/Packages.sig")):
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
+    def send_head(self):
+        # nothing hidden (the config, temporary files) is served
+        if any(part.startswith(".") for part in self.path.split("?")[0].split("/") if part):
+            self.send_error(404)
+            return None
+        return super().send_head()
+
+
+def cmd_serve(d, args):
+    load_conf(d)
+    port, bind = 8080, "0.0.0.0"
+    i = 0
+    while i < len(args):
+        if args[i] == "--port" and i + 1 < len(args):
+            port = int(args[i + 1])
+            i += 2
+        elif args[i] == "--bind" and i + 1 < len(args):
+            bind = args[i + 1]
+            i += 2
+        else:
+            die("unknown option " + args[i])
+    os.chdir(d)
+    _Handler.extensions_map.update({".bpk": "application/octet-stream", ".sig": "text/plain", "": "text/plain"})
+
+    class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
+    with Server((bind, port), _Handler) as httpd:
+        print("banana-repo: serving %s on http://%s:%d/ (Ctrl+C stops)" % (os.getcwd(), bind, port))
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            pass
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] in ("-h", "--help", "help"):
+        print(__doc__)
+        return
+    cmd = argv[1]
+    if cmd == "selftest":
+        sk = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+        assert ed25519_public(sk).hex() == "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        sig = ed25519_sign(sk, b"")
+        assert sig.hex().startswith("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bac")
+        assert ed25519_verify(ed25519_public(sk), b"", sig) and not ed25519_verify(ed25519_public(sk), b"x", sig)
+        assert vercmp("1.10", "1.9") > 0 and vercmp("1.0~rc1", "1.0") < 0 and vercmp("2.0", "2.0") == 0
+        print("selftest: ok")
+        return
+    if len(argv) < 3:
+        die("usage: banana-repo %s DIR ... (banana-repo --help)" % cmd)
+    d, rest = argv[2], argv[3:]
+    if cmd == "init":
+        cmd_init(d, rest)
+    elif cmd == "add":
+        cmd_add(d, rest)
+    elif cmd in ("remove", "rm"):
+        cmd_remove(d, rest)
+    elif cmd in ("list", "ls"):
+        cmd_list(d)
+    elif cmd == "index":
+        build_index(d)
+    elif cmd == "key":
+        cmd_key(d, rest)
+    elif cmd == "verify":
+        cmd_verify(d)
+    elif cmd == "serve":
+        cmd_serve(d, rest)
+    else:
+        die("unknown command %s (init, add, remove, list, index, key, verify, serve)" % cmd)
+
+
+if __name__ == "__main__":
+    main(sys.argv)
