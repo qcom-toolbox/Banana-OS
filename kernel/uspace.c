@@ -379,6 +379,15 @@ static int vma_add(uspace_t* us, uint64_t s, uint64_t e, int prot) {
     return 0;
 }
 
+/* [s, e) mapped with protection prot, whatever was there: in one step under
+ * vm_lock, so the range is never a gap that vm_find could hand to another
+ * mapping in between (room made first: it cannot stop half-way) */
+static int vma_replace(uspace_t* us, uint64_t s, uint64_t e, int prot) {
+    if (vma_room(us, 2)) return -1;
+    if (vma_cut(us, s, e)) return -1;
+    return vma_add(us, s, e, prot);
+}
+
 /* 1 if every byte of [s, e) is mapped (with all of need's protection bits) */
 static int vma_covers(uspace_t* us, uint64_t s, uint64_t e, int need) {
     uint64_t a = s;
@@ -469,21 +478,22 @@ uintptr_t uvm_map(uspace_t* us, umem_t* m, uintptr_t addr, uint64_t len, int pro
     prot &= UVM_READ | UVM_WRITE | UVM_EXEC;
     uint64_t a = 0;
     if (flags & UVM_FIXED) {
-        if (!(addr & 4095) && in_region(addr, len)) {
-            uintptr_t f = spin_lock_irq(&us->vm_lock);
-            int ok = vma_cut(us, addr, addr + len) == 0;
-            spin_unlock_irq(&us->vm_lock, f);
-            if (ok) {
-                vm_release(us, addr, addr + len);          /* (what was there is gone: fresh pages) */
-                a = addr;
-            }
-        }
-        if (a) {
-            uintptr_t f = spin_lock_irq(&us->vm_lock);
-            if (vma_add(us, a, a + len, prot)) a = 0;
-            spin_unlock_irq(&us->vm_lock, f);
-        }
-        return (uintptr_t)a;
+        if ((addr & 4095) || !in_region(addr, len)) return 0;
+        /* What was there goes (fresh pages), but the range stays this space's
+         * all along: first a no-access placeholder (faults are not served while
+         * the old pages are released), then the new protection. It used to be
+         * a gap meanwhile - another thread's mmap could be given it, and the
+         * two then shared (and unmapped) each other's pages: the heap's spans
+         * given back with a FIXED map, under LLVMpipe's JIT mappings. */
+        uintptr_t f = spin_lock_irq(&us->vm_lock);
+        int ok = vma_replace(us, addr, addr + len, 0) == 0;
+        spin_unlock_irq(&us->vm_lock, f);
+        if (!ok) return 0;
+        vm_release(us, addr, addr + len);
+        f = spin_lock_irq(&us->vm_lock);
+        ok = vma_replace(us, addr, addr + len, prot) == 0;
+        spin_unlock_irq(&us->vm_lock, f);
+        return ok ? (uintptr_t)addr : 0;
     }
     uintptr_t f = spin_lock_irq(&us->vm_lock);
     a = vm_find(us, len, addr);
@@ -497,11 +507,18 @@ int uvm_unmap(uspace_t* us, umem_t* m, uintptr_t addr, uint64_t len) {
     if (!us || (addr & 4095) || !len) return -1;
     len = (len + 4095) & ~4095ull;
     if (!in_region(addr, len)) return -1;
+    /* a no-access placeholder while the pages go, then the range is free: a
+     * mapping made meanwhile by another thread could otherwise get it - and
+     * lose the pages it touched to this release */
     uintptr_t f = spin_lock_irq(&us->vm_lock);
-    int rc = vma_cut(us, addr, addr + len);
+    int rc = vma_replace(us, addr, addr + len, 0);
     spin_unlock_irq(&us->vm_lock, f);
-    if (rc == 0) vm_release(us, addr, addr + len);
-    return rc;
+    if (rc) return rc;
+    vm_release(us, addr, addr + len);
+    f = spin_lock_irq(&us->vm_lock);
+    vma_cut(us, addr, addr + len);              /* (no room for a split: it stays reserved, no access) */
+    spin_unlock_irq(&us->vm_lock, f);
+    return 0;
 }
 
 int uvm_protect(uspace_t* us, uintptr_t addr, uint64_t len, int prot) {
@@ -518,7 +535,7 @@ int uvm_protect(uspace_t* us, uintptr_t addr, uint64_t len, int prot) {
         dev = (us->vma[i].prot & UVM_DEV) != 0;
         a = us->vma[i].end;
     }
-    if (!dev && vma_covers(us, addr, addr + len, 0) && vma_cut(us, addr, addr + len) == 0 && vma_add(us, addr, addr + len, prot) == 0) {
+    if (!dev && vma_covers(us, addr, addr + len, 0) && vma_replace(us, addr, addr + len, prot) == 0) {
         int cur = is_current(us);
         for (uint64_t a = addr; a < addr + len; ) {
             uint64_t next = a + 4096;
@@ -637,10 +654,13 @@ int uvm_unmap_frames(uspace_t* us, uintptr_t addr, uint32_t n, uint64_t frame0) 
     uint64_t len = (uint64_t)n * 4096u;
     uintptr_t f = spin_lock_irq(&us->vm_lock);
     uint64_t* pte = vm_pte(us, addr, 0, NULL);
-    int ok = pte && (*pte & P_DEV) && (*pte & ADDR_MASK) == (frame0 & ADDR_MASK) && vma_cut(us, addr, addr + len) == 0;
+    int ok = pte && (*pte & P_DEV) && (*pte & ADDR_MASK) == (frame0 & ADDR_MASK) && vma_replace(us, addr, addr + len, 0) == 0;
     spin_unlock_irq(&us->vm_lock, f);
     if (!ok) return -1;
     vm_release(us, addr, addr + len);
+    f = spin_lock_irq(&us->vm_lock);
+    vma_cut(us, addr, addr + len);
+    spin_unlock_irq(&us->vm_lock, f);
     return 0;
 }
 

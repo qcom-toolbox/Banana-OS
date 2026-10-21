@@ -232,8 +232,7 @@ static void give(region_t* r, span_t* s, void* p) {
     s->state = S_FREE;
     if (g_nfree >= FREE_KEEP) {
         /* (mapped again in place: the addresses stay reserved, the pages go) */
-        __banana->vm_map(span_mem(r, s), SPAN, PROT_ALL, BANANA_MAP_FIXED);
-        s->released = 1;
+        s->released = __banana->vm_map(span_mem(r, s), SPAN, PROT_ALL, BANANA_MAP_FIXED) == span_mem(r, s);
     }
     list_add(&g_free, s);
     g_nfree++;

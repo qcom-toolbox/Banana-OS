@@ -1,0 +1,4 @@
+sleep 10
+> pkg install /mnt/virtio/posixtest.bpk
+> posixtest mmap
+> posixtest mmap

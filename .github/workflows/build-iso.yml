@@ -63,7 +63,8 @@ jobs:
 
   # Java for Banana OS (64-bit): java.bpk (ports/openjdk/package.sh) - the java
   # app, and /usr/java, which `pkg install java.bpk` unpacks: jdk/ (ports/openjdk),
-  # lib/libOSMesa.so (ports/mesa: OpenGL 3.3) and lwjgl/ (ports/lwjgl)
+  # lib/libOSMesa.so + lib/libLLVM.so (ports/mesa with LLVMpipe and crocus, ports/llvm) and
+  # lwjgl/ (ports/lwjgl)
   java:
     runs-on: ubuntu-latest
     timeout-minutes: 300
@@ -78,7 +79,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: java-bundle
-          key: java-bundle-${{ hashFiles('ports/openjdk/*.sh', 'ports/openjdk/*.py', 'ports/openjdk/include/**', 'ports/openjdk/launcher/*.c', 'ports/openjdk/launcher/Makefile', 'ports/openjdk/test/**', 'ports/mesa/*.sh', 'ports/mesa/*.py', 'ports/mesa/gl3test/*.c', 'ports/mesa/gl3test/Makefile', 'ports/lwjgl/*.sh', 'ports/lwjgl/native/**', 'ports/lwjgl/test/**', 'sdk/lib/**', 'sdk/include/**', 'sdk/banana.mk', 'sdk/tools/**') }}
+          key: java-bundle-${{ hashFiles('ports/openjdk/*.sh', 'ports/openjdk/*.py', 'ports/openjdk/include/**', 'ports/openjdk/launcher/*.c', 'ports/openjdk/launcher/Makefile', 'ports/openjdk/test/**', 'ports/mesa/*.sh', 'ports/mesa/*.py', 'ports/mesa/gl3test/*.c', 'ports/llvm/*.sh', 'ports/llvm/*.py', 'ports/llvm/*.c', 'ports/llvm/*.cpp', 'ports/llvm/include/**', 'sdk/examples/gl3test/*.c', 'ports/mesa/gl3test/Makefile', 'ports/lwjgl/*.sh', 'ports/lwjgl/native/**', 'ports/lwjgl/test/**', 'sdk/lib/**', 'sdk/include/**', 'sdk/banana.mk', 'sdk/tools/**') }}
 
       - name: Install build dependencies
         if: steps.bundle.outputs.cache-hit != 'true'
@@ -87,7 +88,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo apt-get update -qq
           sudo apt-get install -y gcc-multilib g++ binutils make python3 autoconf zip unzip file libffi-dev \
-            mtools fdisk meson ninja-build flex bison python3-mako python3-yaml zlib1g-dev pkg-config \
+            mtools fdisk cmake libdrm-dev meson ninja-build flex bison python3-mako python3-yaml zlib1g-dev pkg-config \
             libasound2-dev libcups2-dev libfontconfig1-dev libx11-dev libxext-dev libxrender-dev \
             libxrandr-dev libxtst-dev libxt-dev
 
@@ -106,15 +107,24 @@ jobs:
         with:
           path: |
             ports/mesa/src
-            ports/mesa/build/ref
-          key: mesa-ref-24.3.4-${{ hashFiles('ports/mesa/build.sh', 'ports/mesa/patch.py') }}
+            ports/mesa/build-llvmpipe-crocus/ref
+          key: mesa-ref-24.3.4-llvmpipe-crocus-${{ hashFiles('ports/mesa/build.sh', 'ports/mesa/patch.py') }}
+      # LLVM 18 for LLVMpipe (its objects kept: they take the longest)
+      - name: LLVM reference build cache
+        if: steps.bundle.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ports/llvm/src
+            ports/llvm/build/ref
+          key: llvm-ref-18.1.8-${{ hashFiles('ports/llvm/build.sh', 'ports/llvm/prepare_source.py') }}
 
       - name: Build OpenJDK, Mesa and LWJGL
         if: steps.bundle.outputs.cache-hit != 'true'
         run: |
           sh ports/openjdk/build.sh
-          sh ports/mesa/build.sh
-          JAVA_BIN=$PWD/ports/openjdk/src/jdk-17.0.20.1+1/bin sh ports/lwjgl/build.sh
+          LLVMPIPE=1 CROCUS=1 sh ports/mesa/build.sh
+          MESA_OUT=$PWD/ports/mesa/build-llvmpipe-crocus JAVA_BIN=$PWD/ports/openjdk/src/jdk-17.0.20.1+1/bin sh ports/lwjgl/build.sh
 
       - name: Pack java.bpk
         if: steps.bundle.outputs.cache-hit != 'true'
@@ -124,7 +134,7 @@ jobs:
           ls -la java-bundle/java.bpk
           # the reference builds' objects are not replayed: smaller caches
           find ports/openjdk/src -path '*/build/*' -name '*.o' -delete
-          find ports/mesa/build/ref -name '*.o' -delete
+          find ports/mesa/build-llvmpipe-crocus/ref -name '*.o' -delete
 
       - name: Upload java.bpk
         uses: actions/upload-artifact@v4

@@ -1,0 +1,8 @@
+sleep 10
+> pkg install /mnt/virtio/gl3test.bpk
+> export BGL3_LIBRARY=/mnt/virtio/lib/soft/libOSMesa.so
+> gl3test bench 10
+> unset BGL3_LIBRARY
+> gl3test bench softpipe 10
+> gl3test bench llvmpipe 40
+> gl3test llvmpipe

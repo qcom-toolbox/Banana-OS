@@ -1,0 +1,12 @@
+diff --git a/test/banana/mcplay.c b/test/banana/mcplay.c
+index 4534711..7daf57e 100644
+--- a/test/banana/mcplay.c
++++ b/test/banana/mcplay.c
+@@ -49,6 +49,7 @@ int main(int argc, char** argv) {
+         else if (!strcmp(argv[i], "--name") && i + 1 < argc) name = argv[++i];
+         else if (!strcmp(argv[i], "--ram") && i + 1 < argc) ram = atoi(argv[++i]);
+         else if (!strcmp(argv[i], "--jvm") && i + 1 < argc) setenv("MC_JVM_OPTS", argv[++i], 1);
++        else if (!strcmp(argv[i], "--env") && i + 1 < argc) { char* kv = argv[++i]; char* eq = strchr(kv, (int)0x3d); if (eq) { *eq = 0; setenv(kv, eq + 1, 1); *eq = (char)0x3d; } }
+         else version = argv[i];
+     }
+     if (!version) { printf("usage: mcplay <version> [--dir <game folder>] [--name <player>] [--ram <MB>]\n"); return 2; }

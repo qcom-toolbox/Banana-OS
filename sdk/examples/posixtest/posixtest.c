@@ -69,6 +69,51 @@ static int toucher(void* arg) {
     return 0;
 }
 
+/* MAP_FIXED over a range of this program's while another thread maps: the
+ * range must stay this program's all along. The kernel used to take it out
+ * of the address space while it released the old pages, and an mmap in
+ * another thread could be given it meanwhile (the heap gives its empty spans
+ * back this way; with LLVMpipe's JIT mappings, Minecraft's memory got shared
+ * and unmapped under it) */
+#define RACE_LEN (16 * 4096)
+static uint8_t* volatile g_race_base;
+static volatile int g_race_stop;
+
+static int race_remapper(void* arg) {
+    (void)arg;
+    for (int i = 0; i < 3000 && !g_race_stop; i++) {
+        void* q = mmap(g_race_base, RACE_LEN, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (q != g_race_base) { g_race_stop = 2; break; }
+        g_race_base[i % RACE_LEN] = 1;                   /* (a fresh page each time) */
+    }
+    if (!g_race_stop) g_race_stop = 1;
+    return 0;
+}
+
+static void t_mmap_fixed_race(void) {
+    g_race_stop = 0;
+    g_race_base = mmap(NULL, RACE_LEN, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (g_race_base == MAP_FAILED) { check("MAP_FIXED while another thread maps", 0, "no memory"); return; }
+    int id = banana_thread(race_remapper, NULL);
+    long asked = 0, stolen = 0;
+    while (id >= 0 && !g_race_stop) {
+        /* the range as a hint: granted only if it is free - it never is */
+        for (int k = 0; k < 16; k++) {
+            uint8_t* want = g_race_base + (size_t)k * 4096;
+            uint8_t* q = mmap(want, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            asked++;
+            if (q == MAP_FAILED) continue;
+            if (q >= g_race_base && q < g_race_base + RACE_LEN) stolen++;
+            else munmap(q, 4096);
+        }
+    }
+    if (id >= 0) banana_join(id);
+    char note[64];
+    snprintf(note, sizeof(note), "%ld mappings asked for meanwhile, %ld inside it", asked, stolen);
+    check("MAP_FIXED while another thread maps: the range is never given away", id >= 0 && g_race_stop == 1 && stolen == 0, note);
+    munmap(g_race_base, RACE_LEN);
+}
+
 static void t_mmap(void) {
     printf("mmap / munmap / mprotect\n");
     int big = sizeof(void*) == 8;
@@ -129,6 +174,8 @@ static void t_mmap(void) {
     if (g_area != MAP_FAILED) munmap(g_area, (size_t)n * TOUCH);
 
     check("munmap the whole reservation", munmap(r, reserve) == 0, "");
+
+    t_mmap_fixed_race();
 }
 
 /* ── threads ──────────────────────────────────────────────────────── */

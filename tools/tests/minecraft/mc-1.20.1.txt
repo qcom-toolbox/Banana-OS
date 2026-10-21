@@ -1,0 +1,8 @@
+sleep 10
+> pkg install /mnt/virtio/mcplay.bpk
+>! startx
+sleep 40
+> echo serial-ok
+>! mcplay 1.20.1 --dir /mnt/virtio/minecraft --ram 1024
+wait Minecraft is running 1200
+sleep 5400
