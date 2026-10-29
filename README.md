@@ -1,5 +1,12 @@
 # 🍌 Banana OS 0.6
 
+- **Safer settings saves:** configuration text stays pinned while its replacement
+  is allocated; read failures leave existing settings intact. Saving identical
+  content now avoids a file rewrite (100 repeated saves: 100 writes reduced to
+  zero in the regression), while explicit filesystem persistence is retained.
+  The actual parser/writer is tested with cache eviction and I/O/allocation
+  failures on 32-bit and under 64-bit ASan/UBSan.
+
 - **Programs on installed disks:** executable files stay pinned while their
   address spaces are allocated, including allocation failures. Disk read errors
   return an I/O error. Bash now stops if its binary/script probe cannot read

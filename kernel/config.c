@@ -26,29 +26,37 @@ static const char* find_line(const char* text, const char* key, const char** end
 int cfg_get(const char* path, const char* key, char* out, int cap) {
     int idx = fs_find_file(path);
     if (idx < 0 || cap <= 0) return 0;
+    fs_pin(idx);
     fs_file_t* f = fs_get_file(idx);
-    if (!f || !f->content) return 0;
+    if (!f || !f->used || !f->loaded || !f->content) { fs_unpin(idx); return 0; }
     const char* end;
     const char* line = find_line(f->content, key, &end);
-    if (!line) return 0;
+    if (!line) { fs_unpin(idx); return 0; }
     const char* v = strchr(line, '=') + 1;
     int n = 0;
     while (v < end && *v != '\r' && n < cap - 1) out[n++] = *v++;
     while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\t')) n--;
     out[n] = '\0';
+    fs_unpin(idx);
     return 1;
 }
 
 int cfg_set(const char* path, const char* key, const char* value, const char* header) {
     const char* old = "";
     int idx = fs_find_file(path);
-    if (idx >= 0 && fs_get_file(idx)->content) old = fs_get_file(idx)->content;
-    else if (!value) return 0;
+    if (idx >= 0) {
+        /* Keep the old text resident while allocating the replacement. */
+        fs_pin(idx);
+        fs_file_t* f = fs_get_file(idx);
+        if (!f || !f->used || !f->loaded || !f->content) { fs_unpin(idx); return -1; }
+        old = f->content;
+    } else if (!value) return 0;
 
-    uint32_t cap = (uint32_t)strlen(old) + strlen(key) + (value ? strlen(value) : 0) +
+    uint32_t old_len = (uint32_t)strlen(old);
+    uint32_t cap = old_len + strlen(key) + (value ? strlen(value) : 0) +
                    (header ? strlen(header) : 0) + 8;
     char* buf = (char*)kmalloc(cap);
-    if (!buf) return -1;
+    if (!buf) { if (idx >= 0) fs_unpin(idx); return -1; }
     buf[0] = '\0';
     if (!old[0] && header) kstrlcat(buf, header, cap);
 
@@ -72,8 +80,12 @@ int cfg_set(const char* path, const char* key, const char* value, const char* he
     }
     if (line && *end) kstrlcat(buf, end + 1, cap);
 
-    int r = fs_write_path(path, buf, (uint32_t)strlen(buf)) >= 0 ? 0 : -1;
+    uint32_t len = (uint32_t)strlen(buf);
+    /* Preserve formatting/unknown keys, but avoid writing identical bytes. */
+    int r = old_len == len && !memcmp(old, buf, len) ? 0
+          : fs_write_path(path, buf, len) >= 0 ? 0 : -1;
     kfree(buf);
+    if (idx >= 0) fs_unpin(idx);
     return r;
 }
 
