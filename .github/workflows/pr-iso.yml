@@ -27,7 +27,14 @@ concurrency:
   group: review-iso-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
+  libjs:
+    uses: ./.github/workflows/libjs-reference.yml
+    with:
+      sdk: true
+    permissions:
+      contents: read
   build:
+    needs: libjs
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -36,6 +43,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
+          sudo python3 tools/ci_apt_mirrors.py
           sudo apt-get update -qq
           sudo apt-get install -y nasm gcc-multilib binutils xorriso mtools python3 sbsigntool efitools ncurses-bin zsh cmake git
 
@@ -88,10 +96,19 @@ jobs:
           key: unix-ports-v2-${{ hashFiles('ports/port.sh', 'ports/bash/*', 'ports/coreutils/*', 'ports/grep/*', 'ports/sed/*', 'ports/findutils/*', 'ports/diffutils/*', 'ports/gawk/*', 'ports/ncurses/*', 'ports/less/*', 'ports/zsh/*', 'ports/nano/*', 'ports/vim/*', 'ports/vi/*', 'ports/neovim/*', 'sdk/tools/banana-*', 'sdk/lib/*.c', 'sdk/include/**') }}
           restore-keys: unix-ports-v2-
 
+      - name: Download audited LibJS worker
+        uses: actions/download-artifact@v4
+        with:
+          name: experimental-libjs-packages
+          path: libjs-packages
+      - name: Verify LibJS package checksums
+        working-directory: libjs-packages
+        run: sha256sum -c LIBJS-SHA256SUMS
+
       - name: Build Banana_OS.iso
         run: |
           make clean
-          make
+          make -j2 LIBJS_WORKER_BPK="$GITHUB_WORKSPACE/libjs-packages/libjsworker-x86_64.bpk"
 
       - name: Record artifact provenance
         run: |
