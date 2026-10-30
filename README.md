@@ -1,5 +1,10 @@
 # 🍌 Banana OS 0.6
 
+- **Intel Wi-Fi port groundwork:** validated AX200/AX210 API-77 firmware parsing
+  and separate bootstrap DMA contexts, with pinned firmware/licences and
+  fault tests on both architectures. **Radio connectivity is not implemented yet.**
+  [Current state and remaining work](docs/wifi.md#intel-ax200--ax210-port-status).
+
 - **Interactive CI synchronization:** editor checks wait for raw/no-echo input
   mode and a bounded quiet interval after redraw instead of treating a visible
   heading as readiness. PTY input write errors now fail explicitly.

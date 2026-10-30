@@ -135,3 +135,47 @@ Run `tools/test_rtl8188eu.py --sanitize` and `--32`: the native driver/HAL,
 embedded firmware and actual station core run against USB/register/OTP models
 and independent WPA2 access-point vectors, including malformed DMA aggregates,
 OTP corruption, failed initialization and controller-owned TX buffers.
+
+## Intel AX200 / AX210 port status
+
+The native port has a tested firmware and bootstrap-context layer in
+net/iwx_fw.c and net/iwx_boot.c. It validates API-77 CC/AX200 and TY/AX210
+containers, TLV lengths, section views, command versions, family identity
+and image-loader data. Pinned unmodified firmware, licences and hashes are
+in firmware/intel/. The two models use distinct DMA context layouts.
+
+The bootstrap builder validates ring addresses/alignment, copies firmware
+sections into owned allocations and rolls back allocations on failure.
+Host tests exercise actual firmware, malformed TLVs, 3,000 mutations per
+model, and a failure/invalid DMA address at every allocation position.
+Both architectures use compile-time context size checks. Context layouts
+come from the pinned OpenBSD iwx source documented in third_party/iwx/.
+
+The hardware helper in net/iwx_hw.c performs bounded reset/clock/access
+handshakes, observes hardware RF-kill, writes each model's bootstrap context
+registers and kicks the firmware loader. Stop requires bus-master acknowledgement.
+After an uncertain doorbell write, DMA ownership must be retained until stop.
+Register models inject failure at every I/O step and exercise clock timeout,
+RF-kill, unplugged-device reads and failed/successful stop. Rounded allocations
+use the actual firmware image-loader length, not the larger buffer capacity.
+
+These helpers are not wired into PCI discovery. The running OS does not claim
+Intel radios, start their DMA or register a ready interface. ALIVE handling,
+PNVM handshake notifications, NVM/regulatory configuration, command/RX/TX
+transport and association remain to be implemented.
+AX200/AX210 connectivity is not available yet. The firmware inputs are not
+embedded in the ISO. Physical radio testing is also pending.
+
+The required network CI gate runs tools/test_iwx_fw.py with --sanitize and
+--32 --sanitize.
+
+
+AX210 PNVM parsing now selects exact SKU/MAC/RF identity and validates the
+complete TLV stream. There is no fallback to another board's calibration.
+Four real PNVM SKU profiles are exercised. Contiguous and fragmented DMA
+handoff layouts are supported by the preparation helper; failed allocations
+roll back only unpublished PNVM blocks and preserve the firmware's earlier
+context/paging allocations. The scratch pointer is published only after all
+copies succeed. Actual ALIVE/SKU notification handling and firmware PNVM
+handshake completion are still pending, so these helpers do not enable radio
+connectivity in the running OS.

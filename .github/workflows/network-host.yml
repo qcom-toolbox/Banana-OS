@@ -3,6 +3,10 @@ on:
   pull_request:
     paths:
       - 'net/**'
+      - 'firmware/intel/**'
+      - 'third_party/iwx/**'
+      - 'tools/test_iwx_fw.py'
+      - 'tools/tests/iwx_fw.c'
       - 'tools/test_loopback.py'
       - 'tools/tests/loopback.c'
       - 'third_party/igc/**'
@@ -94,3 +98,5 @@ jobs:
         run: python3 tools/test_r8125.py --sanitize && python3 tools/test_r8125.py --32
       - name: Taskbar Wi-Fi actions, password erasure, hotplug and layout
         run: python3 tools/test_nettray.py --sanitize && python3 tools/test_nettray.py --32
+      - name: Intel AX200/AX210 firmware parsing and bootstrap DMA context safety
+        run: python3 tools/test_iwx_fw.py --sanitize && python3 tools/test_iwx_fw.py --32 --sanitize
