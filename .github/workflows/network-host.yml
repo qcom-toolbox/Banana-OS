@@ -5,8 +5,8 @@ on:
       - 'net/**'
       - 'firmware/intel/**'
       - 'third_party/iwx/**'
-      - 'tools/test_iwx_fw.py'
-      - 'tools/tests/iwx_fw.c'
+      - 'tools/test_iwx_*.py'
+      - 'tools/tests/iwx_*.c'
       - 'tools/test_loopback.py'
       - 'tools/tests/loopback.c'
       - 'third_party/igc/**'
@@ -100,3 +100,7 @@ jobs:
         run: python3 tools/test_nettray.py --sanitize && python3 tools/test_nettray.py --32
       - name: Intel AX200/AX210 firmware parsing and bootstrap DMA context safety
         run: python3 tools/test_iwx_fw.py --sanitize && python3 tools/test_iwx_fw.py --32 --sanitize
+      - name: Intel command descriptors and bounded ALIVE event decoding
+        run: python3 tools/test_iwx_msg.py --sanitize && python3 tools/test_iwx_msg.py --32 --sanitize
+      - name: Intel command and RX ring ownership, wraparound and stop failures
+        run: python3 tools/test_iwx_queue.py --sanitize && python3 tools/test_iwx_queue.py --32 --sanitize

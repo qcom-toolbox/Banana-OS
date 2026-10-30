@@ -566,3 +566,25 @@ The safe optimization in this audit is avoiding byte-identical settings writes.
 No graphics quality, networking timeout, isolation quota or persistence guarantee
 was reduced to improve benchmark numbers. Passing this campaign establishes
 the listed coverage, not the absence of all OS bugs.
+
+### Intel command/RX transport fault models
+
+The native AX200/AX210 port now includes command descriptor encoding, bounded
+RX event/ALIVE decoding and per-card command/RX queue ownership. The firmware
+files are real pinned API-77 inputs; register/DMA behavior is a host model.
+Tests exercise 600 command/acknowledgement cycles, 8/16-bit doorbell wrap,
+maximum payloads, stale responses and group normalization, all preparation
+allocation failures and invalid addresses, malformed/duplicate RX IDs, RF-kill,
+uncertain doorbells and a stop that fails before succeeding. A callback cannot
+reenter poll, send or close. DMA buffers are retained after an uncertain error
+until the stop acknowledgement succeeds.
+
+Regressions: tools/test_iwx_msg.py and tools/test_iwx_queue.py, both with
+ASan/UBSan on x86_64 and i686. Network CI requires these alongside the existing
+firmware/bootstrap tests. No physical Intel card has been tested; the port
+still lacks PCI integration, PNVM completion, NVM/regulatory and station setup.
+
+The earlier intermittent Vim help/quit failure remains open: run 41093990924
+still failed the build-212 Mesa BIOS update job before installation, while
+run 41098093242 completed successfully and published build290. PTY readiness
+improvements and a successful later run are not proof that this flake is fixed.

@@ -160,14 +160,15 @@ RF-kill, unplugged-device reads and failed/successful stop. Rounded allocations
 use the actual firmware image-loader length, not the larger buffer capacity.
 
 These helpers are not wired into PCI discovery. The running OS does not claim
-Intel radios, start their DMA or register a ready interface. ALIVE handling,
-PNVM handshake notifications, NVM/regulatory configuration, command/RX/TX
-transport and association remain to be implemented.
+Intel radios, start their DMA or register a ready interface. ALIVE decoding and
+a polling command/RX transport now exist as isolated components (details below).
+PNVM handshake notifications, NVM/regulatory configuration, data TX/RX
+integration and association remain to be implemented.
 AX200/AX210 connectivity is not available yet. The firmware inputs are not
 embedded in the ISO. Physical radio testing is also pending.
 
-The required network CI gate runs tools/test_iwx_fw.py with --sanitize and
---32 --sanitize.
+The required network CI gate runs tools/test_iwx_fw.py, tools/test_iwx_msg.py
+and tools/test_iwx_queue.py with --sanitize and --32 --sanitize.
 
 
 AX210 PNVM parsing now selects exact SKU/MAC/RF identity and validates the
@@ -176,6 +177,37 @@ Four real PNVM SKU profiles are exercised. Contiguous and fragmented DMA
 handoff layouts are supported by the preparation helper; failed allocations
 roll back only unpublished PNVM blocks and preserve the firmware's earlier
 context/paging allocations. The scratch pointer is published only after all
-copies succeed. Actual ALIVE/SKU notification handling and firmware PNVM
-handshake completion are still pending, so these helpers do not enable radio
+copies succeed. Firmware ALIVE/SKU decoding exists; connecting its selected calibration to the
+PNVM handshake and waiting for completion are still pending, so these helpers do not enable radio
 connectivity in the running OS.
+
+### Command/RX transport milestone
+
+net/iwx_msg.c builds API-77 wide command headers and transfer descriptors
+without publishing them. RX parsing checks the 4 KiB buffer boundary and
+64-byte aggregation alignment; AX210 accepts one event per buffer.
+ALIVE v4/v5/v6/v7 decoding verifies status and the advertised notification
+version before accepting the firmware's SKU.
+
+net/iwx_queue.c owns per-card command and receive rings. Prepare allocates
+and initializes buffers without enabling DMA. Only a valid ALIVE notification
+permits command submission. A single outstanding command retains its DMA until
+a matching queue/index/opcode/group completion; stale replies cannot release
+it. Legacy group-zero commands use the firmware's group-one version table.
+AX200's 8-bit and AX210's 16-bit doorbells wrap independently of 256 slots.
+
+RX completions validate nonzero buffer IDs and reject duplicate returns in
+a batch. Descriptor contents are published before the aligned refill doorbell.
+RF-kill, malformed events, device removal and I/O failures put the transport
+in a failed state. A failed stop retains every allocation; releasing any
+pending command or ring requires acknowledged DMA quiescence.
+Objects must be zero-initialized on the heap and owned by a serialized caller.
+Notification views are borrowed; callbacks must defer work that could reenter
+the transport. The owner must impose command deadlines and close on timeout,
+without freeing or recycling a pending command.
+
+Host models exercise real firmware version tables, 600 command completions,
+both index wrap boundaries, maximum command/reply size, all preparation
+allocation failures and invalid DMA addresses, stale acknowledgements,
+malformed/duplicate RX completions, failed doorbells, RF-kill, and failed then
+successful stop. They do not emulate an Intel radio or prove hardware support.
