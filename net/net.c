@@ -106,9 +106,19 @@ void net_rx(netdev_t* nd, const uint8_t* frame, uint32_t len) {
     if (nd != g_if.dev) return;       /* only the active interface talks IP */
     if (len < 14) return;
     uint16_t type = rd16(frame + 12);
-    if (type == ETH_TYPE_ARP)     arp_rx(frame + 14, len - 14);
-    else if (type == ETH_TYPE_IP) ip_rx(frame + 14, len - 14);
-    else if (type == 0x86DD)      ipv6_rx(frame + 14, len - 14);
+    if (type == ETH_TYPE_ARP) arp_rx(frame + 14, len - 14);
+    else if (type == ETH_TYPE_IP) {
+        /* Loopback endpoints are private to the software path. In
+         * particular, a physical packet must not bypass the firewall by
+         * pretending to originate from 127/8. */
+        if (len >= 34 && (frame[26] == 127 || frame[30] == 127)) return;
+        ip_rx(frame + 14, len - 14);
+    } else if (type == 0x86DD) {
+        if (len >= 54 &&
+            (ip6_is_loopback((const ip6_t*)(frame + 22)) ||
+             ip6_is_loopback((const ip6_t*)(frame + 38)))) return;
+        ipv6_rx(frame + 14, len - 14);
+    }
 }
 
 /* ── polling / waiting ──────────────────────────────────────────── */
@@ -122,20 +132,22 @@ void net_irq_notify(void) {
 }
 
 void net_poll(void) {
-    if (g_ndevs == 0 || g_in_poll) return;
+    if (g_in_poll) return;
     g_in_poll = 1;
     /* every card is drained (inactive ones just drop their frames) */
     for (int i = 0; i < g_ndevs; i++)
         if (g_devs[i]->present) g_devs[i]->poll(g_devs[i]);
-    if (!g_if.dev) { g_in_poll = 0; return; }
+    /* Local sockets and their TCP timers do not require a physical NIC. */
     ip_loopback_drain();
     ipv6_loopback_drain();
     uint32_t now = timer_ms();
     if ((uint32_t)(now - g_last_timer_ms) >= 10) {
         g_last_timer_ms = now;
-        arp_timer();
-        ipv6_timer();
-        dhcp_timer();
+        if (g_if.dev) {
+            arp_timer();
+            ipv6_timer();
+            dhcp_timer();
+        }
         tcp_timer();
     }
     tcp_flush();   /* delayed ACKs / window updates owed after this batch */

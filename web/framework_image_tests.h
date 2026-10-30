@@ -2,6 +2,18 @@
 #include "../kernel/image.h"
 #include "image_decode.h"
 #include "test/image_fixtures.h"
+/* Hosted 32-bit tests have a decoder shim; the 32-bit kernel deliberately
+ * cannot launch the isolated 64-bit image worker. Verify that safe refusal
+ * instead of reporting missing worker support as seven decoder regressions. */
+#if defined(__i386__) && !defined(FONT_HOST)
+static void image_tests(checks_t* c) {
+    image_t image; char err[128];
+    int rc=image_decode(image_fixture_lossless,sizeof(image_fixture_lossless),&image,err,sizeof(err));
+    check(c,"32-bit image decoding requires the isolated 64-bit worker",
+          rc!=0 && !image.rgb && !image.w && !image.h && strstr(err,"64-bit"),err);
+    if(!rc)image_free(&image);
+}
+#else
 static int image_pixels(const uint8_t* data,uint32_t len,int tolerance) {
     image_t image;char err[128];
     if(image_decode(data,len,&image,err,sizeof(err)))return 0;
@@ -42,3 +54,5 @@ static void image_tests(checks_t* c) {
         image_pixels(image_fixture_jpeg,sizeof(image_fixture_jpeg),5) && image_pixels(image_fixture_bmp,sizeof(image_fixture_bmp),0) &&
         image_pixels(image_fixture_gif,sizeof(image_fixture_gif),0),"");
 }
+
+#endif

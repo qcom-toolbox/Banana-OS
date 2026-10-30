@@ -3,6 +3,8 @@ on:
   pull_request:
     paths:
       - 'net/**'
+      - 'tools/test_loopback.py'
+      - 'tools/tests/loopback.c'
       - 'third_party/igc/**'
       - 'third_party/rge/**'
       - 'third_party/rtwn/**'
@@ -58,6 +60,8 @@ jobs:
         run: python3 tools/test_network_drivers.py --sanitize
       - name: Network models on the 32-bit fallback
         run: python3 tools/test_network_drivers.py --32
+      - name: Offline TCP and UDP loopback, timeouts and physical spoof rejection
+        run: python3 tools/test_loopback.py --sanitize && python3 tools/test_loopback.py --32
       - name: DHCP lifecycle regression
         run: python3 tools/test_dhcp_state.py --sanitize && python3 tools/test_dhcp_state.py --32
       - name: DNS cache and TCP fallback regression

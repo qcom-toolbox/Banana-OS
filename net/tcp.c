@@ -906,7 +906,7 @@ static tcp_conn_t* connect_to(ip4_t ip, const ip6_t* ip6, uint16_t port, uint32_
     if (ip6) {
         *err = ipv6_source(ip6, &src6);
         if (*err != NET_OK) return NULL;
-    } else {
+    } else if ((ip >> 24) != 127) {
         if (!nif->dev) { *err = NET_ERR_NODEV; return NULL; }
         if (!net_wait_configured(timeout_ms)) { *err = NET_ERR_NOTREADY; return NULL; }
     }

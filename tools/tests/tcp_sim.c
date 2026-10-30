@@ -35,6 +35,10 @@ uint16_t net_csum_fold(uint32_t sum) {
     return (uint16_t)~sum;
 }
 void ip4_to_str(ip4_t ip, char out[16]) { snprintf(out, 16, "%u.%u.%u.%u", ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255); }
+int ip6_is_loopback(const ip6_t* ip) {
+    for (int i=0;i<15;i++) if (ip->b[i]) return 0;
+    return ip->b[15]==1;
+}
 int  ipv6_enabled(void) { return 0; }
 int  ipv6_source(const ip6_t* d, ip6_t* s) { (void)d; (void)s; return NET_ERR_NOROUTE; }
 int  ipv6_send(const ip6_t* s, const ip6_t* d, uint8_t p, const void* x, uint32_t n) { (void)s; (void)d; (void)p; (void)x; (void)n; return 0; }

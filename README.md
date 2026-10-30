@@ -1,5 +1,20 @@
 # 🍌 Banana OS 0.6
 
+- **OS regression audit (October 2026):** hardened the actual ELF loader against
+  wrapped offsets, truncated segments, unbounded dynamic tables and relocation
+  reads/writes. Damaged executables return a format error; allocation failures
+  retain their separate out-of-memory error. Tests include 20,000 deterministic
+  mutations per architecture, sanitizer checks and built SDK/ported executables.
+  The 32-bit selftest now checks the documented refusal of isolated decoding;
+  full image decoding remains covered by hosted tests and the 64-bit guest.
+  Full offline OS regressions now gate ISO publication in BIOS 32/64-bit and UEFI 64-bit VMs.
+
+- **Offline local networking:** TCP/UDP loopback works without a physical NIC
+  or DHCP lease, including local servers, epoll and receive timeouts. Physical
+  Ethernet packets claiming IPv4/IPv6 loopback addresses are rejected. External
+  networking keeps its existing device/configuration requirements.
+  [Audit results, reproduction commands and hardware limits](docs/OS-TESTING-2026-10-30.md).
+
 - **Safer settings saves:** configuration text stays pinned while its replacement
   is allocated; read failures leave existing settings intact. Saving identical
   content now avoids a file rewrite (100 repeated saves: 100 writes reduced to

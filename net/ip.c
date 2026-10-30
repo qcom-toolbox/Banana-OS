@@ -57,9 +57,9 @@ void ip_loopback_drain(void) {
 
 int ip_send(ip4_t dst, uint8_t proto, const void* payload, uint32_t len) {
     netif_t* nif = net_if();
-    if (!nif->dev) return NET_ERR_NODEV;
     if (len > IP_MAX_PAYLOAD) return NET_ERR_PROTO;
     if (is_local(dst)) return loopback_send(dst, proto, payload, len);
+    if (!nif->dev) return NET_ERR_NODEV;
     /* before DHCP completes only broadcasts (DHCP itself) may go out */
     if (!nif->configured && dst != IP4_BROADCAST) return NET_ERR_NOTREADY;
 
@@ -131,7 +131,7 @@ void ip_rx(const uint8_t* p, uint32_t len) {
     switch (p[9]) {
     case IP_PROTO_ICMP: icmp_rx(src, payload, plen, p[8]); break;
     case IP_PROTO_UDP:  udp_rx(src, dst, payload, plen); break;
-    case IP_PROTO_TCP:  if (nif->configured) tcp_rx(src, dst, payload, plen); break;
+    case IP_PROTO_TCP:  if (nif->configured || (dst >> 24) == 127) tcp_rx(src, dst, payload, plen); break;
     default: break;
     }
 }
