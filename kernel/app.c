@@ -3598,10 +3598,10 @@ static int a_proc_exec(const char* path, char* const* argv, char* const* envp) {
     p->mem = p->us ? umem_create(p->us) : NULL;
     p->stack = NULL;
     char err[96];
-    int bad = !p->mem || load_program(p, (const uint8_t*)f->content, f->size, argc, kargv, kenv, err, sizeof(err)) != 0;
+    int load_rc = !p->mem ? -12 : load_program(p, (const uint8_t*)f->content, f->size, argc, kargv, kenv, err, sizeof(err));
     fs_unpin(fi);
     kfree(kenv);
-    if (bad) {
+    if (load_rc) {
         umem_destroy(p->mem);
         uspace_destroy(p->us);
         p->us = old.us; p->mem = old.mem; p->entry = old.entry; p->base = old.base;
@@ -3609,7 +3609,7 @@ static int a_proc_exec(const char* path, char* const* argv, char* const* envp) {
         p->argv = old.argv; p->argc = old.argc; p->uapi = old.uapi; p->ret_stub = old.ret_stub;
         p->sigret_stub = old.sigret_stub;
         kfree(kargv);
-        return -12;
+        return load_rc;
     }
     /* what a new program does not keep: the other threads, descriptors
      * marked close-on-exec, signal handlers (back to the default), its
@@ -4341,133 +4341,225 @@ typedef struct { int32_t tag; uint32_t val; } dyn_t;
 /* run_at: where the program will run (64-bit: in its mmap region, the image
  * built in a kernel buffer and copied there), its lowest page; 0: where it
  * is loaded */
+
+/* Validate offsets with subtraction, never by adding attacker-controlled
+ * lengths. Headers are copied so malformed alignment cannot become a
+ * kernel unaligned access. This is shared by exec's sizing and loading. */
+static int elf_layout(const uint8_t* f, uint32_t size, uintptr_t* low, uintptr_t* high) {
+    ehdr_t e;
+    if (!f || size < sizeof(e)) return 0;
+    memcpy(&e, f, sizeof(e));
+    if (memcmp(e.ident, "\177ELF", 4) || e.ident[4] != ELF_CLASS ||
+        e.ident[5] != 1 || e.ident[6] != 1 || e.version != 1 ||
+        e.machine != EM_HOST || e.type != 3 || e.ehsize != sizeof(e) ||
+        e.phentsize != sizeof(phdr_t) || !e.phnum ||
+        e.phoff < sizeof(e) || e.phoff > size ||
+        e.phnum > (size - e.phoff) / sizeof(phdr_t)) return 0;
+    uintptr_t lo = ~(uintptr_t)0, hi = 0;
+    int entry_ok = 0, dynamics = 0;
+    for (unsigned i = 0; i < e.phnum; i++) {
+        phdr_t p;
+        memcpy(&p, f + e.phoff + i * sizeof(p), sizeof(p));
+        if (p.type == 3) return 0; /* PT_INTERP: the SDK ABI has no ELF interpreter. */
+        if (p.type != PT_LOAD || !p.memsz) {
+            if (p.type == PT_LOAD && p.filesz) return 0;
+            continue;
+        }
+        if (p.offset > size || p.filesz > size - p.offset ||
+            p.filesz > p.memsz || p.vaddr > ~(uintptr_t)0 ||
+            p.memsz > ~(uintptr_t)0 - p.vaddr) return 0;
+        uintptr_t end = (uintptr_t)(p.vaddr + p.memsz);
+        if (p.vaddr < lo) lo = (uintptr_t)p.vaddr;
+        if (end > hi) hi = end;
+        if ((p.flags & 1u) && e.entry >= p.vaddr && e.entry - p.vaddr < p.memsz) entry_ok = 1;
+    }
+    if (hi <= lo || !entry_ok) return 0;
+    lo &= ~(uintptr_t)4095;
+    if (hi - lo > APP_MAX_IMAGE) return 0;
+    for (unsigned i = 0; i < e.phnum; i++) {
+        phdr_t p;
+        memcpy(&p, f + e.phoff + i * sizeof(p), sizeof(p));
+        if (p.type != PT_DYNAMIC) continue;
+        if (++dynamics > 1 || p.offset > size || p.filesz > size - p.offset ||
+            p.filesz > p.memsz || p.memsz < sizeof(dyn_t) || p.memsz % sizeof(dyn_t) ||
+            p.vaddr < lo || p.vaddr > hi || p.memsz > hi - p.vaddr) return 0;
+        int covered = 0;
+        for (unsigned j = 0; j < e.phnum; j++) {
+            phdr_t q;
+            memcpy(&q, f + e.phoff + j * sizeof(q), sizeof(q));
+            if (q.type == PT_LOAD && p.vaddr >= q.vaddr &&
+                p.vaddr - q.vaddr <= q.memsz && p.memsz <= q.memsz - (p.vaddr - q.vaddr))
+                covered = 1;
+        }
+        if (!covered) return 0;
+    }
+    *low = lo; *high = hi;
+    return 1;
+}
+
+static int elf_in_image(uintptr_t at, uintptr_t n, uintptr_t lo, uintptr_t span) {
+    return at >= lo && at - lo <= span && n <= span - (at - lo);
+}
+
+/* An undefined symbol's diagnostic must never scan outside the image,
+ * including a corrupt or unterminated string table. */
+static void elf_symbol_name(uintptr_t base, uintptr_t lo, uintptr_t span,
+                            uintptr_t strtab, uint32_t index, char* out, size_t cap) {
+    if (!strtab || index > ~(uintptr_t)0 - strtab ||
+        !elf_in_image(strtab + index, 1, lo, span)) {
+        kstrlcpy(out, "a missing function", cap);
+        return;
+    }
+    uintptr_t at = strtab + index;
+    size_t max = (size_t)(span - (at - lo)), n = 0;
+    while (n + 1 < cap && n < max && *(const char*)(base + at + n)) {
+        out[n] = *(const char*)(base + at + n);
+        n++;
+    }
+    if (cap) out[n] = 0;
+}
+
 static int load_elf(umem_t* m, const uint8_t* f, uint32_t size, uint8_t** image_out, banana_entry_t* entry, uintptr_t* base_out,
                     uintptr_t* lo_out, uintptr_t* hi_out, uintptr_t run_at, char* err, int ecap) {
-    const ehdr_t* eh = (const ehdr_t*)f;
-    if (size < sizeof(ehdr_t) || memcmp(eh->ident, "\x7f" "ELF", 4) != 0) { kstrlcpy(err, "not an ELF program", (size_t)ecap); return -1; }
-    if (eh->ident[4] != ELF_CLASS || eh->machine != EM_HOST) {
+    ehdr_t eh;
+    if (!f || size < sizeof(eh)) { kstrlcpy(err, "not an ELF program", (size_t)ecap); return -8; }
+    memcpy(&eh, f, sizeof(eh));
+    if (memcmp(eh.ident, "\177ELF", 4)) { kstrlcpy(err, "not an ELF program", (size_t)ecap); return -8; }
+    if (eh.ident[4] != ELF_CLASS || eh.machine != EM_HOST) {
         ksnprintf(err, (size_t)ecap, "built for another CPU (this is the %s kernel)", BANANA_ARCH);
-        return -1;
+        return -8;
     }
-    if (eh->type != 3) { kstrlcpy(err, "not position-independent (build it with the Banana OS SDK)", (size_t)ecap); return -1; }
-    if (eh->phentsize != sizeof(phdr_t) || eh->phoff + (uint32_t)eh->phnum * sizeof(phdr_t) > size) {
-        kstrlcpy(err, "damaged ELF headers", (size_t)ecap);
-        return -1;
+    if (eh.type != 3) { kstrlcpy(err, "not position-independent (build it with the Banana OS SDK)", (size_t)ecap); return -8; }
+    uintptr_t lo, hi;
+    if (!elf_layout(f, size, &lo, &hi)) {
+        kstrlcpy(err, "damaged ELF layout (headers, segments or entry)", (size_t)ecap);
+        return -8;
     }
-    const phdr_t* ph = (const phdr_t*)(f + eh->phoff);
-    uintptr_t lo = ~(uintptr_t)0, hi = 0;
-    for (int i = 0; i < eh->phnum; i++) {
-        if (ph[i].type != PT_LOAD) continue;
-        if (ph[i].offset + ph[i].filesz > size || ph[i].filesz > ph[i].memsz) { kstrlcpy(err, "damaged ELF segments", (size_t)ecap); return -1; }
-        if (ph[i].vaddr < lo) lo = (uintptr_t)ph[i].vaddr;
-        if (ph[i].vaddr + ph[i].memsz > hi) hi = (uintptr_t)(ph[i].vaddr + ph[i].memsz);
-    }
-    if (hi <= lo || hi - lo > APP_MAX_IMAGE) { kstrlcpy(err, "no loadable code (or too big)", (size_t)ecap); return -1; }
-    lo &= ~(uintptr_t)4095;
     uint32_t span = (uint32_t)(hi - lo);
     uint8_t* raw = m ? (uint8_t*)umem_alloc_pages(m, span, 0) : (uint8_t*)kmalloc(span + 4096);
-    if (!raw) { kstrlcpy(err, "out of memory", (size_t)ecap); return -1; }
+    if (!raw) { kstrlcpy(err, "out of memory", (size_t)ecap); return -12; }
     uint8_t* mem = (uint8_t*)(((uintptr_t)raw + 4095) & ~(uintptr_t)4095);
     memset(mem, 0, span);
     uintptr_t base = (uintptr_t)mem - lo;
-    uintptr_t run = run_at ? run_at - lo : base;     /* (relocated for there) */
-    const dyn_t* dyn = NULL;
-    for (int i = 0; i < eh->phnum; i++) {
-        if (ph[i].type == PT_LOAD) memcpy((void*)(base + (uintptr_t)ph[i].vaddr), f + ph[i].offset, (size_t)ph[i].filesz);
-        if (ph[i].type == PT_DYNAMIC) dyn = (const dyn_t*)(base + (uintptr_t)ph[i].vaddr);
+    uintptr_t run = run_at ? run_at - lo : base;
+    const uint8_t* dyn = NULL;
+    uintptr_t dyn_size = 0;
+    for (unsigned i = 0; i < eh.phnum; i++) {
+        phdr_t p;
+        memcpy(&p, f + eh.phoff + i * sizeof(p), sizeof(p));
+        if (p.type == PT_LOAD && p.memsz)
+            memcpy((void*)(base + (uintptr_t)p.vaddr), f + p.offset, (size_t)p.filesz);
+        if (p.type == PT_DYNAMIC) {
+            dyn = (const uint8_t*)(base + (uintptr_t)p.vaddr);
+            dyn_size = (uintptr_t)p.memsz;
+        }
     }
-    /* relocations: the SDK's static PIEs only have "base + addend" ones;
-     * TinyCC's programs (-shared, built on Banana OS) also refer to their
-     * own symbols - through the GOT and PLT, and (i386) in their code */
     if (dyn) {
         uintptr_t rel = 0, relsz = 0, relent = 0, rela = 0, relasz = 0, relaent = 0;
         uintptr_t symtab = 0, syment = 0, strtab = 0, jmprel = 0, pltrelsz = 0, pltrel = 0;
-        for (const dyn_t* d = dyn; d->tag != DT_NULL && (const uint8_t*)d < mem + span; d++) {
-            switch (d->tag) {
-            case DT_RELA: rela = (uintptr_t)d->val; break;
-            case DT_RELASZ: relasz = (uintptr_t)d->val; break;
-            case DT_RELAENT: relaent = (uintptr_t)d->val; break;
-            case DT_REL: rel = (uintptr_t)d->val; break;
-            case DT_RELSZ: relsz = (uintptr_t)d->val; break;
-            case DT_RELENT: relent = (uintptr_t)d->val; break;
-            case DT_SYMTAB: symtab = (uintptr_t)d->val; break;
-            case DT_SYMENT: syment = (uintptr_t)d->val; break;
-            case DT_STRTAB: strtab = (uintptr_t)d->val; break;
-            case DT_JMPREL: jmprel = (uintptr_t)d->val; break;
-            case DT_PLTRELSZ: pltrelsz = (uintptr_t)d->val; break;
-            case DT_PLTREL: pltrel = (uintptr_t)d->val; break;
+        int terminated = 0;
+        for (uintptr_t off = 0; off < dyn_size; off += sizeof(dyn_t)) {
+            dyn_t d;
+            memcpy(&d, dyn + off, sizeof(d));
+            if (d.tag == DT_NULL) { terminated = 1; break; }
+            switch (d.tag) {
+            case DT_RELA: rela = (uintptr_t)d.val; break;
+            case DT_RELASZ: relasz = (uintptr_t)d.val; break;
+            case DT_RELAENT: relaent = (uintptr_t)d.val; break;
+            case DT_REL: rel = (uintptr_t)d.val; break;
+            case DT_RELSZ: relsz = (uintptr_t)d.val; break;
+            case DT_RELENT: relent = (uintptr_t)d.val; break;
+            case DT_SYMTAB: symtab = (uintptr_t)d.val; break;
+            case DT_SYMENT: syment = (uintptr_t)d.val; break;
+            case DT_STRTAB: strtab = (uintptr_t)d.val; break;
+            case DT_JMPREL: jmprel = (uintptr_t)d.val; break;
+            case DT_PLTRELSZ: pltrelsz = (uintptr_t)d.val; break;
+            case DT_PLTREL: pltrel = (uintptr_t)d.val; break;
             }
         }
-#define IN_IMAGE(a, n) ((a) >= lo && (a) - lo + (n) <= span)
-        int bad = 0;
+#define IN_IMAGE(a, n) elf_in_image((uintptr_t)(a), (uintptr_t)(n), lo, span)
+        int bad = !terminated;
         char why[96] = "";
 #ifdef __x86_64__
-        (void)rel; (void)relsz; (void)relent;
-        if (!syment) syment = 24;
+        (void)relent;
+        if (rel || relsz || (syment && syment != 24) ||
+            (rela && relaent && relaent != 24) || (relasz && !rela) ||
+            (pltrelsz && (!jmprel || pltrel != DT_RELA))) bad = 1;
+        syment = 24;
         uintptr_t tabs[2][2] = { { rela, relasz }, { pltrel == DT_RELA ? jmprel : 0, pltrelsz } };
-        if (rela && relaent && relaent != 24) bad = 1;
         for (int t = 0; t < 2 && !bad; t++) {
             if (!tabs[t][0]) continue;
-            if (!IN_IMAGE(tabs[t][0], tabs[t][1])) { bad = 1; break; }
-            for (uintptr_t o = 0; o + 24 <= tabs[t][1]; o += 24) {
-                const uint64_t* r = (const uint64_t*)(base + tabs[t][0] + o);
+            if (tabs[t][1] % 24 || !IN_IMAGE(tabs[t][0], tabs[t][1])) { bad = 1; break; }
+            for (uintptr_t o = 0; o < tabs[t][1]; o += 24) {
+                uint64_t r[3];
+                memcpy(r, (const void*)(base + tabs[t][0] + o), sizeof(r));
                 uint32_t type = (uint32_t)r[1], si = (uint32_t)(r[1] >> 32);
                 if (type == R_X86_64_NONE) continue;
-                if (!IN_IMAGE(r[0], 8)) { bad = 1; break; }
-                uint64_t* P = (uint64_t*)(base + r[0]);
-                if (type == R_X86_64_RELATIVE) { *P = run + r[2]; continue; }
-                /* a symbol of the program itself */
+                if (!IN_IMAGE(r[0], type == 2 ? 4 : 8)) { bad = 1; break; }
+                void* P = (void*)(base + r[0]);
+                uint64_t value;
+                if (type == R_X86_64_RELATIVE) { value = run + r[2]; memcpy(P, &value, 8); continue; }
+                if (!symtab || si > (~(uintptr_t)0 - symtab) / syment) { bad = 1; break; }
                 uintptr_t sa = symtab + (uintptr_t)si * syment;
-                if (!symtab || !IN_IMAGE(sa, 24)) { bad = 1; break; }
+                if (!IN_IMAGE(sa, 24)) { bad = 1; break; }
                 const uint8_t* sym = (const uint8_t*)(base + sa);
-                uint16_t shndx = *(const uint16_t*)(sym + 6);
-                uint64_t val = *(const uint64_t*)(sym + 8);
+                uint16_t shndx;
+                uint64_t val;
+                memcpy(&shndx, sym + 6, 2); memcpy(&val, sym + 8, 8);
                 if (!shndx) {
-                    uint32_t nm = *(const uint32_t*)sym;
-                    ksnprintf(why, sizeof(why), "it needs %s, which Banana OS does not have",
-                              strtab && IN_IMAGE(strtab + nm, 1) ? (const char*)(base + strtab + nm) : "a missing function");
-                    bad = 2;
-                    break;
+                    uint32_t nm; char name[64];
+                    memcpy(&nm, sym, 4); elf_symbol_name(base, lo, span, strtab, nm, name, sizeof(name));
+                    ksnprintf(why, sizeof(why), "it needs %s, which Banana OS does not have", name);
+                    bad = 2; break;
                 }
                 uint64_t S = run + val;
-                if (type == 1) *P = S + r[2];                          /* R_X86_64_64 */
-                else if (type == 6 || type == 7) *P = S;               /* GLOB_DAT, JUMP_SLOT */
-                else if (type == 2) *(uint32_t*)P = (uint32_t)(S + r[2] - (run + r[0]));   /* PC32 */
-                else { ksnprintf(why, sizeof(why), "unsupported relocation type %u", type); bad = 2; break; }
+                if (type == 1) value = S + r[2];
+                else if (type == 6 || type == 7) value = S;
+                else if (type == 2) {
+                    uint32_t v = (uint32_t)(S + r[2] - (run + r[0]));
+                    memcpy(P, &v, 4); continue;
+                } else { ksnprintf(why, sizeof(why), "unsupported relocation type %u", type); bad = 2; break; }
+                memcpy(P, &value, 8);
             }
         }
 #else
-        (void)rela; (void)relasz; (void)relaent; (void)run;
-        if (!syment) syment = 16;
+        (void)relaent;
+        if (rela || relasz || (syment && syment != 16) ||
+            (rel && relent && relent != 8) || (relsz && !rel) ||
+            (pltrelsz && (!jmprel || pltrel != DT_REL))) bad = 1;
+        syment = 16;
         uintptr_t tabs[2][2] = { { rel, relsz }, { pltrel == DT_REL ? jmprel : 0, pltrelsz } };
-        if (rel && relent && relent != 8) bad = 1;
         for (int t = 0; t < 2 && !bad; t++) {
             if (!tabs[t][0]) continue;
-            if (!IN_IMAGE(tabs[t][0], tabs[t][1])) { bad = 1; break; }
-            for (uintptr_t o = 0; o + 8 <= tabs[t][1]; o += 8) {
-                const uint32_t* r = (const uint32_t*)(base + tabs[t][0] + o);
+            if (tabs[t][1] % 8 || !IN_IMAGE(tabs[t][0], tabs[t][1])) { bad = 1; break; }
+            for (uintptr_t o = 0; o < tabs[t][1]; o += 8) {
+                uint32_t r[2];
+                memcpy(r, (const void*)(base + tabs[t][0] + o), sizeof(r));
                 uint32_t type = r[1] & 0xFF, si = r[1] >> 8;
                 if (type == R_386_NONE) continue;
                 if (!IN_IMAGE(r[0], 4)) { bad = 1; break; }
-                uint32_t* P = (uint32_t*)(base + r[0]);
-                if (type == R_386_RELATIVE) { *P += base; continue; }
+                void* P = (void*)(base + r[0]);
+                uint32_t value;
+                memcpy(&value, P, 4);
+                if (type == R_386_RELATIVE) { value += run; memcpy(P, &value, 4); continue; }
+                if (!symtab || si > (~(uintptr_t)0 - symtab) / syment) { bad = 1; break; }
                 uintptr_t sa = symtab + (uintptr_t)si * syment;
-                if (!symtab || !IN_IMAGE(sa, 16)) { bad = 1; break; }
+                if (!IN_IMAGE(sa, 16)) { bad = 1; break; }
                 const uint8_t* sym = (const uint8_t*)(base + sa);
-                uint32_t val = *(const uint32_t*)(sym + 4);
-                uint16_t shndx = *(const uint16_t*)(sym + 14);
+                uint32_t val; uint16_t shndx;
+                memcpy(&val, sym + 4, 4); memcpy(&shndx, sym + 14, 2);
                 if (!shndx) {
-                    uint32_t nm = *(const uint32_t*)sym;
-                    ksnprintf(why, sizeof(why), "it needs %s, which Banana OS does not have",
-                              strtab && IN_IMAGE(strtab + nm, 1) ? (const char*)(base + strtab + nm) : "a missing function");
-                    bad = 2;
-                    break;
+                    uint32_t nm; char name[64];
+                    memcpy(&nm, sym, 4); elf_symbol_name(base, lo, span, strtab, nm, name, sizeof(name));
+                    ksnprintf(why, sizeof(why), "it needs %s, which Banana OS does not have", name);
+                    bad = 2; break;
                 }
-                uint32_t S = (uint32_t)base + val;
-                if (type == 1) *P += S;                                /* R_386_32 */
-                else if (type == 2) *P += S - (uint32_t)(uintptr_t)P;  /* R_386_PC32 */
-                else if (type == 6 || type == 7) *P = S;               /* GLOB_DAT, JMP_SLOT */
+                uint32_t S = (uint32_t)run + val;
+                if (type == 1) value += S;
+                else if (type == 2) value += S - (uint32_t)(run + r[0]);
+                else if (type == 6 || type == 7) value = S;
                 else { ksnprintf(why, sizeof(why), "unsupported relocation type %u", type); bad = 2; break; }
+                memcpy(P, &value, 4);
             }
         }
 #endif
@@ -4475,16 +4567,13 @@ static int load_elf(umem_t* m, const uint8_t* f, uint32_t size, uint8_t** image_
         if (bad) {
             if (bad == 1) kstrlcpy(err, "damaged relocations (link it with the SDK or tcc)", (size_t)ecap);
             else kstrlcpy(err, why, (size_t)ecap);
-            if (m) umem_free_pages(m, raw, 0);
-            else kfree(raw);
-            return -1;
+            if (m) umem_free_pages(m, raw, 0); else kfree(raw);
+            return -8;
         }
     }
     *image_out = raw;
-    *entry = (banana_entry_t)(run + (uintptr_t)eh->entry);
-    *base_out = run;
-    *lo_out = run + lo;
-    *hi_out = run + lo + span;
+    *entry = (banana_entry_t)(run + (uintptr_t)eh.entry);
+    *base_out = run; *lo_out = run + lo; *hi_out = run + lo + span;
     return 0;
 }
 
@@ -4673,19 +4762,9 @@ static void stack_unmap(app_proc_t* p, uint8_t* stack, size_t size, size_t guard
 
 /* the bytes an ELF's loadable segments span (whole pages), 0 if it is not one */
 static uint64_t elf_span(const uint8_t* f, uint32_t size) {
-    const ehdr_t* eh = (const ehdr_t*)f;
-    if (size < sizeof(ehdr_t) || memcmp(eh->ident, "\x7f" "ELF", 4) != 0 || eh->phentsize != sizeof(phdr_t) ||
-        eh->phoff + (uint32_t)eh->phnum * sizeof(phdr_t) > size) return 0;
-    const phdr_t* ph = (const phdr_t*)(f + eh->phoff);
-    uint64_t lo = ~0ull, hi = 0;
-    for (int i = 0; i < eh->phnum; i++) {
-        if (ph[i].type != PT_LOAD) continue;
-        if (ph[i].vaddr < lo) lo = ph[i].vaddr;
-        if (ph[i].vaddr + ph[i].memsz > hi) hi = ph[i].vaddr + ph[i].memsz;
-    }
-    if (hi <= lo || hi - lo > APP_MAX_IMAGE) return 0;
-    lo &= ~4095ull;
-    return (hi - lo + 4095) & ~4095ull;
+    uintptr_t lo, hi;
+    if (!elf_layout(f, size, &lo, &hi)) return 0;
+    return ((uint64_t)(hi - lo) + 4095) & ~4095ull;
 }
 
 /* 64-bit: the program in file f, into p's (new, empty) space - everything
@@ -4697,17 +4776,18 @@ static int load_program(app_proc_t* p, const uint8_t* f, uint32_t size, int argc
                         char** envp, char* err, int ecap) {
     uint64_t span = elf_span(f, size);
     uintptr_t at = span ? uvm_map(p->us, p->mem, 0, span, UVM_READ | UVM_WRITE | UVM_EXEC, 0) : 0x1000;
-    if (!at) { kstrlcpy(err, "out of memory", (size_t)ecap); return -1; }
+    if (!at) { kstrlcpy(err, "out of memory", (size_t)ecap); return -12; }
     umem_t* tmp = umem_create(NULL);
     uint8_t* raw = NULL;
-    if (!tmp) { kstrlcpy(err, "out of memory", (size_t)ecap); return -1; }
-    if (load_elf(tmp, f, size, &raw, &p->entry, &p->base, &p->code_lo, &p->code_hi, at, err, ecap) != 0) {
+    if (!tmp) { kstrlcpy(err, "out of memory", (size_t)ecap); return -12; }
+    int load_rc = load_elf(tmp, f, size, &raw, &p->entry, &p->base, &p->code_lo, &p->code_hi, at, err, ecap);
+    if (load_rc) {
         umem_destroy(tmp);
-        return -1;
+        return load_rc;
     }
     int rc = span ? uvm_write(p->us, at, raw, span) : -1;   /* (umem pages: page-aligned already) */
     umem_destroy(tmp);
-    if (rc) { kstrlcpy(err, span ? "out of memory" : "no loadable code", (size_t)ecap); return -1; }
+    if (rc) { kstrlcpy(err, span ? "out of memory" : "no loadable code", (size_t)ecap); return -12; }
     p->stack = stack_map(p, APP_STACK, APP_GUARD);
     p->guard = p->stack ? p->stack - APP_GUARD : NULL;
     /* argv: its pointers, NULL, the environment's (envp: NULL - the system's
@@ -4739,7 +4819,7 @@ static int load_program(app_proc_t* p, const uint8_t* f, uint32_t size, int argc
     p->argc = argc;
     cmdline_set(p, argc, argv);
     if (!p->kstack) p->kstack = kstack_new();
-    if (!p->stack || !ua || !p->kstack || make_uapi(p) != 0) { kstrlcpy(err, "out of memory", (size_t)ecap); return -1; }
+    if (!p->stack || !ua || !p->kstack || make_uapi(p) != 0) { kstrlcpy(err, "out of memory", (size_t)ecap); return -12; }
     return 0;
 }
 #endif

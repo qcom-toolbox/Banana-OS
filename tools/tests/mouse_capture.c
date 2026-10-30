@@ -14,6 +14,7 @@ static int failures,checks;static uint32_t escape_sequence;static int escape_hel
 static void report(const char* label,int ok,const char* note) {
     checks++;failures+=!ok;printf("%s %s%s%s\n",ok?"ok  ":"FAIL",label,*note?" - ":"",note);
 }
+uint32_t theme_color(uint32_t c) { return c; }
 void* kmalloc(size_t n) { return malloc(n); }
 void kfree(void* p) { free(p); }
 void* app_mem_alloc(int owner,size_t n) { (void)owner;return malloc(n); }

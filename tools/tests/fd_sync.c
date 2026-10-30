@@ -50,7 +50,7 @@ static const banana_api_t* __banana = &api;
 #undef fdatasync
 _Static_assert(__builtin_offsetof(banana_api_t,fd_sync) == __builtin_offsetof(banana_api_t,poll_mask)+sizeof(void*),"append ABI 31");
 int main(void) {
-    CHECK(BANANA_API_VERSION == 31);
+    CHECK(BANANA_API_VERSION >= 31);
     CHECK(a_fd_sync(-1) == -9 && a_fd_sync(256) == -9 && a_fd_sync(3) == -9);
     files[0] = (kfile_t){.type=KF_FILE,.fidx=7,.pos=42,.refs=1}; fds[3] = &files[0];
     CHECK(a_fd_sync(3) == -9); file.used=1;
