@@ -633,3 +633,16 @@ The NVM milestone also compiled both native kernels and passed the same
 32/64-bit QEMU boot/mouse/no-radio smoke checks. Test inputs are synthetic
 responses shaped by the imported ABI; no claim of physical radio validation
 is made.
+
+### SDK allocator source removed by incremental make
+
+An incremental SDK app build using make -o ../../lib/malloc.c completed its
+links and then GNU make removed the allocator source as an intermediate.
+This was reproduced with make's dry run and in an isolated SDK copy; it is a
+build-system source-deletion bug, separate from the unresolved Vim wait.
+
+sdk/banana.mk now marks library source inputs precious. The regression
+tools/test_sdk_sources.py shows the old scheduled removal, builds the actual
+allocator for both CPUs in a temporary SDK, repeats the incremental build and
+verifies the source hash and both object files. It now gates command-host CI.
+The affected local source was restored byte-for-byte before further builds.

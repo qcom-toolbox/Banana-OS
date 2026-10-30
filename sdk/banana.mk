@@ -119,6 +119,10 @@ LIBC_SRCS = $(BANANA_SDK)/lib/crt0.c $(BANANA_SDK)/lib/libc.c $(BANANA_SDK)/lib/
 LIBC_i686   = $(LIBC_SRCS) $(BANANA_SDK)/lib/divdi3.c
 LIBC_x86_64 = $(LIBC_SRCS)
 
+# Source inputs found through pattern rules are never disposable intermediates.
+# GNU make can otherwise remove malloc.c after an incremental -o source build.
+.PRECIOUS: $(LIBC_SRCS) $(BANANA_SDK)/lib/divdi3.c
+
 # the libc must not turn its own loops into calls to itself
 NOBUILTIN = -fno-builtin -fno-tree-loop-distribute-patterns
 

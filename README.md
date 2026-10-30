@@ -1,5 +1,9 @@
 # 🍌 Banana OS 0.6
 
+- **SDK build input preservation:** incremental app builds can no longer let
+  GNU make delete allocator source as an intermediate file. The regression
+  reproduces the old cleanup and compiles both architectures in an isolated SDK.
+
 - **Intel Wi-Fi port groundwork:** validated AX200/AX210 API-77 firmware parsing
   and separate bootstrap DMA contexts, with pinned firmware/licences.
   Command descriptors, bounded ALIVE/event decoding and command/RX queues now
