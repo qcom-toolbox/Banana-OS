@@ -321,6 +321,54 @@ python3 tools/test_wallpaper.py --32 --sanitize
 python3 tools/gen_landscape_data.py
 ```
 
+## Filesystem mutations under memory pressure
+
+The actual filesystem implementation is exercised with allocation-triggered
+cache eviction and mocked volume I/O. Running the same harness against the
+pre-fix source reproduced:
+
+- A heap-use-after-free while copying an 8 KiB cached file.
+- An invalid null-buffer read during a cross-volume move after cache eviction.
+- A double-free while appending from a file's own cached contents.
+- An invalid null-buffer write when volume I/O reclaimed the destination cache.
+- A 4,294,967,295-byte read after buffered append length arithmetic wrapped.
+
+Copy and cross-volume move now pin their source until the destination write
+finishes. Write, offset-write, truncate and buffered append pin the destination
+across allocation and volume callbacks, releasing pins on failures as well.
+Inputs that alias the destination cache are tracked by offset across reallocations,
+and overlapping writes use memmove. Append checks the maximum file size before
+adding lengths. The intentional streaming transition for large downloads is
+retained, including appends through fs_write_at; it does not discard an aliased
+input buffer.
+
+The host regression runs ASan/UBSan on both x86_64 and i686, using real fs.c,
+not a reimplementation. Cases cover existing/new copy destinations, a
+cross-volume move, overflow rejection, zero-filled gaps, overlapping and
+relocated inputs, whole-file and offset-volume APIs, hard links, truncation, large-file
+streaming, read/write errors, and allocation failures. These tests are now a
+required host gate of the ISO workflow.
+
+The final host run passed 20,870 checks per architecture (41,740 total).
+Related configuration, file-operation and wallpaper regressions also passed,
+as did the ext4 fault/recovery suite with e2fsck. Both kernels built successfully.
+The full live-OS campaign passed on BIOS x86_64 (1 GiB) and i686 (512 MiB);
+64-bit coverage includes Bash/Zsh, editors, browser/LibJS isolation, Mesa and
+external execution after GPU setting changes. These GPU checks used QEMU's
+software renderer and do not establish physical Intel acceleration.
+
+The five-phase BIOS install/update/cold-boot test from the official build-212
+ISO also passed. A frozen pre-update Bash executable still ran after cache
+eviction and cold boot; installed Bash, echo and terminal SHA-256 values matched
+the new ISO. User data, terminal preferences and network priority survived.
+The reproductions and native logs are retained under
+/home/banana/bos-tests/fs-audit-20261030 on the build host.
+
+```sh
+python3 tools/test_fs_mutation.py --sanitize
+python3 tools/test_fs_mutation.py --32 --sanitize
+```
+
 ## Scope of the evidence
 
 Hosted driver models and QEMU test emulated behavior. They do not qualify

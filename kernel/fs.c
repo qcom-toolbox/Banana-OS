@@ -596,11 +596,24 @@ static int create_file_in(int parent, const char* name_in) {
     return i;
 }
 
+/* A caller may pass bytes from this file's own cache. Remember the offset
+ * before reserve can move that cache, and reject ranges outside its contents. */
+static int cached_input(fs_file_t* f, const void* data, uint32_t len, uint32_t* off) {
+    uintptr_t base = (uintptr_t)f->content, ptr = (uintptr_t)data;
+    if (!base || ptr < base || ptr - base >= f->cap) return 0;
+    uintptr_t delta = ptr - base;
+    if (delta > f->size || len > f->size - delta) return -1;
+    *off = (uint32_t)delta;
+    return 1;
+}
+
 static int data_write(int idx, const void* data, uint32_t len);
 /* (every name of the file sees the change) */
 int fs_write(int idx, const void* data, uint32_t len) {
+    fs_pin(idx);
     int rc = data_write(idx, data, len);
     if (idx >= 0 && idx < g_fslots) links_sync(idx);
+    fs_unpin(idx);
     return rc;
 }
 
@@ -612,7 +625,10 @@ static int data_write(int idx, const void* data, uint32_t len) {
     if (!file_writable(idx)) return -1;
     settle(f);
     used_now(f);
-    if (reserve(f, len) != 0) return -1;
+    uint32_t input_off = 0;
+    int alias = cached_input(f, data, len, &input_off);
+    if (alias < 0 || reserve(f, len) != 0) return -1;
+    if (alias) data = f->content + input_off;
     links_sync(idx);                    /* (the buffer may have moved: the other names too, before the disk lets others run) */
     f->data_gen = g_fs_gen;
     f->mtime = rtc_now();
@@ -649,6 +665,7 @@ static void drop(int i);
 #define APPEND_STREAM_MIN (1u << 20)
 
 static int data_append(int idx, const void* data, uint32_t len);
+static int buffered_append(int idx, const void* data, uint32_t len);
 /* (every name of the file sees the change) */
 int fs_append(int idx, const void* data, uint32_t len) {
     int rc = data_append(idx, data, len);
@@ -662,13 +679,19 @@ static int data_append(int idx, const void* data, uint32_t len) {
     if (!f || !f->used) return -1;
     g_perm_err = 0;
     if (!file_writable(idx)) return -1;
+    /* The buffered path must reject the same oversized requests as the
+     * streaming path, before a 32-bit addition can wrap. */
+    if (f->size > FS_MAX_FILE_SIZE || len > FS_MAX_FILE_SIZE - f->size) return -1;
     used_now(f);
     f->data_gen = g_fs_gen;
     f->mtime = rtc_now();
     mount_t* m = mount_of(f->mnt);
     if (m && m->ops->write_at && f->loaded && f->size + (uint64_t)len > APPEND_STREAM_MIN) {
         settle(f);
-        if (droppable(idx)) drop(idx);              /* (written through: the disk has all of it) */
+        /* Keep an aliased input alive; ordinary downloads still discard the
+         * cached copy and append directly to the disk. */
+        if (droppable(idx) && !((uintptr_t)data >= (uintptr_t)f->content &&
+            (uintptr_t)data - (uintptr_t)f->content < f->cap)) drop(idx);
     }
     if (m && m->ops->write_at && !f->loaded) {
         /* written at the end on the disk: nothing of the file read in */
@@ -678,15 +701,27 @@ static int data_append(int idx, const void* data, uint32_t len) {
         f->size += len;
         return 0;
     }
+    fs_pin(idx);
+    int rc = buffered_append(idx, data, len);
+    fs_unpin(idx);
+    return rc;
+}
+
+static int buffered_append(int idx, const void* data, uint32_t len) {
+    fs_file_t* f = fs_file_info(idx);
+    mount_t* m = mount_of(f->mnt);
     if (ensure_loaded(f) != 0) return -1;
-    if (reserve(f, f->size + len) != 0) return -1;
+    uint32_t input_off = 0;
+    int alias = cached_input(f, data, len, &input_off);
+    if (alias < 0 || reserve(f, f->size + len) != 0) return -1;
+    if (alias) data = f->content + input_off;
     links_sync(idx);
     if (m && m->ops->append(m->ctx, f->node, f->size, data, len) != 0) {
         g_io_err = 1;
         f->loaded = 0;
         return -1;
     }
-    memcpy(f->content + f->size, data, len);
+    memmove(f->content + f->size, data, len);
     f->size += len;
     f->content[f->size] = '\0';
     return 0;
@@ -695,8 +730,13 @@ static int data_append(int idx, const void* data, uint32_t len) {
 static int data_write_at(int idx, uint32_t off, const void* data, uint32_t len);
 /* (every name of the file sees the change) */
 int fs_write_at(int idx, uint32_t off, const void* data, uint32_t len) {
+    fs_file_t* f = fs_file_info(idx);
+    /* Keep append's deliberate disk-streaming transition available. */
+    if (f && f->used && off == f->size) return fs_append(idx, data, len);
+    fs_pin(idx);
     int rc = data_write_at(idx, off, data, len);
     if (idx >= 0 && idx < g_fslots) links_sync(idx);
+    fs_unpin(idx);
     return rc;
 }
 
@@ -712,6 +752,9 @@ static int data_write_at(int idx, uint32_t off, const void* data, uint32_t len) 
     used_now(f);
     f->data_gen = g_fs_gen;
     f->mtime = rtc_now();
+    uint32_t input_off = 0;
+    int alias = cached_input(f, data, len, &input_off);
+    if (alias < 0) return -1;
     uint32_t end = off + len > f->size ? off + len : f->size;
     mount_t* m = mount_of(f->mnt);
     if (m && m->ops->write_at) {
@@ -719,8 +762,9 @@ static int data_write_at(int idx, uint32_t off, const void* data, uint32_t len) 
         if (f->loaded) {                               /* the copy in RAM follows */
             if (reserve(f, end) != 0) { kfree(f->content); f->content = NULL; f->cap = 0; f->loaded = 0; }
             else {
+                if (alias) data = f->content + input_off;
                 if (off > f->size) memset(f->content + f->size, 0, off - f->size);
-                memcpy(f->content + off, data, len);
+                memmove(f->content + off, data, len);
                 f->content[end] = '\0';
             }
         }
@@ -729,9 +773,10 @@ static int data_write_at(int idx, uint32_t off, const void* data, uint32_t len) 
     }
     /* in RAM (the live CD), or a volume without it (FAT): the whole file */
     if (ensure_loaded(f) != 0 || reserve(f, end) != 0) return -1;
+    if (alias) data = f->content + input_off;
     uint32_t old = f->size;
     if (off > old) memset(f->content + old, 0, off - old);
-    memcpy(f->content + off, data, len);
+    memmove(f->content + off, data, len);
     f->content[end] = '\0';
     f->size = end;
     if (m && m->ops->write(m->ctx, f->node, f->content, end) != 0) { g_io_err = 1; f->loaded = 0; return -1; }
@@ -741,8 +786,10 @@ static int data_write_at(int idx, uint32_t off, const void* data, uint32_t len) 
 static int data_truncate(int idx, uint32_t size);
 /* (every name of the file sees the change) */
 int fs_truncate(int idx, uint32_t size) {
+    fs_pin(idx);
     int rc = data_truncate(idx, size);
     if (idx >= 0 && idx < g_fslots) links_sync(idx);
+    fs_unpin(idx);
     return rc;
 }
 
@@ -1302,12 +1349,16 @@ int fs_copy(const char* src, const char* dst) {
 
     int existing = find_file_in(target_dir, target_name);
     if (existing == sidx) return sidx;   /* cp a a */
-    if (ensure_loaded(&F(sidx)) != 0) return -1;
+    /* Destination creation/growth can reclaim cached file data. Hold the
+     * source until every read of its buffer and metadata is finished. */
+    fs_pin(sidx);
+    if (ensure_loaded(&F(sidx)) != 0) { fs_unpin(sidx); return -1; }
     int tidx = (existing >= 0) ? existing : create_file_in(target_dir, target_name);
-    if (tidx < 0) return -1;
+    if (tidx < 0) { fs_unpin(sidx); return -1; }
 
-    if (fs_write(tidx, F(sidx).content, F(sidx).size) != 0) return -1;
+    if (fs_write(tidx, F(sidx).content, F(sidx).size) != 0) { fs_unpin(sidx); return -1; }
     if (F(sidx).mtime) { F(tidx).mtime = F(sidx).mtime; links_sync(tidx); }   /* a copy keeps the original's date */
+    fs_unpin(sidx);
     return tidx;
 }
 
@@ -1338,10 +1389,12 @@ int fs_move(const char* src, const char* dst) {
         if (find_dir_in(target_dir, target_name) >= 0) return -1;
         if (F(sfile).mnt != D(target_dir).mnt) {
             /* onto / off a USB stick: copy, then delete the original */
-            if (ensure_loaded(&F(sfile)) != 0) return -1;
+            fs_pin(sfile);
+            if (ensure_loaded(&F(sfile)) != 0) { fs_unpin(sfile); return -1; }
             int tidx = existing >= 0 ? existing : create_file_in(target_dir, target_name);
-            if (tidx < 0) return -1;
-            if (fs_write(tidx, F(sfile).content, F(sfile).size) != 0) return -1;
+            if (tidx < 0) { fs_unpin(sfile); return -1; }
+            if (fs_write(tidx, F(sfile).content, F(sfile).size) != 0) { fs_unpin(sfile); return -1; }
+            fs_unpin(sfile);
             if (remove_file(sfile) != 0) return -1;
             return tidx;
         }

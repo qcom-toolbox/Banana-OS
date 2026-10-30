@@ -1,5 +1,11 @@
 # 🍌 Banana OS 0.6
 
+- **Filesystem cache safety:** copying/moving files and modifying cached files now
+  hold their buffers through allocations and disk I/O. Appends reject oversized
+  requests before arithmetic overflow; writes from a file's own contents remain
+  valid when its cache moves. Large downloads retain direct-to-disk streaming.
+  [Reproductions and regression coverage](docs/OS-TESTING-2026-10-30.md#filesystem-mutations-under-memory-pressure).
+
 - **CC0 landscapes:** Alpine Peaks, Seeley Lake and Grand Tetons are new
   3200 × 1800 presets. Their JPEGs use the isolated image worker on x86_64;
   32-bit or decoder-failure paths retain low-memory thumbnails.
