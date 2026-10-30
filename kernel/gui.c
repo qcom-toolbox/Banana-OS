@@ -1552,7 +1552,7 @@ static void wm_arrow(int c) {
 }
 
 /* taskbar geometry: Start button, window buttons, then the tray */
-#define BAR_H     28
+#define BAR_H     WIN_TASKBAR
 #define START_X   4
 #define START_W   STARTMENU_ORB_W
 /* apps pinned to the taskbar (right of Start): a program (ACT_*) or an

@@ -200,7 +200,7 @@ Banana OS 0.6 is a minimal x86 operating system written from scratch (no Linux k
 
 - **PNG screenshots** - `screenshot [absolute directory]` saves the screen without overwriting previous captures; **Win+Shift+S** captures the completed desktop frame. The default destination is `/home/banana/Pictures`.
 
-- **Native notifications** - `notify TITLE [BODY]` posts a five-second desktop toast; **Win+N** opens the last 16 alerts, with keyboard navigation and Clear all. Notifications are rate-limited per source.
+- **Native notifications** - `notify TITLE [BODY]` posts a five-second desktop toast in the bottom-right corner, 12 pixels above the taskbar; **Win+N** opens the last 16 alerts, with keyboard navigation and Clear all. Notifications are rate-limited per source.
 
 - **Network time** - `ntp [server]` queries UTC; `ntp --set [server]` explicitly sets the RTC after validating the reply. Queries leave the clock unchanged. This is unauthenticated SNTP with an approximate offset, not a background time service. See [NTP behavior and limits](docs/ntp.md).
 

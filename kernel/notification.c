@@ -6,6 +6,7 @@
 #include "fb.h"
 #include "gfx.h"
 #include "theme.h"
+#include "winframe.h"
 
 /* Bounded ring buffer for history */
 static notify_item_t g_history[NOTIFY_HIST_MAX];
@@ -247,7 +248,7 @@ void notify_poll(void) {
     spin_unlock_irq(&g_notify_lock, f);
 }
 
-/* Toast geometry: top-right corner of desktop */
+/* Toast geometry: bottom-right, above the taskbar. Shared by drawing/hit testing. */
 #define TOAST_W 260
 #define TOAST_H 64
 #define TOAST_MARGIN 12
@@ -261,11 +262,15 @@ static void draw_bevel_box(int x, int y, int w, int h, uint32_t base, uint32_t h
     gfx_fill_rect(x + w - 1, y, 1, h, lo);
 }
 
-static void get_toast_rect(const fb_info_t* fi, int* x, int* y, int* w, int* h) {
+static int get_toast_rect(const fb_info_t* fi, int* x, int* y, int* w, int* h) {
+    if (fi->width < TOAST_W || fi->height < WIN_TASKBAR + TOAST_H) return 0;
     *w = TOAST_W;
     *h = TOAST_H;
     *x = (int)fi->width - TOAST_W - TOAST_MARGIN;
-    *y = TOAST_MARGIN;
+    *y = (int)fi->height - WIN_TASKBAR - TOAST_H - TOAST_MARGIN;
+    if (*x < 0) *x = 0;
+    if (*y < 0) *y = 0;
+    return 1;
 }
 
 void notify_draw_toast(const fb_info_t* fi) {
@@ -275,7 +280,7 @@ void notify_draw_toast(const fb_info_t* fi) {
     if (!notify_get_active_toast(&toast, &rem)) return;
 
     int tx, ty, tw, th;
-    get_toast_rect(fi, &tx, &ty, &tw, &th);
+    if (!get_toast_rect(fi, &tx, &ty, &tw, &th)) return;
 
     /* Card background with bevel */
     draw_bevel_box(tx, ty, tw, th, TC(0x00222A36u), TC(0x005E708Au), TC(0x0010141Bu));
@@ -314,7 +319,7 @@ void notify_draw_toast(const fb_info_t* fi) {
 int notify_click(const fb_info_t* fi, int mx, int my) {
     if (!fi || !notify_has_active_toast()) return 0;
     int tx, ty, tw, th;
-    get_toast_rect(fi, &tx, &ty, &tw, &th);
+    if (!get_toast_rect(fi, &tx, &ty, &tw, &th)) return 0;
 
     if (mx >= tx && mx < tx + tw && my >= ty && my < ty + th) {
         /* Check if clicked on 'x' */

@@ -248,6 +248,24 @@ standard/Mesa, BIOS/UEFI, build-212/build-218 publication matrix runs them.
 `tools/check_update_elf.py` verifies the captured bytes rather than inferring
 executable integrity merely from reaching a shell prompt.
 
+## Notification placement
+
+After completing the ELF upgrade checks, existing notification toasts were
+moved from the top-right to the bottom-right. Drawing and hit testing share
+the same rectangle, with a 12-pixel margin above the shared 28-pixel taskbar.
+The desktop now uses the same taskbar-height constant as notification layout.
+Frames too small to hold the card suppress the toast instead of covering the bar.
+
+Hosted 32/64-bit notification regressions cover expiry, history, rate limits,
+actions, the relocated close/body clicks, old-position and taskbar clicks,
+resolution changes up to 3840×2160 and undersized frames. These checks now
+also run in the main publication gate.
+
+In an 800×600 graphical VM the card occupied (528,496) to (788,560), while
+the taskbar began at y=572. A screenshot confirmed the 12-pixel gap; QMP
+clicked the relocated close button and verified the card disappeared.
+The following boot selftest passed all 37 checks.
+
 ## Scope of the evidence
 
 Hosted driver models and QEMU test emulated behavior. They do not qualify

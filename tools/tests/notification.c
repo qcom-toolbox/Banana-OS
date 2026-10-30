@@ -146,10 +146,13 @@ int main(void) {
 
     /* 6. Toast click handling */
     fb_info_t fi = { .width = 1024, .height = 768, .pitch = 4096, .bpp = 32, .type = 1, .addr = 0 };
-    /* Toast rect: x = 1024 - 260 - 12 = 752, y = 12, w = 260, h = 64 */
+    /* Bottom-right, twelve pixels above the 28-pixel taskbar: y = 664. */
     /* Dismiss with click on 'x' */
     assert(notify_has_active_toast());
-    assert(notify_click(&fi, 752 + 260 - 10, 12 + 10) == 1);
+    assert(notify_click(&fi, 760, 25) == 0);    /* former top-right position */
+    assert(notify_click(&fi, 760, 750) == 0);   /* taskbar remains clickable */
+    assert(notify_has_active_toast());
+    assert(notify_click(&fi, 752 + 260 - 10, 664 + 10) == 1);
     assert(!notify_has_active_toast());
 
     /* Post new toast and click body to trigger action */
@@ -158,7 +161,7 @@ int main(void) {
     assert(id_act > 0);
     assert(notify_has_active_toast());
     g_last_action = -1;
-    assert(notify_click(&fi, 760, 25) == 1);
+    assert(notify_click(&fi, 760, 690) == 1);
     assert(g_last_action == 777);
     assert(!notify_has_active_toast());
 
@@ -170,6 +173,25 @@ int main(void) {
     notify_draw_toast(&fi);
     assert(g_fill_rect_calls > prev_rects);
     assert(g_draw_text_calls > prev_text);
+
+    /* Resolution changes re-anchor the same toast without entering the bar. */
+    const unsigned sizes[][2] = {{640,480},{800,600},{1024,768},{1920,1080},{3840,2160},{260,92}};
+    for (unsigned i=0; i<sizeof(sizes)/sizeof(sizes[0]); i++) {
+        fi.width=sizes[i][0];fi.height=sizes[i][1];
+        int x,y,w,h;
+        assert(get_toast_rect(&fi,&x,&y,&w,&h));
+        assert(x>=0 && y>=0 && x+w<=(int)fi.width);
+        assert(y+h<=(int)fi.height-WIN_TASKBAR);
+        if(fi.width>=284) assert(x+w==(int)fi.width-12);
+        if(fi.height>=104) assert(y+h==(int)fi.height-WIN_TASKBAR-12);
+        assert(notify_click(&fi,x,(int)fi.height-1)==0);
+    }
+    int no_fit_rects=g_fill_rect_calls,no_fit_text=g_draw_text_calls;
+    fi.width=259;fi.height=480;notify_draw_toast(&fi);
+    assert(notify_click(&fi,0,0)==0);
+    fi.width=800;fi.height=91;notify_draw_toast(&fi);
+    assert(notify_click(&fi,0,0)==0);
+    assert(g_fill_rect_calls==no_fit_rects && g_draw_text_calls==no_fit_text);
 
     notify_init();
     g_mock_ms = 0xfffffff0u;
