@@ -668,3 +668,9 @@ a queued carriage return after diagnostics. Both 32/64-bit ASan/UBSan pass,
 both SDK binaries build, and the same test passes natively on the 64-bit OS.
 The updated full native editor suite also passes all 31 assertions once;
 that successful suite does not negate the earlier reproduced stress failure.
+
+The first SDK preservation CI run exposed a test portability mistake:
+the Ubuntu runner's make did not reproduce removal by the old rules, while
+the Debian build host did. Baseline reproduction is now informational.
+Both architectures must still compile and retain the exact source hash on
+every make version; dry-run cleanup by the protected rules remains forbidden.
