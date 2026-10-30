@@ -23,6 +23,7 @@ static int g_m = -1, g_pass, g_fail, g_verbose;
 static pid_t g_pid;
 static char g_out[65536];              /* what the shell showed since the last mark, escapes out */
 static int g_len;
+static unsigned long g_received;
 
 static long now_ms(void) {
     struct timespec t;
@@ -55,13 +56,14 @@ static void take(const char* b, int n) {
 static void pump(int ms) {
     long end = now_ms() + ms;
     for (;;) {
+        if (now_ms() >= end) return;
         long left = end - now_ms();
         if (left < 0) left = 0;
         struct pollfd p = { g_m, POLLIN, 0 };
         if (poll(&p, 1, (int)left) > 0 && (p.revents & POLLIN)) {
             char b[4096];
             int n = (int)read(g_m, b, sizeof b);
-            if (n > 0) { take(b, n); continue; }
+            if (n > 0) { g_received += (unsigned long)n; take(b, n); continue; }
         }
         if (now_ms() >= end) return;
     }
@@ -79,8 +81,33 @@ static int wait_for(const char* text, int ms) {
     return 1;
 }
 
+/* Seeing a filename/help heading does not mean a full-screen program is
+ * ready for input: startup and redraw may still be changing the terminal.
+ * Wait for raw/no-echo mode and a quiet output interval, within a fixed bound. */
+static int editor_ready(int ms) {
+    long end = now_ms() + ms, quiet_since = now_ms();
+    unsigned long received = g_received;
+    int was_raw = 0;
+    while (now_ms() < end) {
+        struct termios t;
+        if (tcgetattr(g_m, &t) != 0) return 0;
+        int raw = !(t.c_lflag & (ICANON | ECHO));
+        if (!raw || !was_raw) quiet_since = now_ms();
+        was_raw = raw;
+        if (raw && now_ms() - quiet_since >= 100) return 1;
+        pump(20);
+        if (g_received != received) { received = g_received; quiet_since = now_ms(); }
+    }
+    return 0;
+}
+
 static void type(const char* s) {
-    for (; *s; s++) { write(g_m, s, 1); pump(15); }
+    for (; *s; s++) {
+        ssize_t n;
+        do { n = write(g_m, s, 1); } while (n < 0 && errno == EINTR);
+        if (n != 1) { printf("  FAIL  PTY input write (errno %d)\n", errno); g_fail++; return; }
+        pump(15);
+    }
 }
 
 static void check(const char* what, int ok) {
@@ -370,9 +397,8 @@ static int edit(const char* path, const char* file, const char* ready, const cha
     const char* name = strrchr(path, '/') + 1;
     char* av[] = { (char*)name, (char*)file, NULL };
     if (start(path, av)) return 0;
-    int up = wait_for(ready, 20000);
+    int up = wait_for(ready, 20000) && editor_ready(8000);
     check("starts and draws its screen", up);
-    pump(400);                             /* (its screen drawn to the end: keys typed during it can be lost) */
     type(keys);
     int st = finish();
     return up && st == 0;
@@ -382,7 +408,7 @@ static int edit(const char* path, const char* file, const char* ready, const cha
 static void ex_shows(const char* what, const char* cmd, const char* want) {
     mark();
     type(cmd);
-    check(what, wait_for(want, 8000));
+    check(what, wait_for(want, 8000) && editor_ready(8000));
 }
 
 int shelltest_editors(void) {
@@ -394,7 +420,7 @@ int shelltest_editors(void) {
         unlink("/tmp/ed-nano.txt");
         char* av[] = { "nano", "/tmp/ed-nano.txt", NULL };
         if (!start("/bin/nano", av)) {
-            check("starts and draws its screen", wait_for("GNU nano", 20000));
+            check("starts and draws its screen", wait_for("GNU nano", 20000) && editor_ready(8000));
             type("hello nano");
             mark();
             type("\x0f");
@@ -415,7 +441,7 @@ int shelltest_editors(void) {
         put("/tmp/ed-vim.c", "int main(void) { return 0; }\n");
         char* av[] = { "vim", "/tmp/ed-vim.c", NULL };
         if (!start("/bin/vim", av)) {
-            wait_for("ed-vim.c", 20000);
+            check("syntax session ready", wait_for("ed-vim.c", 20000) && editor_ready(8000));
             ex_shows("syntax colouring for C", ":echo 'syn=' . get(b:, 'current_syntax', 'none')\r", "syn=c");
             ex_shows(":help opens", ":help\r", "VIM - main help file");
             type(":qa!\r");
@@ -454,7 +480,7 @@ int shelltest_editors(void) {
         put("/tmp/ed-nvim.lua", "local x = 1\nprint(x)\n");
         char* av[] = { "nvim", "/tmp/ed-nvim.lua", NULL };
         if (!start("/bin/nvim", av)) {
-            wait_for("ed-nvim.lua", 20000);
+            check("Lua session ready", wait_for("ed-nvim.lua", 20000) && editor_ready(8000));
             ex_shows("Lua runs", ":lua print('lua=' .. (1 + 1))\r", "lua=2");
             ex_shows("a tree-sitter parser (Lua, built in)", ":lua print('ts=' .. tostring(pcall(vim.treesitter.get_parser, 0, 'lua')))\r", "ts=true");
             ex_shows(":help opens", ":help\r", "help.txt [Help]");

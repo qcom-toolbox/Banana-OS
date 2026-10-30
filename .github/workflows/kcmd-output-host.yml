@@ -22,6 +22,8 @@ jobs:
         run: |
           python3 tools/test_kcmd_output.py --sanitize
           python3 tools/test_program_load.py --sanitize
+          python3 tools/test_editor_sync.py --sanitize
+          python3 tools/test_editor_sync.py --32 --sanitize
           python3 tools/test_update_elf.py
           python3 tools/test_landscapes.py
           python3 tools/test_wallpaper.py --sanitize

@@ -1,5 +1,10 @@
 # 🍌 Banana OS 0.6
 
+- **Interactive CI synchronization:** editor checks wait for raw/no-echo input
+  mode and a bounded quiet interval after redraw instead of treating a visible
+  heading as readiness. PTY input write errors now fail explicitly.
+  [Failure trace and validation](docs/OS-TESTING-2026-10-30.md#interactive-editor-ci-synchronization).
+
 - **Safe editor file loading:** Notepad and the built-in console editor keep
   their document when a read, allocation or line-limit check fails. Text is
   built separately before replacing the current buffer; cached input files

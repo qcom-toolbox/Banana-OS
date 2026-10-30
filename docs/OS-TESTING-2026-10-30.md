@@ -506,6 +506,46 @@ python3 tools/test_text_load.py --sanitize
 python3 tools/test_text_load.py --32 --sanitize
 ```
 
+## Interactive editor CI synchronization
+
+GitHub run 41071270451 built both ISO variants and passed host, network,
+driver, power, offline OS and seven of eight update jobs. The remaining
+Mesa/BIOS/build-212 job stopped in its preliminary live-ISO editor test:
+Vim opened help but the typed :qa! did not exit before the harness deadline.
+The captured screen ended with ::qa!. It had not reached installation or
+update, so this log does not demonstrate an ELF/update regression.
+
+The old harness accepted an early filename/help heading as readiness and
+used a fixed delay only in its first editor session. The updated harness
+waits for raw/no-echo terminal mode and 100 ms of output quiescence within
+a bounded deadline, including after help/redraw. The quiet interval begins
+after raw mode is observed, rather than counting earlier canonical-mode
+silence. PTY writes retry EINTR and report other failures explicitly.
+The output pump checks its deadline even under continuous output.
+
+No editor assertions or publication gates were removed. The existing exit
+deadline remains unchanged. Linux host tests use real pseudo-terminals and
+the actual harness to verify delayed raw-mode transitions, partial redraw,
+and bounded failure when the terminal stays canonical or output never settles.
+Both 32/64-bit sanitizer runs pass and are required in the ISO host gate.
+
+The exact intermittent Vim failure was not reproduced in ten pre-change
+editor suites locally; the CI trace is retained. Five consecutive suites with
+the synchronization change passed all 31 editor checks each, including Vim
+help/quit and Neovim Lua, help and terminal operation. The original full Mesa
+BIOS boot validation also passed. The full build-212 BIOS install/update/cold-boot
+path passed, including frozen old-executable and installed-binary SHA-256
+checks. After the final raw-mode quiet-interval adjustment, both SDK binaries
+were rebuilt, the host cases rerun, and a freshly rebuilt ISO passed another
+full editor suite. Logs and the original CI artifacts are in
+/home/banana/bos-tests/ci-fail-20261030.
+
+```sh
+python3 tools/test_editor_sync.py --sanitize
+python3 tools/test_editor_sync.py --32 --sanitize
+MESA_ISO=1 bash tools/ci-boot.sh bios
+```
+
 ## Scope of the evidence
 
 Hosted driver models and QEMU test emulated behavior. They do not qualify
