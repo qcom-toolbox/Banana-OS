@@ -208,17 +208,26 @@ void editor_open(const char* fname) {
         ksnprintf(path, sizeof(path), "%s%s%s", cwd, strcmp(cwd, "/") ? "/" : "", fname);
     }
     int idx = fs_find_file(path);
-    if (idx >= 0 && fs_is_binary(idx)) {
-        /* saving would truncate it at the first NUL byte */
-        terminal_write_color("editor: refusing to open a binary file (image/download?)\n",
-                             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        return;
-    }
-    tb_free(&e->tb);
-    tb_init(&e->tb);
     if (idx >= 0) {
+        fs_pin(idx);
         fs_file_t* f = fs_get_file(idx);
-        tb_load(&e->tb, f->content, f->size);
+        if (!f || !f->loaded || !f->content) {
+            fs_unpin(idx);
+            terminal_writeln("editor: cannot read file (text unchanged)");
+            return;
+        }
+        if (fs_is_binary(idx)) {
+            fs_unpin(idx);
+            terminal_write_color("editor: refusing to open a binary file (image/download?)\n",
+                                 VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            return;
+        }
+        int rc = tb_load(&e->tb, f->content, f->size);
+        fs_unpin(idx);
+        if (rc != 0) { terminal_writeln("editor: out of memory or too many lines (text unchanged)"); return; }
+    } else if (tb_load(&e->tb, "", 0) != 0) {
+        terminal_writeln("editor: out of memory (text unchanged)");
+        return;
     }
     kstrlcpy(e->filename, path, sizeof(e->filename));
     e->scroll = e->hscroll = 0;

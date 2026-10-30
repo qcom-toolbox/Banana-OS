@@ -156,8 +156,8 @@ static void full_path(const char* in, char* out, int cap) {
 }
 
 static void new_text(void) {
-    if (!g_tb_ready) { tb_init(&g_tb); g_tb_ready = 1; }
-    tb_load(&g_tb, "", 0);
+    if (tb_load(&g_tb, "", 0) != 0) { status("Out of memory - text unchanged", 1); return; }
+    g_tb_ready = 1;
     g_path[0] = 0;
     g_top = g_left = 0;
     status("New text", 0);
@@ -169,20 +169,29 @@ static int load(const char* path) {
     if (idx < 0) {
         if (fs_find_dir(path) >= 0) { status("That is a folder", 1); return -1; }
         /* a new file: it is created by the first save */
-        if (!g_tb_ready) { tb_init(&g_tb); g_tb_ready = 1; }
-        tb_load(&g_tb, "", 0);
+        if (tb_load(&g_tb, "", 0) != 0) { status("Out of memory - text unchanged", 1); return -1; }
+        g_tb_ready = 1;
         kstrlcpy(g_path, path, sizeof(g_path));
         g_top = g_left = 0;
         status("New file (saved on Ctrl+S)", 0);
         return 0;
     }
-    if (fs_is_binary(idx)) { status("Not a text file (a picture or a download?)", 1); return -1; }
+    fs_pin(idx);
     fs_file_t* f = fs_get_file(idx);
-    if (!g_tb_ready) { tb_init(&g_tb); g_tb_ready = 1; }
-    tb_load(&g_tb, f->content, f->size);
+    if (!f || !f->loaded || !f->content) {
+        fs_unpin(idx);
+        status("Could not read file - text unchanged", 1);
+        return -1;
+    }
+    if (fs_is_binary(idx)) { fs_unpin(idx); status("Not a text file (a picture or a download?)", 1); return -1; }
+    uint32_t size = f->size;
+    int rc = tb_load(&g_tb, f->content, size);
+    fs_unpin(idx);
+    if (rc != 0) { status("Out of memory or too many lines - text unchanged", 1); return -1; }
+    g_tb_ready = 1;
     kstrlcpy(g_path, path, sizeof(g_path));
     g_top = g_left = 0;
-    ksnprintf(msg, sizeof(msg), "Opened %s (%u bytes)", path, f->size);
+    ksnprintf(msg, sizeof(msg), "Opened %s (%u bytes)", path, size);
     status(msg, 0);
     return 0;
 }
@@ -405,7 +414,10 @@ static void prompt_done(int ok) {
 /* ── window ───────────────────────────────────────────────────────── */
 
 void notepad_open(const char* path) {
-    if (!g_tb_ready) { tb_init(&g_tb); g_tb_ready = 1; }
+    if (!g_tb_ready) {
+        if (tb_load(&g_tb, "", 0) != 0) { status("Out of memory - cannot open editor", 1); return; }
+        g_tb_ready = 1;
+    }
     if (path && *path) {
         if (g_open && g_tb.dirty && strcmp(path, g_path) != 0) {
             /* keep the unsaved text: ask first */

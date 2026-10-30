@@ -27,7 +27,7 @@ typedef struct {
 
 void  tb_init(textbuf_t* t);
 void  tb_free(textbuf_t* t);
-void  tb_load(textbuf_t* t, const char* text, uint32_t len);   /* CRLF -> LF */
+int   tb_load(textbuf_t* t, const char* text, uint32_t len);   /* CRLF -> LF; -1 preserves t */
 char* tb_text(const textbuf_t* t, uint32_t* len);              /* kmalloc'd, NUL-terminated */
 
 void  tb_insert(textbuf_t* t, const char* s, uint32_t n);      /* replaces the selection; '\n' splits */

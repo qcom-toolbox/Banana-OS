@@ -38,6 +38,8 @@ jobs:
           python3 tools/test_mouse_capture.py --32
           python3 tools/test_clipboard.py --sanitize
           python3 tools/test_clipboard.py --32 --sanitize
+          python3 tools/test_text_load.py --sanitize
+          python3 tools/test_text_load.py --32 --sanitize
           python3 tools/test_config.py --sanitize
           python3 tools/test_config.py --32
           python3 tools/test_desktop_layout.py --sanitize

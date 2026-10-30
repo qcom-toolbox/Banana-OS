@@ -464,6 +464,48 @@ python3 tools/test_mouse_capture.py --sanitize
 python3 tools/test_mouse_capture.py --32 --sanitize
 ```
 
+## Editor load failures and document preservation
+
+The actual Notepad/text-buffer code reproduced the following before fixes:
+an 8 KiB cached file was freed during line allocation and then read by tb_load;
+a null file result was dereferenced; an unreadable file was accepted as text;
+and an allocation failure during tb_load could crash after the old document
+had already been freed. Passing a line of the old document back to tb_load
+also caused a use-after-free. Baseline reproductions are retained in
+/home/banana/bos-tests/text-load-20261030.
+
+tb_load now returns a status and constructs a separate temporary document.
+Only a fully built result replaces the existing one. Failure frees temporary
+allocations and preserves text, cursor, selection, dirty flag and ownership
+of the old buffer. Empty-line allocation is checked before insertion. The
+configured 200,000-line limit is checked before the capacity shortcut, so
+geometric spare capacity cannot bypass it. Oversized lengths are rejected.
+
+Both Notepad and the console edit command pin the input file while reading
+and building the text; failed/null reads and allocation errors return without
+changing the document's path. New/empty-document operations likewise check
+allocation results before replacing existing text. Successful CRLF conversion
+and ordinary editing remain unchanged.
+
+The host suite includes actual textbuf.c and Notepad's load function. It
+injects a failure at each of 203 allocation positions while loading a
+100-line CRLF document and verifies the old document and metadata survive.
+It also covers aliased input, empty/null input bounds, the line limit,
+cache eviction, binary files, null/read errors and new-file allocation errors.
+Both x86_64 and i686 ASan/UBSan runs pass, and both are required ISO host gates.
+
+Both kernels built successfully. Native x86_64 and i686 runs opened a file
+in edit, inserted text, saved, exited, and verified the saved bytes. GUI runs
+then opened that file in Notepad, selected/replaced its contents through QMP
+keyboard input, saved, and checked the resulting file contained hello. On
+i686 the window was closed before sending verification commands because
+the focused built-in Notepad receives the kernel console's keyboard input.
+
+```sh
+python3 tools/test_text_load.py --sanitize
+python3 tools/test_text_load.py --32 --sanitize
+```
+
 ## Scope of the evidence
 
 Hosted driver models and QEMU test emulated behavior. They do not qualify

@@ -1,5 +1,11 @@
 # 🍌 Banana OS 0.6
 
+- **Safe editor file loading:** Notepad and the built-in console editor keep
+  their document when a read, allocation or line-limit check fails. Text is
+  built separately before replacing the current buffer; cached input files
+  stay pinned while being parsed.
+  [Reproductions and tests](docs/OS-TESTING-2026-10-30.md#editor-load-failures-and-document-preservation).
+
 - **VirtualBox pointer clicks:** absolute position updates no longer bypass the
   PS/2 button queue. This fixes a reproduced starvation path where clicks or
   releases stayed unread while mouse integration refreshed the pointer.

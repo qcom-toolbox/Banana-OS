@@ -7,6 +7,7 @@
 #define MAX_LINES 200000
 
 static int line_reserve(tb_line_t* l, uint32_t need) {
+    if (need >= 0x80000000u) return -1;
     if (need + 1 <= l->cap) return 0;
     uint32_t cap = l->cap ? l->cap : 16;
     while (cap < need + 1) cap *= 2;
@@ -20,8 +21,8 @@ static int line_reserve(tb_line_t* l, uint32_t need) {
 }
 
 static int lines_reserve(textbuf_t* t, int need) {
-    if (need <= t->cap) return 0;
     if (need > MAX_LINES) return -1;
+    if (need <= t->cap) return 0;
     int cap = t->cap ? t->cap : 64;
     while (cap < need) cap *= 2;
     tb_line_t* nl = (tb_line_t*)kzalloc((size_t)cap * sizeof(tb_line_t));
@@ -35,9 +36,10 @@ static int lines_reserve(textbuf_t* t, int need) {
 /* a new empty line at index i */
 static int insert_line(textbuf_t* t, int i) {
     if (lines_reserve(t, t->n + 1) != 0) return -1;
+    tb_line_t fresh = {0};
+    if (line_reserve(&fresh, 0) != 0) return -1;
     memmove(&t->lines[i + 1], &t->lines[i], (size_t)(t->n - i) * sizeof(tb_line_t));
-    memset(&t->lines[i], 0, sizeof(tb_line_t));
-    line_reserve(&t->lines[i], 0);
+    t->lines[i] = fresh;
     t->n++;
     return 0;
 }
@@ -79,28 +81,34 @@ int tb_byte(const textbuf_t* t, int y, int col) {
     return u8_byte_at_col(l->s, (int)l->len, col);
 }
 
-void tb_load(textbuf_t* t, const char* text, uint32_t len) {
-    tb_free(t);
-    tb_init(t);
+/* Build separately: a failed open must preserve the document, cursor,
+ * selection and dirty flag, and input may alias the existing document. */
+int tb_load(textbuf_t* t, const char* text, uint32_t len) {
+    if (len >= 0x80000000u || (!text && len)) return -1;
+    if (!text) text = "";
+    textbuf_t next = {0};
+    if (insert_line(&next, 0) != 0) { tb_free(&next); return -1; }
     uint32_t start = 0;
     for (uint32_t i = 0; i <= len; i++) {
         if (i == len || text[i] == '\n') {
             uint32_t e = i;
             if (e > start && text[e - 1] == '\r') e--;
-            tb_line_t* l = &t->lines[t->n - 1];
-            if (line_reserve(l, e - start) == 0) {
-                memcpy(l->s, text + start, e - start);
-                l->len = e - start;
-                l->s[l->len] = 0;
-            }
+            tb_line_t* l = &next.lines[next.n - 1];
+            if (line_reserve(l, e - start) != 0) goto failed;
+            if (e > start) memcpy(l->s, text + start, e - start);
+            l->len = e - start;
+            l->s[l->len] = 0;
             if (i == len) break;
-            if (insert_line(t, t->n) != 0) break;
+            if (insert_line(&next, next.n) != 0) goto failed;
             start = i + 1;
         }
     }
-    t->cx = t->cy = 0;
-    t->sel = 0;
-    t->dirty = 0;
+    tb_free(t);
+    *t = next;
+    return 0;
+failed:
+    tb_free(&next);
+    return -1;
 }
 
 char* tb_text(const textbuf_t* t, uint32_t* len) {
