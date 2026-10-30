@@ -24,6 +24,26 @@ static pid_t g_pid;
 static char g_out[65536];              /* what the shell showed since the last mark, escapes out */
 static int g_len;
 static unsigned long g_received;
+/* Failure-only diagnostics for this test PTY, never global terminal input. */
+static unsigned char g_raw[2048],g_typed[128];
+static unsigned g_raw_head,g_raw_count,g_typed_head,g_typed_count;
+static long g_last_input,g_last_output;
+static void trace_add(unsigned char* bytes,unsigned capacity,unsigned* head,unsigned* count,
+                      const char* data,unsigned n) {
+    for (unsigned i=0;i<n;i++) {
+        bytes[*head]=(unsigned char)data[i];*head=(*head+1)%capacity;
+        if (*count<capacity) (*count)++;
+    }
+}
+static void trace_print(FILE* out,const unsigned char* bytes,unsigned capacity,unsigned head,unsigned count) {
+    unsigned first=(head+capacity-count)%capacity;
+    for (unsigned i=0;i<count;i++) {
+        unsigned char c=bytes[(first+i)%capacity];
+        if(c>=32&&c<127&&c!='\\')fputc(c,out);
+        else fprintf(out,"\\x%02x",c);
+    }
+    fputc('\n',out);
+}
 
 static long now_ms(void) {
     struct timespec t;
@@ -63,7 +83,8 @@ static void pump(int ms) {
         if (poll(&p, 1, (int)left) > 0 && (p.revents & POLLIN)) {
             char b[4096];
             int n = (int)read(g_m, b, sizeof b);
-            if (n > 0) { g_received += (unsigned long)n; take(b, n); continue; }
+            if (n > 0) { g_received += (unsigned long)n; g_last_output=now_ms();
+                trace_add(g_raw,sizeof(g_raw),&g_raw_head,&g_raw_count,b,(unsigned)n); take(b, n); continue; }
         }
         if (now_ms() >= end) return;
     }
@@ -116,6 +137,8 @@ static void type(const char* s) {
         if (write_all(g_m,s,1)!=0) {
             printf("  FAIL  PTY input write (errno %d)\n",errno);g_fail++;return;
         }
+        g_last_input=now_ms();
+        trace_add(g_typed,sizeof(g_typed),&g_typed_head,&g_typed_count,s,1);
         pump(15);
     }
 }
@@ -143,8 +166,30 @@ static int start(const char* shell, char* const argv[]) {
         execve(shell, argv, env);
         _exit(127);
     }
+    g_esc=g_osc=0;
+    g_raw_head=g_raw_count=g_typed_head=g_typed_count=0;
+    g_last_input=g_last_output=now_ms();
     mark();
     return 0;
+}
+
+/* Query only: keep queued bytes intact for diagnosis before terminating the
+ * timed-out child. Escaping preserves redraw/control bytes without executing
+ * them on the CI console or mistaking a cursor redraw for duplicated input. */
+static void pty_diagnostic(FILE* out) {
+    struct termios t;
+    if(tcgetattr(g_m,&t)==0)
+        fprintf(out,"        PTY input=%x local=%x VMIN=%u VTIME=%u\n",
+                (unsigned)t.c_iflag,(unsigned)t.c_lflag,(unsigned)t.c_cc[VMIN],(unsigned)t.c_cc[VTIME]);
+    char* path=ptsname(g_m);
+    int slave=path?open(path,O_RDONLY|O_NONBLOCK|O_NOCTTY):-1,queued=-1;
+    if(slave>=0){if(ioctl(slave,FIONREAD,&queued)<0)queued=-1;close(slave);}
+    fprintf(out,"        PTY queued input=%d, input age=%ld ms, output age=%ld ms\n",
+            queued,now_ms()-g_last_input,now_ms()-g_last_output);
+    fputs("        PTY sent (escaped): ",out);
+    trace_print(out,g_typed,sizeof(g_typed),g_typed_head,g_typed_count);
+    fputs("        PTY raw output (escaped): ",out);
+    trace_print(out,g_raw,sizeof(g_raw),g_raw_head,g_raw_count);
 }
 
 static int finish(void) {
@@ -154,6 +199,7 @@ static int finish(void) {
         if (waitpid(g_pid, &st, WNOHANG) == g_pid) break;
     }
     if (waitpid(g_pid, &st, WNOHANG) == 0) {
+        pty_diagnostic(stdout);
         /* still there: what it and its children are doing, for the report */
         fflush(stdout);
         if (access("/bin/ps", X_OK) == 0) {

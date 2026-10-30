@@ -646,3 +646,25 @@ tools/test_sdk_sources.py shows the old scheduled removal, builds the actual
 allocator for both CPUs in a temporary SDK, repeats the incremental build and
 verifies the source hash and both object files. It now gates command-host CI.
 The affected local source was restored byte-for-byte before further builds.
+
+### PTY evidence for the unresolved Vim exit
+
+A targeted local harness reproduced the help/quit failure at iteration 56.
+Its raw tail ended with qa!, carriage return and cursor-hide; querying/reading
+the slave found no pending input (EAGAIN). The terminal was noncanonical/no-echo
+with VMIN=1 and VTIME=0. This supports a wait after receipt of Enter rather
+than Enter simply remaining in the kernel's input queue. It does not yet
+identify the internal Vim/SDK wait or establish a fix.
+
+shelltest now captures bounded per-session rings (128 sent bytes, 2048 raw
+output bytes) and prints escaped bytes, terminal flags, input queue size and
+input/output ages when an exit times out. Diagnostics query queued input
+without draining it. Parser escape state is reset for each new PTY session.
+The existing exit deadline and failure criteria remain unchanged.
+
+The real-PTY regression verifies a delayed raw transition, delayed redraw,
+bounded failure, trace wraparound, escaped control bytes and preservation of
+a queued carriage return after diagnostics. Both 32/64-bit ASan/UBSan pass,
+both SDK binaries build, and the same test passes natively on the 64-bit OS.
+The updated full native editor suite also passes all 31 assertions once;
+that successful suite does not negate the earlier reproduced stress failure.

@@ -18,6 +18,8 @@
 - **Interactive CI synchronization:** editor checks wait for raw/no-echo input
   mode and a bounded quiet interval after redraw instead of treating a visible
   heading as readiness. PTY input write errors now fail explicitly.
+  Failed exits now include escaped wire output, sent keys and queued-input
+  state. The intermittent Vim exit issue is reproduced and remains open.
   [Failure trace and validation](docs/OS-TESTING-2026-10-30.md#interactive-editor-ci-synchronization).
 
 - **Safe editor file loading:** Notepad and the built-in console editor keep
