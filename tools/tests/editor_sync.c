@@ -1,5 +1,11 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
+#include <unistd.h>
+/* The fake editor sessions do not require Banana OS's home directory to
+ * exist on the Linux CI runner. Keep the production start path unchanged. */
+static int fixture_chdir(const char* path){(void)path;return chdir("/");}
+#define chdir fixture_chdir
 #include "../../sdk/examples/shelltest/interactive.c"
+#undef chdir
 #define REQUIRE(x) do{if(!(x)){fprintf(stderr,"editor sync failed at %d: %s\n",__LINE__,#x);exit(1);}}while(0)
 static void child_session(int mode) {
  struct termios t;
