@@ -2,6 +2,8 @@
 /* Standalone AX200/AX210 bootstrap register sequence, following OpenBSD
  * if_iwx.c. See third_party/iwx/NOTICES and its pinned source revision. */
 #include "iwx_hw.h"
+#include "iwx_nvm.h"
+#include "../kernel/kstring.h"
 #include "../third_party/iwx/iwx_boot_regs.h"
 static int rd(iwx_hw_t* h,uint32_t r,uint32_t* v){return h->io->read32(h->owner,r,v);}
 static int wr(iwx_hw_t* h,uint32_t r,uint32_t v){return h->io->write32(h->owner,r,v);}
@@ -152,6 +154,23 @@ int iwx_hw_pnvm(iwx_hw_t* h){
     int rc=pwr(h,IWX_UREG_DOORBELL_TO_ISR6+0x300000u,IWX_UREG_DOORBELL_TO_ISR6_PNVM);
     int release=unlock(h);
     return rc||release?-1:0;
+}
+int iwx_hw_mac(iwx_hw_t* h,uint8_t out[6]){
+    if(!out)return -1;
+    memset(out,0,6);
+    if(!h||!h->io||!h->io->read32||!h->io->write32||!h->io->delay_us||
+       (h->model!=IWX_FW_AX200&&h->model!=IWX_FW_AX210)||
+       !h->started||!h->kicked||h->locked)return -1;
+    if(lock(h))return -1;
+    uint32_t first,last;uint8_t mac[6];int rc=-1;
+    /* Both supported families use CSR base 0x380; 0x30 belongs to later BZ. */
+    if(!rd(h,0x388,&first)&&!rd(h,0x38c,&last)){
+        rc=iwx_mac_decode(mac,first,last);
+        if(rc&&!rd(h,0x380,&first)&&!rd(h,0x384,&last))rc=iwx_mac_decode(mac,first,last);
+    }
+    int release=unlock(h);
+    if(rc||release)return -1;
+    memcpy(out,mac,6);return 0;
 }
 int iwx_hw_stop(iwx_hw_t* h){
     if(!h||!h->io||!h->io->read32||!h->io->write32||!h->io->delay_us)return -1;

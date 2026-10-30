@@ -163,13 +163,14 @@ These helpers are not wired into PCI discovery. The running OS does not claim
 Intel radios, start their DMA or register a ready interface. ALIVE decoding and
 a polling command/RX transport now exist as isolated components (details below).
 The AX210 PNVM handoff is also implemented in this isolated transport.
-PCI integration, NVM/regulatory configuration, data TX/RX integration and
+NVM metadata initialization is implemented in a separate bounded state machine.
+PCI integration, runtime regulatory configuration, data TX/RX integration and
 association remain to be implemented.
 AX200/AX210 connectivity is not available yet. The firmware inputs are not
 embedded in the ISO. Physical radio testing is also pending.
 
-The required network CI gate runs tools/test_iwx_fw.py, tools/test_iwx_msg.py
-and tools/test_iwx_queue.py with --sanitize and --32 --sanitize.
+The required network CI gate runs tools/test_iwx_fw.py, tools/test_iwx_msg.py,
+tools/test_iwx_queue.py and tools/test_iwx_nvm.py with --sanitize and --32 --sanitize.
 
 
 AX210 PNVM parsing now selects exact SKU/MAC/RF identity and validates the
@@ -238,3 +239,34 @@ tested on a physical radio.
 References for the notification ABI:
 [OpenBSD iwx](https://github.com/openbsd/src/blob/65596250e06438442ce07bad87e5ba129229607d/sys/dev/pci/if_iwx.c)
 and [Intel PNVM API](https://github.com/torvalds/linux/blob/aaed66fadba2d2de8fe0daa0aa3eac827d2076b9/drivers/net/wireless/intel/iwlwifi/fw/api/nvm-reg.h).
+
+### MAC/NVM initialization metadata
+
+net/iwx_hw.c reads the OEM strap MAC under the bounded NIC access lock,
+falling back to OTP only if the strap address is invalid. Multicast, zero,
+broadcast and Intel's reserved placeholder are rejected. CSR word octets
+are decoded in network order; an I/O/unlock error returns no address.
+
+net/iwx_init.c serializes INIT_EXTENDED_CFG, NVM_ACCESS_COMPLETE, the
+INIT_COMPLETE notification, and NVM_GET_INFO. Every phase has a two-second
+monotonic deadline, including counter wraparound. A failed acknowledgement,
+malformed notification/response or timeout marks the transport failed and
+retains DMA for the owner's acknowledged stop/close path. Completion may
+precede the NVM_ACCESS_COMPLETE acknowledgement; duplicates/premature
+notifications cannot advance initialization. Only the known API-77 unversioned
+INIT_EXTENDED_CFG command has a version-zero exception when absent from the
+firmware version table; unrelated unknown commands remain rejected.
+
+net/iwx_nvm.c decodes only the advertised v3/v4 response layouts, with imported
+ABI size/offset assertions and bounded channel counts. Empty OTP, invalid
+antenna masks and malformed lengths fail without partial output. Metadata
+retains full channel flags and distinguishes 2.4/5/6 GHz entries so overlapping
+channel numbers cannot alias. AX200 never exposes AX210's 6 GHz entries.
+These are response fixtures plus real firmware version-table/register/queue
+models; no real-card response has been captured.
+
+Initialization READY means metadata is available, not a connected/usable
+network interface. Runtime MCC/regulatory policy, PHY/MAC/station context
+setup, frame transport and the PCI front end still remain. The existing Wi-Fi
+station core also needs its channel policy connected before these radios can
+be offered as supported interfaces.

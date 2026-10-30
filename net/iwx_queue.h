@@ -19,6 +19,7 @@ typedef struct {
     uint16_t returned[IWX_RX_COUNT],read,write,sequence;
     uint8_t available[IWX_RX_COUNT];
     uint32_t rx_allocated,state,rx_dropped,pnvm_state,pnvm_status,pnvm_version;
+    int init_armed,init_complete;
     int polling,pending,reply_ready,reply_status,rx_enabled,pending_legacy;
     uint8_t pending_index,pending_opcode,pending_group;
     uint8_t reply[IWX_COMMAND_MAX];

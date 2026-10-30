@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../net/iwx_queue.h"
+#include "../../net/iwx_init.h"
+#include "../../third_party/iwx/iwx_nvm_regs.h"
 #include "../../third_party/iwx/iwx_boot_regs.h"
 static unsigned checks;
 static uint8_t* pnvm_data;static unsigned pnvm_bytes;
@@ -344,6 +346,111 @@ static void calibration(iwx_queue_t* q,const iwx_firmware_t* fw,int model){
  d.stopfail=1;base=m.live;CHECK(iwx_queue_close(q)<0&&base==m.live);
  d.stopfail=0;closed(q,&m);
 }
+static void mac_address(iwx_queue_t* q,const iwx_firmware_t* fw,int model){
+ memory_t m={0};device_t d;uint8_t mac[6];
+ prepared(q,fw,model,&m,&d);booted(q,&d);
+ d.regs[0x388/4]=0x10223344;d.regs[0x38c/4]=0x5566;
+ unsigned before=d.operations;
+ CHECK(!iwx_hw_mac(&q->hardware,mac)&&!memcmp(mac,(uint8_t[6]){0x10,0x22,0x33,0x44,0x55,0x66},6));
+ unsigned operations=d.operations-before;
+ /* OEM strap takes precedence over an otherwise valid OTP address. */
+ d.regs[0x380/4]=0x20445566;d.regs[0x384/4]=0x7788;
+ CHECK(!iwx_hw_mac(&q->hardware,mac)&&mac[0]==0x10);
+ d.regs[0x388/4]=0;d.regs[0x38c/4]=0;
+ CHECK(!iwx_hw_mac(&q->hardware,mac)&&!memcmp(mac,(uint8_t[6]){0x20,0x44,0x55,0x66,0x77,0x88},6));
+ d.regs[0x380/4]=0x02ccaaff;d.regs[0x384/4]=0xee00;
+ memset(mac,0xa5,6);CHECK(iwx_hw_mac(&q->hardware,mac)<0&&!memcmp(mac,(uint8_t[6]){0},6));
+ closed(q,&m);
+ for(unsigned at=1;at<=operations;at++){
+  prepared(q,fw,model,&m,&d);booted(q,&d);
+  d.regs[0x388/4]=0x10223344;d.regs[0x38c/4]=0x5566;d.fail=d.operations+at;
+  memset(mac,0xa5,6);CHECK(iwx_hw_mac(&q->hardware,mac)<0&&!memcmp(mac,(uint8_t[6]){0},6));
+  d.fail=0;closed(q,&m);
+ }
+}
+static void ack(iwx_queue_t* q,device_t* d,const void* data,unsigned size,int error){
+ CHECK(q->pending);
+ produce(q,d,q->pending_opcode,(uint8_t)(q->pending_group|(error?0x40:0)),
+         q->pending_index,0,data,size,0);
+}
+static void init_start(iwx_init_t* n,iwx_queue_t* q,const iwx_firmware_t* fw,int model,memory_t* m,device_t* d){
+ prepared(q,fw,model,m,d);booted(q,d);alive(q,d);memset(n,0,sizeof(*n));
+ d->regs[0x388/4]=0x10223344;d->regs[0x38c/4]=0x5566;
+ CHECK(!iwx_init_begin(n,q,0xfffffff0u)&&n->state==IWX_INIT_CONFIG);
+ uint8_t* p=q->pending_dma.data;
+ CHECK(p[0]==3&&p[1]==2&&p[7]==0&&p[8]==2&&p[9]==0&&p[10]==0&&p[11]==0);
+ CHECK(iwx_init_begin(n,q,0)<0);
+}
+static void init_info(iwx_init_t* n,iwx_queue_t* q,device_t* d,unsigned now,int notification_first){
+ ack(q,d,NULL,0,0);CHECK(!iwx_init_poll(n,now));
+ CHECK(n->state==IWX_INIT_COMPLETE_ACK&&q->pending_opcode==0&&q->pending_group==12);
+ if(notification_first)produce(q,d,4,0,0,0x80,NULL,0,0);
+ ack(q,d,NULL,0,0);CHECK(!iwx_init_poll(n,now+1)&&n->state==IWX_INIT_NOTIFICATION);
+ if(!notification_first){
+  CHECK(!iwx_init_poll(n,now+2)&&n->state==IWX_INIT_NOTIFICATION);
+  produce(q,d,4,0,0,0x80,NULL,0,0);
+ }
+ CHECK(!iwx_init_poll(n,now+3)&&n->state==IWX_INIT_INFO);
+ CHECK(q->pending_opcode==2&&q->pending_group==12);
+}
+static void initialization(iwx_queue_t* q,const iwx_firmware_t* fw,int model){
+ memory_t m={0};device_t d;iwx_init_t n;
+ for(unsigned first=0;first<2;first++){
+  init_start(&n,q,fw,model,&m,&d);init_info(&n,q,&d,0x20,first);
+  struct iwx_nvm_get_info_rsp response={0};
+  response.general.n_hw_addrs=1;put16(&response.general.nvm_version,0x5678);
+  put32(&response.mac_sku.mac_sku_flags,3);
+  put32(&response.phy_sku.tx_chains,3);put32(&response.phy_sku.rx_chains,3);
+  put32(&response.regulatory.lar_enabled,1);put32(&response.regulatory.n_channels,110);
+  put32(&response.regulatory.channel_profile[0],0x109);
+  ack(q,&d,&response,sizeof(response),0);
+  CHECK(iwx_init_poll(&n,0x25)==1&&n.state==IWX_INIT_READY);
+  CHECK(n.nvm.version==0x5678&&n.nvm.mac[0]==0x10&&n.nvm.channels[0].flags==0x109);
+  CHECK(iwx_init_poll(&n,0x26)==1&&!q->pending);closed(q,&m);
+ }
+ for(unsigned which=0;which<11;which++){
+  init_start(&n,q,fw,model,&m,&d);
+  if(which==0){CHECK(iwx_init_poll(&n,0x7c0)==-3);} /* 2 seconds across uint32 wrap. */
+  if(which==1){ack(q,&d,NULL,0,1);CHECK(iwx_init_poll(&n,0x20)<0);}
+  if(which==2){
+   produce(q,&d,4,0,0,0x80,NULL,0,0);CHECK(iwx_init_poll(&n,0x20)<0); /* Premature notification. */
+  }
+  if(which==3){
+   ack(q,&d,NULL,0,0);CHECK(!iwx_init_poll(&n,0x20));
+   ack(q,&d,NULL,0,0);CHECK(!iwx_init_poll(&n,0x21));
+   CHECK(iwx_init_poll(&n,0x7f1)==-3); /* No INIT_COMPLETE. */
+  }
+  if(which==4){
+   init_info(&n,q,&d,0x20,0);uint8_t bad[468]={0};ack(q,&d,bad,sizeof(bad),0);
+   CHECK(iwx_init_poll(&n,0x25)<0);
+  }
+  if(which==5){
+   init_info(&n,q,&d,0x20,0);ack(q,&d,NULL,0,0);CHECK(iwx_init_poll(&n,0x25)<0);
+  }
+  if(which==6){
+   m.fail=m.calls+1;ack(q,&d,NULL,0,0);CHECK(iwx_init_poll(&n,0x20)<0);
+  }
+  if(which==7){
+   init_info(&n,q,&d,0x20,0);CHECK(iwx_init_poll(&n,0x7f3)==-3&&q->pending_dma.data);
+  }
+  if(which==8){
+   ack(q,&d,NULL,0,0);CHECK(!iwx_init_poll(&n,0x20));
+   ack(q,&d,NULL,0,1);CHECK(iwx_init_poll(&n,0x21)<0);
+  }
+  if(which==9){
+   init_info(&n,q,&d,0x20,0);
+   produce(q,&d,4,0,0,0x80,NULL,0,0);CHECK(iwx_init_poll(&n,0x25)<0);
+  }
+  if(which==10){
+   ack(q,&d,NULL,0,0);CHECK(!iwx_init_poll(&n,0x20));
+   uint8_t extra[4]={0};produce(q,&d,4,0,0,0x80,extra,4,0);
+   CHECK(iwx_init_poll(&n,0x21)<0);
+  }
+  CHECK(n.state==IWX_INIT_FAILED&&q->state==IWX_QUEUE_FAILED);
+  unsigned retained=m.live;d.stopfail=1;CHECK(iwx_queue_close(q)<0&&m.live==retained);
+  d.stopfail=0;closed(q,&m);
+ }
+}
 int main(int argc,char** argv){
  CHECK(argc==4);int model=atoi(argv[2]);FILE* f=fopen(argv[1],"rb");CHECK(f);
  CHECK(!fseek(f,0,SEEK_END));long length=ftell(f);CHECK(length>0&&length<8000000);rewind(f);
@@ -353,6 +460,6 @@ int main(int argc,char** argv){
  CHECK(fread(pnvm_data,1,pnvm_bytes,f)==pnvm_bytes);CHECK(!fclose(f));
  iwx_firmware_t fw;CHECK(!iwx_firmware_parse(&fw,data,(uint32_t)length,model));
  iwx_queue_t* q=calloc(1,sizeof(*q));CHECK(q);
- transport(q,&fw,model);boundaries(q,&fw,model);faults(q,&fw,model);calibration(q,&fw,model);free(q);free(data);free(pnvm_data);
+ transport(q,&fw,model);boundaries(q,&fw,model);faults(q,&fw,model);calibration(q,&fw,model);mac_address(q,&fw,model);initialization(q,&fw,model);free(q);free(data);free(pnvm_data);
  printf("Intel AX%d queue model: %u checks passed\n",model,checks);return 0;
 }

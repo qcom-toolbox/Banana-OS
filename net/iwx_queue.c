@@ -78,6 +78,9 @@ static int event(void* owner,const iwx_event_t* e){
         if(q->state!=IWX_QUEUE_BOOTING||iwx_alive_read(&q->alive,q->firmware,e))return -1;
         q->state=IWX_QUEUE_ALIVE;
         if(q->hardware.model==IWX_FW_AX200)q->pnvm_state=IWX_PNVM_READY;
+    }else if(e->opcode==4&&e->group==0&&(e->queue&0x80u)){
+        if(!q->init_armed||q->init_complete||e->size)return -1;
+        q->init_complete=1;
     }else if(e->opcode==0xfe&&e->group==12&&(e->queue&0x80u)){
         if(q->hardware.model!=IWX_FW_AX210||q->state!=IWX_QUEUE_ALIVE||
            q->pnvm_state!=IWX_PNVM_WAITING||e->size!=4||
@@ -184,6 +187,10 @@ int iwx_queue_command(iwx_queue_t* q,uint8_t opcode,uint8_t group,const void* da
     if(!q||q->state!=IWX_QUEUE_ALIVE||q->pnvm_state!=IWX_PNVM_READY||q->pending||q->polling||
        length>IWX_COMMAND_MAX||(!data&&length))return -1;
     int version=iwx_firmware_command_version(q->firmware,group?group:1,opcode,0);
+    /* API-77 INIT_EXTENDED_CFG is an unversioned system command, absent
+     * from both pinned version tables. The reference sends header version 0.
+     * Do not extend this exception to unknown commands/notification-only IDs. */
+    if(version<0&&q->firmware->api==77&&group==2&&opcode==3)version=0;
     if(version<0||version==99||version>255)return -2;
     iwx_dma_t command={0};
     if(allocation(q,&command,8+length))return -1;

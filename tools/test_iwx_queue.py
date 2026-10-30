@@ -18,8 +18,8 @@ if a.bits32:
 if a.sanitize:
     flags += ['-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-pie', '-no-pie']
 exe = out/'test'
-subprocess.run(['cc', *flags, 'tools/tests/iwx_queue.c', 'net/iwx_queue.c', 'net/iwx_msg.c',
-                'net/iwx_fw.c', 'net/iwx_boot.c', 'net/iwx_hw.c', 'net/iwx_pnvm.c',
+subprocess.run(['cc', *flags, 'tools/tests/iwx_queue.c', 'net/iwx_queue.c', 'net/iwx_init.c', 'net/iwx_msg.c',
+                'net/iwx_fw.c', 'net/iwx_boot.c', 'net/iwx_hw.c', 'net/iwx_nvm.c', 'net/iwx_pnvm.c',
                 '-o', str(exe)], cwd=r, check=True)
 for model, name in [(200, 'iwlwifi-cc-a0-77.ucode'), (210, 'iwlwifi-ty-a0-gf-a0-77.ucode')]:
     subprocess.run([str(exe), str(r/'firmware/intel'/name), str(model),

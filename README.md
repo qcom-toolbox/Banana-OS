@@ -6,6 +6,8 @@
   have sanitizer tests for both architectures, including ring wraparound and
   DMA retention after uncertain writes or failed stop. AX210 calibration now
   uses an exact SKU/MAC/RF match and blocks commands until PNVM completion.
+  Bounded initialization now reads MAC/antenna/channel metadata from NVM;
+  channel metadata alone never authorizes transmission.
   **Radio connectivity is not implemented yet.**
   [Current state and remaining work](docs/wifi.md#intel-ax200--ax210-port-status).
 

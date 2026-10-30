@@ -610,3 +610,26 @@ image in QEMU TCG (64-bit with 1 GiB and two vCPUs; 32-bit with 512 MiB).
 The boot and mouse selftests reported zero failures, and Wi-Fi still correctly
 reported no supported radio in the NIC-less guest. These smoke checks cover
 kernel integration/build compatibility, not Intel hardware operation.
+
+### Intel NVM initialization and repeated editor regression
+
+NVM initialization now sequences config/complete/notification/get-info
+commands with two-second phase deadlines, retaining DMA after timeout/errors.
+MAC strap/OTP reads use a bounded access lock. The decoder checks v3/v4 ABI
+shapes, channel counts and antennas; channel flags remain metadata rather
+than transmit permission. Queue models use real firmware tables and inject
+notification order changes, duplicate/short/failed notifications, failed ACKs,
+allocation failure, missing completion and time-counter wrap. Decoder fixtures
+exercise every truncated length and 5,000 mutations per model/ABI combination.
+Both architectures run the queue/NVM tests with ASan/UBSan.
+
+A longer four-vCPU editor repetition reproduced a failure after ten successful
+full suites. At iteration 11 Vim stayed in poll with :wq visible and the file
+was not saved; the remaining editor checks ran. This is additional evidence
+of an intermittent editor/PTY issue, not a passing stress result or a fix.
+Raw PTY diagnostics are being collected in a separate local test harness.
+
+The NVM milestone also compiled both native kernels and passed the same
+32/64-bit QEMU boot/mouse/no-radio smoke checks. Test inputs are synthetic
+responses shaped by the imported ABI; no claim of physical radio validation
+is made.

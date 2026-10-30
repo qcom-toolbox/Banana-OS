@@ -102,5 +102,7 @@ jobs:
         run: python3 tools/test_iwx_fw.py --sanitize && python3 tools/test_iwx_fw.py --32 --sanitize
       - name: Intel command descriptors and bounded ALIVE event decoding
         run: python3 tools/test_iwx_msg.py --sanitize && python3 tools/test_iwx_msg.py --32 --sanitize
-      - name: Intel command and RX ring ownership, wraparound and stop failures
+      - name: Intel queues and NVM initialization, deadlines and DMA ownership
         run: python3 tools/test_iwx_queue.py --sanitize && python3 tools/test_iwx_queue.py --32 --sanitize
+      - name: Intel NVM response ABI, MAC and channel metadata
+        run: python3 tools/test_iwx_nvm.py --sanitize && python3 tools/test_iwx_nvm.py --32 --sanitize
