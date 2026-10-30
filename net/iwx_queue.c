@@ -77,6 +77,15 @@ static int event(void* owner,const iwx_event_t* e){
     if(e->opcode==1&&e->group==0&&(e->queue&0x80u)){
         if(q->state!=IWX_QUEUE_BOOTING||iwx_alive_read(&q->alive,q->firmware,e))return -1;
         q->state=IWX_QUEUE_ALIVE;
+        if(q->hardware.model==IWX_FW_AX200)q->pnvm_state=IWX_PNVM_READY;
+    }else if(e->opcode==0xfe&&e->group==12&&(e->queue&0x80u)){
+        if(q->hardware.model!=IWX_FW_AX210||q->state!=IWX_QUEUE_ALIVE||
+           q->pnvm_state!=IWX_PNVM_WAITING||e->size!=4||
+           iwx_firmware_command_version(q->firmware,12,0xfe,1)!=1)return -1;
+        q->pnvm_status=le32(e->data);
+        /* Fail closed on firmware-reported errors; keep calibration DMA owned. */
+        if(q->pnvm_status)return -1;
+        q->pnvm_state=IWX_PNVM_READY;
     }else if(!(e->queue&0x80u)){
         uint8_t group=e->group&~0x40u;
         if(!q->pending||e->queue!=0||e->index!=q->pending_index||
@@ -146,8 +155,33 @@ int iwx_queue_poll(iwx_queue_t* q){
 failed:
     q->polling=0;q->state=IWX_QUEUE_FAILED;return -1;
 }
+int iwx_queue_pnvm(iwx_queue_t* q,const uint8_t* blob,uint32_t bytes){
+    if(!q||q->state!=IWX_QUEUE_ALIVE||q->hardware.model!=IWX_FW_AX210||
+       q->polling||q->pending||q->pnvm_state!=IWX_PNVM_NONE)return -1;
+    if(!(q->alive.sku[0]|q->alive.sku[1]|q->alive.sku[2])){
+        q->pnvm_state=IWX_PNVM_READY;return 0;
+    }
+    if(iwx_firmware_command_version(q->firmware,12,0xfe,1)!=1)return -2;
+    uint32_t revision,radio;
+    const iwx_io_ops_t* io=q->hardware.io;void* owner=q->hardware.owner;
+    if(io->read32(owner,IWX_CSR_HW_REV,&revision)||revision==0xffffffffu||
+       io->read32(owner,IWX_CSR_HW_RF_ID,&radio)||radio==0xffffffffu){
+        q->state=IWX_QUEUE_FAILED;return -1;
+    }
+    iwx_pnvm_t selected;
+    int rc=iwx_pnvm_select(&selected,blob,bytes,q->alive.sku,
+                          IWX_CSR_HW_REV_TYPE(revision),IWX_CSR_HW_RFID_TYPE(radio));
+    if(rc)return rc;
+    if(iwx_boot_attach_pnvm(&q->boot,q->firmware,&selected,q->dma,q->dma_owner))return -1;
+    q->pnvm_version=selected.version;
+    /* Publish expectation before the uncertain doorbell. Never discard PNVM DMA
+     * after handoff failure; firmware may already have observed the scratch. */
+    q->pnvm_state=IWX_PNVM_WAITING;
+    if(iwx_hw_pnvm(&q->hardware)){q->state=IWX_QUEUE_FAILED;return -1;}
+    return 0;
+}
 int iwx_queue_command(iwx_queue_t* q,uint8_t opcode,uint8_t group,const void* data,uint32_t length){
-    if(!q||q->state!=IWX_QUEUE_ALIVE||q->pending||q->polling||
+    if(!q||q->state!=IWX_QUEUE_ALIVE||q->pnvm_state!=IWX_PNVM_READY||q->pending||q->polling||
        length>IWX_COMMAND_MAX||(!data&&length))return -1;
     int version=iwx_firmware_command_version(q->firmware,group?group:1,opcode,0);
     if(version<0||version==99||version>255)return -2;

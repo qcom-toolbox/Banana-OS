@@ -4,7 +4,8 @@
   and separate bootstrap DMA contexts, with pinned firmware/licences.
   Command descriptors, bounded ALIVE/event decoding and command/RX queues now
   have sanitizer tests for both architectures, including ring wraparound and
-  DMA retention after uncertain writes or failed stop.
+  DMA retention after uncertain writes or failed stop. AX210 calibration now
+  uses an exact SKU/MAC/RF match and blocks commands until PNVM completion.
   **Radio connectivity is not implemented yet.**
   [Current state and remaining work](docs/wifi.md#intel-ax200--ax210-port-status).
 

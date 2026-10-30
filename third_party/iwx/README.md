@@ -12,7 +12,8 @@ Native firmware parsing, DMA contexts and hardware bootstrap helpers are in
 net/iwx_fw.c, net/iwx_boot.c and net/iwx_hw.c. They are not wired to PCI
 discovery and do not advertise Wi-Fi connectivity. Command/RX queue helpers
 and bounded ALIVE decoding are in net/iwx_queue.c and net/iwx_msg.c.
-PNVM handshake, NVM, station data TX/RX and association remain pending. Original source
+The AX210 PNVM handshake is implemented in these helpers; PCI integration,
+NVM, station data TX/RX and association remain pending. Original source
 copyright/licence notices are also reproduced in NOTICES.
 
 

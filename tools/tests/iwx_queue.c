@@ -5,6 +5,7 @@
 #include "../../net/iwx_queue.h"
 #include "../../third_party/iwx/iwx_boot_regs.h"
 static unsigned checks;
+static uint8_t* pnvm_data;static unsigned pnvm_bytes;
 #define CHECK(x) do{checks++;if(!(x)){fprintf(stderr,"iwx queue FAIL %d: %s\n",__LINE__,#x);exit(1);}}while(0)
 static void put16(void* out,unsigned n){uint8_t* p=out;p[0]=(uint8_t)n;p[1]=(uint8_t)(n>>8);}
 static void put32(void* out,uint32_t n){uint8_t* p=out;for(unsigned i=0;i<4;i++)p[i]=(uint8_t)(n>>(8*i));}
@@ -57,6 +58,7 @@ static const iwx_io_ops_t io={read32,write32,delay};
 static void init(device_t* d,int model){
  memset(d,0,sizeof(*d));d->badwrite=0xffffffffu;
  d->regs[IWX_CSR_HW_REV/4]=model==200?0x340u:0x420u;
+ d->regs[IWX_CSR_HW_RF_ID/4]=0x10d000;
 }
 static void prepared(iwx_queue_t* q,const iwx_firmware_t* fw,int model,memory_t* m,device_t* d){
  CHECK(!m->live);memset(q,0,sizeof(*q));memset(m,0,sizeof(*m));init(d,model);
@@ -105,7 +107,7 @@ static int notification(void* owner,const iwx_event_t* event){
  CHECK(iwx_queue_poll(q)<0);
  notify_calls++;return 0;
 }
-static void alive(iwx_queue_t* q,device_t* d){
+static void alive_only(iwx_queue_t* q,device_t* d){
  uint8_t payload[144]={0};
  int version=iwx_firmware_command_version(q->firmware,0,1,1);
  unsigned n=version==4?116:version==5?128:144;
@@ -114,6 +116,23 @@ static void alive(iwx_queue_t* q,device_t* d){
  CHECK(iwx_queue_poll(q)==1&&q->state==IWX_QUEUE_ALIVE);
  CHECK(q->alive.lmac_major==77&&q->alive.umac_major==12);
  CHECK(!d->regs[IWX_CSR_FH_INT_STATUS/4]);
+}
+static void pnvm_ack(iwx_queue_t* q,device_t* d){
+ uint8_t status[4]={0};produce(q,d,0xfe,12,0,0x80,status,4,0);
+ CHECK(iwx_queue_poll(q)==1&&q->pnvm_state==IWX_PNVM_READY);
+}
+static void alive(iwx_queue_t* q,device_t* d){
+ alive_only(q,d);
+ if(q->hardware.model==210){
+  CHECK(q->pnvm_state==IWX_PNVM_NONE);
+  CHECK(iwx_queue_command(q,0x98,0,NULL,0)<0);
+  CHECK(iwx_queue_pnvm(q,pnvm_data,pnvm_bytes)==0&&q->pnvm_state==IWX_PNVM_WAITING);
+  CHECK(iwx_queue_command(q,0x98,0,NULL,0)<0);
+  CHECK(q->boot.pnvm.data&&q->pnvm_version==0xe1c4fa8eu);
+  CHECK(d->regs[IWX_HBUS_TARG_PRPH_WADDR/4]==((3u<<24)|0xd05c04u));
+  CHECK(d->regs[IWX_HBUS_TARG_PRPH_WDAT/4]==(1u<<20));
+  pnvm_ack(q,d);
+ }
 }
 static void closed(iwx_queue_t* q,memory_t* m){
  CHECK(iwx_queue_close(q)==0&&!m->live);
@@ -251,12 +270,89 @@ static void faults(iwx_queue_t* q,const iwx_firmware_t* fw,int model){
  CHECK(iwx_queue_poll(q)<0&&q->pending&&q->pending_dma.data);
  d.fail=0;closed(q,&m);
 }
+static void calibration(iwx_queue_t* q,const iwx_firmware_t* fw,int model){
+ memory_t m={0};device_t d;
+ if(model==200){
+  prepared(q,fw,model,&m,&d);booted(q,&d);alive_only(q,&d);
+  CHECK(iwx_queue_pnvm(q,pnvm_data,pnvm_bytes)<0&&q->pnvm_state==IWX_PNVM_READY);
+  closed(q,&m);return;
+ }
+ /* No selected SKU means firmware does not require a PNVM handoff. */
+ prepared(q,fw,model,&m,&d);booted(q,&d);alive_only(q,&d);
+ memset(q->alive.sku,0,sizeof(q->alive.sku));unsigned before=d.operations,base=m.live;
+ CHECK(iwx_queue_pnvm(q,NULL,0)==0&&q->pnvm_state==IWX_PNVM_READY);
+ CHECK(before==d.operations&&base==m.live);closed(q,&m);
+ /* Unknown board/radio and truncated data cannot publish any calibration. */
+ prepared(q,fw,model,&m,&d);booted(q,&d);alive_only(q,&d);base=m.live;
+ q->alive.sku[0]^=1;CHECK(iwx_queue_pnvm(q,pnvm_data,pnvm_bytes)==-2);
+ CHECK(m.live==base&&!q->boot.pnvm.data&&q->state==IWX_QUEUE_ALIVE);
+ q->alive.sku[0]^=1;d.regs[IWX_CSR_HW_RF_ID/4]^=0x1000;
+ CHECK(iwx_queue_pnvm(q,pnvm_data,pnvm_bytes)==-2&&m.live==base);
+ d.regs[IWX_CSR_HW_RF_ID/4]^=0x1000;
+ CHECK(iwx_queue_pnvm(q,pnvm_data,7)<0&&m.live==base&&!q->boot.pnvm.data);
+ CHECK(iwx_queue_pnvm(q,pnvm_data,pnvm_bytes)==0);
+ unsigned pnvm_operations;
+ pnvm_ack(q,&d);closed(q,&m);
+ /* A notification cannot finish an unsolicited, duplicate, short or failed handoff. */
+ for(unsigned which=0;which<4;which++){
+  prepared(q,fw,model,&m,&d);booted(q,&d);alive_only(q,&d);
+  if(which!=0){CHECK(!iwx_queue_pnvm(q,pnvm_data,pnvm_bytes));}
+  if(which==1)pnvm_ack(q,&d);
+  uint8_t status[4]={0};if(which==3)put32(status,1);
+  produce(q,&d,0xfe,12,0,0x80,status,which==2?3:4,0);
+  CHECK(iwx_queue_poll(q)<0&&q->state==IWX_QUEUE_FAILED);
+  if(which==3)CHECK(q->pnvm_status==1);
+  closed(q,&m);
+ }
+ /* Both supported PNVM allocation layouts, every failed allocation position. */
+ for(unsigned fragmented=0;fragmented<2;fragmented++){
+  iwx_firmware_t variant=*fw;
+  if(fragmented)variant.capabilities[1]|=1;else variant.capabilities[1]&=~1u;
+  prepared(q,&variant,model,&m,&d);booted(q,&d);alive_only(q,&d);
+  unsigned calls=m.calls;CHECK(!iwx_queue_pnvm(q,pnvm_data,pnvm_bytes));
+  unsigned allocations=m.calls-calls;CHECK(allocations==(fragmented?3u:1u));
+  pnvm_ack(q,&d);closed(q,&m);
+  for(unsigned bad=0;bad<2;bad++)for(unsigned at=1;at<=allocations;at++){
+   prepared(q,&variant,model,&m,&d);booted(q,&d);alive_only(q,&d);base=m.live;
+   unsigned blocks=q->boot.nblocks;
+   if(bad)m.bad=m.calls+at;else m.fail=m.calls+at;
+   CHECK(iwx_queue_pnvm(q,pnvm_data,pnvm_bytes)<0);
+   CHECK(q->state==IWX_QUEUE_ALIVE&&q->pnvm_state==IWX_PNVM_NONE&&m.live==base);
+   CHECK(q->boot.nblocks==blocks&&!q->boot.pnvm.data);
+   m.bad=m.fail=0;CHECK(!iwx_queue_pnvm(q,pnvm_data,pnvm_bytes));
+   pnvm_ack(q,&d);closed(q,&m);
+  }
+ }
+ /* Inject each failed register operation; uncertain handoff keeps DMA pinned. */
+ prepared(q,fw,model,&m,&d);booted(q,&d);alive_only(q,&d);
+ before=d.operations;CHECK(!iwx_queue_pnvm(q,pnvm_data,pnvm_bytes));
+ pnvm_operations=d.operations-before;pnvm_ack(q,&d);closed(q,&m);
+ for(unsigned at=1;at<=pnvm_operations;at++){
+  prepared(q,fw,model,&m,&d);booted(q,&d);alive_only(q,&d);
+  d.fail=d.operations+at;
+  CHECK(iwx_queue_pnvm(q,pnvm_data,pnvm_bytes)<0&&q->state==IWX_QUEUE_FAILED);
+  unsigned retained=m.live;d.fail=0;d.stopfail=1;
+  CHECK(iwx_queue_close(q)<0&&m.live==retained);
+  d.stopfail=0;closed(q,&m);
+ }
+ /* Missing completion is not permission to send; closing safely retains until stop. */
+ prepared(q,fw,model,&m,&d);booted(q,&d);alive_only(q,&d);
+ CHECK(!iwx_queue_pnvm(q,pnvm_data,pnvm_bytes));
+ CHECK(iwx_queue_pnvm(q,pnvm_data,pnvm_bytes)<0);
+ CHECK(iwx_queue_poll(q)==0&&q->pnvm_state==IWX_PNVM_WAITING);
+ CHECK(iwx_queue_command(q,0x98,0,NULL,0)<0);
+ d.stopfail=1;base=m.live;CHECK(iwx_queue_close(q)<0&&base==m.live);
+ d.stopfail=0;closed(q,&m);
+}
 int main(int argc,char** argv){
- CHECK(argc==3);int model=atoi(argv[2]);FILE* f=fopen(argv[1],"rb");CHECK(f);
+ CHECK(argc==4);int model=atoi(argv[2]);FILE* f=fopen(argv[1],"rb");CHECK(f);
  CHECK(!fseek(f,0,SEEK_END));long length=ftell(f);CHECK(length>0&&length<8000000);rewind(f);
  uint8_t* data=malloc((size_t)length);CHECK(data);CHECK(fread(data,1,(size_t)length,f)==(size_t)length);CHECK(!fclose(f));
+ f=fopen(argv[3],"rb");CHECK(f);CHECK(!fseek(f,0,SEEK_END));long pn=ftell(f);CHECK(pn>0&&pn<1000000);rewind(f);
+ pnvm_bytes=(unsigned)pn;pnvm_data=malloc(pnvm_bytes);CHECK(pnvm_data);
+ CHECK(fread(pnvm_data,1,pnvm_bytes,f)==pnvm_bytes);CHECK(!fclose(f));
  iwx_firmware_t fw;CHECK(!iwx_firmware_parse(&fw,data,(uint32_t)length,model));
  iwx_queue_t* q=calloc(1,sizeof(*q));CHECK(q);
- transport(q,&fw,model);boundaries(q,&fw,model);faults(q,&fw,model);free(q);free(data);
+ transport(q,&fw,model);boundaries(q,&fw,model);faults(q,&fw,model);calibration(q,&fw,model);free(q);free(data);free(pnvm_data);
  printf("Intel AX%d queue model: %u checks passed\n",model,checks);return 0;
 }

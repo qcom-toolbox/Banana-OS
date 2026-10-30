@@ -582,9 +582,31 @@ until the stop acknowledgement succeeds.
 Regressions: tools/test_iwx_msg.py and tools/test_iwx_queue.py, both with
 ASan/UBSan on x86_64 and i686. Network CI requires these alongside the existing
 firmware/bootstrap tests. No physical Intel card has been tested; the port
-still lacks PCI integration, PNVM completion, NVM/regulatory and station setup.
+still lacks PCI integration, NVM/regulatory and station setup.
 
 The earlier intermittent Vim help/quit failure remains open: run 41093990924
 still failed the build-212 Mesa BIOS update job before installation, while
 run 41098093242 completed successfully and published build290. PTY readiness
 improvements and a successful later run are not proof that this flake is fixed.
+
+### AX210 PNVM handshake fault model
+
+After decoding ALIVE, the standalone transport selects calibration using the
+live MAC/RF registers and all SKU words, copies it to DMA, and publishes its
+scratch pointer before the bounded NIC-lock/PNVM doorbell sequence. Commands
+remain blocked until a correctly shaped API-1 completion with zero status.
+No-SKU devices explicitly bypass PNVM. Unknown or malformed calibration does
+not get a fallback from a different board.
+
+The queue regression now exercises both contiguous/fragmented allocation
+layouts, every handoff I/O failure, allocation rollback/retry, wrong SKU/RF,
+truncated calibration, unsolicited/duplicate/short/error notifications,
+missing completion and failed/successful stop. It checks exact UMAC address
+and doorbell value. Both i686 and x86_64 ASan/UBSan pass. Physical verification
+and the remaining station driver are still pending.
+
+Both native kernels also compiled and booted from the resulting local test
+image in QEMU TCG (64-bit with 1 GiB and two vCPUs; 32-bit with 512 MiB).
+The boot and mouse selftests reported zero failures, and Wi-Fi still correctly
+reported no supported radio in the NIC-less guest. These smoke checks cover
+kernel integration/build compatibility, not Intel hardware operation.

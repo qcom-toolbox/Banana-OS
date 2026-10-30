@@ -15,6 +15,8 @@ typedef struct {
 /* Serialized caller only. No PCI binding and no DMA memory ownership here. */
 int iwx_hw_start(iwx_hw_t*);
 int iwx_hw_kick(iwx_hw_t*,const iwx_boot_t*,const iwx_firmware_t*);
+/* After ALIVE and published AX210 PNVM scratch data. No memory ownership. */
+int iwx_hw_pnvm(iwx_hw_t*);
 /* Success proves bus-master stop acknowledged. Failure keeps DMA ownership. */
 int iwx_hw_stop(iwx_hw_t*);
 #endif

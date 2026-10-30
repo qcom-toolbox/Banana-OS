@@ -141,6 +141,18 @@ int iwx_hw_kick(iwx_hw_t* h,const iwx_boot_t* b,const iwx_firmware_t* fw){
     int release=unlock(h);
     return rc||release?-1:0;
 }
+int iwx_hw_pnvm(iwx_hw_t* h){
+    if(!h||h->model!=IWX_FW_AX210||!h->io||!h->io->read32||
+       !h->io->write32||!h->io->delay_us||!h->started||!h->kicked||h->locked)return -1;
+    uint32_t gp;
+    if(rd(h,IWX_CSR_GP_CNTRL,&gp)||gp==0xffffffffu||
+       !(gp&IWX_CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW))return -1;
+    if(lock(h))return -1;
+    __sync_synchronize();
+    int rc=pwr(h,IWX_UREG_DOORBELL_TO_ISR6+0x300000u,IWX_UREG_DOORBELL_TO_ISR6_PNVM);
+    int release=unlock(h);
+    return rc||release?-1:0;
+}
 int iwx_hw_stop(iwx_hw_t* h){
     if(!h||!h->io||!h->io->read32||!h->io->write32||!h->io->delay_us)return -1;
     if(wr(h,IWX_CSR_INT_MASK,0)||

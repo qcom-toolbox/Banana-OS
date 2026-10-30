@@ -162,8 +162,9 @@ use the actual firmware image-loader length, not the larger buffer capacity.
 These helpers are not wired into PCI discovery. The running OS does not claim
 Intel radios, start their DMA or register a ready interface. ALIVE decoding and
 a polling command/RX transport now exist as isolated components (details below).
-PNVM handshake notifications, NVM/regulatory configuration, data TX/RX
-integration and association remain to be implemented.
+The AX210 PNVM handoff is also implemented in this isolated transport.
+PCI integration, NVM/regulatory configuration, data TX/RX integration and
+association remain to be implemented.
 AX200/AX210 connectivity is not available yet. The firmware inputs are not
 embedded in the ISO. Physical radio testing is also pending.
 
@@ -177,9 +178,8 @@ Four real PNVM SKU profiles are exercised. Contiguous and fragmented DMA
 handoff layouts are supported by the preparation helper; failed allocations
 roll back only unpublished PNVM blocks and preserve the firmware's earlier
 context/paging allocations. The scratch pointer is published only after all
-copies succeed. Firmware ALIVE/SKU decoding exists; connecting its selected calibration to the
-PNVM handshake and waiting for completion are still pending, so these helpers do not enable radio
-connectivity in the running OS.
+copies succeed. Firmware ALIVE/SKU decoding now feeds the nonblocking PNVM handoff described
+below. These helpers still do not enable radio connectivity in the running OS.
 
 ### Command/RX transport milestone
 
@@ -191,7 +191,8 @@ version before accepting the firmware's SKU.
 
 net/iwx_queue.c owns per-card command and receive rings. Prepare allocates
 and initializes buffers without enabling DMA. Only a valid ALIVE notification
-permits command submission. A single outstanding command retains its DMA until
+permits initialization to proceed; AX210 additionally requires PNVM completion.
+A single outstanding command retains its DMA until
 a matching queue/index/opcode/group completion; stale replies cannot release
 it. Legacy group-zero commands use the firmware's group-one version table.
 AX200's 8-bit and AX210's 16-bit doorbells wrap independently of 256 slots.
@@ -211,3 +212,29 @@ both index wrap boundaries, maximum command/reply size, all preparation
 allocation failures and invalid DMA addresses, stale acknowledgements,
 malformed/duplicate RX completions, failed doorbells, RF-kill, and failed then
 successful stop. They do not emulate an Intel radio or prove hardware support.
+
+### AX210 PNVM handoff
+
+After ALIVE, iwx_queue_pnvm reads the controller MAC/RF identity and selects
+calibration by all three SKU words. Unknown boards/radios and malformed blobs
+cannot publish a scratch pointer. Both contiguous and fragmented layouts copy
+their input into owned DMA before publication. Failed allocations preserve
+earlier context/paging data and allow a clean retry.
+
+The hardware helper takes the bounded NIC access lock and rings the AX210
+UMAC PNVM doorbell. Submission is nonblocking: subsequent poll calls must
+receive the API-1 regulatory/NVM completion notification with its four-byte
+status. Only zero status is accepted; unknown/nonzero status fails closed.
+Short, duplicate and unsolicited completions fail the transport.
+Commands stay blocked while PNVM is pending; a missing notification requires
+the owner's timeout/close path. A zero SKU explicitly needs no PNVM, following
+the reference driver. AX200 does not use this handoff.
+
+Register models verify the exact doorbell address/value, allocation rollback
+for both layouts, malformed/mismatched inputs, every handoff I/O failure,
+missing completion and DMA retention after failed stop. This has not been
+tested on a physical radio.
+
+References for the notification ABI:
+[OpenBSD iwx](https://github.com/openbsd/src/blob/65596250e06438442ce07bad87e5ba129229607d/sys/dev/pci/if_iwx.c)
+and [Intel PNVM API](https://github.com/torvalds/linux/blob/aaed66fadba2d2de8fe0daa0aa3eac827d2076b9/drivers/net/wireless/intel/iwlwifi/fw/api/nvm-reg.h).
