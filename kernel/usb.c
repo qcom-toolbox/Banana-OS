@@ -770,6 +770,16 @@ static mouse_state_t read_pointer(int raw) {
     vmtools_poll_pointer();      /* and a hypervisor's absolute pointer (VMMouse, VirtualBox) */
     uintptr_t f = irq_off();
     mouse_state_t m = mouse_read_locked();
+    /* VirtualBox supplies position through VMMDev but buttons through PS/2.
+     * Apply the position only after consuming packets: a fresh absolute
+     * sample every frame must never starve button presses and releases. */
+    if (g_abs_new) {
+        m.abs = 1;
+        m.ax = g_abs_x;
+        m.ay = g_abs_y;
+        m.dx = m.dy = 0;
+        g_abs_new = 0;
+    }
     if(!raw)scale_motion(&m.dx, &m.dy);
     irq_on(f);
     return m;
@@ -789,13 +799,12 @@ static mouse_state_t mouse_read_locked(void) {
         while (mouse_pkt_ready()) { mouse_pop(); synaptics_consume_ready(); }
         tp_tick(&g_syn_tp);
     }
-    if (g_usb_dx || g_usb_dy || g_usb_btnq_n || g_usb_dz || g_abs_new) {
+    if (g_usb_dx || g_usb_dy || g_usb_btnq_n || g_usb_dz) {
         mouse_state_t m = last_mouse;
         m.dx = g_usb_dx;
         m.dy = g_usb_dy;
         m.dz = g_usb_dz;
         g_usb_dz = 0;
-        if (g_abs_new) { m.abs = 1; m.ax = g_abs_x; m.ay = g_abs_y; m.dx = m.dy = 0; g_abs_new = 0; }
         if (g_usb_btnq_n) {                       /* the oldest change; the others next time */
             int b = g_usb_btnq[0];
             for (int i = 1; i < g_usb_btnq_n; i++) g_usb_btnq[i - 1] = g_usb_btnq[i];

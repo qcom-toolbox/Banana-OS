@@ -1,5 +1,11 @@
 # 🍌 Banana OS 0.6
 
+- **VirtualBox pointer clicks:** absolute position updates no longer bypass the
+  PS/2 button queue. This fixes a reproduced starvation path where clicks or
+  releases stayed unread while mouse integration refreshed the pointer.
+  Tested on both architectures, with native PS/2 and USB-tablet click checks.
+  [Mouse tests and live RAM measurements](docs/OS-TESTING-2026-10-30.md#virtualbox-pointer-clicks-and-live-memory).
+
 - **Clipboard history safety:** prevent an out-of-bounds read when an entry
   changes during selection, and keep the saved history resident while loading.
   Malformed lengths and incomplete records are rejected; copying new text no

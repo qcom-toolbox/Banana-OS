@@ -411,6 +411,59 @@ python3 tools/test_clipboard.py --sanitize
 python3 tools/test_clipboard.py --32 --sanitize
 ```
 
+## VirtualBox pointer clicks and live memory
+
+The reported symptoms were no clicks in 32-bit VirtualBox and lost clicks in
+64-bit VirtualBox after leaving the VM. A deterministic test of actual usb.c
+reproduced a matching starvation path on both architectures: VMMDev updates
+the absolute position, but VirtualBox's buttons arrive through PS/2. A fresh
+absolute sample selected an early return before the PS/2 queue was read.
+Repeated polling could therefore leave press/release packets unread indefinitely.
+
+The absolute position is now applied after pointer packet processing instead
+of bypassing it. This preserves button transitions and wheel reports while
+still discarding redundant relative motion when an absolute sample is present.
+The same path serves ordinary desktop reads and raw game reads.
+
+Host tests pass 491 checks per architecture under ASan/UBSan (982 total):
+120 repeated press/release cycles with continuous absolute samples, raw reads,
+queued quick clicks, integration off/on across a held button, ordinary relative
+motion, USB absolute buttons and a PS/2 wheel packet. Only port I/O and IRQ
+instructions are shimmed; the pointer arbitration/packet code is actual usb.c.
+The existing 37 capture/window-event regressions also pass on both architectures.
+
+Native mouse selftests passed in both kernels. Separate headless GUI runs
+closed and reopened Task Manager twice in each of four combinations:
+x86_64/i686 with PS/2, and x86_64/i686 with USB tablet (VMware vmport disabled).
+QMP input generated real guest input events; framebuffer checks confirmed
+the window closed. This is QEMU coverage, not a claim that VirtualBox's UI
+focus behavior was directly tested: VirtualBox is unavailable on the test host.
+The owner's VM still needs a retest with this image.
+
+Live RAM was measured separately on the local Mesa image with 1 GiB assigned.
+The 64-bit guest used 311 MiB before the GUI and 316 MiB after it, including
+about 205 MiB of filesystem data/tables. Before the GUI, the heap used 217,104
+KiB and total accounted usage was 318,855 KiB; the remaining approximately
+99 MiB is the resident kernel image/static data, including embedded packages.
+These files are the live RAM filesystem, not disposable disk cache:
+drop_caches reclaimed zero bytes. The 32-bit console used 66 MiB, including
+about 34 MiB of files. Measurements depend on ISO variant and display mode;
+they do not establish the exact breakdown of the owner's reported 284 MB.
+
+The current live image retains both compressed built-in packages for the App
+Store and the installed/unpacked files in RAM. LibJS, Mesa and the additional
+64-bit GNU tools contribute even when their apps are not running. A disk
+installation has a different backing store and cache-release path. No RAM
+reduction is claimed in this change. Logs, before-fix reproductions and
+GUI screenshots are retained at /home/banana/bos-tests/mouse-20261030.
+
+```sh
+python3 tools/test_mouse_input.py --sanitize
+python3 tools/test_mouse_input.py --32 --sanitize
+python3 tools/test_mouse_capture.py --sanitize
+python3 tools/test_mouse_capture.py --32 --sanitize
+```
+
 ## Scope of the evidence
 
 Hosted driver models and QEMU test emulated behavior. They do not qualify

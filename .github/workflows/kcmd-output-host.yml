@@ -32,6 +32,8 @@ jobs:
           python3 tools/test_elf_loader.py --32 --sanitize
           python3 tools/test_fd_sync.py --sanitize
           python3 tools/test_fd_sync.py --32
+          python3 tools/test_mouse_input.py --sanitize
+          python3 tools/test_mouse_input.py --32 --sanitize
           python3 tools/test_mouse_capture.py --sanitize
           python3 tools/test_mouse_capture.py --32
           python3 tools/test_clipboard.py --sanitize
