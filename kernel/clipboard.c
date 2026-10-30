@@ -35,6 +35,7 @@ static char* hist_push(char* text, uint32_t len, int pinned) {
     if (g_nhist == CLIP_HIST_MAX) {
         int last = g_nhist - 1;
         while (last >= 0 && g_hist[last].pinned) last--;
+        if (last < 0 && !pinned) return text;           /* keep every pinned entry */
         if (last < 0) last = g_nhist - 1;                /* (all pinned: the oldest goes) */
         drop = g_hist[last].text;
         memmove(&g_hist[last], &g_hist[last + 1], (size_t)(g_nhist - last - 1) * sizeof(clip_item_t));
@@ -100,9 +101,15 @@ static void save_pinned(void);
 int clipboard_hist_use(int i) {
     uint32_t len = 0;
     if (clipboard_hist_peek(i, NULL, 0, &len, NULL) < 0) return -1;
-    char* t = (char*)kmalloc(len + 1);
+    uint32_t cap = len + 1;
+    char* t = (char*)kmalloc(cap);
     if (!t) return -1;
-    if (clipboard_hist_peek(i, t, len + 1, &len, NULL) < 0) { kfree(t); return -1; }
+    /* Another core may replace entry i while the allocation yields. peek
+     * reports the full new length even when its copied text was truncated. */
+    if (clipboard_hist_peek(i, t, cap, &len, NULL) < 0 || len >= cap) {
+        kfree(t);
+        return -1;
+    }
     clipboard_set(t, len);                               /* (it moves to the top) */
     kfree(t);
     return 0;
@@ -184,14 +191,22 @@ void clipboard_hist_load(void) {
     if (done) return;
     done = 1;
     int fi = fs_find_file(PINNED_FILE);
-    fs_file_t* fl = fi >= 0 ? fs_get_file(fi) : NULL;
-    if (!fl || !fl->content) return;
+    if (fi < 0) return;
+    fs_pin(fi);
+    fs_file_t* fl = fs_get_file(fi);
+    if (!fl || !fl->loaded || !fl->content) { fs_unpin(fi); return; }
     const char* p = fl->content, *end = fl->content + fl->size;
     while (p < end) {
         uint32_t len = 0;
-        while (p < end && *p >= '0' && *p <= '9') len = len * 10u + (uint32_t)(*p++ - '0');
-        if (p >= end || *p != '\n' || len > CLIPBOARD_MAX || (uint32_t)(end - p - 1) < len) break;
+        if (*p < '0' || *p > '9') break;
+        while (p < end && *p >= '0' && *p <= '9') {
+            uint32_t digit = (uint32_t)(*p++ - '0');
+            if (len > (CLIPBOARD_MAX - digit) / 10u) goto finished;
+            len = len * 10u + digit;
+        }
+        if (p >= end || *p != '\n') break;
         p++;
+        if ((uint32_t)(end - p) <= len || p[len] != '\n') break;
         char* t = (char*)kmalloc(len + 1);
         if (!t) break;
         memcpy(t, p, len);
@@ -202,4 +217,6 @@ void clipboard_hist_load(void) {
         spin_unlock_irq(&g_lock, f);
         kfree(drop);
     }
+finished:
+    fs_unpin(fi);
 }

@@ -369,6 +369,48 @@ python3 tools/test_fs_mutation.py --sanitize
 python3 tools/test_fs_mutation.py --32 --sanitize
 ```
 
+## Clipboard history and persistence
+
+The actual clipboard implementation reproduced two memory faults under
+ASan/UBSan: a history entry growing from one byte to 512 bytes between the
+length query and the snapshot caused an out-of-bounds read; cache eviction
+during restoration of a 6,000-byte pinned entry caused a use-after-free.
+The race test injects a history change at allocation time, exercising the
+size-change interleaving deterministically rather than depending on timing.
+
+Selection now verifies that the second snapshot fits its allocated buffer
+before passing its length to clipboard_set. If the entry grew, selection
+returns an error and preserves the current clipboard. Loading pins the
+saved file through parsing/allocation and rejects failed disk reads.
+
+Malformed pinned-history files previously accepted wrapped decimal lengths
+(e.g. 4294967299 becoming 3), empty length fields, and records missing their
+final newline. The parser now bounds each decimal step before multiplication
+and requires complete record delimiters. The 64 KiB maximum remains supported.
+
+A further reproduced behavior violated the pinned-history guarantee: copying
+a new entry with all 25 slots pinned discarded the oldest pinned entry. It
+now updates the current clipboard while preserving every pinned history item.
+Duplicate selection and ordinary eviction of unpinned entries remain supported.
+
+The new host suite passes 367 checks on each architecture (734 total) with
+ASan/UBSan. It covers normal persistence, full pinned history, the size-change
+race, cache eviction, missing files, null/error reads, allocation failure,
+maximum-length records, overflow and truncated/malformed input. Spinlock IRQ
+instructions are shimmed for the host; the parser/history code is the actual
+kernel implementation. Both variants are required in the ISO host gate.
+
+Both kernels built. Native x86_64 and i686 clipboard selftests passed all six
+checks. A separate x86_64 GUI run wrote a two-record saved history, verified
+its bytes, opened Win+V through QMP keyboard input and confirmed both entries
+were restored as pinned and survived clip -c. Logs and baseline reproductions
+are retained at /home/banana/bos-tests/clipboard-20261030 on the build host.
+
+```sh
+python3 tools/test_clipboard.py --sanitize
+python3 tools/test_clipboard.py --32 --sanitize
+```
+
 ## Scope of the evidence
 
 Hosted driver models and QEMU test emulated behavior. They do not qualify

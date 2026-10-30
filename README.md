@@ -1,5 +1,11 @@
 # 🍌 Banana OS 0.6
 
+- **Clipboard history safety:** prevent an out-of-bounds read when an entry
+  changes during selection, and keep the saved history resident while loading.
+  Malformed lengths and incomplete records are rejected; copying new text no
+  longer evicts a pinned entry when all 25 history slots are pinned.
+  [Reproductions and tests](docs/OS-TESTING-2026-10-30.md#clipboard-history-and-persistence).
+
 - **Filesystem cache safety:** copying/moving files and modifying cached files now
   hold their buffers through allocations and disk I/O. Appends reject oversized
   requests before arithmetic overflow; writes from a file's own contents remain
