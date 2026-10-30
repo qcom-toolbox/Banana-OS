@@ -1,5 +1,22 @@
 # 🍌 Banana OS 0.6
 
+- **CC0 landscapes:** Alpine Peaks, Seeley Lake and Grand Tetons are new
+  3200 × 1800 presets. Their JPEGs use the isolated image worker on x86_64;
+  32-bit or decoder-failure paths retain low-memory thumbnails.
+  [Photographers, original sources, CC0 declarations and checksums](assets/wallpapers/landscapes/README.md).
+
+- **Cleaner Windows Task Manager styles:** Windows 10 has a neutral light
+  palette; Windows 11 uses charcoal surfaces. Both use anti-aliased proportional
+  text, quieter controls and readable resource columns. The memory tint now
+  represents a percentage of available RAM rather than treating MiB as percent.
+  [Windows 10 preview](assets/screenshots/task-manager-windows10.png) ·
+  [Windows 11 preview](assets/screenshots/task-manager-windows11.png).
+
+- **Wallpaper fault handling:** unreadable images leave the current background
+  intact; the saved configuration stays pinned while decoding can allocate or
+  reclaim memory. Host tests reproduce the former null access and use-after-free.
+
+
 - **Desktop and file safety:** removed **Restore removed icons** from the desktop
   right-click menu. Saved icon coordinates are validated before indexing the
   desktop grid. Recursive folder copies include more than 32 subfolders, and

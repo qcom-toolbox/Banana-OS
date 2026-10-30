@@ -3,7 +3,7 @@ on:
   push:
     branches: ['upstream/kcmd-drain']
   pull_request:
-    paths: ['kernel/**', 'net/**', 'sdk/**', 'shell/**', 'tools/**', '.github/workflows/kcmd-output-host.yml']
+    paths: ['assets/wallpapers/**', 'kernel/**', 'net/**', 'sdk/**', 'shell/**', 'tools/**', '.github/workflows/kcmd-output-host.yml']
   workflow_dispatch: {}
   workflow_call: {}
 permissions:
@@ -17,12 +17,15 @@ jobs:
       - run: |
           sudo python3 tools/ci_apt_mirrors.py
           sudo apt-get update -qq
-          sudo apt-get install -y gcc-multilib
+          sudo apt-get install -y gcc-multilib nasm
       - name: Run regressions
         run: |
           python3 tools/test_kcmd_output.py --sanitize
           python3 tools/test_program_load.py --sanitize
           python3 tools/test_update_elf.py
+          python3 tools/test_landscapes.py
+          python3 tools/test_wallpaper.py --sanitize
+          python3 tools/test_wallpaper.py --32 --sanitize
           python3 tools/test_notification.py --sanitize
           python3 tools/test_notification.py --32
           python3 tools/test_elf_loader.py --sanitize

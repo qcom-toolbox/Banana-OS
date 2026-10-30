@@ -1,0 +1,76 @@
+[
+  {
+    "id": "alpine-peaks",
+    "name": "Alpine Peaks",
+    "author": "Harald Hetzner",
+    "source_page": "https://commons.wikimedia.org/wiki/File:20260815_131221_HDR.jpg",
+    "source_download": "https://upload.wikimedia.org/wikipedia/commons/d/db/20260815_131221_HDR.jpg?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=original",
+    "license": "CC0-1.0",
+    "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+    "source_sha256": "3019a74127d0c20d90c4a981a0cf81e7b1f3edc7b8e3b81283a364957f0d83e0",
+    "source_dimensions": [
+      3840,
+      2160
+    ],
+    "file": "alpine-peaks.jpg",
+    "dimensions": [
+      3200,
+      1800
+    ],
+    "sha256": "dadf0db9de9b71e9719590b9fadcfbd3d2dc5f33e44941fb2ad169758ccf2ae7",
+    "bytes": 1270577,
+    "modifications": "16:9 crop, downsample to 3200x1800, JPEG RGB re-encode; source metadata removed",
+    "source_page_sha256": "17fb58e3b708a636a86f101d70fe295af0c70a45cb95fecee4aa67d9e92b770f",
+    "license_verified_on": "2026-10-30",
+    "source_revision_url": "https://commons.wikimedia.org/w/index.php?title=File:20260815_131221_HDR.jpg&oldid=1271930888"
+  },
+  {
+    "id": "seeley-lake",
+    "name": "Seeley Lake",
+    "author": "Extemporalist",
+    "source_page": "https://commons.wikimedia.org/wiki/File:Rain_falls_amongst_the_wetlands_on_the_shores_of_Lake_Seeley.png",
+    "source_download": "https://upload.wikimedia.org/wikipedia/commons/e/e1/Rain_falls_amongst_the_wetlands_on_the_shores_of_Lake_Seeley.png?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=original",
+    "license": "CC0-1.0",
+    "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+    "source_sha256": "28c952919766a5c54ee4240ee7fb0096075267dd6c539e9e44ae9b631b93a989",
+    "source_dimensions": [
+      4600,
+      3456
+    ],
+    "file": "seeley-lake.jpg",
+    "dimensions": [
+      3200,
+      1800
+    ],
+    "sha256": "e2209adb3a417cf0a9ab2eb6a7d62aac4eed6a862e6bb0fadd04fad58c8cee8f",
+    "bytes": 840882,
+    "modifications": "16:9 crop, downsample to 3200x1800, JPEG RGB re-encode; source metadata removed",
+    "source_page_sha256": "f0c2ae6eb53c0798f54995704b8da523794989998d946490d5c2efbdb3cd5fdd",
+    "license_verified_on": "2026-10-30",
+    "source_revision_url": "https://commons.wikimedia.org/w/index.php?title=File:Rain_falls_amongst_the_wetlands_on_the_shores_of_Lake_Seeley.png&oldid=1016449705"
+  },
+  {
+    "id": "grand-tetons",
+    "name": "Grand Tetons",
+    "author": "Scott Horvath / USGS",
+    "source_page": "https://www.usgs.gov/media/images/grand-tetons",
+    "source_download": "https://d9-wret.s3.us-west-2.amazonaws.com/assets/palladium/production/s3fs-public/thumbnails/image/IMG_2355.jpg",
+    "license": "CC0-1.0",
+    "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+    "source_sha256": "a41830a2771e0142cb5b01a3d786dd6978a629d92f1b46ae77a8ef5955ff75da",
+    "source_dimensions": [
+      4212,
+      2808
+    ],
+    "file": "grand-tetons.jpg",
+    "dimensions": [
+      3200,
+      1800
+    ],
+    "sha256": "8733cd0f066d61c754c8ad92eaa143874b42db20f377bcf9962ebab0e00df077",
+    "bytes": 779061,
+    "modifications": "16:9 crop, downsample to 3200x1800, JPEG RGB re-encode; source metadata removed",
+    "source_page_sha256": "4c55eb7ab01948b0f7da3f899820c4e3bc6be8b90e0ec475704c585b5ad70485",
+    "license_verified_on": "2026-10-30"
+  }
+]

@@ -1,23 +1,33 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wallpaper.h"
 #include "wallpaper_data.h"
+#include "landscape_data.h"
 #include "fs.h"
 #include "fb.h"
 #include "kheap.h"
 #include "kstring.h"
 #include "serial.h"
 
+#ifdef __x86_64__
+#define PHOTO_DATA(name) name, sizeof(name)
+#else
+#define PHOTO_DATA(name) NULL, 0
+#endif
+
 static const wallpaper_preset_t g_presets[] = {
-    {"Midnight Blue", "assets/wallpapers/midnight-blue.png", 0x00151F30u, wallpaper_midnight_blue},
-    {"Forest Night",  "assets/wallpapers/forest-night.png",  0x00162A1Eu, wallpaper_forest_night},
-    {"Graphite",      "assets/wallpapers/graphite.png",      0x00252528u, wallpaper_graphite},
-    {"Royal Purple",  "assets/wallpapers/royal-purple.png",  0x00261D3Au, wallpaper_royal_purple},
-    {"Sunset Grid",   "assets/wallpapers/sunset-grid.png",   0x0030292Au, wallpaper_sunset_grid},
-    {"Ocean Wave",    "assets/wallpapers/ocean-wave.png",    0x00131F2Du, wallpaper_ocean_wave},
-    {"Cyber Mint",    "assets/wallpapers/cyber-mint.png",    0x00152A2Au, wallpaper_cyber_mint},
-    {"Amber Mesh",    "assets/wallpapers/amber-mesh.png",    0x0033261Bu, wallpaper_amber_mesh},
-    {"Azure Flow",    "assets/wallpapers/azure-flow.jpg",    0x00142E5Cu, wallpaper_azure_flow},
-    {"Plain Black",   "assets/wallpapers/plain-black.png",   0x00121214u, wallpaper_plain_black},
+    {"Midnight Blue", "assets/wallpapers/midnight-blue.png", 0x00151F30u, wallpaper_midnight_blue, NULL, 0},
+    {"Forest Night",  "assets/wallpapers/forest-night.png",  0x00162A1Eu, wallpaper_forest_night, NULL, 0},
+    {"Graphite",      "assets/wallpapers/graphite.png",      0x00252528u, wallpaper_graphite, NULL, 0},
+    {"Royal Purple",  "assets/wallpapers/royal-purple.png",  0x00261D3Au, wallpaper_royal_purple, NULL, 0},
+    {"Sunset Grid",   "assets/wallpapers/sunset-grid.png",   0x0030292Au, wallpaper_sunset_grid, NULL, 0},
+    {"Ocean Wave",    "assets/wallpapers/ocean-wave.png",    0x00131F2Du, wallpaper_ocean_wave, NULL, 0},
+    {"Cyber Mint",    "assets/wallpapers/cyber-mint.png",    0x00152A2Au, wallpaper_cyber_mint, NULL, 0},
+    {"Amber Mesh",    "assets/wallpapers/amber-mesh.png",    0x0033261Bu, wallpaper_amber_mesh, NULL, 0},
+    {"Azure Flow",    "assets/wallpapers/azure-flow.jpg",    0x00142E5Cu, wallpaper_azure_flow, NULL, 0},
+    {"Plain Black",   "assets/wallpapers/plain-black.png",   0x00121214u, wallpaper_plain_black, NULL, 0},
+    {"Alpine Peaks", "assets/wallpapers/landscapes/alpine-peaks.jpg", 0x001E3340u, landscape_alpine_peaks_thumb, PHOTO_DATA(landscape_alpine_peaks_jpeg)},
+    {"Seeley Lake", "assets/wallpapers/landscapes/seeley-lake.jpg", 0x001E3340u, landscape_seeley_lake_thumb, PHOTO_DATA(landscape_seeley_lake_jpeg)},
+    {"Grand Tetons", "assets/wallpapers/landscapes/grand-tetons.jpg", 0x001E3340u, landscape_grand_tetons_thumb, PHOTO_DATA(landscape_grand_tetons_jpeg)},
 };
 #define PRESET_COUNT ((int)(sizeof(g_presets) / sizeof(g_presets[0])))
 
@@ -28,6 +38,43 @@ static uint32_t*    g_custom;            /* rendered user image, screen sized */
 static int          g_custom_w, g_custom_h;
 static uint32_t     g_gen = 1;
 static int          g_config_loaded;
+static image_t      g_photo;
+static int          g_photo_preset = -1, g_photo_failed = -1, g_photo_loading;
+
+static void drop_photo(void) {
+    image_free(&g_photo);
+    g_photo_preset = g_photo_failed = -1;
+}
+
+/* The decoder remains in the isolated worker. Keep only the selected image;
+ * 32-bit systems or allocation/worker failures retain the embedded thumbnail. */
+static const image_t* preset_photo(void) {
+    int selected = g_preset;
+    const wallpaper_preset_t* p = &g_presets[selected];
+    if (!p->encoded || g_photo_failed == selected || g_photo_loading) return NULL;
+    if (g_photo_preset != selected) {
+        image_t decoded = {0};
+        char err[128];
+        g_photo_loading = 1;
+        int bad = image_decode(p->encoded, p->encoded_size, &decoded, err, sizeof(err));
+        g_photo_loading = 0;
+        /* Waiting for the worker can yield to GUI events. Never publish an
+         * older selection over one the user chose while decoding. */
+        if (g_preset != selected) { image_free(&decoded); return NULL; }
+        if (bad) {
+            g_photo_failed = selected;
+            klog("wallpaper: high-resolution %s unavailable (%s)\n", p->name, err);
+            return NULL;
+        }
+        image_free(&g_photo);
+        g_photo = decoded;
+        g_photo_preset = selected;
+        g_photo_failed = -1;
+        g_gen++;
+        klog("wallpaper: %s %dx%d decoded in user space\n",p->name,g_photo.w,g_photo.h);
+    }
+    return &g_photo;
+}
 
 int wallpaper_preset_count(void) { return PRESET_COUNT; }
 
@@ -149,16 +196,20 @@ void wallpaper_recent_remove(int i) {
 }
 
 const uint32_t* wallpaper_recent_thumb(int i, int w, int h) {
-    if (i < 0 || i >= g_nrecent || g_thumb_bad[i]) return NULL;
+    if (i < 0 || i >= g_nrecent || g_thumb_bad[i] ||
+        w <= 0 || h <= 0 || w > 2560 || h > 1600) return NULL;
     if (g_thumb[i] && g_thumb_w[i] == w && g_thumb_h[i] == h) return g_thumb[i];
     kfree(g_thumb[i]);
     g_thumb[i] = NULL;
     int idx = fs_find_file(g_recent[i]);
-    fs_file_t* f = idx >= 0 ? fs_get_file(idx) : NULL;
+    if (idx < 0) { g_thumb_bad[i] = 1; return NULL; }
+    fs_pin(idx);
+    fs_file_t* f = fs_get_file(idx);
     image_t img;
     char err[64];
-    if (!f) { g_thumb_bad[i] = 1; return NULL; }
-    fs_pin(idx);
+    if (!f || !f->loaded || !f->content) {
+        fs_unpin(idx); g_thumb_bad[i] = 1; return NULL;
+    }
     int bad = image_decode((const uint8_t*)f->content, f->size, &img, err, sizeof(err)) != 0;
     fs_unpin(idx);
     if (bad) { g_thumb_bad[i] = 1; return NULL; }
@@ -172,6 +223,7 @@ const uint32_t* wallpaper_recent_thumb(int i, int w, int h) {
 }
 
 void wallpaper_render(uint32_t* dst, int w, int h, int stride) {
+    if (!dst || w <= 0 || h <= 0 || w > 2560 || h > 1600 || stride < w) return;
     if (g_custom && (g_custom_w != w || g_custom_h != h)) {
         /* another size (a new resolution): the picture again, at this one */
         char path[FS_PATH_LEN], err[96];
@@ -184,7 +236,19 @@ void wallpaper_render(uint32_t* dst, int w, int h, int stride) {
             memcpy(dst + y * stride, g_custom + y * w, (uint32_t)w * 4u);
         return;
     }
-    render_preset(g_presets[g_preset].pixels, dst, w, h, stride);
+    const image_t* photo = preset_photo();
+    if (photo) {
+        if (stride == w) image_render(photo, dst, w, h, IMAGE_FILL, 0);
+        else {
+            for (int y=0; y<h; y++) memset32(dst+y*stride, g_presets[g_preset].base, (size_t)w);
+            uint32_t* tmp = kmalloc((size_t)w*h*4);
+            if (tmp) {
+                image_render(photo,tmp,w,h,IMAGE_FILL,0);
+                for (int y=0; y<h; y++) memcpy(dst+y*stride,tmp+y*w,(size_t)w*4);
+                kfree(tmp);
+            }
+        }
+    } else render_preset(g_presets[g_preset].pixels, dst, w, h, stride);
 }
 
 static void save_config(void) {
@@ -212,6 +276,7 @@ static void drop_custom(void) {
 void wallpaper_set_preset(int i) {
     if (i < 0 || i >= PRESET_COUNT) return;
     drop_custom();
+    drop_photo();
     g_preset = i;
     g_gen++;
     save_config();
@@ -219,12 +284,20 @@ void wallpaper_set_preset(int i) {
 
 /* the picture in a file, rendered at w x h for the given mode */
 static int set_file_at(const char* path, image_mode_t mode, int w, int h, char* err, uint32_t errlen, int persist) {
+    if (w <= 0 || h <= 0 || w > 2560 || h > 1600) {
+        ksnprintf(err, errlen, "invalid wallpaper dimensions"); return -1;
+    }
     int idx = fs_find_file(path);
     if (idx < 0) { ksnprintf(err, errlen, "no such file: %s", path); return -1; }
+    fs_pin(idx);
     fs_file_t* f = fs_get_file(idx);
+    if (!f || !f->loaded || !f->content) {
+        fs_unpin(idx);
+        ksnprintf(err, errlen, "could not read wallpaper: %s", path); return -1;
+    }
 
     image_t img;
-    fs_pin(idx);                         /* (decoding a big photo takes a while) */
+    /* pinned for the whole decode */                         /* (decoding a big photo takes a while) */
     int bad = image_decode((const uint8_t*)f->content, f->size, &img, err, errlen) != 0;
     fs_unpin(idx);
     if (bad) return -1;
@@ -239,6 +312,7 @@ static int set_file_at(const char* path, image_mode_t mode, int w, int h, char* 
     image_free(&img);
 
     drop_custom();
+    drop_photo();
     g_custom = px;
     g_custom_w = w;
     g_custom_h = h;
@@ -280,7 +354,10 @@ void wallpaper_load_config(void) {
     g_config_loaded = 1;
     int idx = fs_find_file(WALLPAPER_CONFIG);
     if (idx < 0) return;
-    const char* p = fs_get_file(idx)->content;
+    fs_pin(idx);
+    fs_file_t* f = fs_get_file(idx);
+    if (!f || !f->loaded || !f->content) { fs_unpin(idx); return; }
+    const char* p = f->content;
     while (*p) {
         const char* nl = strchr(p, '\n');
         uint32_t n = nl ? (uint32_t)(nl - p) : (uint32_t)strlen(p);
@@ -311,4 +388,5 @@ void wallpaper_load_config(void) {
                 klog("wallpaper: saved image %s unusable (%s), keeping the preset\n", path, err);
         }
     }
+    fs_unpin(idx);
 }

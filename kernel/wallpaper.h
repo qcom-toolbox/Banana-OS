@@ -7,7 +7,8 @@
 
 /*
  * Desktop wallpaper state: one of the built-in presets (baked into the
- * kernel, see wallpaper_data.h) or a user image file from the
+ * kernel, see wallpaper_data.h; optional high-resolution JPEGs are decoded
+ * in the isolated worker) or a user image file from the
  * filesystem (PNG/JPEG/BMP/GIF, e.g. downloaded with wget into
  * ~/Pictures). The choice is saved in /etc/wallpaper, so it survives a
  * reboot on an installed disk.
@@ -21,7 +22,9 @@ typedef struct {
     const char*    name;
     const char*    file;        /* source image in assets/wallpapers */
     uint32_t       base;        /* representative colour (swatch) */
-    const uint8_t* pixels;      /* WALLPAPER_IMG_W x WALLPAPER_IMG_H RGB888 */
+    const uint8_t* pixels;      /* low-memory thumbnail, WALLPAPER_IMG_W x WALLPAPER_IMG_H */
+    const uint8_t* encoded;     /* optional high-resolution JPEG, decoded in user space */
+    uint32_t encoded_size;
 } wallpaper_preset_t;
 
 int                       wallpaper_preset_count(void);

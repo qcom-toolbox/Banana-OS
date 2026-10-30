@@ -266,6 +266,61 @@ the taskbar began at y=572. A screenshot confirmed the 12-pixel gap; QMP
 clicked the relocated close button and verified the card disappeared.
 The following boot selftest passed all 37 checks.
 
+## CC0 landscapes, wallpaper faults and Task Manager presentation
+
+Three new presets are genuine 3200×1800 photographs: Alpine Peaks (Harald
+Hetzner), Seeley Lake (Extemporalist), and Grand Tetons (Scott Horvath / USGS).
+Each selected source explicitly states CC0 1.0. The asset README and manifest
+record authors, original source/license URLs, original and packaged dimensions,
+transformations, checksums and verification date. No picture was upscaled.
+
+The three JPEGs total 2,890,520 bytes. Builds embed these compressed bytes
+directly, and the existing isolated image worker decodes the selected preset
+on x86_64. Only one decoded photograph is cached. Drawing re-entry during
+worker waits uses the fallback thumbnail; a stale selection is not published.
+The 32-bit kernel embeds only thumbnails. No decoder quota was increased and
+no image decoder was moved into the kernel.
+
+Two pre-existing faults were reproduced with the actual wallpaper implementation:
+
+- A failed image read dereferenced a null file pointer.
+- Decoding while reading an 8 KiB saved configuration could reclaim that
+  configuration, producing an ASan heap-use-after-free in `wallpaper_load_config`.
+
+The file is now pinned before read/decode and checked for valid loaded contents.
+Configuration remains pinned while it is parsed. Invalid output dimensions
+are rejected before allocation. Failure preserves the previous custom image.
+Hosted ASan/UBSan cases pass on both architectures: I/O failures, configuration
+cache eviction, output bounds, thumbnail fallback, full-resolution cache reuse
+and recursive drawing during decode. Offline asset tests verify SHA-256, JPEG
+dimensions, CC0 provenance fields, assembly blob sizes and the 3 MiB JPEG budget.
+
+Windows 10/11 Task Manager layouts now use coherent light/charcoal palettes,
+proportional anti-aliased text, aligned numeric columns and flat title controls.
+The classic/Banana fixed-cell text paths remain in place. Memory-cell heat
+uses the process's share of usable RAM rather than raw megabytes. Native QMP
+tests exercised both styles' Processes and Performance pages and maximize,
+restore and close controls; cropped screenshots are committed in
+`assets/screenshots/task-manager-windows10.png` and `task-manager-windows11.png`.
+
+Live VM serial traces confirmed all three photos decoded to **3200×1800**
+through the user-space worker. Each background and both Task Manager styles
+were inspected visually. Full 32/64-bit OS/POSIX, shell/editor, LibJS/isolation
+and Mesa regressions passed for the supported architectures. The updated image
+also passed the complete build-212 BIOS install/update/reboot path and exact
+ELF hash assertions. A separate AHCI disk overlay was upgraded, configured
+with Seeley Lake, synced and cold-booted; the saved preset was restored and
+again decoded to 3200×1800, and external commands worked after cache eviction.
+The local Mesa ISO measured 125,413,376 bytes (119.6 MiB).
+
+```sh
+python3 tools/test_landscapes.py
+python3 tools/test_wallpaper.py --sanitize
+python3 tools/test_wallpaper.py --32 --sanitize
+# Only needed when changing the packaged photos; requires Pillow:
+python3 tools/gen_landscape_data.py
+```
+
 ## Scope of the evidence
 
 Hosted driver models and QEMU test emulated behavior. They do not qualify
