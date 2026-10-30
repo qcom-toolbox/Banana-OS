@@ -101,11 +101,21 @@ static int editor_ready(int ms) {
     return 0;
 }
 
+static int write_all(int fd,const char* bytes,size_t length) {
+    while (length) {
+        ssize_t n=write(fd,bytes,length);
+        if (n<0 && errno==EINTR) continue;
+        if (n<=0) return -1;
+        bytes+=n;length-=(size_t)n;
+    }
+    return 0;
+}
+
 static void type(const char* s) {
     for (; *s; s++) {
-        ssize_t n;
-        do { n = write(g_m, s, 1); } while (n < 0 && errno == EINTR);
-        if (n != 1) { printf("  FAIL  PTY input write (errno %d)\n", errno); g_fail++; return; }
+        if (write_all(g_m,s,1)!=0) {
+            printf("  FAIL  PTY input write (errno %d)\n",errno);g_fail++;return;
+        }
         pump(15);
     }
 }
@@ -129,7 +139,7 @@ static int start(const char* shell, char* const argv[]) {
     g_pid = forkpty(&g_m, NULL, NULL, &ws);
     if (g_pid < 0) return -1;
     if (g_pid == 0) {
-        chdir("/home/banana");
+        if (chdir("/home/banana")!=0) _exit(126);
         execve(shell, argv, env);
         _exit(127);
     }
@@ -146,7 +156,10 @@ static int finish(void) {
     if (waitpid(g_pid, &st, WNOHANG) == 0) {
         /* still there: what it and its children are doing, for the report */
         fflush(stdout);
-        if (access("/bin/ps", X_OK) == 0) system("ps -eo pid,ppid,pgid,tty,tpgid,stat,sched,wchan,uip,pending,args | sed 's/^/        | /'");
+        if (access("/bin/ps", X_OK) == 0) {
+            int diagnostic=system("ps -eo pid,ppid,pgid,tty,tpgid,stat,sched,wchan,uip,pending,args | sed 's/^/        | /'");
+            if (diagnostic<0) printf("        (process diagnostics unavailable)\n");
+        }
         kill(g_pid, SIGKILL); waitpid(g_pid, &st, 0); st = -1;
     }
     close(g_m);
@@ -252,7 +265,7 @@ static void eof_after(const char* what, const char* keys, const char* wait) {
     for (const char* k = keys; *k; ) {               /* (keys: pieces split by \001\001: a pause between) */
         const char* e = strstr(k, "\001\001");
         int n = e ? (int)(e - k) : (int)strlen(k);
-        for (int i = 0; i < n; i++) { write(g_m, k + i, 1); pump(15); }
+        for (int i = 0; i < n; i++) { char key[2]={k[i],0};type(key); }
         pump(700);
         k += n + (e ? 2 : 0);
     }
@@ -344,7 +357,10 @@ int shelltest_keys(const char* shell, const char* keys, int ms) {
     printf("%s\n(end)\n", g_out);
     fflush(stdout);
     /* what the processes are doing (a stuck one: where) */
-    if (access("/bin/ps", X_OK) == 0) system("ps -eo pid,ppid,pgid,tty,tpgid,stat,sched,wchan,uip,pending,args");
+    if (access("/bin/ps", X_OK) == 0) {
+        int diagnostic=system("ps -eo pid,ppid,pgid,tty,tpgid,stat,sched,wchan,uip,pending,args");
+        if (diagnostic<0) printf("(process diagnostics unavailable)\n");
+    }
     kill(g_pid, SIGKILL);
     finish();
     return 0;
@@ -389,7 +405,9 @@ static char* slurp(const char* path) {
 }
 static void put(const char* path, const char* text) {
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) { write(fd, text, strlen(text)); close(fd); }
+    if (fd<0) { check("create editor fixture",0);return; }
+    if (write_all(fd,text,strlen(text))!=0) check("write editor fixture",0);
+    if (close(fd)!=0) check("close editor fixture",0);
 }
 
 /* the editor at path on file: keys typed after it shows ready; 1 if it ended */

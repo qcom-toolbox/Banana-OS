@@ -529,6 +529,13 @@ the actual harness to verify delayed raw-mode transitions, partial redraw,
 and bounded failure when the terminal stays canonical or output never settles.
 Both 32/64-bit sanitizer runs pass and are required in the ISO host gate.
 
+The host harness explicitly compiles with _FORTIFY_SOURCE=3 and warnings
+as errors, matching the fortified libc return-value diagnostics exposed
+by Ubuntu CI. Child chdir failures, fixture creation/write/close errors and
+PTY writes are checked; diagnostic-command launch failures are reported.
+All partial writes and EINTR retries use a shared write_all helper, including
+synthetic PTY child output. Both SDK architectures build with these changes.
+
 The exact intermittent Vim failure was not reproduced in ten pre-change
 editor suites locally; the CI trace is retained. Five consecutive suites with
 the synchronization change passed all 31 editor checks each, including Vim

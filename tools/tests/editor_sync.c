@@ -5,18 +5,18 @@ static void child_session(int mode) {
  struct termios t;
  if(mode!=1){usleep(200000);tcgetattr(0,&t);cfmakeraw(&t);tcsetattr(0,TCSANOW,&t);}
  if(mode==2){
-  for(int i=0;i<100;i++){write(1,"REDRAW",6);usleep(10000);}
+  for(int i=0;i<100;i++){if(write_all(1,"REDRAW",6))_exit(2);usleep(10000);}
   _exit(0);
  }
- write(1,"READY",5);
- if(mode==0){usleep(50000);write(1,"FINISHED",8);}
+ if(write_all(1,"READY",5))_exit(2);
+ if(mode==0){usleep(50000);if(write_all(1,"FINISHED",8))_exit(2);}
  if(mode==1){sleep(2);_exit(0);}
  char c=0;ssize_t n=read(0,&c,1);_exit(n==1&&c=='K'?0:1);
 }
 static void begin(int mode){
  struct winsize w={30,100,0,0};
  g_pid=forkpty(&g_m,NULL,NULL,&w);REQUIRE(g_pid>=0);
- if(!g_pid){write(1,"HEADING",7);child_session(mode);}
+ if(!g_pid){if(write_all(1,"HEADING",7))_exit(2);child_session(mode);}
  mark();
 }
 static void stop_child(void){kill(g_pid,SIGKILL);waitpid(g_pid,NULL,0);close(g_m);g_m=-1;}

@@ -11,7 +11,7 @@ p.add_argument('--sanitize', action='store_true')
 a = p.parse_args()
 out = r / 'build/test/editor-sync'
 out.mkdir(parents=True, exist_ok=True)
-flags = ['-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror']
+flags = ['-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=3']
 if a.bits32:
     flags += ['-m32']
 if a.sanitize:
