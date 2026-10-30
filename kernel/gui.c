@@ -1829,6 +1829,21 @@ static void desk_key(const desk_item_t* d, char* out, int cap) {
     else ksnprintf(out, (size_t)cap, "file:%s", strrchr(d->path, '/') ? strrchr(d->path, '/') + 1 : d->label);   /* (a shortcut: its file name) */
 }
 
+/* Coordinates index a fixed 64-by-32 occupancy table. Parse against the
+ * limit before multiplication so long decimal strings cannot wrap. */
+static int layout_coord(const char* text, unsigned limit, int* out) {
+    unsigned value = 0;
+    if (!text[0]) return 0;
+    for (const char* p = text; *p; p++) {
+        if (*p < '0' || *p > '9') return 0;
+        unsigned digit = (unsigned)(*p - '0');
+        if (value > (limit - 1u - digit) / 10u) return 0;
+        value = value * 10u + digit;
+    }
+    *out = (int)value;
+    return 1;
+}
+
 static void layout_load(void) {
     g_nlay = 0;
     int fi = fs_find_file(LAYOUT_FILE);
@@ -1839,20 +1854,26 @@ static void layout_load(void) {
         const char* nl = strchr(p, '\n');
         int n = nl ? (int)(nl - p) : (int)strlen(p);
         char line[96];
-        if (n >= (int)sizeof(line)) n = sizeof(line) - 1;
+        if (n >= (int)sizeof(line)) {
+            if (!nl) break;
+            p = nl + 1;
+            continue;
+        }
         memcpy(line, p, (size_t)n);
         line[n] = 0;
+        if (n && line[n - 1] == '\r') line[n - 1] = 0;
         char* t1 = strchr(line, '\t');
         char* t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
         if (t1 && t2) {
             *t1 = 0; *t2 = 0;
-            uint32_t c = 0, r = 0;
-            k_parse_u32(t1 + 1, &c);
-            k_parse_u32(t2 + 1, &r);
-            kstrlcpy(g_lay[g_nlay].key, line, sizeof(g_lay[0].key));
-            g_lay[g_nlay].col = (int)c;
-            g_lay[g_nlay].row = (int)r;
-            g_nlay++;
+            int c, r;
+            if (line[0] && strlen(line) < sizeof(g_lay[0].key) &&
+                layout_coord(t1 + 1, 64, &c) && layout_coord(t2 + 1, 32, &r)) {
+                kstrlcpy(g_lay[g_nlay].key, line, sizeof(g_lay[0].key));
+                g_lay[g_nlay].col = c;
+                g_lay[g_nlay].row = r;
+                g_nlay++;
+            }
         }
         if (!nl) break;
         p = nl + 1;
@@ -1898,7 +1919,8 @@ static void desk_place(void) {
         char key[56];
         desk_key(&g_desk[i], key, sizeof(key));
         for (int k = 0; k < g_nlay; k++)
-            if (!strcmp(g_lay[k].key, key) && g_lay[k].col < cols && g_lay[k].row < rows &&
+            if (!strcmp(g_lay[k].key, key) && g_lay[k].col >= 0 && g_lay[k].row >= 0 &&
+                g_lay[k].col < cols && g_lay[k].row < rows &&
                 g_lay[k].col < 64 && g_lay[k].row < 32 && !used[g_lay[k].col][g_lay[k].row]) {
                 g_desk[i].col = g_lay[k].col;
                 g_desk[i].row = g_lay[k].row;
@@ -1922,7 +1944,7 @@ static void desk_place(void) {
 static pkg_info_t g_pkgs[DESK_MAX];
 
 /* icons taken off the desktop (programs, the Recycle Bin): their keys in
- * ~/.config/desktop-hidden, one a line; "Restore removed icons" brings them back */
+ * ~/.config/desktop-hidden, one a line. */
 #define HIDDEN_FILE "/home/banana/.config/desktop-hidden"
 #define HIDDEN_MAX  48
 static char g_hidden[HIDDEN_MAX][56];
@@ -2718,7 +2740,7 @@ static int new_shortcut_done(const char* text, char* err, int ecap) {
     return 0;
 }
 
-enum { DM_NEWFOLDER = 100, DM_NEWFILE, DM_PASTE, DM_OPENDIR, DM_REFRESH, DM_ARRANGE, DM_NEWLINK, DM_UNHIDE };
+enum { DM_NEWFOLDER = 100, DM_NEWFILE, DM_PASTE, DM_OPENDIR, DM_REFRESH, DM_ARRANGE, DM_NEWLINK };
 static void desktop_menu_cb(int id, void* arg) {
     (void)arg;
     char msg[112];
@@ -2729,7 +2751,6 @@ static void desktop_menu_cb(int id, void* arg) {
         ask_open(_("Create shortcut"), "What should the shortcut open?",
                  "e.g. Notepad, example.com or ~/Music", new_shortcut_done);
         break;
-    case DM_UNHIDE: g_nhidden = 0; hidden_save(); desk_refresh(1); break;
     case DM_PASTE: fileops_paste(DESKTOP_DIR, msg, sizeof(msg)); desk_refresh(1); explorer_refresh(); break;
     case DM_OPENDIR: explorer_open(DESKTOP_DIR); gui_raise_files(); break;
     case DM_REFRESH: desk_refresh(1); break;
@@ -2739,7 +2760,6 @@ static void desktop_menu_cb(int id, void* arg) {
 }
 
 static void open_desktop_menu(int mx, int my) {
-    if (g_nhidden < 0) hidden_load();
     ctx_item_t items[] = {
         { _("New folder"), DM_NEWFOLDER, 0 },
         { _("New text document"), DM_NEWFILE, 0 },
@@ -2747,7 +2767,6 @@ static void open_desktop_menu(int mx, int my) {
         { _("Paste"), DM_PASTE, fileops_clip_count() == 0 },
         { CTX_SEP, 0, 0 },
         { _("Arrange icons"), DM_ARRANGE, 0 },
-        { _("Restore removed icons"), DM_UNHIDE, g_nhidden == 0 },
         { _("Refresh"), DM_REFRESH, 0 },
         { _("Open the Desktop folder"), DM_OPENDIR, 0 },
         { CTX_SEP, 0, 0 },
@@ -4713,7 +4732,10 @@ static void desk_clip_marked(int cut) {
 static void desk_new(int folder) {
     char p[FS_PATH_LEN];
     fs_mkdir_p(DESKTOP_DIR);
-    fileops_unique(DESKTOP_DIR, folder ? "New folder" : "New text document.txt", p, sizeof(p));
+    if (fileops_unique(DESKTOP_DIR, folder ? "New folder" : "New text document.txt", p, sizeof(p)) < 0) {
+        notify_post("desktop", "Desktop", "Cannot create an item: no available name or path too long.", 0);
+        return;
+    }
     if (folder) fs_mkdir(p);
     else fs_write_path(p, "", 0);
     desk_refresh(1);

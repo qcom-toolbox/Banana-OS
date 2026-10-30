@@ -19,8 +19,8 @@
 #define TRASH_FILES  TRASH_DIR "/files"
 #define TRASH_INFO   TRASH_DIR "/info"
 
-/* a name like base, free in dir: "name", then "name (2)"... */
-void fileops_unique(const char* dir, const char* base, char* out, int cap);
+/* A free name: 0 on success; -1 and empty out on exhaustion/truncation. */
+int  fileops_unique(const char* dir, const char* base, char* out, int cap);
 int  fileops_copy_tree(const char* src, const char* dst, int depth);
 /* src into the folder dstdir (copy, or move): 0, or -1 with why in err.
  * out (if given) gets where it went. */

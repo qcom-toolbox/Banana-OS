@@ -39,7 +39,6 @@ const i18n_pair_t I18N_FR[] = {
     { "New shortcut...", "Nouveau raccourci..." },
     { "Paste", "Coller" },
     { "Arrange icons", "Réorganiser les icônes" },
-    { "Restore removed icons", "Rétablir les icônes retirées" },
     { "Refresh", "Actualiser" },
     { "Open the Desktop folder", "Ouvrir le dossier Bureau" },
     { "Change wallpaper...", "Changer le fond d'écran..." },

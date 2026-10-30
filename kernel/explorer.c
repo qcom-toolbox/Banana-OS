@@ -660,36 +660,6 @@ static int  g_clip_cut;
 static int  g_renaming = -1;          /* item being renamed */
 static char g_rename[FS_NAME_LEN];
 
-static int copy_tree(const char* src, const char* dst, int depth) {
-    if (depth > 12 || fs_mkdir(dst) < 0) return -1;
-    int* idx = (int*)kmalloc(FS_LIST_MAX * sizeof(int));     /* (for this folder's files only) */
-    if (!idx) return -1;
-    int rc = 0;
-    int nf = fs_list_files(src, idx, FS_LIST_MAX);
-    for (int i = 0; i < nf && i < FS_LIST_MAX; i++) {
-        char s[FS_PATH_LEN], d[FS_PATH_LEN];
-        const char* name = fs_file_info(idx[i])->name;
-        ksnprintf(s, sizeof(s), "%s/%s", src, name);
-        ksnprintf(d, sizeof(d), "%s/%s", dst, name);
-        if (fs_copy(s, d) < 0) rc = -1;
-    }
-    kfree(idx);
-    int dirs[32];
-    int nd = fs_list_dirs(src, dirs, 32);
-    char (*names)[FS_NAME_LEN] = kmalloc(32 * FS_NAME_LEN);     /* (8 KiB: not on the GUI's stack) */
-    if (!names) return -1;
-    int n = nd < 32 ? nd : 32;
-    for (int i = 0; i < n; i++) kstrlcpy(names[i], fs_get_dir(dirs[i])->name, FS_NAME_LEN);
-    for (int i = 0; i < n; i++) {
-        char s[FS_PATH_LEN], d[FS_PATH_LEN];
-        ksnprintf(s, sizeof(s), "%s/%s", src, names[i]);
-        ksnprintf(d, sizeof(d), "%s/%s", dst, names[i]);
-        if (copy_tree(s, d, depth + 1) < 0) rc = -1;
-    }
-    kfree(names);
-    return rc;
-}
-
 static void clip_selected(int cut) {
     static char paths[CLIP_MAX][FS_PATH_LEN];
     int n = marked_paths(paths, CLIP_MAX);
@@ -725,7 +695,7 @@ static void paste_here(void) {
     }
     int ok;
     set_status(g_clip_cut ? "Moving..." : "Copying...");
-    if (fs_find_dir(g_clip) >= 0) ok = g_clip_cut ? fs_move(g_clip, dst) >= 0 : copy_tree(g_clip, dst, 0) == 0;
+    if (fs_find_dir(g_clip) >= 0) ok = g_clip_cut ? fs_move(g_clip, dst) >= 0 : fileops_copy_tree(g_clip, dst, 0) == 0;
     else ok = g_clip_cut ? fs_move(g_clip, dst) >= 0 : fs_copy(g_clip, dst) >= 0;
     if (ok) ksnprintf(msg, sizeof(msg), "%s \"%s\"", g_clip_cut ? "Moved" : "Pasted", base);
     else ksnprintf(msg, sizeof(msg), "Could not %s \"%s\"%s", g_clip_cut ? "move" : "copy", base,

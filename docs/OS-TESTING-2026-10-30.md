@@ -171,6 +171,56 @@ The `--mesa` flag asserts that the tested ISO includes the optional runtime.
 CI runs the same offline OS script on the standard ISO without that flag.
 Installation and filesystem tests use disposable image files exclusively.
 
+## Desktop and file operations follow-up
+
+The desktop right-click menu no longer contains **Restore removed icons**.
+Its action and unused translations were removed. Existing icon layout and
+hidden-icon records are retained.
+
+Three additional regressions were reproduced against the previous source:
+
+- **Saved desktop coordinates:** `4294967295` became signed `-1` and indexed
+  the desktop occupancy array before its start. UBSan stopped in the actual
+  placement function. The parser now bounds decimal accumulation, rejects
+  malformed/out-of-range coordinates and overlong records, and keeps CRLF
+  compatibility. Placement independently rejects negative indices.
+- **Incomplete recursive moves:** a folder with 33 children was reported moved
+  successfully, but only 32 children were copied before the source was removed.
+  The shared implementation now sizes the listing buffer to actual counts,
+  covers all children within the listing limit and rejects failed/oversized
+  or growing listings. Any copy failure prevents source deletion. Files also
+  uses this shared implementation instead of its duplicate truncated copier.
+- **Exhausted destination names:** when all 999 candidate names were taken,
+  the previous helper returned the already-existing `note (999).txt`.
+  It now returns failure with an empty output path on exhaustion or truncation;
+  transfer, shortcut creation, trash restore and desktop item creation all
+  handle that failure. Recursive copies also reject truncated child paths.
+
+`tools/test_desktop_layout.py` passes 19,993 checks on both architectures
+under ASan/UBSan, including invalid coordinates, duplicate cells, wide/tiny
+screens, CRLF records and an invalid in-memory entry. `tools/test_fileops.py`
+passes 11,591 checks on each architecture, including 0–64 child directories,
+payload preservation, listing/copy/allocation failures and exhausted names.
+Both run in the publication-gating host workflow.
+
+```sh
+python3 tools/test_desktop_layout.py --sanitize
+python3 tools/test_desktop_layout.py --32 --sanitize
+python3 tools/test_fileops.py --sanitize
+python3 tools/test_fileops.py --32 --sanitize
+```
+
+In a live graphical VM, QMP keyboard input cut/pasted a folder containing
+40 subdirectories from the OS filesystem to a separate FAT32 volume.
+Every payload matched and the source directory was gone. After QEMU exited,
+host `mtype` independently reread all 40 payloads and `fsck.fat -n` returned
+success. A screenshot of the actual desktop menu confirmed that the removed
+restore entry is absent; Arrange icons, Refresh and shortcut creation remain.
+
+Copy failures can leave partial destination contents for inspection; this is
+not an atomic filesystem transaction. The source is retained when recursive
+copy reports failure.
+
 ## Scope of the evidence
 
 Hosted driver models and QEMU test emulated behavior. They do not qualify

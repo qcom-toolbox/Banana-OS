@@ -30,6 +30,10 @@ jobs:
           python3 tools/test_mouse_capture.py --32
           python3 tools/test_config.py --sanitize
           python3 tools/test_config.py --32
+          python3 tools/test_desktop_layout.py --sanitize
+          python3 tools/test_desktop_layout.py --32 --sanitize
+          python3 tools/test_fileops.py --sanitize
+          python3 tools/test_fileops.py --32 --sanitize
           python3 tools/test_kcmd_output.py --32
-          gcc -m64 -ffreestanding -fsyntax-only -Ikernel -Inet -Isdk/include kernel/app.c
-          gcc -m32 -ffreestanding -fsyntax-only -Ikernel -Inet -Isdk/include kernel/app.c
+          gcc -m64 -ffreestanding -fsyntax-only -Ikernel -Inet -Isdk/include kernel/app.c kernel/gui.c kernel/fileops.c kernel/explorer.c kernel/shortcut.c
+          gcc -m32 -ffreestanding -fsyntax-only -Ikernel -Inet -Isdk/include kernel/app.c kernel/gui.c kernel/fileops.c kernel/explorer.c kernel/shortcut.c

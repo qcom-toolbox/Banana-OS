@@ -20,54 +20,68 @@ void fileops_parent(const char* path, char* out, int cap) {
 int fileops_is_dir(const char* path) { return fs_find_dir(path) >= 0; }
 int fileops_on_usb(const char* path) { return fs_path_mount(path) != 0; }
 
-static void join(const char* dir, const char* name, char* out, int cap) {
-    if (!strcmp(dir, "/")) ksnprintf(out, (size_t)cap, "/%s", name);
-    else ksnprintf(out, (size_t)cap, "%s/%s", dir, name);
+static int join(const char* dir, const char* name, char* out, int cap) {
+    int n = !strcmp(dir, "/") ? ksnprintf(out, (size_t)cap, "/%s", name)
+                              : ksnprintf(out, (size_t)cap, "%s/%s", dir, name);
+    return n >= 0 && n < cap ? 0 : -1;
 }
 
-void fileops_unique(const char* dir, const char* base, char* out, int cap) {
-    join(dir, base, out, cap);
-    if (fs_find_file(out) < 0 && fs_find_dir(out) < 0) return;
-    /* "photo (2).png": the number before the extension */
+int fileops_unique(const char* dir, const char* base, char* out, int cap) {
+    if (!out || cap <= 0) return -1;
+    out[0] = 0;
+    if (!base[0] || strlen(base) >= FS_NAME_LEN ||
+        join(dir, base, out, cap) < 0) { out[0] = 0; return -1; }
+    if (fs_find_file(out) < 0 && fs_find_dir(out) < 0) return 0;
+    /* "photo (2).png": the number before the extension. Never hand back
+     * an existing or truncated path when the candidate range is exhausted. */
     char stem[FS_NAME_LEN], ext[FS_NAME_LEN] = "";
     kstrlcpy(stem, base, sizeof(stem));
     char* dot = strrchr(stem, '.');
     if (dot && dot != stem) { kstrlcpy(ext, dot, sizeof(ext)); *dot = 0; }
     for (int n = 2; n < 1000; n++) {
         char nm[FS_NAME_LEN];
-        ksnprintf(nm, sizeof(nm), "%s (%d)%s", stem, n, ext);
-        join(dir, nm, out, cap);
-        if (fs_find_file(out) < 0 && fs_find_dir(out) < 0) return;
+        int len = ksnprintf(nm, sizeof(nm), "%s (%d)%s", stem, n, ext);
+        if (len < 0 || len >= (int)sizeof(nm) || join(dir, nm, out, cap) < 0) break;
+        if (fs_find_file(out) < 0 && fs_find_dir(out) < 0) return 0;
     }
+    out[0] = 0;
+    return -1;
 }
 
 int fileops_copy_tree(const char* src, const char* dst, int depth) {
     if (depth > 12 || fs_mkdir(dst) < 0) return -1;
-    int rc = 0;
-    int* idx = (int*)kmalloc(sizeof(int) * FS_LIST_MAX);
+    /* Listing returns the total, even when its output array is smaller.
+     * Never report a partial copy as complete: cross-volume moves delete
+     * the source only after this function reports success. */
+    int nf = fs_list_files(src, NULL, 0);
+    int nd = fs_list_dirs(src, NULL, 0);
+    if (nf < 0 || nd < 0 || nf > FS_LIST_MAX || nd > FS_LIST_MAX) return -1;
+    int cap = nf > nd ? nf : nd;
+    if (!cap) return 0;
+    int* idx = kmalloc(sizeof(int) * (size_t)cap);
     if (!idx) return -1;
-    int nf = fs_list_files(src, idx, FS_LIST_MAX);
-    for (int i = 0; i < nf && i < FS_LIST_MAX; i++) {
+    int rc = 0;
+    nf = fs_list_files(src, idx, cap);
+    if (nf < 0 || nf > cap) { kfree(idx); return -1; }
+    for (int i = 0; i < nf; i++) {
         char s[FS_PATH_LEN], d[FS_PATH_LEN];
-        const char* name = fs_file_info(idx[i])->name;
-        join(src, name, s, sizeof(s));
-        join(dst, name, d, sizeof(d));
+        const fs_file_t* f = fs_file_info(idx[i]);
+        if (!f) { rc = -1; continue; }
+        if (join(src, f->name, s, sizeof(s)) < 0 ||
+            join(dst, f->name, d, sizeof(d)) < 0) { rc = -1; continue; }
         if (fs_copy(s, d) < 0) rc = -1;
     }
-    kfree(idx);
-    int dirs[32];
-    int nd = fs_list_dirs(src, dirs, 32);
-    char (*names)[FS_NAME_LEN] = kmalloc(32 * FS_NAME_LEN);
-    if (!names) return -1;
-    int n = nd < 32 ? nd : 32;
-    for (int i = 0; i < n; i++) kstrlcpy(names[i], fs_get_dir(dirs[i])->name, FS_NAME_LEN);
-    for (int i = 0; i < n; i++) {
+    nd = fs_list_dirs(src, idx, cap);
+    if (nd < 0 || nd > cap) { kfree(idx); return -1; }
+    for (int i = 0; i < nd; i++) {
         char s[FS_PATH_LEN], d[FS_PATH_LEN];
-        join(src, names[i], s, sizeof(s));
-        join(dst, names[i], d, sizeof(d));
+        const fs_dir_t* child = fs_get_dir(idx[i]);
+        if (!child) { rc = -1; continue; }
+        if (join(src, child->name, s, sizeof(s)) < 0 ||
+            join(dst, child->name, d, sizeof(d)) < 0) { rc = -1; continue; }
         if (fileops_copy_tree(s, d, depth + 1) < 0) rc = -1;
     }
-    kfree(names);
+    kfree(idx);
     return rc;
 }
 
@@ -93,7 +107,10 @@ int fileops_transfer(const char* src, const char* dstdir, int copy, char* out, i
     fileops_parent(src, parent, sizeof(parent));
     if (!copy && !strcmp(parent, dstdir)) { if (out) kstrlcpy(out, src, (size_t)cap); return 0; }   /* already there */
     char dst[FS_PATH_LEN];
-    fileops_unique(dstdir, fileops_base(src), dst, sizeof(dst));
+    if (fileops_unique(dstdir, fileops_base(src), dst, sizeof(dst)) < 0) {
+        kstrlcpy(err, "no available destination name (or path too long)", (size_t)ecap);
+        return -1;
+    }
     int ok;
     /* a move between the disk and a USB stick: copy, then delete */
     int across = fileops_on_usb(src) != fileops_on_usb(dstdir) ||
@@ -189,7 +206,7 @@ int trash_restore(const char* trashed) {
     fs_mkdir_p(dir);
     /* back under its own name (if that is taken: a free one) */
     char dst[FS_PATH_LEN];
-    fileops_unique(dir, fileops_base(orig), dst, sizeof(dst));
+    if (fileops_unique(dir, fileops_base(orig), dst, sizeof(dst)) < 0) return -1;
     int ok = fs_move(trashed, dst) >= 0;
     if (!ok) {
         char err[64];

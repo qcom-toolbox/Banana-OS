@@ -38,7 +38,6 @@ const i18n_pair_t I18N_RM[] = {
     { "New shortcut...", "Nova scursanida..." },
     { "Paste", "Encollar" },
     { "Arrange icons", "Ordinar ils symbols" },
-    { "Restore removed icons", "Restituir ils symbols allontanads" },
     { "Refresh", "Actualisar" },
     { "Open the Desktop folder", "Avrir l'ordinatur Desktop" },
     { "Change wallpaper...", "Midar il fund davos..." },

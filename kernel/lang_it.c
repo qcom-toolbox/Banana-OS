@@ -38,7 +38,6 @@ const i18n_pair_t I18N_IT[] = {
     { "New shortcut...", "Nuovo collegamento..." },
     { "Paste", "Incolla" },
     { "Arrange icons", "Disponi icone" },
-    { "Restore removed icons", "Ripristina le icone rimosse" },
     { "Refresh", "Aggiorna" },
     { "Open the Desktop folder", "Apri la cartella Desktop" },
     { "Change wallpaper...", "Cambia sfondo..." },

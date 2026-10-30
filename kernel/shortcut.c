@@ -114,7 +114,7 @@ int shortcut_create(const char* dir, const char* name, const char* target, char*
     if (!k) kstrlcpy(clean, "Shortcut", sizeof(clean));
     ksnprintf(base, sizeof(base), "%s%s", clean, SHORTCUT_EXT);
     fs_mkdir_p(dir);
-    fileops_unique(dir, base, out, ocap);
+    if (fileops_unique(dir, base, out, ocap) < 0) return -1;
     char body[FS_PATH_LEN + 32];
     int n = ksnprintf(body, sizeof(body), "[Shortcut]\nTarget=%s\n", target);
     return fs_write_path(out, body, (uint32_t)n) < 0 ? -1 : 0;
