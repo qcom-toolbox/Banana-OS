@@ -674,3 +674,29 @@ the Ubuntu runner's make did not reproduce removal by the old rules, while
 the Debian build host did. Baseline reproduction is now informational.
 Both architectures must still compile and retain the exact source hash on
 every make version; dry-run cleanup by the protected rules remains forbidden.
+
+### Wallpaper catalogue and preferences across updates
+
+A disposable BIOS VM installed build 212, selected Forest Night, synced,
+updated from the current test ISO and booted from disk without the CD.
+The catalogue included Alpine Peaks, Seeley Lake and Grand Tetons, so absence
+of the built-in landscapes was not reproduced on this migration.
+
+The test did reproduce a preference-loading bug: before first opening the
+desktop, the wallpaper command reported Azure Flow although the stored
+configuration selected Forest Night. Only GUI startup restored configuration.
+The command now loads the saved state before reading/changing the selection,
+also retaining the saved recent-picture list when changing a preset from CLI.
+
+tools/ci-install-test.sh now preserves Forest Night across installation/update,
+checks the landscape catalogue, selects each of the three new presets, syncs,
+and verifies Grand Tetons after another cold boot. The complete five-phase
+BIOS update from build 212 passed with the Mesa test ISO, including terminal
+and network preferences, Mesa glinfo, LibJS checks, old-ELF execution and exact
+installed binary hashes after update/reboot. Both kernels compiled; existing
+wallpaper fault tests passed with ASan/UBSan on 32/64-bit and all three 3200x1800
+JPEG provenance/hash checks passed.
+
+The editor host fixture also now uses a test-only working directory rather
+than requiring /home/banana on Ubuntu runners. Production editor startup is
+unchanged; both architecture sanitizer tests pass.

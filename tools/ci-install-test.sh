@@ -61,6 +61,7 @@ python3 tools/serialtest.py --log "$logs/serial-install.log" \
     --cmd 'disks' \
     --cmd 'install --minimal ##? Continue? [y/N]' \
     --cmd 'y ## install: done' \
+    --cmd 'wallpaper preset Forest Night ## Current wallpaper: Forest Night' \
     --cmd 'echo banana-ci-persistence > /home/banana/ci-persist.txt' \
     --cmd 'cp /bin/bash /home/banana/ci-old-bash' \
     --cmd 'chmod +x /home/banana/ci-old-bash' \
@@ -108,6 +109,11 @@ python3 tools/serialtest.py --log "$logs/serial-after-update.log" \
     --cmd 'browser --engine ## browser engine: LibJS' \
     --cmd 'selftest browser libjsdom ## 30 passed, 0 failed' \
     --cmd 'pkg remove libjsworker ## integrated OS component' \
+    --cmd 'wallpaper ## Current wallpaper: Forest Night' \
+    --cmd 'wallpaper list ## Grand Tetons' \
+    --cmd 'wallpaper preset Alpine Peaks ## Current wallpaper: Alpine Peaks' \
+    --cmd 'wallpaper preset Seeley Lake ## Current wallpaper: Seeley Lake' \
+    --cmd 'wallpaper preset Grand Tetons ## Current wallpaper: Grand Tetons' \
     --cmd 'pkg info terminal ## Terminal' \
     --cmd 'pkg remove terminal ## integrated OS component' \
     --cmd 'pkg remove bash ## integrated OS component' \
@@ -133,6 +139,8 @@ python3 tools/serialtest.py --log "$logs/serial-preferences.log" \
     --cmd '/apps/terminal/app-x86_64 --show-config ## theme=solarized' \
     --cmd '/apps/terminal/app-x86_64 --show-config ## font=18' \
     --cmd 'cat /home/banana/.config/banana-terminal.conf ## shell=zsh' \
+    --cmd 'wallpaper ## Current wallpaper: Grand Tetons' \
+    --cmd 'wallpaper list ## Grand Tetons' \
     --cmd 'ifconfig priority ## Network priority: wifi' \
     --cmd 'drop_caches ## drop_caches:' \
     --cmd "/home/banana/ci-old-bash -c '/bin/echo old-elf-probe-OK' ## old-elf-probe-OK" \

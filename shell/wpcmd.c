@@ -179,6 +179,9 @@ void cmd_wallpaper(int argc, char** argv) {
         fail("no graphical framebuffer - wallpapers need the GUI mode");
         return;
     }
+    /* Console commands can run before the desktop's first start. Restore
+     * the saved selection/history before reading or replacing this state. */
+    wallpaper_load_config();
     if (argc < 2) {
         show_current();
         terminal_writeln("");

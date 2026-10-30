@@ -1,5 +1,10 @@
 # 🍌 Banana OS 0.6
 
+- **Wallpaper preferences after restart:** the wallpaper command now loads the
+  saved choice and recent pictures before the desktop first opens. Update CI
+  preserves an existing choice, selects all three CC0 landscapes and verifies
+  the new choice after another cold boot.
+
 - **SDK build input preservation:** incremental app builds can no longer let
   GNU make delete allocator source as an intermediate file. The regression
   reproduces the old cleanup and compiles both architectures in an isolated SDK.
