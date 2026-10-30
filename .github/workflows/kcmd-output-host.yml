@@ -22,6 +22,7 @@ jobs:
         run: |
           python3 tools/test_kcmd_output.py --sanitize
           python3 tools/test_program_load.py --sanitize
+          python3 tools/test_update_elf.py
           python3 tools/test_elf_loader.py --sanitize
           python3 tools/test_elf_loader.py --32 --sanitize
           python3 tools/test_fd_sync.py --sanitize

@@ -29,6 +29,10 @@
   The actual parser/writer is tested with cache eviction and I/O/allocation
   failures on 32-bit and under 64-bit ASan/UBSan.
 
+- **Upgrade ELF checks:** installation/update CI preserves an executable from
+  the old release, runs it again after cache eviction and a cold reboot, and
+  compares installed Bash/Echo/Terminal SHA-256 hashes against the candidate ISO.
+
 - **Programs on installed disks:** executable files stay pinned while their
   address spaces are allocated, including allocation failures. Disk read errors
   return an I/O error. Bash now stops if its binary/script probe cannot read

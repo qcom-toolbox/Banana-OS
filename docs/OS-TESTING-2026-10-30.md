@@ -221,6 +221,33 @@ Copy failures can leave partial destination contents for inspection; this is
 not an atomic filesystem transaction. The source is retained when recursive
 copy reports failure.
 
+## ELF checks after upgrading an installed system
+
+The strengthened five-phase install/update test keeps a copy of the old
+release's Bash executable in the user's home directory. It executes that
+unchanged ELF before the update, after the update and after a further cold
+boot, each following `drop_caches`. The preserved executable launches the
+current `/bin/echo`, exercising old-app compatibility and new-program execution.
+
+The test also captures SHA-256 of the candidate ISO's `/bin/bash`, `/bin/echo`
+and `/apps/terminal/app-x86_64`. Both updated-disk boots must match these
+exact hashes, while the preserved old executable must retain its original hash.
+Missing or conflicting hash records fail the check; 26 host verifier checks
+cover missing entries, changed payloads and conflicting duplicate records.
+
+The local source candidate `816eaf2` passed upgrade from official build 212
+in BIOS and UEFI with a Mesa/LibJS target; the same five-phase test also
+passed with an emulated SATA/AHCI system disk. The older ELF's SHA-256 was
+`3f6f8c10ac9f5bd499556ae903ebb5cdc47aa2c7562b95ec2ad2ee52c7b706e9`;
+the target Bash differed, proving the compatibility probe used old code.
+The usual browser, Mesa, terminal preference and user-data checks also passed.
+No ELF breakage was reproduced in these upgrade paths.
+
+These assertions are now part of `tools/ci-install-test.sh`, so the existing
+standard/Mesa, BIOS/UEFI, build-212/build-218 publication matrix runs them.
+`tools/check_update_elf.py` verifies the captured bytes rather than inferring
+executable integrity merely from reaching a shell prompt.
+
 ## Scope of the evidence
 
 Hosted driver models and QEMU test emulated behavior. They do not qualify

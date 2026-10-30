@@ -62,6 +62,8 @@ python3 tools/serialtest.py --log "$logs/serial-install.log" \
     --cmd 'install --minimal ##? Continue? [y/N]' \
     --cmd 'y ## install: done' \
     --cmd 'echo banana-ci-persistence > /home/banana/ci-persist.txt' \
+    --cmd 'cp /bin/bash /home/banana/ci-old-bash' \
+    --cmd 'chmod +x /home/banana/ci-old-bash' \
     --cmd 'sync' \
     -- "${base_qemu[@]}" -cdrom "$base_iso" -boot d \
        -drive "file=$disk_img,format=raw,if=ide" \
@@ -72,6 +74,8 @@ python3 tools/serialtest.py --log "$logs/serial-diskboot.log" \
     --boot-timeout 180 --timeout 180 \
     --cmd 'cat /home/banana/ci-persist.txt ## banana-ci-persistence' \
     --cmd 'drop_caches ## drop_caches:' \
+    --cmd "/home/banana/ci-old-bash -c '/bin/echo old-elf-probe-OK' ## old-elf-probe-OK" \
+    --cmd 'sha256sum /home/banana/ci-old-bash' \
     --cmd "bash -c 'gpu3d status; /bin/echo disk-commands-ok' ## disk-commands-ok" \
     -- "${base_qemu[@]}" \
        -drive "file=$disk_img,format=raw,if=ide" \
@@ -89,6 +93,7 @@ else
 fi
 python3 tools/serialtest.py --log "$logs/serial-update.log" \
     --boot-timeout 180 --timeout 180 \
+    --cmd 'sha256sum /bin/bash /bin/echo /apps/terminal/app-x86_64' \
     "${update_cmds[@]}" \
     -- "${base_qemu[@]}" -cdrom Banana_OS.iso -boot d \
        -drive "file=$disk_img,format=raw,if=ide" \
@@ -98,6 +103,7 @@ echo "== 4. Boot updated disk again and verify user data"
 python3 tools/serialtest.py --log "$logs/serial-after-update.log" \
     --boot-timeout 180 --timeout 180 \
     "${mesa_checks[@]}" \
+    --cmd 'sha256sum /bin/bash /bin/echo /apps/terminal/app-x86_64' \
     --cmd 'selftest boot ## 0 failed' \
     --cmd 'browser --engine ## browser engine: LibJS' \
     --cmd 'selftest browser libjsdom ## 30 passed, 0 failed' \
@@ -108,6 +114,8 @@ python3 tools/serialtest.py --log "$logs/serial-after-update.log" \
     --cmd 'pkg remove zsh ## integrated OS component' \
     --cmd 'cat /home/banana/ci-persist.txt ## banana-ci-persistence' \
     --cmd 'drop_caches ## drop_caches:' \
+    --cmd "/home/banana/ci-old-bash -c '/bin/echo old-elf-probe-OK' ## old-elf-probe-OK" \
+    --cmd 'sha256sum /home/banana/ci-old-bash' \
     --cmd "bash -c 'gpu3d status; /bin/echo disk-commands-ok' ## disk-commands-ok" \
     --cmd '/apps/terminal/app-x86_64 --set theme solarized' \
     --cmd '/apps/terminal/app-x86_64 --set font 18' \
@@ -121,14 +129,18 @@ echo "== 5. Reboot and verify terminal preferences survive on disk"
 python3 tools/serialtest.py --log "$logs/serial-preferences.log" \
     --boot-timeout 180 --timeout 180 \
     "${mesa_checks[@]}" \
+    --cmd 'sha256sum /bin/bash /bin/echo /apps/terminal/app-x86_64' \
     --cmd '/apps/terminal/app-x86_64 --show-config ## theme=solarized' \
     --cmd '/apps/terminal/app-x86_64 --show-config ## font=18' \
     --cmd 'cat /home/banana/.config/banana-terminal.conf ## shell=zsh' \
     --cmd 'ifconfig priority ## Network priority: wifi' \
     --cmd 'drop_caches ## drop_caches:' \
+    --cmd "/home/banana/ci-old-bash -c '/bin/echo old-elf-probe-OK' ## old-elf-probe-OK" \
+    --cmd 'sha256sum /home/banana/ci-old-bash' \
     --cmd "bash -c 'gpu3d status; /bin/echo disk-commands-ok' ## disk-commands-ok" \
     --cmd 'cat /usr/share/licenses/mt7601u/NOTICES ## Copyright (c) 2013, Ralink' \
     -- "${base_qemu[@]}" -drive "file=$disk_img,format=raw,if=ide" \
     2>&1 | tee "$logs/results-preferences.log"
 
+python3 tools/check_update_elf.py "$logs"
 echo "== All installation, disk boot, and update checks passed on $firmware"
