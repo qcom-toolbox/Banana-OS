@@ -319,39 +319,13 @@ jobs:
 
 
   # Build the isolated renderer before embedding it in the 64-bit ISO.
-  # Also publish raw BPKs and notices for the exact same commit.
+  # Keep audited packages/notices as internal CI artifacts; the worker ships in the ISO.
   libjs:
     uses: ./.github/workflows/libjs-reference.yml
     permissions:
       contents: read
     with:
       sdk: true
-
-  publish-libjs:
-    needs: [publish-isos, libjs]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download installable LibJS packages
-        uses: actions/download-artifact@v4
-        with:
-          name: experimental-libjs-packages
-          path: libjs-packages
-      - name: Verify package checksums
-        working-directory: libjs-packages
-        run: sha256sum -c LIBJS-SHA256SUMS
-      - name: Add LibJS packages to the ISO prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_number }}
-          name: Banana OS build ${{ github.run_number }}
-          prerelease: true
-          fail_on_unmatched_files: true
-          files: |
-            libjs-packages/*.bpk
-            libjs-packages/LIBJS-THIRD-PARTY-NOTICES.txt
-            libjs-packages/LIBJS-SHA256SUMS
 
   mesa:
     name: Intel Mesa runtime (Crocus and Iris)
@@ -620,6 +594,7 @@ jobs:
             banana-driver-sdk.tar.gz
           body: |
             - **Banana_OS.iso**: standard BIOS/UEFI image.
+            - LibJS is integrated in both 64-bit ISO variants; no separate LibJS BPK installation is required.
             - **Banana_OS-mesa.iso**: the same OS with the 64-bit Mesa runtime, Intel Crocus/Iris (Core 1st–10th generation), VirGL and software fallback. The combined Mesa/LibJS profile is tested with 1 GiB RAM.
 
             - **banana-sdk.tar.gz**: application SDK.

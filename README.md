@@ -66,6 +66,11 @@
   Physical Intel performance and the reported installed-disk command failure
   still require confirmation on the affected PC.
 
+The LibJS browser renderer is included in both 64-bit ISO variants. Standalone
+LibJS BPKs and their sidecar files are kept as developer CI artifacts and are
+no longer attached to ISO prereleases; the optional diagnostic probe is not an
+integrated application.
+
 **Mesa ISO:** prereleases also include `Banana_OS-mesa.iso` with Intel Crocus/Iris (Core 1st–10th generation), VirGL and software OpenGL. The combined Mesa/LibJS profile is tested with 1 GiB RAM. Intel acceleration remains experimental: see [GPU.md](GPU.md#mesa-iso-in-prereleases) for setup, tests and hardware limits.
 
 Hybrid images share the BIOS and UEFI kernel data to avoid storing duplicate

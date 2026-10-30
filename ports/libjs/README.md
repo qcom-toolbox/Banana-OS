@@ -149,24 +149,29 @@ per-second CPU throttle and IPC/origin restrictions remain active. CPU and
 wall-time terminations show distinct errors; crashes are not labelled as proven
 quota failures.
 
-Every ISO workflow builds and audits LibJS before embedding the renderer, then attaches these
-packages to the same [GitHub prerelease](https://github.com/qcom-toolbox/Banana-OS/releases):
+Every ISO workflow builds and audits LibJS before embedding the renderer in
+both 64-bit ISO variants. No separate LibJS download or BPK installation is
+needed, and the ISO prerelease no longer attaches standalone LibJS packages,
+notices or checksum files.
 
-- `libjsworker-x86_64.bpk`: the isolated browser renderer.
-- `libjsprobe-x86_64.bpk`: standalone JavaScript/containment probes.
-- `LIBJS-THIRD-PARTY-NOTICES.txt` and `LIBJS-SHA256SUMS`: licenses and SHA-256 checksums.
+Developer builds remain available in the run's `experimental-libjs-packages`
+CI artifact:
 
-No BPK installation is needed on current 64-bit images. To test a separate
-package build in a disposable VM, download it and install it explicitly:
+- `libjsworker-x86_64.bpk`: the isolated browser renderer included in the ISO.
+- `libjsprobe-x86_64.bpk`: optional standalone JavaScript/containment probes;
+  this diagnostic application is not embedded in the ISO.
+- `LIBJS-THIRD-PARTY-NOTICES.txt` and `LIBJS-SHA256SUMS`: licenses and checksums
+  for the internal artifact.
+
+To test a separate package build in a disposable VM, download the CI artifact,
+unzip it and install its raw BPK explicitly:
 
     pkg install /home/banana/Downloads/libjsworker-x86_64.bpk
     browser --libjs https://github.com/qcom-toolbox/Banana-OS/releases
 
-The optional probe is installed with `pkg install` in the same way.
-These are raw installable BPKs; no decompression is required. They are also
-available in the ISO run's `experimental-libjs-packages` artifact. A manual
-LibJS workflow builds them by default; disable its `sdk` input for native probes
-only. The standalone probe is not embedded in the normal ISO.
+The optional probe installs with `pkg install` in the same way. A manual LibJS
+workflow builds these artifacts by default; disable its `sdk` input for native
+probes only.
 
 The root Makefile builds LibJS locally using the Debian prerequisites above.
 CI passes the same commit's audited artifact through `LIBJS_WORKER_BPK=/path/to/libjsworker-x86_64.bpk`.
