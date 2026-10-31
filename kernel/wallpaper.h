@@ -29,6 +29,9 @@ typedef struct {
 
 int                       wallpaper_preset_count(void);
 const wallpaper_preset_t* wallpaper_preset(int i);
+/* Gallery order puts photographic landscapes first. Returns the stable preset
+ * index; CLI numbers and saved preset names keep their existing meaning. */
+int wallpaper_gallery_preset(int slot);
 /* by (case-insensitive) name, or 1-based number; -1 if none */
 int                       wallpaper_find_preset(const char* s);
 

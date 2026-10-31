@@ -82,6 +82,16 @@ const wallpaper_preset_t* wallpaper_preset(int i) {
     return (i >= 0 && i < PRESET_COUNT) ? &g_presets[i] : NULL;
 }
 
+int wallpaper_gallery_preset(int slot) {
+    if(slot<0||slot>=PRESET_COUNT)return -1;
+    for(int photos=1;photos>=0;photos--)
+        for(int i=0;i<PRESET_COUNT;i++) {
+            int is_photo=strstr(g_presets[i].file,"/landscapes/")!=NULL;
+            if(is_photo==photos&&slot--==0)return i;
+        }
+    return -1;
+}
+
 int wallpaper_find_preset(const char* s) {
     uint32_t n;
     int used = k_parse_u32(s, &n);

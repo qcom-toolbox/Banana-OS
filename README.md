@@ -1,5 +1,11 @@
 # 🍌 Banana OS 0.6
 
+- **Visible landscape wallpapers:** Alpine Peaks, Seeley Lake and Grand Tetons
+  appear first in Settings. The gallery shows its total and gains page buttons
+  and mouse-wheel navigation when the window cannot show every preset.
+  [Preview](assets/screenshots/wallpaper-gallery.png) ·
+  [GUI validation](docs/OS-TESTING-2026-10-31.md).
+
 - **Wallpaper preferences after restart:** the wallpaper command now loads the
   saved choice and recent pictures before the desktop first opens. Update CI
   preserves an existing choice, selects all three CC0 landscapes and verifies

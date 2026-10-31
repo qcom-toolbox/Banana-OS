@@ -18,6 +18,7 @@
 #include "audio.h"
 #include "keyboard.h"
 #include "wallpaper.h"
+#include "wallpaper_gallery.h"
 #include "wallpaper_data.h"
 #include "sysinfo.h"
 #include "rtc.h"
@@ -136,20 +137,33 @@ static int cx0(void) { return g_win.x + SIDE_W + 16; }
 static int cy0(void) { return g_win.y + BODY_Y + 6; }
 static int cw(void) { return g_win.w - SIDE_W - 28; }
 
-/* Wallpaper: the presets' thumbnails, two rows; then the user's pictures */
-#define THUMB_W 80
-#define THUMB_H 50
-#define THUMB_GAP 8
-static int thumbs_per_row(void) { int n = (cw() + THUMB_GAP) / (THUMB_W + THUMB_GAP); return n < 1 ? 1 : n; }
-static void thumb_rect(int i, int* x, int* y) {
-    int per = thumbs_per_row();
-    *x = cx0() + (i % per) * (THUMB_W + THUMB_GAP);
-    *y = cy0() + 38 + (i / per) * (THUMB_H + 20);
+/* The gallery pages within the content area; preset IDs stay stable. */
+#define THUMB_W WP_THUMB_W
+#define THUMB_H WP_THUMB_H
+#define THUMB_GAP WP_THUMB_GAP
+static int g_wp_page;
+static wp_gallery_t gallery(void) {
+    wp_gallery_t l=wp_gallery_layout(cw(),g_win.y+g_win.h-28-cy0(),
+                                    wallpaper_preset_count(),wallpaper_recent_count());
+    if(g_wp_page>=l.pages)g_wp_page=l.pages-1;
+    if(g_wp_page<0)g_wp_page=0;
+    return l;
 }
-static int preset_rows(void) { int per = thumbs_per_row(); return (wallpaper_preset_count() + per - 1) / per; }
-static int pics_y(void) { return cy0() + 38 + preset_rows() * (THUMB_H + 20) + 4; }     /* "Your pictures" */
-static void pic_rect(int i, int* x, int* y) { *x = cx0() + i * (THUMB_W + THUMB_GAP); *y = pics_y() + 18; }
-static int wp_buttons_y(void) { return pics_y() + 18 + THUMB_H + 24; }
+static int gallery_first(void) { wp_gallery_t l=gallery();return g_wp_page*l.capacity; }
+static int gallery_end(void) {
+    wp_gallery_t l=gallery();int end=(g_wp_page+1)*l.capacity;
+    return end<wallpaper_preset_count()?end:wallpaper_preset_count();
+}
+static void thumb_rect(int slot,int* x,int* y) {
+    wp_gallery_t l=gallery();int local=slot-g_wp_page*l.capacity;
+    *x=cx0()+(local%l.per_row)*(THUMB_W+THUMB_GAP);
+    *y=cy0()+38+(local/l.per_row)*WP_THUMB_ROW;
+}
+static int pager_y(void) { wp_gallery_t l=gallery();return cy0()+38+l.rows*WP_THUMB_ROW; }
+static int pics_y(void) { wp_gallery_t l=gallery();return pager_y()+l.pager_h+4; }
+static void pic_rect(int i,int* x,int* y) { *x=cx0()+i*(THUMB_W+THUMB_GAP);*y=pics_y()+18; }
+static int wp_buttons_y(void) { return pics_y()+18+(wallpaper_recent_count()?THUMB_H:18)+24; }
+static int wp_visible(int y,int h) { return y>=cy0()&&y+h<=g_win.y+g_win.h-28; }
 
 /* a w x h picture at (x, y), clipped to the screen */
 static void blit(int x, int y, int w, int h, const uint32_t* px) {
@@ -190,7 +204,8 @@ static void save_volume(void) {
 
 static void draw_display(void) {
     int x = cx0(), y = cy0();
-    label(x, y, _("Wallpaper"), C_HEAD);
+    char heading[64];ksnprintf(heading,sizeof(heading),"%s (%d)",_("Wallpaper"),wallpaper_preset_count());
+    label(x,y,heading,C_HEAD);
     const char* file = wallpaper_current_file();
     char line[96];
     if (file && *file) {
@@ -203,11 +218,10 @@ static void draw_display(void) {
         ksnprintf(line, sizeof(line), "%s %s", _("Now:"), p ? p->name : "-");
     }
     label(x, y + 18, line, C_DIM);
-    int n = wallpaper_preset_count();
     int cur = wallpaper_current_preset();
-    for (int i = 0; i < n; i++) {
-        int tx, ty;
-        thumb_rect(i, &tx, &ty);
+    for(int slot=gallery_first();slot<gallery_end();slot++) {
+        int i=wallpaper_gallery_preset(slot),tx,ty;
+        thumb_rect(slot,&tx,&ty);
         if (ty + THUMB_H + 20 > g_win.y + g_win.h - 28) break;
         const wallpaper_preset_t* p = wallpaper_preset(i);
         gfx_fill_rect(tx - 2, ty - 2, THUMB_W + 4, THUMB_H + 4, i == cur ? C_ACCENT : TC(0x10141C));
@@ -228,15 +242,26 @@ static void draw_display(void) {
         label(tx, ty + THUMB_H + 5, nm, i == cur ? C_HEAD : C_DIM);
     }
 
+    wp_gallery_t layout=gallery();
+    if(layout.pages>1&&wp_visible(pager_y(),20)){
+        int py=pager_y();
+        if(g_wp_page>0)button(x,py,80,_("Previous"),0);
+        else label(x+8,py+6,_("Previous"),C_DIM);
+        char page[40];ksnprintf(page,sizeof(page),"%d / %d",g_wp_page+1,layout.pages);
+        label(x+cw()/2-20,py+6,page,C_DIM);
+        if(g_wp_page+1<layout.pages)button(x+cw()-64,py,64,_("Next"),0);
+        else label(x+cw()-56,py+6,_("Next"),C_DIM);
+    }
+
     /* the user's pictures: those used lately */
     int py = pics_y();
-    label(x, py, _("Your pictures"), C_HEAD);
-    int nr = wallpaper_recent_count();
-    if (!nr) label(x, py + 22, _("The pictures you choose show up here."), C_DIM);
+    if(wp_visible(py,10))label(x,py,_("Your pictures"),C_HEAD);
+    int nr=wallpaper_recent_count();
+    if(!nr&&wp_visible(py+22,10))label(x,py+22,_("The pictures you choose show up here."),C_DIM);
     for (int i = 0; i < nr; i++) {
         int tx, ty;
         pic_rect(i, &tx, &ty);
-        if (tx + THUMB_W > x + cw()) break;
+        if(tx+THUMB_W>x+cw()||!wp_visible(ty,THUMB_H+18))break;
         int on = file && !strcmp(file, wallpaper_recent(i));
         gfx_fill_rect(tx - 2, ty - 2, THUMB_W + 4, THUMB_H + 4, on ? C_ACCENT : TC(0x10141C));
         kbnav_add(&g_nav, tx, ty + 14, THUMB_W, THUMB_H - 14);
@@ -253,12 +278,16 @@ static void draw_display(void) {
     }
 
     /* Browse..., and how a picture covers the screen */
-    int by = wp_buttons_y();
+    int by=wp_buttons_y();
+    if(!wp_visible(by,20))return;
     button(x, by, 96, _("Browse..."), 0);
     int pic = file && *file;
-    label(x + 112, by + 6, _("Position:"), pic ? C_TEXT : C_DIM);
-    for (int m = 0; m < 4; m++)
-        button(x + 192 + m * 68, by, 64, _(MODE_NAMES[m]), pic && wallpaper_current_mode() == MODES[m]);
+    by+=24;
+    if(!wp_visible(by,20))return;
+    label(x,by+6,_("Position:"),pic?C_TEXT:C_DIM);
+    int step=(cw()-80)/4;
+    for(int m=0;m<4;m++)
+        button(x+80+m*step,by,64,_(MODE_NAMES[m]),pic&&wallpaper_current_mode()==MODES[m]);
 }
 
 /* ── Fonts: the text size, the installed fonts, which one the interface
@@ -435,6 +464,9 @@ void settings_wheel(int mx, int my, int dz) {
     (void)mx; (void)my;
     if (!g_open) return;
     if (fc_active()) { fc_wheel(dz); g_gen++; return; }
+    if(g_page==PG_DISPLAY&&inside(mx,my,cx0(),cy0(),cw(),g_win.y+g_win.h-28-cy0())) {
+        g_wp_page+=dz;gallery();g_gen++;
+    }
     if (g_page == PG_FONTS) { g_font_top += dz; g_gen++; }
     if (g_page == PG_APPS) { apps_wheel(dz); g_gen++; }
 }
@@ -1892,31 +1924,36 @@ void settings_click(int mx, int my) {
     }
     if (g_page == PG_THEMES) { click_themes(mx, my); g_gen++; return; }
     if (g_page == PG_FONTS) { click_fonts(mx, my); return; }
-    if (g_page == PG_DISPLAY) {
+    if(g_page==PG_DISPLAY) {
+        wp_gallery_t l=gallery();
+        if(l.pages>1&&wp_visible(pager_y(),20)){
+            if(g_wp_page>0&&inside(mx,my,x,pager_y(),80,20)){g_wp_page--;g_gen++;return;}
+            if(g_wp_page+1<l.pages&&inside(mx,my,x+cw()-64,pager_y(),64,20)){g_wp_page++;g_gen++;return;}
+        }
         for (int i = 0; i < wallpaper_recent_count(); i++) {
             int tx, ty;
             pic_rect(i, &tx, &ty);
-            if (tx + THUMB_W > x + cw()) break;
+            if(tx+THUMB_W>x+cw()||!wp_visible(ty,THUMB_H+18))break;
             if (inside(mx, my, tx + THUMB_W - 12, ty, 12, 12)) { wallpaper_recent_remove(i); return; }
             if (inside(mx, my, tx, ty, THUMB_W, THUMB_H + 18)) { picture_chosen(wallpaper_recent(i)); return; }
         }
         int by = wp_buttons_y();
-        if (inside(mx, my, x, by, 96, 20)) {
+        if(wp_visible(by,20)&&inside(mx,my,x,by,96,20)) {
             fc_open(_("Choose a picture for the wallpaper"), WALLPAPER_DIR, is_picture, picture_chosen);
             return;
         }
         for (int m = 0; m < 4; m++)
-            if (inside(mx, my, x + 192 + m * 68, by, 64, 20)) {
+            if(wp_visible(by+24,20)&&inside(mx,my,x+80+m*((cw()-80)/4),by+24,64,20)) {
                 char err[80];
                 if (wallpaper_set_mode(MODES[m], err, sizeof(err)) == 0)
                     ksnprintf(g_status, sizeof(g_status), "Position: %s", _(MODE_NAMES[m]));
                 else ksnprintf(g_status, sizeof(g_status), "Choose a picture first (Browse...)");
                 return;
             }
-        for (int i = 0; i < wallpaper_preset_count(); i++) {
-            int tx, ty;
-            thumb_rect(i, &tx, &ty);
-            if (inside(mx, my, tx, ty, THUMB_W, THUMB_H + 18)) {
+        for(int slot=gallery_first();slot<gallery_end();slot++) {
+            int i=wallpaper_gallery_preset(slot),tx,ty;
+            thumb_rect(slot,&tx,&ty);
+            if(wp_visible(ty,THUMB_H+20)&&inside(mx,my,tx,ty,THUMB_W,THUMB_H+18)) {
                 wallpaper_set_preset(i);
                 const wallpaper_preset_t* p = wallpaper_preset(i);
                 ksnprintf(g_status, sizeof(g_status), "Wallpaper: %s", p ? p->name : "");
@@ -2091,6 +2128,7 @@ void settings_open(void) {
     wifi_clear_password();
     char reason[160];g_sleep_available=!acpi_s3_status(reason,sizeof(reason));
     g_open = 1;
+    g_wp_page=0;
     g_pc_focus = g_pc_dirty = 0;
     kstrlcpy(g_pc_name, hostname_get(), sizeof(g_pc_name));
     g_status[0] = 0;

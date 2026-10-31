@@ -7,6 +7,7 @@
 #include "../../kernel/wallpaper_data.h"
 #include "../../kernel/fs.h"
 #include "../../kernel/fb.h"
+#include "../../kernel/wallpaper_gallery.h"
 #define PIXEL(name) const uint8_t wallpaper_##name[WALLPAPER_IMG_W*WALLPAPER_IMG_H*3]={0};
 PIXEL(midnight_blue) PIXEL(forest_night) PIXEL(graphite) PIXEL(royal_purple) PIXEL(sunset_grid)
 PIXEL(ocean_wave) PIXEL(cyber_mint) PIXEL(amber_mesh) PIXEL(azure_flow) PIXEL(plain_black)
@@ -42,7 +43,37 @@ void image_render(const image_t* p,uint32_t* dst,int w,int h,image_mode_t mode,u
 int main(int argc,char** argv){
  CHECK(argc==2);files[0]=(fs_file_t){.content=calloc(1,8192),.size=4096,.cap=8192,.used=1,.loaded=1};
  char err[128];
- if(!strcmp(argv[1],"io")){
+ if(!strcmp(argv[1],"gallery")){
+  CHECK(wallpaper_preset_count()==13);
+  int seen[13]={0};
+  for(int slot=0;slot<13;slot++){
+   int index=wallpaper_gallery_preset(slot);CHECK(index>=0&&index<13&&!seen[index]);seen[index]=1;
+   if(slot<3)CHECK(strstr(wallpaper_preset(index)->file,"/landscapes/")!=NULL);
+  }
+  CHECK(wallpaper_gallery_preset(-1)==-1&&wallpaper_gallery_preset(13)==-1);
+  CHECK(wallpaper_find_preset("1")==0&&wallpaper_find_preset("11")==10);
+  CHECK(!strcmp(wallpaper_preset(0)->name,"Midnight Blue")); /* Saved/CLI ID stays stable. */
+  CHECK(!strcmp(wallpaper_preset(wallpaper_gallery_preset(0))->name,"Alpine Peaks"));
+  for(int width=260;width<=1000;width+=20)for(int height=220;height<=700;height+=20)
+   for(int recent=0;recent<=5;recent+=5){
+    wp_gallery_t l=wp_gallery_layout(width,height,13,recent);
+    CHECK(l.per_row>0&&l.rows>0&&l.capacity>0&&l.pages>0);
+    CHECK(l.rows*WP_THUMB_ROW+38+l.pager_h<=height);
+    int visits[13]={0};
+    for(int page=0;page<l.pages;page++)for(int k=0;k<l.capacity;k++){
+     int slot=page*l.capacity+k;if(slot>=13)break;
+     int col=k%l.per_row,row=k/l.per_row;
+     CHECK(col*(WP_THUMB_W+WP_THUMB_GAP)+WP_THUMB_W<=width);
+     CHECK(38+row*WP_THUMB_ROW+WP_THUMB_ROW<=height);
+     int preset=wallpaper_gallery_preset(slot);CHECK(preset>=0&&preset<13);visits[preset]++;
+    }
+    for(int i=0;i<13;i++)CHECK(visits[i]==1);
+   }
+  wp_gallery_t small=wp_gallery_layout(420,408,13,5);
+  CHECK(small.pages>1&&small.pager_h==24);
+  wp_gallery_t normal=wp_gallery_layout(480,428,13,0);
+  CHECK(normal.pages==1&&normal.capacity>=13);
+ }else if(!strcmp(argv[1],"io")){
   read_fail=1;CHECK(wallpaper_set_file("/pic.jpg",IMAGE_FILL,err,sizeof(err))<0);CHECK(pins[0]==0&&decodes==0);
   read_fail=0;files[0].loaded=0;CHECK(wallpaper_set_file("/pic.jpg",IMAGE_FILL,err,sizeof(err))<0);CHECK(pins[0]==0&&decodes==0);
  }else if(!strcmp(argv[1],"config")){
