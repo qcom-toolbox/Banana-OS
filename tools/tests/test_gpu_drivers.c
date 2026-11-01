@@ -6,6 +6,7 @@
  * a process of its own (the drivers keep their state in statics).
  *   cc -O1 -I kernel tools/tests/test_gpu_drivers.c kernel/gpu_intel.c kernel/gpu_radeon.c -o /tmp/gpudrv && /tmp/gpudrv */
 #include "../../kernel/gpu.h"
+#include "../../kernel/gpu_i915.h"
 #include "../../kernel/fb.h"
 #include "../../kernel/kstring.h"
 
@@ -41,6 +42,14 @@ uint16_t pci_read16(uint8_t b, uint8_t dv, uint8_t fn, uint8_t off) {
     if (b == 0 && dv == 0x1F && off == 2) return g_pch;
     return 0;
 }
+/* Record the display-to-render handoff without starting a render engine. */
+static i915_hw_t render_hw;
+static int render_attached;
+void i915_attach(const i915_hw_t* hw) { render_hw = *hw; render_attached++; }
+uint32_t pci_read32(uint8_t b, uint8_t dv, uint8_t fn, uint8_t off) {
+    (void)b; (void)dv; (void)fn;
+    return off == 8 ? 9 : 0;
+}
 void pci_enable_from(const pci_dev_t* d, const char* f) { (void)d; (void)f; }
 void pci_claim(const pci_dev_t* d, const char* drv) { (void)d; (void)drv; }
 static pci_dev_t g_dev;
@@ -58,7 +67,10 @@ static void check(const char* what, int ok, uint64_t got, uint64_t want) {
     printf("    FAIL %s: 0x%llx, wanted 0x%llx\n", what, (unsigned long long)got, (unsigned long long)want);
     g_fail = 1;
 }
-#define EQ(what, got, want) check(what, (uint64_t)(got) == (uint64_t)(want), (uint64_t)(got), (uint64_t)(want))
+#define EQ(what, got, want) do { \
+    uint64_t actual_ = (uint64_t)(got), expected_ = (uint64_t)(want); \
+    check(what, actual_ == expected_, actual_, expected_); \
+} while (0)
 
 static uint8_t* g_mm;                    /* the fake register BAR */
 static uint32_t R(uint32_t r) { return *(volatile uint32_t*)(g_mm + r); }
@@ -93,6 +105,14 @@ static void intel_case(const icase_t* c) {
     EQ("probe", gpu_intel_probe(&g_dev), 0);
     if (!g_reg_gpu) { g_fail = 1; return; }
     gpu_t* g = g_reg_gpu;
+    if (c->gen >= 5) {
+        EQ("render handoff", render_attached, 1);
+        EQ("render generation", render_hw.gen, c->gen);
+        EQ("render device ID", render_hw.devid, c->id);
+        EQ("render PCI revision", render_hw.revision, 9);
+        EQ("render GTT size", render_hw.gtt_entries, c->gtt_entries);
+        EQ("cursor pages reserved", render_hw.reserved_hi >= 4, 1);
+    }
     char info[512];
     g->info(g, info, sizeof(info));
     printf("    %s\n", info);

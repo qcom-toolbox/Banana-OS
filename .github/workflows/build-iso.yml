@@ -360,8 +360,14 @@ jobs:
         run: python3 tools/tests/mesa_patch.py
       - name: Test Intel kernel interface
         run: |
-          cc -O1 -no-pie -w -I kernel -I tools/tests tools/tests/test_i915.c kernel/gpu_i915.c kernel/gpu_i915_lrc.c kernel/gpu_gem.c -o /tmp/i915
+          cc -O1 -g -no-pie -w -fsanitize=undefined -fno-sanitize-recover=all -I kernel -I tools/tests tools/tests/test_i915.c kernel/gpu_i915.c kernel/gpu_i915_lrc.c kernel/gpu_gem.c -o /tmp/i915
           /tmp/i915
+      - name: Test display compatibility in both architectures
+        run: |
+          for bits in 32 64; do
+            cc -m"$bits" -O1 -I kernel tools/tests/test_gpu_drivers.c kernel/gpu_intel.c kernel/gpu_radeon.c -o "/tmp/display-$bits"
+            "/tmp/display-$bits"
+          done
       - name: Test both Mesa drivers on Intel models
         env:
           MESA_REF: ${{ github.workspace }}/ports/mesa/build-crocus-iris/ref

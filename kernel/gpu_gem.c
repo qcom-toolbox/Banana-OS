@@ -161,7 +161,12 @@ static int obj_create(int owner, uint64_t size, uint32_t* handle) {
     uint32_t n = (uint32_t)((size + 4095) / 4096);
     uint32_t slot = 0;
     while (slot < g_nobj && g_obj[slot].owner) slot++;
-    if (slot == g_nobj) retire();
+    if (slot == g_nobj) {
+        retire();
+        /* Retirement can both open interior holes and shrink the tail.
+         * Search again: the old cursor may now lie beyond g_nobj. */
+        slot = 0;
+    }
     while (slot < g_nobj && g_obj[slot].owner) slot++;
     if (slot >= OBJ_MAX) return -E_NOSPC;
     obj_t* o = &g_obj[slot];
@@ -328,6 +333,7 @@ static int execbuffer(int owner, struct drm_i915_gem_execbuffer2* eb) {
         if (nr > (1u << 20) || !u_ok(ex[i].relocs_ptr, (uint64_t)nr * sizeof(struct drm_i915_gem_relocation_entry))) { rc = -E_FAULT; break; }
         struct drm_i915_gem_relocation_entry* rl = (struct drm_i915_gem_relocation_entry*)(uintptr_t)ex[i].relocs_ptr;
         obj_t* o = ob[i];
+        int waited = 0;
         for (uint32_t k = 0; k < nr; k++) {
             struct drm_i915_gem_relocation_entry r = rl[k];
             obj_t* t = NULL;
@@ -337,8 +343,12 @@ static int execbuffer(int owner, struct drm_i915_gem_execbuffer2* eb) {
             uint64_t off = full ? t->va : (uint64_t)t->gtt * 4096u;
             if (r.presumed_offset == off) continue;
             uint32_t wide = full ? 8 : 4;                            /* (gen 8+: 64-bit addresses in the batch) */
-            if ((r.offset & 3) || r.offset + wide > (uint64_t)o->pages * 4096u || (wide == 8 && (r.offset & 4095) > 4088)) { rc = -E_INVAL; break; }
-            if (obj_wait(o, 1, -1)) { rc = -E_IO; break; }          /* (not under the GPU's feet) */
+            uint64_t bytes = (uint64_t)o->pages * 4096u;
+            if ((r.offset & 3) || r.offset > bytes - wide || (wide == 8 && (r.offset & 4095) > 4088)) { rc = -E_INVAL; break; }
+            /* No submission occurs during relocation. Once this buffer is
+             * idle, all its patches can be written without polling again. */
+            if (!waited && obj_wait(o, 1, -1)) { rc = -E_IO; break; }
+            waited = 1;
             uint32_t* w = (uint32_t*)(uintptr_t)(o->phys[r.offset >> 12] + (r.offset & 4095));
             uint64_t v = off + (uint64_t)(int64_t)(int32_t)r.delta;
             w[0] = (uint32_t)v;
@@ -698,6 +708,7 @@ static int ioctl_i915(int owner, unsigned nr, unsigned size, void* arg, uspace_t
             if (r) { ctx_free(x); return r; }
             e = sp.base.next_extension;
         }
+        if (e) { ctx_free(x); c->ctx_id = 0; return -E_INVAL; }
         return 0;
     }
     case I915_NR_CONTEXT_DESTROY: {
@@ -785,11 +796,11 @@ int gem_ioctl(int owner, unsigned long req, void* arg) {
     /* (the request is copied: the app's other threads may change their copy meanwhile) */
     uint64_t k[32];
     memset(k, 0, sizeof(k));
-    memcpy(k, arg, size);
+    if (size) memcpy(k, arg, size);
     uspace_t* us = app_user_space();
     if (nr >= DRM_COMMAND_BASE && nr < DRM_COMMAND_BASE + 0x40) r = ioctl_i915(owner, nr - DRM_COMMAND_BASE, size, k, us);
     else r = ioctl_core(owner, nr, k, us);
-    if ((req >> 30) & 2) memcpy(arg, k, size);           /* _IOC_READ: the answer back */
+    if (size && ((req >> 30) & 2)) memcpy(arg, k, size);           /* _IOC_READ: the answer back */
     return r;
 }
 

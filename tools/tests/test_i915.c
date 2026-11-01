@@ -238,6 +238,21 @@ static void one(int g, int is_hsw, uint16_t devid) {
         check("a softpinned offset not page-aligned: EINVAL", io(A, W, I915(I915_NR_GEM_EXECBUFFER2), &es, sizeof es) == -22);
     }
 
+    /* An aligned offset near UINT64_MAX used to wrap the end check and
+     * index far beyond the physical-page table. No batch may be submitted. */
+    uint64_t saved_offset = rl[0].offset, saved_presumed = rl[0].presumed_offset;
+    rl[0].offset = ~3ull;
+    rl[0].presumed_offset = ~0ull;
+    check("overflowing relocation rejected",
+          io(A, W, I915(I915_NR_GEM_EXECBUFFER2), &eb, sizeof eb) == -22);
+    rl[0].offset = 8192;
+    check("relocation beyond buffer rejected",
+          io(A, W, I915(I915_NR_GEM_EXECBUFFER2), &eb, sizeof eb) == -22);
+    rl[0].offset = saved_offset;
+    rl[0].presumed_offset = saved_presumed;
+    check("valid submission works after rejected relocation",
+          io(A, W, I915(I915_NR_GEM_EXECBUFFER2), &eb, sizeof eb) == 0 && gem_wait(A, ht, -1) == 0);
+
     /* hardware contexts (gen 6+): each keeps its own state between batches */
     int iso = -1;
     gp.param = I915_PARAM_HAS_CONTEXT_ISOLATION; gp.value = (uint64_t)(uintptr_t)&iso;
@@ -294,7 +309,7 @@ static void one(int g, int is_hsw, uint16_t devid) {
     uint32_t t = 0;
     for (int i = 0; i < 3000 && !r; i++) { r = io(A, W, I915(I915_NR_GEM_EXECBUFFER2), &eb, sizeof eb); t++; }
     check("3000 submissions", r == 0 && gem_wait(A, ht, -1) == 0);
-    check("the model ran every batch", g_ran == 3002 + (g >= 6 ? 7 : 0) + (g >= 8 ? 2 : 0));
+    check("the model ran every batch", g_ran == 3003 + (g >= 6 ? 7 : 0) + (g >= 8 ? 2 : 0));
 
     /* a big buffer away from the 64 KiB-aligned place: alignment asked for */
     struct drm_i915_gem_exec_object2 ex2[2];
@@ -346,6 +361,54 @@ static void one(int g, int is_hsw, uint16_t devid) {
     gem_release(A);
     check("all of the app's pages back at its end", pages_out == 0);
     check("no stray GPU writes", bad_writes == 0);
+
+    /* Retiring the last busy handle must not leave the next one outside
+     * the live handle table. Repeat to catch progressive handle leaks. */
+    for (int iteration = 0; iteration < 3; iteration++) {
+        uint32_t old = create(A, 4096);
+        uint32_t* batch = map(A, old, 4096);
+        check("retirement fixture mapped", batch != NULL);
+        if (!batch) break;
+        batch[0] = 0x0Au << 23; batch[1] = 0;
+        struct drm_i915_gem_exec_object2 object = {0};
+        object.handle = old;
+        struct drm_i915_gem_execbuffer2 submit = {0};
+        submit.buffers_ptr = (uint64_t)(uintptr_t)&object;
+        submit.buffer_count = 1;
+        check("retirement fixture submitted", io(A, W, I915(I915_NR_GEM_EXECBUFFER2), &submit, sizeof submit) == 0);
+        struct drm_gem_close close = {old, 0};
+        check("retirement fixture closed", io(A, W, DRM_NR_GEM_CLOSE, &close, sizeof close) == 0);
+        task_sleep_ms(5);
+        uint32_t fresh = create(A, 4096);
+        check("allocation after tail retirement returns a usable handle",
+              fresh && gem_wait(A, fresh, 0) == 0);
+        check("retired tail slot is reused", fresh == old);
+        gem_release(A);
+        check("retirement cycle releases every page", pages_out == 0);
+    }
+
+    /* Context extension chains are bounded and failure must roll back. */
+    struct drm_i915_gem_context_create_ext_setparam extensions[17];
+    memset(extensions, 0, sizeof extensions);
+    for (int i = 0; i < 17; i++) {
+        extensions[i].base.next_extension = i < 16 ? (uint64_t)(uintptr_t)&extensions[i + 1] : 0;
+        extensions[i].base.name = I915_CONTEXT_CREATE_EXT_SETPARAM;
+        extensions[i].param.param = I915_CONTEXT_PARAM_RECOVERABLE;
+        extensions[i].param.value = 1;
+    }
+    struct drm_i915_gem_context_create_ext chain = {0, I915_CONTEXT_CREATE_FLAGS_USE_EXTENSIONS, (uint64_t)(uintptr_t)extensions};
+    check("overlong context chain rejected", io(A, WR, I915(I915_NR_CONTEXT_CREATE), &chain, sizeof chain) == -22);
+    struct drm_i915_gem_context_destroy destroy = {chain.ctx_id, 0};
+    check("rejected context is not live", io(A, W, I915(I915_NR_CONTEXT_DESTROY), &destroy, sizeof destroy) == -2);
+    extensions[15].base.next_extension = 0;
+    chain.ctx_id = 0;
+    check("sixteen context extensions supported", io(A, WR, I915(I915_NR_CONTEXT_CREATE), &chain, sizeof chain) == 0);
+    destroy.ctx_id = chain.ctx_id;
+    check("bounded context can be destroyed", io(A, W, I915(I915_NR_CONTEXT_DESTROY), &destroy, sizeof destroy) == 0);
+    extensions[0].base.next_extension = (uint64_t)(uintptr_t)extensions;
+    chain.ctx_id = 0;
+    check("cyclic context chain rejected", io(A, WR, I915(I915_NR_CONTEXT_CREATE), &chain, sizeof chain) == -22);
+    gem_release(A);
 
     /* gpu3d test */
     i915_tests(report);

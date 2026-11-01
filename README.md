@@ -1,5 +1,12 @@
 # 🍌 Banana OS 0.6
 
+- **Intel graphics reliability and submission overhead:** buffers retired by the
+  GPU now reuse valid handles without losing their backing pages. Relocation
+  bounds cannot wrap, and excessive or cyclic context extensions fail cleanly.
+  Relocating one buffer waits for it once instead of once per changed address.
+  The existing Intel model tests now run under UBSan in CI.
+  [Reproductions, Mesa compatibility and validation limits](docs/OS-TESTING-2026-11-01.md).
+
 - **Visible landscape wallpapers:** Alpine Peaks, Seeley Lake and Grand Tetons
   appear first in Settings. The gallery shows its total and gains page buttons
   and mouse-wheel navigation when the window cannot show every preset.
