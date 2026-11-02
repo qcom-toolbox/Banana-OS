@@ -169,7 +169,8 @@ jobs:
 
   # Java for Banana OS (64-bit): java.bpk (ports/openjdk/package.sh) - the java
   # app, and /usr/java, which `pkg install java.bpk` unpacks: jdk/ (ports/openjdk),
-  # lib/libOSMesa.so (ports/mesa: OpenGL 3.3) and lwjgl/ (ports/lwjgl)
+  # lib/libOSMesa.so (the mesa job's: Intel Crocus/Iris once gpu3d on, then
+  # VirGL, then softpipe) and lwjgl/ (ports/lwjgl)
   boot:
     name: Validate ${{ matrix.variant }} ${{ matrix.firmware }} upgrade from build ${{ matrix.install_build }}
     needs: build
@@ -228,20 +229,32 @@ jobs:
           retention-days: 14
 
   java:
+    needs: [mesa]
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # the finished bundle, kept while nothing it is built from changes
-      # (before the caches below: their folders must not be hashed)
-      - name: Java bundle cache
+      # Java's OpenGL is the Intel Mesa runtime's libOSMesa.so (Crocus and
+      # Iris for the GPU, VirGL, softpipe), not a software-only build
+      - name: Download Intel Mesa runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: mesa-intel-runtime
+          path: mesa-intel
+      - name: Verify Intel Mesa runtime
+        working-directory: mesa-intel
+        run: sha256sum -c MESA-SHA256SUMS && test -f libOSMesa.so
+
+      # the JDK and LWJGL builds, kept while nothing they are built from
+      # changes (before the caches below: their folders must not be hashed)
+      - name: Java parts cache
         id: bundle
         uses: actions/cache@v4
         with:
-          path: java-bundle
-          key: java-bundle-${{ hashFiles('ports/openjdk/*.sh', 'ports/openjdk/*.py', 'ports/openjdk/include/**', 'ports/openjdk/launcher/*.c', 'ports/openjdk/launcher/Makefile', 'ports/openjdk/test/**', 'ports/mesa/*.sh', 'ports/mesa/*.py', 'ports/mesa/gl3test/*.c', 'ports/mesa/gl3test/Makefile', 'ports/lwjgl/*.sh', 'ports/lwjgl/native/**', 'ports/lwjgl/test/**', 'sdk/lib/**', 'sdk/include/**', 'sdk/banana.mk', 'sdk/tools/**') }}
+          path: java-parts
+          key: java-parts-v1-${{ hashFiles('ports/openjdk/*.sh', 'ports/openjdk/*.py', 'ports/openjdk/include/**', 'ports/openjdk/launcher/*.c', 'ports/openjdk/launcher/Makefile', 'ports/openjdk/test/**', 'ports/mesa/*.sh', 'ports/mesa/*.py', 'ports/mesa/gl3test/*.c', 'ports/mesa/gl3test/Makefile', 'ports/lwjgl/*.sh', 'ports/lwjgl/native/**', 'ports/lwjgl/test/**', 'sdk/lib/**', 'sdk/include/**', 'sdk/banana.mk', 'sdk/tools/**') }}
 
       - name: Install build dependencies
         if: steps.bundle.outputs.cache-hit != 'true'
@@ -280,15 +293,34 @@ jobs:
           sh ports/mesa/build.sh
           JAVA_BIN=$PWD/ports/openjdk/src/jdk-17.0.20.1+1/bin sh ports/lwjgl/build.sh
 
-      - name: Pack java.bpk
+      - name: Keep the JDK and LWJGL builds
         if: steps.bundle.outputs.cache-hit != 'true'
         run: |
-          sh ports/openjdk/package.sh "$PWD/java-bundle"
-          rm -rf java-bundle/usr-java java-bundle/java.zip
-          ls -la java-bundle/java.bpk
+          rm -rf java-parts && mkdir -p java-parts/jdk-out java-parts/lwjgl-out
+          cp -r ports/openjdk/build/jdk java-parts/jdk-out/
+          cp -r ports/lwjgl/build/lwjgl java-parts/lwjgl-out/
           # the reference builds' objects are not replayed: smaller caches
           find ports/openjdk/src -path '*/build/*' -name '*.o' -delete
           find ports/mesa/build/ref -name '*.o' -delete
+
+      - name: Install packaging tools
+        if: steps.bundle.outputs.cache-hit == 'true'
+        run: |
+          sudo python3 tools/ci_apt_mirrors.py
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-multilib binutils make python3 zip
+
+      - name: Pack java.bpk
+        env:
+          JDK_OUT: ${{ github.workspace }}/java-parts/jdk-out
+          LWJGL_OUT: ${{ github.workspace }}/java-parts/lwjgl-out
+          MESA_OUT: ${{ github.workspace }}/mesa-intel
+        run: |
+          sh ports/openjdk/package.sh "$PWD/java-bundle"
+          # the bundle's OpenGL must be the GPU-capable one
+          unzip -p java-bundle/java.zip lib/libOSMesa.so | cmp - mesa-intel/libOSMesa.so
+          rm -rf java-bundle/usr-java java-bundle/java.zip
+          ls -la java-bundle/java.bpk
 
       - name: Upload java.bpk
         uses: actions/upload-artifact@v4
@@ -355,7 +387,9 @@ jobs:
           make -C ports/mesa/runtime mesa-x86_64.bpk
           mkdir -p mesa-packages
           cp ports/mesa/runtime/mesa-x86_64.bpk mesa-packages/
-          (cd mesa-packages && sha256sum mesa-x86_64.bpk > MESA-SHA256SUMS)
+          # (the same library goes into java.bpk: Java's OpenGL on the GPU)
+          cp ports/mesa/build-crocus-iris/libOSMesa.so mesa-packages/
+          (cd mesa-packages && sha256sum mesa-x86_64.bpk libOSMesa.so > MESA-SHA256SUMS)
       - name: Test pristine Mesa patching
         run: python3 tools/tests/mesa_patch.py
       - name: Test Intel kernel interface

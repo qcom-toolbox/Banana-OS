@@ -1,5 +1,12 @@
 # 🍌 Banana OS 0.6
 
+- **Java OpenGL on the Intel GPU:** `java.bpk` now ships the same `libOSMesa.so`
+  as the Mesa ISO (Crocus for 1st–4th generation Core, e.g. Sandy Bridge
+  HD 2000/3000; Iris for 5th–10th), instead of a software-only copy. Minecraft
+  and other LWJGL apps draw on the GPU once `gpu3d on` is set, and otherwise
+  fall back to VirGL or the processor as before. CI checks that the bundle carries
+  the GPU-capable library. [Setup and limits](GPU.md#java-and-lwjgl).
+
 - **Intel graphics reliability and submission overhead:** buffers retired by the
   GPU now reuse valid handles without losing their backing pages. Relocation
   bounds cannot wrap, and excessive or cyclic context extensions fail cleanly.

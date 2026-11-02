@@ -173,13 +173,29 @@ cc -O1 -no-pie -w -I kernel -I tools/tests tools/tests/test_i915.c kernel/gpu_i9
 No hardware contexts: every batch re-emits the whole state (the Banana patch
 in `crocus_batch.c`). No aperture (GTT) maps, no PRIME or flink, no BLT ring.
 
+## Java and LWJGL
+
+`java.bpk` carries the Intel Mesa runtime's `libOSMesa.so` in `/usr/java/lib`
+(CI copies it from the `mesa` job), so Java apps that draw through LWJGL,
+such as Minecraft, use the same drivers as the Mesa ISO.
+Mesa tries Iris, then Crocus, then VirGL, then softpipe. On a 2nd
+generation Core (Sandy Bridge, gen6) Crocus gives OpenGL 3.3 core and
+compatibility, enough for Minecraft 1.7 to 1.20. If the Mesa runtime is also installed,
+`/lib/libOSMesa.so` is found first; it is the same build.
+
+Like every OpenGL app, Java gets the GPU only after `gpu3d test` and
+`gpu3d on`. Start Java again after switching. Run `glinfo` to see the renderer
+that apps will get. Minecraft also reports it in its log and F3 screen. Each
+frame is drawn on the GPU and copied back into the window, so the copy costs
+some speed at high resolutions.
+
 ## Mesa ISO in prereleases
 
 Each prerelease ships two bootable BIOS/UEFI images: `Banana_OS.iso` (standard)
 and `Banana_OS-mesa.iso` (the same OS plus the 64-bit Mesa runtime).
 The Mesa image installs `/apps/mesa/libOSMesa.so` and the `glinfo` CLI command.
 It adds no desktop or Start-menu launcher. OpenGL/EGL apps prefer this runtime
-over Java's bundled software-only copy. The package owns a /lib/libOSMesa.so
+over Java's bundled copy (the same build). The package owns a /lib/libOSMesa.so
 symlink, so existing applications work without recompilation; removal clears
 that link only while it still points to this package. The runtime persists across installation
 and updates like other built-in packages; it can be inspected in the package manager.

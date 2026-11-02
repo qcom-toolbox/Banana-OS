@@ -3,7 +3,8 @@
 # Packs Java for Banana OS into one package, java.bpk: the java app, and
 # java.zip that `pkg install` unpacks into /usr/java (unpack=, kernel/pkg.c):
 #     /usr/java/jdk             OpenJDK 17          (ports/openjdk/build.sh)
-#     /usr/java/lib/libOSMesa.so  OpenGL 3.3        (ports/mesa/build.sh)
+#     /usr/java/lib/libOSMesa.so  OpenGL 3.3        (ports/mesa/build.sh; CI: the
+#                                 CROCUS=1 IRIS=1 build, Intel GPUs after gpu3d on)
 #     /usr/java/lwjgl           LWJGL 3             (ports/lwjgl/build.sh)
 # The java app, <GL/gl3.h> apps and the Minecraft launcher look there.
 #     ports/openjdk/package.sh [output dir]      (default: ports/openjdk/build)
