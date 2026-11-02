@@ -302,25 +302,33 @@ int tlb_selftest(char* msg, int cap, uint32_t* old_ns, uint32_t* new_ns, int* ke
     /* timed: TOUCH pages here and TOUCH of the kernel's, then the same
      * again - as before (no global pages, every CR3 load under PCID 0: each
      * forgets everything), and now */
+    /* (the two ways alternate, 5 rounds, and each keeps its fastest: one
+     *  round slowed by the host - an emulator's or a hypervisor's pause -
+     *  must not decide the comparison) */
     uint64_t hz = timer_counter_per_ms();
     if (hz) {
-        const int R = 400;
+        const int R = 100, ROUNDS = 5;
+        uint64_t best_old = ~0ull, best_new = ~0ull;
         uintptr_t cr4 = rd_cr4();
-        wr_cr4(cr4 & ~CR4_PGE);
-        uint64_t t0 = timer_counter();
-        for (int r = 0; r < R; r++) {
-            wr_cr3(mine); touch(va);
-            wr_cr3(kcr3); touch((uintptr_t)frames);
+        for (int k = 0; k < ROUNDS; k++) {
+            wr_cr4(cr4 & ~CR4_PGE);
+            uint64_t t0 = timer_counter();
+            for (int r = 0; r < R; r++) {
+                wr_cr3(mine); touch(va);
+                wr_cr3(kcr3); touch((uintptr_t)frames);
+            }
+            uint64_t t1 = timer_counter();
+            wr_cr4(cr4);                /* (and everything forgotten again) */
+            for (int r = 0; r < R; r++) {
+                tlb_load(mine, &tag); touch(va);
+                tlb_load(kcr3, NULL); touch((uintptr_t)frames);
+            }
+            uint64_t t2 = timer_counter();
+            if (t1 - t0 < best_old) best_old = t1 - t0;
+            if (t2 - t1 < best_new) best_new = t2 - t1;
         }
-        uint64_t t1 = timer_counter();
-        wr_cr4(cr4);                    /* (and everything forgotten again) */
-        for (int r = 0; r < R; r++) {
-            tlb_load(mine, &tag); touch(va);
-            tlb_load(kcr3, NULL); touch((uintptr_t)frames);
-        }
-        uint64_t t2 = timer_counter();
-        *old_ns = (uint32_t)((t1 - t0) * 1000000ull / hz / (uint64_t)R);
-        *new_ns = (uint32_t)((t2 - t1) * 1000000ull / hz / (uint64_t)R);
+        *old_ns = (uint32_t)(best_old * 1000000ull / hz / (uint64_t)R);
+        *new_ns = (uint32_t)(best_new * 1000000ull / hz / (uint64_t)R);
     }
 
 out:
