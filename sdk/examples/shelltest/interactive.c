@@ -192,9 +192,13 @@ static void pty_diagnostic(FILE* out) {
     trace_print(out,g_raw,sizeof(g_raw),g_raw_head,g_raw_count);
 }
 
+/* the program has been told to quit: wait for it to end. Up to 10 s, as
+ * the other steps' 8 s: Vim after :help closes the help buffer and writes
+ * its viminfo before it exits, which on a busy emulated CI machine took
+ * longer than the 2 s this once allowed (a hang still fails the check). */
 static int finish(void) {
     int st = -1;
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 500; i++) {
         pump(20);
         if (waitpid(g_pid, &st, WNOHANG) == g_pid) break;
     }
