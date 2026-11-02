@@ -230,7 +230,9 @@ jobs:
 
   java:
     needs: [mesa]
-    runs-on: ubuntu-latest
+    # (the toolchain the OpenJDK reference build and LWJGL were made with:
+    #  ubuntu-latest moved to 26.04 / GCC 15, which fails LWJGL's stb_dxt)
+    runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
       - name: Checkout

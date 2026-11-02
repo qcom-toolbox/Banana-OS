@@ -97,7 +97,7 @@ cc_all() {   # cc_all OUTDIR flags... -- sources...: compile, list the failures
         gcc $fl $BCFLAGS -c "$f" -o "$o" 2>"$o.log" || { bad="$bad $(basename "$f")"; rm -f "$o"; }
         [ -s "$o.log" ] || rm -f "$o.log"
     done
-    [ -z "$bad" ] || { echo "failed:$bad (logs: $d/*.log)"; exit 1; }
+    [ -z "$bad" ] || { echo "failed:$bad (logs: $d/*.log)"; head -n 40 "$d"/*.log; exit 1; }
 }
 so() {   # so NAME SONAME objects/flags...
     n=$1; s=$2; shift 2
