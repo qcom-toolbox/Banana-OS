@@ -55,7 +55,9 @@ int pkg_is_desktop(const pkg_info_t* info);
 int pkg_list_drivers(pkg_info_t* out, int max);  /* the installed driver packages (type=driver) */
 int pkg_get(const char* name, pkg_info_t* out);   /* 0 if installed */
 /* how many of an installed package's files are missing or changed since it
- * was installed (full: contents, else sizes); -1: no file list, -2: not installed */
+ * was installed (full 1: every file's contents; 2: the contents of its
+ * programs and libraries, the others' sizes; 0: sizes only); -1: no file
+ * list, -2: not installed */
 int pkg_verify(const char* name, int full, char* first, int fcap);
 
 /* starts installed app `name`: a console app runs in the calling shell
