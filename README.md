@@ -16,6 +16,16 @@ Banana OS 0.6 is a minimal x86 operating system written from scratch (no Linux k
 
 <!-- New entries go here, at the top of this section - not above the introduction. -->
 
+- **Repairing a broken install:** built-in programs could go bad on the
+  disk with their sizes unchanged ("not an ELF program": Terminal, the App
+  Store, finally bash), and the check at every start only compared sizes.
+  It now also checks the contents (CRC-32C) of the built-in apps' programs
+  and libraries and puts a damaged one back from the kernel's copy - after
+  an `update` from the CD, a broken bash is repaired at the next start. New
+  on the live CD: **`repair`** writes the system again (also when it is the
+  same version) and has every built-in app installed again at the next start
+  from the disk; files, settings and the password are kept.
+
 - **Clocks to the nanosecond:** `clock_gettime` and `gettimeofday` counted
   whole milliseconds, so Java's `System.nanoTime()` (Minecraft's frame timing
   and frame limiter) moved in 1 ms steps, and two reads a tick apart looked a
