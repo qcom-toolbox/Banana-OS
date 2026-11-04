@@ -1,5 +1,18 @@
 # 🍌 Banana OS 0.6
 
+- **The real neofetch, and "Banana OS" spelled right:** `neofetch` on the
+  64-bit system is now neofetch 7.1.0 itself (the bash script, `ports/neofetch`)
+  with a Banana OS backend and a new banana logo. Banana OS has no `/proc`,
+  so the backend reads the new **`sysinfo`** command, which prints the system's
+  facts as `key: value` lines (CPU, memory, GPU, resolution, uptime,
+  packages). Its options work as on Linux (`neofetch --stdout`,
+  `--ascii_colors`, ...). The boot banner in the terminal and the logo in this
+  README now read "Banana OS" (they read "BananaAOS" and "BananaOS").
+- **Java waits are 10x shorter:** `Thread.sleep(1)` and other 1 ms waits took
+  10 ms, because the kernel's waits always slept in 10 ms steps. Minecraft's
+  game loops wait like that all the time. Short waits now end on time
+  (2000 x `sleep(1)`: 19.5 s before, 2.6 s now in QEMU).
+
 - **Intel 3D on by default:** a supported Intel GPU (1st–10th generation Core)
   now serves OpenGL apps without `gpu3d on` first: crocus ran Minecraft 1.20.4
   on a real HD Graphics 2000. `gpu3d off` still sends apps back to the
@@ -171,11 +184,11 @@ separate entries in Apps, App Store or Settings > Apps.
 Banana OS 0.6 is a minimal x86 operating system written from scratch (no Linux kernel, no external OS kernel) - a **64-bit (x86_64) kernel with a 32-bit fallback**, booting on **UEFI and BIOS** machines and in VirtualBox/QEMU with **its own boot loader** (Banana Boot, Multiboot2) - now with **real networking**: its own drivers for the Intel e1000, AMD PCnet, virtio-net and Realtek RTL8139 network cards (every card VirtualBox offers) and its own TCP/IP stack, so `ping`, `curl` and `wget` talk to the actual Internet (HTTP and HTTPS).
 
 ```
-  ____                               ____  ____
- | __ )  __ _ _ __   __ _ _ __   __|  _ \/ ___|
- |  _ \ / _` | '_ \ / _` | '_ \ / _` | | \___  \
- | |_) | (_| | | | | (_| | | | | (_| | |___)  |
- |____/ \__,_|_| |_|\__,_|_| |_|\__,_|___/____/
+  ____                                   ___  ____
+ | __ )  __ _ _ __   __ _ _ __   __ _   / _ \/ ___|
+ |  _ \ / _` | '_ \ / _` | '_ \ / _` | | | | \___ \
+ | |_) | (_| | | | | (_| | | | | (_| | | |_| |___) |
+ |____/ \__,_|_| |_|\__,_|_| |_|\__,_|  \___/|____/
 ```
 
 ![Banana OS desktop](assets/screenshots/gui-desktop.png)

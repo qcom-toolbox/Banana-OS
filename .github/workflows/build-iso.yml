@@ -107,7 +107,9 @@ jobs:
             ports/vi/build
             ports/neovim/src
             ports/neovim/build
-          key: unix-ports-v2-${{ hashFiles('ports/port.sh', 'ports/bash/*', 'ports/coreutils/*', 'ports/grep/*', 'ports/sed/*', 'ports/findutils/*', 'ports/diffutils/*', 'ports/gawk/*', 'ports/ncurses/*', 'ports/less/*', 'ports/zsh/*', 'ports/nano/*', 'ports/vim/*', 'ports/vi/*', 'ports/neovim/*', 'sdk/tools/banana-*', 'sdk/lib/*.c', 'sdk/include/**') }}
+            ports/neofetch/src
+            ports/neofetch/build
+          key: unix-ports-v2-${{ hashFiles('ports/port.sh', 'ports/bash/*', 'ports/coreutils/*', 'ports/grep/*', 'ports/sed/*', 'ports/findutils/*', 'ports/diffutils/*', 'ports/gawk/*', 'ports/ncurses/*', 'ports/less/*', 'ports/zsh/*', 'ports/nano/*', 'ports/vim/*', 'ports/vi/*', 'ports/neovim/*', 'ports/neofetch/*', 'sdk/tools/banana-*', 'sdk/lib/*.c', 'sdk/include/**') }}
           restore-keys: unix-ports-v2-
 
       - name: Test shared BIOS and UEFI image data

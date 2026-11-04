@@ -277,7 +277,13 @@ static const page_t PAGES[] = {
       "long it took; the three longest are highlighted. Before the kernel, the firmware, the boot menu and "
       "the loading took about as long as the first line says (from the processor's time stamp counter).",
       NULL, NULL, "uptime" },
-    { "neofetch", "system", "neofetch", "a summary of the system", NULL, NULL, NULL, "hw_info" },
+    { "neofetch", "system", "neofetch", "a summary of the system, with the Banana OS logo",
+      "On the 64-bit system this is the real neofetch (7.1.0, a bash script) with a Banana OS backend: it reads "
+      "sysinfo, as Banana OS has no /proc. Its options work as on Linux (neofetch --help).", NULL,
+      "neofetch\nneofetch --off", "sysinfo, hw_info" },
+    { "sysinfo", "system", "sysinfo", "the system's facts as 'key: value' lines, for scripts",
+      "os, version, arch, boot, cpu, threads, memory_used_kb, memory_total_kb, gpu, resolution, uptime_s, packages, desktop.",
+      NULL, "sysinfo\nsysinfo | grep cpu", "neofetch, uname" },
     { "sleep", "system", "sleep [status | SECONDS]", "ACPI S3 suspend to RAM",
       "Sleep retains the session in RAM. The first supported profile is QEMU PC/PIIX4 with standard VGA, e1000 and optional virtio-blk. Unsupported platforms/devices are refused before suspend. Files are synced first. Use the VM wake/power control to resume, or specify 1..3600 seconds for an RTC wake. This is not hibernation.",
       "status|show whether the current platform can suspend\nSECONDS|arm an RTC wake after this many seconds",

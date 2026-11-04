@@ -435,13 +435,20 @@ static void cmd_neofetch(int persona) {
     const sysinfo_t* si = sysinfo_get();
     char mbuf[16];
 
+    terminal_write_color("\n"
+        "                     _\n"
+        "                    ( )\n", VGA_COLOR_BROWN, VGA_COLOR_BLACK);
     terminal_write_color(
-        "\n"
-        "   ,--.\n"
-        "  ( () )\n"
-        "   `--'\n"
-        "    ||\n"
-        "    ||\n",
+        "                    | |\n"
+        "                   /  |\n"
+        "                  /   |\n"
+        "                 /    |\n"
+        "               ,'     /\n"
+        "             ,'      /\n"
+        "          _,'       /\n"
+        "     __,-'        ,'\n"
+        " ,--'          _,'\n"
+        " `-.____,,.--''\n\n",
         VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
 
     terminal_write_color("  Banana OS", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
@@ -481,6 +488,43 @@ static void cmd_neofetch(int persona) {
     }
     terminal_write_color("\n  ** Powered by pure potassium **\n",
                          VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+}
+
+/* sysinfo: the system's facts, one "key: value" a line - for scripts (the
+ * neofetch port reads them: Banana OS has no /proc) */
+static void cmd_sysinfo(void) {
+    const sysinfo_t* si = sysinfo_get();
+    char b[160];
+    terminal_writeln("os: Banana OS");
+    terminal_writeln("version: 0.6");
+#ifdef __x86_64__
+    terminal_writeln("arch: x86_64");
+#else
+    terminal_writeln("arch: i686");
+#endif
+    terminal_writeln(si->uefi ? "boot: UEFI" : "boot: BIOS");
+    ksnprintf(b, sizeof(b), "cpu: %s", si->cpu_brand[0] ? si->cpu_brand : "unknown");
+    terminal_writeln(b);
+    ksnprintf(b, sizeof(b), "threads: %d", cpu_count());
+    terminal_writeln(b);
+    meminfo_t m;
+    meminfo_get(&m);
+    ksnprintf(b, sizeof(b), "memory_used_kb: %u", (uint32_t)m.used_kb);
+    terminal_writeln(b);
+    ksnprintf(b, sizeof(b), "memory_total_kb: %u", (uint32_t)m.total_kb);
+    terminal_writeln(b);
+    gpu_t* g = gpu_active();
+    if (g && g->name[0]) { ksnprintf(b, sizeof(b), "gpu: %s", g->name); terminal_writeln(b); }
+    if (fb_available()) {
+        ksnprintf(b, sizeof(b), "resolution: %ux%u", fb_info()->width, fb_info()->height);
+        terminal_writeln(b);
+    }
+    ksnprintf(b, sizeof(b), "uptime_s: %u", (uint32_t)(timer_ms() / 1000u));
+    terminal_writeln(b);
+    static pkg_info_t pk[256];
+    ksnprintf(b, sizeof(b), "packages: %d", pkg_list(pk, 256));
+    terminal_writeln(b);
+    terminal_writeln(gui_is_enabled() ? "desktop: on" : "desktop: off");
 }
 
 static void cmd_uptime(void) {
@@ -1249,7 +1293,7 @@ static void cmd_history(void) {
 }
 
 static const char* const known_cmds[] = {
-    "help", "neofetch", "echo", "clear", "uname", "whoami", "hostname", "date", "cal", "timezone", "theme", "language",
+    "help", "neofetch", "sysinfo", "echo", "clear", "uname", "whoami", "hostname", "date", "cal", "timezone", "theme", "language",
     "ls", "cd", "pwd", "mkdir", "rm", "touch", "cp", "mv", "edit", "cat", "run",
     "uptime", "boottime", "top", "exit", "start", "stop", "startx", "stopx",
     "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
@@ -2547,6 +2591,7 @@ static void dispatch_plain(const char* line, int persona) {
     if (k_strcmp(line, "apropos") == 0 || k_strncmp(line, "apropos ", 8) == 0) { help_apropos(line + 7); return; }
     if (k_strcmp(line, "clear")    == 0) { terminal_clear(); return; }
     if (k_strcmp(line, "neofetch") == 0) { cmd_neofetch(persona); return; }
+    if (k_strcmp(line, "sysinfo") == 0) { cmd_sysinfo(); return; }
     if (k_strcmp(line, "uname")    == 0) { cmd_uname(line + 5, persona);    return; }
     if (k_strncmp(line, "uname ", 6) == 0) { cmd_uname(line + 5, persona); return; }   /* (uname -a ...: the same) */
     if (k_strcmp(line, "halt")     == 0) { cmd_halt();       return; }
@@ -2791,11 +2836,11 @@ static void run_script_text(const char* content, int persona) {
 
 static void print_banner(int persona) {
     terminal_write_color(
-        "  ____                                   _     ___  ____  \n"
-        " | __ )  __ _ _ __   __ _ _ __   __ _  / \\   / _ \\/ ___| \n"
-        " |  _ \\ / _` | '_ \\ / _` | '_ \\ / _` |/ _ \\ | | | \\___ \\  \n"
-        " | |_) | (_| | | | | (_| | | | | (_| / ___ \\| |_| |___) | \n"
-        " |____/ \\__,_|_| |_|\\__,_|_| |_|\\__,_/_/   \\_\\\\___/|____/  \n",
+        "  ____                                   ___  ____  \n"
+        " | __ )  __ _ _ __   __ _ _ __   __ _   / _ \\/ ___| \n"
+        " |  _ \\ / _` | '_ \\ / _` | '_ \\ / _` | | | | \\___ \\ \n"
+        " | |_) | (_| | | | | (_| | | | | (_| | | |_| |___) |\n"
+        " |____/ \\__,_|_| |_|\\__,_|_| |_|\\__,_|  \\___/|____/ \n",
         VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
 
     terminal_writeln("");

@@ -270,7 +270,7 @@ kernel/appbin.o64: $(foreach a,$(APPS),apps/$(a)/$(a)-x86_64.bpk.z) build/builti
 # installed at boot, their commands in /bin (bin= in their manifests).
 # kernel/appbin.asm and kernel/builtin_apps.c take the list from
 # build/ports64.inc and build/ports64.h, made from PORTS64.
-PORTS64    = bash coreutils grep sed findutils diffutils gawk ncurses less zsh nano vim vi
+PORTS64    = bash coreutils grep sed findutils diffutils gawk ncurses less zsh nano vim vi neofetch
 # optional ones: built in the same way, but installed only when asked for
 # (`apt install neovim`, the App Store: the builtin: source)
 OPTPORTS64 = neovim
