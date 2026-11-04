@@ -468,32 +468,54 @@ struct tm* localtime(const time_t* t) { static struct tm tm; return localtime_r(
  * ran backwards!"). So it is one line: an anchor taken from the clock chip
  * once, and the uptime counter from there - anchored again only when the
  * clock chip is more than 2 s away from it (set by hand, a new time zone). */
-long long __realtime_ms(void) {
-    static volatile long long base;
+/* nanoseconds since boot: the system's counter (API 33), else its milliseconds */
+unsigned long long __uptime_ns(void) {
+    unsigned long long ns;
+    if (BANANA_HAS(__banana, uptime_ns) && __banana->uptime_ns(&ns) == 0) return ns;
+    return (unsigned long long)__banana->ticks_ms() * 1000000ull;
+}
+
+/* The wall clock in nanoseconds since 1970. The clock chip only counts
+ * seconds; its seconds plus the uptime counter went back by up to a second
+ * whenever the two did not tick together (Minecraft: "Time ran
+ * backwards!"). So it is one line: an anchor taken from the clock chip
+ * once, and the uptime counter from there - anchored again only when the
+ * clock chip is more than 2 s away from it (set by hand, a new time zone).
+ * One read of the counter: milliseconds and nanoseconds always agree. */
+long long __realtime_ns(void) {
+    static volatile long long base;               /* (ns since 1970 at uptime 0) */
     static volatile int anchored;
-    unsigned ms = __banana->ticks_ms();
-    long long chip = (long long)time(0) * 1000;
-    long long now = base + ms;
-    if (!anchored || now - chip > 2000 || chip - now > 2000) {
-        base = chip + 500 - ms;                    /* (the middle of the chip's second) */
+    long long ns = (long long)__uptime_ns();
+    long long chip = (long long)time(0) * 1000000000ll;
+    long long now = base + ns;
+    if (!anchored || now - chip > 2000000000ll || chip - now > 2000000000ll) {
+        base = chip + 500000000ll - ns;           /* (the middle of the chip's second) */
         anchored = 1;
-        now = base + ms;
+        now = base + ns;
     }
     return now;
 }
+
+long long __realtime_ms(void) { return __realtime_ns() / 1000000ll; }
 
 int clock_gettime(clockid_t clk, struct timespec* ts) {
     if (!ts) { errno = EFAULT; return -1; }
     unsigned ms = __banana->ticks_ms();
     switch (clk) {
     case CLOCK_REALTIME: case CLOCK_REALTIME_COARSE: {
-        long long now = __realtime_ms();
-        ts->tv_sec = (time_t)(now / 1000);
-        ts->tv_nsec = (long)(now % 1000) * 1000000L;
+        long long now = __realtime_ns();
+        ts->tv_sec = (time_t)(now / 1000000000ll);
+        ts->tv_nsec = (long)(now % 1000000000ll);
         return 0;
     }
-    case CLOCK_MONOTONIC: case CLOCK_MONOTONIC_RAW: case CLOCK_MONOTONIC_COARSE: case CLOCK_BOOTTIME:
-        break;
+    case CLOCK_MONOTONIC: case CLOCK_MONOTONIC_RAW: case CLOCK_MONOTONIC_COARSE: case CLOCK_BOOTTIME: {
+        /* (nanoseconds: Java's System.nanoTime, frame timers - and a whole
+         *  millisecond between two reads is no longer 0 or 1 ms) */
+        unsigned long long ns = __uptime_ns();
+        ts->tv_sec = (time_t)(ns / 1000000000ull);
+        ts->tv_nsec = (long)(ns % 1000000000ull);
+        return 0;
+    }
     case CLOCK_PROCESS_CPUTIME_ID: case CLOCK_THREAD_CPUTIME_ID:
         ms -= g_start_ms;
         break;
@@ -508,7 +530,8 @@ int clock_gettime(clockid_t clk, struct timespec* ts) {
 
 int clock_getres(clockid_t clk, struct timespec* ts) {
     if (clk < 0 || clk > CLOCK_BOOTTIME) { errno = EINVAL; return -1; }
-    if (ts) { ts->tv_sec = 0; ts->tv_nsec = 1000000L; }
+    /* (the system's counter: well under a microsecond; older systems: ms) */
+    if (ts) { ts->tv_sec = 0; ts->tv_nsec = BANANA_HAS(__banana, uptime_ns) ? 1000L : 1000000L; }
     return 0;
 }
 

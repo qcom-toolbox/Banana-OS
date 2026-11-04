@@ -18,7 +18,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 32u
+#define BANANA_API_VERSION 33u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -636,6 +636,11 @@ typedef struct banana_api {
     /* version 32: bounded browser-worker IPC. Only a kernel-created,
      * restricted worker may use its own channel; no caller-supplied IDs. */
     int (*web_ipc)(int op, const void* in, unsigned int len, void* out, unsigned int cap);
+    /* version 33: the time since boot in nanoseconds (the shared hardware
+     * counter ticks_ms is made from: HPET or ACPI PM timer) into *out; 0.
+     * The SDK's clock_gettime and gettimeofday use it: before, they had
+     * whole milliseconds only */
+    int (*uptime_ns)(unsigned long long* out);
 } banana_api_t;
 
 #define BANANA_SIG_DEFAULT 0

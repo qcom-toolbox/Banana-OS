@@ -1485,6 +1485,12 @@ static int a_chdir(const char* path) {
 /* ── time ──────────────────────────────────────────────────────────── */
 
 static unsigned int a_ticks(void) { return timer_ms(); }
+/* v33: nanoseconds since boot (any core: the counter is shared) */
+static int a_uptime_ns(unsigned long long* out) {
+    if (!out) return -14;
+    *out = (unsigned long long)timer_counter();
+    return 0;
+}
 
 static int sig_waiting(app_proc_t* p);
 
@@ -2784,6 +2790,7 @@ static void spec_init(void) {
     SPEC(fd_sync, "i", 0);
     SPEC(web_ipc, "ibibi", 0);
     SPEC(poll_mask, "iiiL", 0);           /* fds: checked in a_poll */
+    SPEC(uptime_ns, "o", sizeof(unsigned long long));
     SPEC(pkg_install, "sbi", 0);
     SPEC(app_run, "siibi", 0);          /* argv: checked in it */
     SPEC(repo_update, "bi", 0);
@@ -2828,6 +2835,7 @@ static void spec_init(void) {
     SPEC(sig_pending, "", 0);
 
     LOCAL(ticks_ms, LOCAL_YES);
+    LOCAL(uptime_ns, LOCAL_YES);
     LOCAL(cpu_count, LOCAL_YES);
     LOCAL(thread_id, LOCAL_YES);
     LOCAL(key_mods, LOCAL_YES);
@@ -3062,7 +3070,7 @@ static int gather_args(app_proc_t* p, const sysspec_t* sp, const sysframe_t* r, 
 static int web_syscall_allowed(uint64_t slot) {
     switch (slot) {
     case API_SLOT(exit): case API_SLOT(malloc): case API_SLOT(free):
-    case API_SLOT(realloc): case API_SLOT(ticks_ms): case API_SLOT(sleep_ms):
+    case API_SLOT(realloc): case API_SLOT(ticks_ms): case API_SLOT(uptime_ns): case API_SLOT(sleep_ms):
     case API_SLOT(yield): case API_SLOT(vm_map): case API_SLOT(vm_unmap):
     case API_SLOT(vm_protect): case API_SLOT(tls_set): case API_SLOT(thread_id):
     /* Read-only UTC/timezone queries back Date/Intl in the SDK runtime. */
@@ -4260,6 +4268,7 @@ static void api_init(void) {
     g_api.poll_mask = G(a_poll_mask);
     g_api.fd_sync = G(a_fd_sync);
     g_api.web_ipc = G(a_web_ipc);
+    g_api.uptime_ns = G(a_uptime_ns);
 #ifdef __x86_64__
     g_api.proc_list = G(a_proc_list);                  /* (the system calls' table: 64-bit) */
 #endif

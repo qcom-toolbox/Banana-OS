@@ -322,9 +322,10 @@ int timer_getoverrun(timer_t id) { (void)id; return 0; }
 
 /* the wall clock (libc.c: __realtime_ms - it never runs backwards) */
 long long __realtime_ms(void);                  /* (libc.c: never runs backwards) */
+long long __realtime_ns(void);                  /* (the same, to the nanosecond) */
 int gettimeofday(struct timeval* tv, void* tz) {
     (void)tz;
-    if (tv) { long long now = __realtime_ms(); tv->tv_sec = (long)(now / 1000); tv->tv_usec = (long)(now % 1000) * 1000; }
+    if (tv) { long long now = __realtime_ns() / 1000; tv->tv_sec = (long)(now / 1000000); tv->tv_usec = (long)(now % 1000000); }
     return 0;
 }
 

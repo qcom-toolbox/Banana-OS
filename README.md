@@ -16,6 +16,14 @@ Banana OS 0.6 is a minimal x86 operating system written from scratch (no Linux k
 
 <!-- New entries go here, at the top of this section - not above the introduction. -->
 
+- **Clocks to the nanosecond:** `clock_gettime` and `gettimeofday` counted
+  whole milliseconds, so Java's `System.nanoTime()` (Minecraft's frame timing
+  and frame limiter) moved in 1 ms steps, and two reads a tick apart looked a
+  whole millisecond apart (what hung Vim). Apps now read the system's shared
+  hardware counter (HPET or ACPI PM timer, API version 33: `uptime_ns`), on
+  any core and without leaving it; the wall clock is still one line that never
+  runs backwards. Apps built with an older SDK keep millisecond clocks.
+
 - **More reliable updates:** `update` (and `install`) now read the whole boot
   image back from the disk and compare every 64 KB piece with what was meant
   to be written. A piece the disk did not keep is written again, and if it

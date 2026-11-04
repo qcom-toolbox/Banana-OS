@@ -353,6 +353,28 @@ static void t_threads(void) {
     snprintf(note, sizeof(note), "%ld ms for 100 waits of 1 ms", took);
     check("1 ms timed waits take about 1 ms", all && took >= 100 && took < 700, note);
 
+    /* the clocks resolve below a millisecond (Java's System.nanoTime) and
+     * never go back */
+    {
+        struct timespec a, b;
+        int finer = 0, back = 0;
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        for (int i = 0; i < 20000; i++) {
+            clock_gettime(CLOCK_MONOTONIC, &b);
+            long long d = (long long)(b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec);
+            if (d < 0) back = 1;
+            if (b.tv_nsec % 1000000L) finer = 1;
+            a = b;
+        }
+        struct timeval tv1, tv2;
+        gettimeofday(&tv1, NULL);
+        int us = 0;
+        for (int i = 0; i < 20000 && !us; i++) { gettimeofday(&tv2, NULL); if (tv2.tv_usec % 1000) us = 1; }
+        snprintf(note, sizeof(note), "%s, %s, gettimeofday %s", finer ? "below 1 ms" : "whole ms only",
+                 back ? "WENT BACK" : "monotonic", us ? "in microseconds" : "in whole ms");
+        check("clock_gettime: nanoseconds, monotonic; gettimeofday: microseconds", finer && !back && us, note);
+    }
+
 #ifdef __x86_64__
     ok = t_var == 42 && !t_big[2999];
     for (long i = 0; i < 6; i++) pthread_create(&th[i], NULL, tls_user, (void*)(i + 1));
