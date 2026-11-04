@@ -1,5 +1,21 @@
 # 🍌 Banana OS 0.6
 
+Banana OS 0.6 is a minimal x86 operating system written from scratch (no Linux kernel, no external OS kernel) - a **64-bit (x86_64) kernel with a 32-bit fallback**, booting on **UEFI and BIOS** machines and in VirtualBox/QEMU with **its own boot loader** (Banana Boot, Multiboot2) - now with **real networking**: its own drivers for the Intel e1000, AMD PCnet, virtio-net and Realtek RTL8139 network cards (every card VirtualBox offers) and its own TCP/IP stack, so `ping`, `curl` and `wget` talk to the actual Internet (HTTP and HTTPS).
+
+```
+  ____                                   ___  ____
+ | __ )  __ _ _ __   __ _ _ __   __ _   / _ \/ ___|
+ |  _ \ / _` | '_ \ / _` | '_ \ / _` | | | | \___ \
+ | |_) | (_| | | | | (_| | | | | (_| | | |_| |___) |
+ |____/ \__,_|_| |_|\__,_|_| |_|\__,_|  \___/|____/
+```
+
+![Banana OS desktop](assets/screenshots/gui-desktop.png)
+
+## Latest additions
+
+<!-- New entries go here, at the top of this section - not above the introduction. -->
+
 - **The real neofetch, and "Banana OS" spelled right:** `neofetch` on the
   64-bit system is now neofetch 7.1.0 itself (the bash script, `ports/neofetch`)
   with a Banana OS backend and a new banana logo. Banana OS has no `/proc`,
@@ -159,8 +175,8 @@
   extended and pipeline context sizes from the correct hardware fields.
   The regression models an 8 KiB context with a different power-context
   size and catches the former 4 KiB allocation before the fix.
-  `gpu3d on` permits acceleration; use `glinfo`'s renderer to confirm
-  whether an application actually uses Intel or software rendering.
+  A supported Intel GPU is used by default (`gpu3d off` turns it off); use
+  `glinfo`'s renderer to confirm whether an application uses Intel or software rendering.
   Physical Intel performance and the reported installed-disk command failure
   still require confirmation on the affected PC.
 
@@ -180,20 +196,6 @@ from both legacy 128 MiB and newer 256 MiB installations.
 The integrated Terminal uses the newer tabbed Bash interface with the original
 terminal icon. Zsh is selected with chsh zsh. Terminal, Bash and Zsh have no
 separate entries in Apps, App Store or Settings > Apps.
-
-Banana OS 0.6 is a minimal x86 operating system written from scratch (no Linux kernel, no external OS kernel) - a **64-bit (x86_64) kernel with a 32-bit fallback**, booting on **UEFI and BIOS** machines and in VirtualBox/QEMU with **its own boot loader** (Banana Boot, Multiboot2) - now with **real networking**: its own drivers for the Intel e1000, AMD PCnet, virtio-net and Realtek RTL8139 network cards (every card VirtualBox offers) and its own TCP/IP stack, so `ping`, `curl` and `wget` talk to the actual Internet (HTTP and HTTPS).
-
-```
-  ____                                   ___  ____
- | __ )  __ _ _ __   __ _ _ __   __ _   / _ \/ ___|
- |  _ \ / _` | '_ \ / _` | '_ \ / _` | | | | \___ \
- | |_) | (_| | | | | (_| | | | | (_| | | |_| |___) |
- |____/ \__,_|_| |_|\__,_|_| |_|\__,_|  \___/|____/
-```
-
-![Banana OS desktop](assets/screenshots/gui-desktop.png)
-
-## Latest additions
 
 - **Experimental RTL8811CU Wi-Fi** - separate native firmware/DDMA, EFUSE,
   radio/channel and WPA2/CCMP station path. USB lifetime and malformed packet
