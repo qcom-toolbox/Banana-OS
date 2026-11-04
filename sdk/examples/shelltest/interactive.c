@@ -504,6 +504,10 @@ int shelltest_editors(void) {
         any = 1;
         printf("vim\n");
         unlink("/tmp/ed-vim.txt");
+        /* (a Vim killed by an earlier failed check leaves its swap file:
+         *  the next one would stop at its ATTENTION prompt) */
+        unlink("/tmp/.ed-vim.txt.swp");
+        unlink("/tmp/.ed-vim.c.swp");
         check("i, text, Esc, :wq", edit("/bin/vim", "/tmp/ed-vim.txt", "ed-vim.txt", "ihello vim\x1b:wq\r"));
         check("the file has the text", !strcmp(slurp("/tmp/ed-vim.txt"), "hello vim\n"));
         put("/tmp/ed-vim.c", "int main(void) { return 0; }\n");
