@@ -2477,6 +2477,34 @@ static int migrate_to_v4(const ata_disk_t* d) {
     return rc;
 }
 
+/* From the live system: asks the installed system on disk d to install
+ * every built-in app again at its next start (repair) - a request file,
+ * /etc/builtin-apps-repair with "*", written into its ext4. The files,
+ * settings and password stay as they are. FSDISK_OK, or an error (only
+ * ext4 installs; never from the installed system itself) */
+int fsdisk_request_repair(const ata_disk_t* dp) {
+    if (g_have_target || ext4_mounted()) return FSDISK_ERR_NO_INSTALL;
+    ata_disk_t d = *dp;
+    if (!e4_detect(&d)) return FSDISK_ERR_NO_INSTALL;
+    ata_disk_t keep = g_target;
+    uint32_t keep_base = g_e4_base;
+    g_target = d;
+    ext4_dev_t dev;
+    e4_geometry(&d, &dev, &g_e4_base);
+    int rc = FSDISK_ERR_IO;
+    if (ext4_mount(&dev) == 0) {
+        uint32_t etc = ext4_lookup(EXT4_ROOT_INO, "etc", 0);
+        if (!etc) etc = ext4_mkdir(EXT4_ROOT_INO, "etc", 0755, 0, 0);
+        uint32_t f = etc ? ext4_lookup(etc, "builtin-apps-repair", 0) : 0;
+        if (etc && !f) f = ext4_create(etc, "builtin-apps-repair", 0644, 0, 0);
+        if (f && ext4_truncate(f, 0) == 0 && ext4_write(f, 0, "*\n", 2) == 0) rc = FSDISK_OK;
+        if (ext4_unmount() != 0) rc = FSDISK_ERR_IO;
+    }
+    g_target = keep;
+    g_e4_base = keep_base;
+    return rc;
+}
+
 int fsdisk_update(void) {
     ata_disk_t d;
     if (!fsdisk_find_install(&d)) return FSDISK_ERR_NO_INSTALL;

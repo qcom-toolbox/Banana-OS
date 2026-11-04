@@ -1835,6 +1835,16 @@ static void unmount_state(void) {
 
 static int mount_sb(const ext4_dev_t* dev);
 
+/* written out and let go (the live system's repair: another disk's ext4) */
+int ext4_unmount(void) {
+    if (!g_mounted) return 0;
+    int rc = ext4_flush();
+    lock();
+    unmount_state();
+    unlock();
+    return rc;
+}
+
 int ext4_mount(const ext4_dev_t* dev) {
     if (g_mounted) unmount_state();
     g_dev = *dev;

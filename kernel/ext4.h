@@ -55,6 +55,7 @@ typedef struct {
  * this driver does not have) */
 int  ext4_mount(const ext4_dev_t* dev);
 int  ext4_mounted(void);
+int  ext4_unmount(void);            /* flushed, then let go */
 /* makes an empty ext4 filesystem over all of dev, named label, and mounts
  * it. keep: nkeep runs of 4 KiB blocks {first, count} holding data already
  * (moving an older Banana OS disk over: ext4_adopt gives them to files) -

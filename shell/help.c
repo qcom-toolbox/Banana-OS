@@ -228,7 +228,13 @@ static const page_t PAGES[] = {
       "Writes this CD's system over the installed one; your files, settings and password are kept. With "
       "several disks holding Banana OS it asks which one (or give its number: update 2), then asks to "
       "confirm, then updates. Only on the live system.",
-      NULL, NULL, "install" },
+      NULL, NULL, "install, repair" },
+    { "repair", "disks", "repair [number]", "repair an installed system from the CD",
+      "For a system that no longer starts right (\"not an ELF program\", a broken bash or app): writes this "
+      "CD's system over the installed one as update does - also when it is already the same - and has every "
+      "built-in app (bash, Terminal, the App Store...) installed again from the kernel's copy at the next start "
+      "from the disk. Your files, settings and password are kept. Only on the live system.",
+      NULL, "repair", "update, pkg" },
     /* ── system ── */
     { "uname", "system", "uname", "the system's name", NULL, NULL, NULL, "neofetch" },
     { "whoami", "system", "whoami", "the user", NULL, NULL, NULL, "passwd" },
@@ -636,7 +642,8 @@ static const topic_t* find_topic(const char* key) {
 /* commands of the live CD only are not shown on an installed system */
 static int shown(const page_t* p) {
     if (sysinfo_live_boot()) return 1;
-    return strcmp(p->name, "install") && strcmp(p->name, "installer") && strcmp(p->name, "update");
+    return strcmp(p->name, "install") && strcmp(p->name, "installer") && strcmp(p->name, "update") &&
+           strcmp(p->name, "repair");
 }
 
 /* "  name           brief" */

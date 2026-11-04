@@ -376,7 +376,8 @@ static void cmd_sleep(const char* args) {
 /* Installing and updating are the live CD's (or USB stick's) work: on an
  * installed system these commands are not there at all. */
 static int live_only(const char* name) {
-    return k_strcmp(name, "install") == 0 || k_strcmp(name, "update") == 0 || k_strcmp(name, "installer") == 0;
+    return k_strcmp(name, "install") == 0 || k_strcmp(name, "update") == 0 || k_strcmp(name, "installer") == 0 ||
+           k_strcmp(name, "repair") == 0;
 }
 static int cmd_hidden(const char* name) { return live_only(name) && !sysinfo_live_boot(); }
 
@@ -1297,7 +1298,7 @@ static const char* const known_cmds[] = {
     "ls", "cd", "pwd", "mkdir", "rm", "touch", "cp", "mv", "edit", "cat", "run",
     "uptime", "boottime", "top", "exit", "start", "stop", "startx", "stopx",
     "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
-    "hw_info", "shutdown", "reboot", "halt", "sleep", "install", "sync", "drop_caches", "update", "installer", "disks", "history", "which", "type",
+    "hw_info", "shutdown", "reboot", "halt", "sleep", "install", "sync", "drop_caches", "update", "repair", "installer", "disks", "history", "which", "type",
     "alias", "unalias", "export", "unset", "env", "chsh", "autologin",
     "grep", "wc", "head", "tail", "find", "time", "nice",
     /* shell/netcmds.c + shell/wpcmd.c */
@@ -1990,7 +1991,12 @@ static void cmd_install(const char* args) {
 
 /* `update`: from a (newer) Banana OS CD, rewrites the installed disk's
  * system and leaves its files and settings alone */
-static void cmd_update(const char* args) {
+/* update, or repair (repair: also when the system is the same, then every
+ * built-in app installed again at the next start - files, settings and the
+ * password kept) */
+static void cmd_update_mode(const char* args, int repair);
+static void cmd_update(const char* args) { cmd_update_mode(args, 0); }
+static void cmd_update_mode(const char* args, int repair) {
     ata_disk_t all[DISK_MAX], inst[DISK_MAX];
     int n = fsdisk_targets(all, DISK_MAX), ni = 0;
     for (int i = 0; i < n; i++) if (fsdisk_holds_banana(&all[i])) inst[ni++] = all[i];
@@ -2029,22 +2035,45 @@ static void cmd_update(const char* args) {
     if (fsdisk_install_layout() == 3)
         terminal_writeln("update: this install uses the old disk layout (32 MB boot area) - it will be\n"
                          "        moved to the new one: a 128 MB boot area, your files using the whole disk.");
-    if (same == 1) {
-        terminal_write_color("update: the installed system is already the same as this CD - nothing to do.\n",
+    if (same == 1 && !repair) {
+        terminal_write_color("update: the installed system is already the same as this CD - nothing to do.\n"
+                             "        (repair: install every built-in app on it again)\n",
                              VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
         return;
     }
-    terminal_write_color(
-        "Replace the Banana OS system on this disk with the one on the CD?\n"
-        "Your files, settings and password are kept. [y/N] ",
-        VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    if (repair)
+        terminal_write_color(
+            "Repair Banana OS on this disk: write the system from the CD again and install\n"
+            "every built-in app again at the next start (bash, Terminal, the App Store...)?\n"
+            "Your files, settings and password are kept. [y/N] ",
+            VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    else
+        terminal_write_color(
+            "Replace the Banana OS system on this disk with the one on the CD?\n"
+            "Your files, settings and password are kept. [y/N] ",
+            VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     if (!prompt_yes_no()) {
-        terminal_writeln("update: cancelled.");
+        terminal_writeln(repair ? "repair: cancelled." : "update: cancelled.");
         return;
     }
-    terminal_writeln("update: writing the new system, please wait (do not switch off)...");
-    terminal_flush();
-    int rc = fsdisk_update_on(&d);
+    int rc = FSDISK_OK;
+    if (same != 1) {
+        terminal_writeln("update: writing the new system, please wait (do not switch off)...");
+        terminal_flush();
+        rc = fsdisk_update_on(&d);
+    }
+    if (repair && rc == FSDISK_OK) {
+        int rr = fsdisk_request_repair(&d);
+        if (rr == FSDISK_OK)
+            terminal_write_color("repair: every built-in app will be installed again at the next start from the disk.\n",
+                                 VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        else
+            terminal_write_color(rr == FSDISK_ERR_NO_INSTALL
+                                 ? "repair: this disk's files are not on ext4 (an older layout): the system was\n"
+                                   "        written again, but the apps cannot be marked for reinstalling.\n"
+                                 : "repair: could not write the request onto the disk.\n",
+                                 VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+    }
     if (rc == FSDISK_OK) print_timing("update", "wrote");
     if (rc == FSDISK_OK) {
         terminal_write_color(
@@ -2687,6 +2716,7 @@ static void dispatch_plain(const char* line, int persona) {
     if (k_strcmp(line, "install")  == 0 || k_strncmp(line, "install ", 8) == 0) { cmd_install(line + 7); return; }
     if (k_strcmp(line, "sync")     == 0) { cmd_sync();        return; }
     if (k_strcmp(line, "update")   == 0 || k_strncmp(line, "update ", 7) == 0) { cmd_update(line + 6); return; }
+    if (k_strcmp(line, "repair")   == 0 || k_strncmp(line, "repair ", 7) == 0) { cmd_update_mode(line + 6, 1); return; }
     if (k_strcmp(line, "nice") == 0 || k_strncmp(line, "nice ", 5) == 0) {
         /* nice [-n N | -N] command: the command runs with its nice value
          * raised by N (default 10: a smaller share of the processor;
