@@ -15,6 +15,7 @@
 #include "../kernel/kheap.h"
 #include "../usb/usbcore.h"
 #include "../kernel/pkg.h"
+#include "../kernel/builtin_apps.h"
 #include "../kernel/app.h"
 #include "../kernel/gui.h"
 #include "../kernel/audio.h"
@@ -261,6 +262,30 @@ static void cmd_pkg(int argc, char** argv) {
         if (p.author[0]) say("  author: %s\n", p.author);
         say("  programs: %s%s%s\n", p.has_i686 ? "i686 " : "", p.has_x86_64 ? "x86_64" : "",
             (!p.has_i686 && !p.has_x86_64) ? "none" : "");
+    } else if (strcmp(sub, "verify") == 0 || strcmp(sub, "check") == 0) {
+        /* every file of each package against the list made when it was installed */
+        static pkg_info_t list[256];
+        int n = 0;
+        if (argc >= 3) {
+            for (int i = 2; i < argc && n < 256; i++) kstrlcpy(list[n++].name, argv[i], sizeof(list[0].name));
+        } else n = pkg_list(list, 256);
+        int damaged = 0, unknown = 0;
+        for (int i = 0; i < n; i++) {
+            char first[64];
+            int bad = pkg_verify(list[i].name, 1, first, sizeof(first));
+            if (bad == -2) { say("  %-14s not installed\n", list[i].name); continue; }
+            if (bad == -1) { unknown++; say("  %-14s no file list (installed by an older Banana OS)\n", list[i].name); continue; }
+            if (bad == 0) { say("  %-14s ok\n", list[i].name); continue; }
+            damaged++;
+            say("  %-14s %d file%s damaged or missing (%s)\n", list[i].name, bad, bad == 1 ? "" : "s", first);
+            int rc = builtin_app_reinstall(list[i].name, msg, sizeof(msg));
+            if (rc == 0) say("  %-14s repaired: %s\n", "", msg);
+            else if (rc == 1) say("  %-14s %s\n", "", msg);
+            else if (rc == -1) say("  %-14s install it again: apt install %s (or pkg install its .bpk)\n", "", list[i].name);
+            else fail("pkg verify", msg);
+        }
+        say("pkg verify: %d checked, %d damaged%s\n", n, damaged,
+            unknown ? " (some without a file list: reinstall them to get one)" : "");
     } else if (strcmp(sub, "run") == 0 && argc >= 3) {
         int rc = pkg_run(argv[2], argc - 2, argv + 2, 0, msg, sizeof(msg));
         if (rc < 0 && msg[0]) fail(argv[2], msg);
@@ -271,6 +296,7 @@ static void cmd_pkg(int argc, char** argv) {
         terminal_writeln("       pkg list                    installed apps");
         terminal_writeln("       pkg info <name|file.bpk>    details");
         terminal_writeln("       pkg remove <name>...        uninstall");
+        terminal_writeln("       pkg verify [name...]        check the installed files; repair built-in apps");
         terminal_writeln("       pkg run <name> [args]       run one (or just type its name)");
         terminal_writeln("       pkg ps                      running apps");
         terminal_writeln("From repositories: apt update / search / install <name> / upgrade (or the App Store).");

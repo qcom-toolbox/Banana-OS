@@ -384,10 +384,13 @@ static const page_t PAGES[] = {
       "Serves /var/www (port 80); .php pages run. expose forwards a port on your router (UPnP) to it.",
       NULL, "httpd start\nhttpd expose 8080", "firewall" },
     /* ── apps ── */
-    { "pkg", "apps", "pkg install <file.bpk>... | list | info <app> | remove <app> | run <app> | ps", "install and run apps",
+    { "pkg", "apps", "pkg install <file.bpk>... | list | info <app> | verify [app...] | remove <app> | run <app> | ps", "install and run apps",
       "Installs apps built with the SDK (.bpk files), lists, describes, removes and runs them. Installed "
-      "apps also run by their name, and appear in Apps on the desktop.", NULL,
-      "pkg install ~/Examples/gears.bpk\npkg list", "apt, apps" },
+      "apps also run by their name, and appear in Apps on the desktop. Each install records its files' sizes and "
+      "checksums (/apps/<app>/.files); pkg verify checks every file against them and puts a damaged built-in app "
+      "back (now on the live system, at the next start on an installed one). At every start the built-in apps' "
+      "files are checked by size and put back if one is missing or cut short.", NULL,
+      "pkg install ~/Examples/gears.bpk\npkg list\npkg verify\npkg verify mesa java", "apt, apps, update" },
     { "apt", "apps", "apt update | search <words> | show <app> | install <app>... | remove <app>... | upgrade | list | sources",
       "packages from repositories",
       "Like Debian's apt: package lists from signed repositories, search, install with what an app needs, "

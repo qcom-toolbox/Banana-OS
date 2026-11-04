@@ -417,6 +417,69 @@ static int sink_delta(uint32_t blk, uint32_t nblk, const uint8_t* data, void* ct
     return 0;
 }
 
+/* ── verifying what was written ──────────────────────────────────────
+ * Install and update read the whole boot image back from the disk and
+ * compare every 64 KB piece with the checksum of what was meant to be
+ * there (g_new). A piece the disk did not keep is written again; if it
+ * still differs, the update fails and says so - before, a write the disk
+ * silently dropped stayed, and the table told the next updates that
+ * piece was fine. */
+static uint8_t g_bad[HTAB_MAX];
+
+/* how many pieces of the image on the disk are not g_new's (g_bad marks them); -1: no memory */
+static int verify_image(const ata_disk_t* d, uint32_t iso_bytes) {
+    uint32_t total = iso_bytes / 2048u;
+    uint8_t* buf = (uint8_t*)kmalloc(READ_BLOCKS * 2048u);
+    if (!buf) return -1;
+    int bad = 0;
+    for (uint32_t done = 0; done < total; ) {
+        uint32_t n = total - done < READ_BLOCKS ? total - done : READ_BLOCKS;
+        int rd = disk_read(d, done * 4u, n * 4u, buf);
+        for (uint32_t k = 0; k < n; k += HASH_BLOCKS) {
+            uint32_t i = (done + k) / HASH_BLOCKS, len = (n - k < HASH_BLOCKS ? n - k : HASH_BLOCKS) * 2048u;
+            if (i >= HTAB_MAX) continue;
+            g_bad[i] = rd != 0 || i >= g_new.n || crc32c(0, buf + k * 2048u, len) != g_new.tab[i];
+            bad += g_bad[i];
+        }
+        done += n;
+        task_yield();
+    }
+    kfree(buf);
+    return bad;
+}
+
+static int need_bad(uint32_t blk, uint32_t nblk) {
+    for (uint32_t i = blk / HASH_BLOCKS; i < (blk + nblk + HASH_BLOCKS - 1u) / HASH_BLOCKS && i < HTAB_MAX; i++)
+        if (g_bad[i]) return 1;
+    return 0;
+}
+
+/* the marked pieces again, from the source (patched as before) */
+static int sink_fix(uint32_t blk, uint32_t nblk, const uint8_t* data, void* ctx) {
+    for (uint32_t k = 0; k < nblk; k += HASH_BLOCKS) {
+        uint32_t i = (blk + k) / HASH_BLOCKS, len = nblk - k < HASH_BLOCKS ? nblk - k : HASH_BLOCKS;
+        if (i >= HTAB_MAX || !g_bad[i]) continue;
+        g_tm.written_bytes += len * 2048u;
+        if (disk_write((const ata_disk_t*)ctx, (blk + k) * 4u, len * 4u, data + k * 2048u) != 0) return -1;
+    }
+    return 0;
+}
+
+/* the image on the disk is g_new's, or is made so (two tries); FSDISK_OK or FSDISK_ERR_IO */
+static int verify_and_fix(const img_src_t* src, const ata_disk_t* d, uint32_t iso_bytes, const uint8_t* partition) {
+    for (int attempt = 0; ; attempt++) {
+        if (disk_flush(d) != 0) return FSDISK_ERR_IO;
+        int bad = verify_image(d, iso_bytes);
+        if (bad == 0) return FSDISK_OK;
+        if (bad < 0) { klog("fsdisk: no memory to verify the boot image\n"); return FSDISK_ERR_IO; }
+        klog("fsdisk: %d of %u pieces of the boot image on the disk are not what was written%s\n",
+             bad, g_new.n, attempt < 2 ? " - writing them again" : "");
+        if (attempt == 2) return FSDISK_ERR_IO;
+        /* (sink_fix leaves g_new as it is) */
+        if (stream_image(src, iso_bytes, sink_fix, (void*)d, need_bad, partition) != 0) return FSDISK_ERR_IO;
+    }
+}
+
 /* comparing with the table: how many 64 KB pieces differ */
 static int sink_hash_compare(uint32_t blk, uint32_t nblk, const uint8_t* data, void* ctx) {
     hash_chunks(blk, nblk, data);
@@ -1987,6 +2050,7 @@ int fsdisk_install_to(const ata_disk_t* tp) {
 
     if (htab_drop(&target) != 0) return FSDISK_ERR_IO;
     if (copy_boot_image(&source, &target, iso_bytes, partition) != 0) return FSDISK_ERR_IO;
+    if (verify_and_fix(&source, &target, iso_bytes, partition) != FSDISK_OK) return FSDISK_ERR_IO;
     /* old headers: a layout-3 install's (past the new image), a layout-4 one's */
     if (iso_bytes <= V3_BASE_LBA * FSDISK_SECTOR) wipe_header(&target, V3_BASE_LBA);
     if (iso_bytes <= V4_BASE_LBA * FSDISK_SECTOR) wipe_header(&target, V4_BASE_LBA);
@@ -2449,7 +2513,9 @@ int fsdisk_update_on(const ata_disk_t* dp) {
     if (htab_drop(&dst) != 0) return FSDISK_ERR_IO;
     if (stream_image(&src, iso_bytes, sink_delta, (void*)&dst, need, partition) != 0) return FSDISK_ERR_IO;
     if (iso_bytes <= V3_BASE_LBA * FSDISK_SECTOR) wipe_header(&dst, V3_BASE_LBA);
-    if (disk_flush(&dst) != 0) return FSDISK_ERR_IO;
+    /* what the disk really holds now, not what the table says it should */
+    rc = verify_and_fix(&src, &dst, iso_bytes, partition);
+    if (rc != FSDISK_OK) return rc;           /* (no table saved: the next update writes everything) */
     htab_save(&dst, iso_bytes);              /* (without it the next update writes everything: no harm) */
     g_fi_state = -1;
     g_prog_done = g_prog_total;

@@ -48,4 +48,8 @@ const char* builtin_profile_apps(int profile);        /* what it installs, in a 
  * how many apps were removed */
 int         builtin_profile_apply(int profile);
 
+/* an app installed again from the kernel's built-in copy: 0; 1 it will be
+ * at the next start; -1 no such built-in app; -2 it failed (msg says why) */
+int builtin_app_reinstall(const char* name, char* msg, int mcap);
+
 #endif

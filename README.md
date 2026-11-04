@@ -16,6 +16,24 @@ Banana OS 0.6 is a minimal x86 operating system written from scratch (no Linux k
 
 <!-- New entries go here, at the top of this section - not above the introduction. -->
 
+- **More reliable updates:** `update` (and `install`) now read the whole boot
+  image back from the disk and compare every 64 KB piece with what was meant
+  to be written. A piece the disk did not keep is written again, and if it
+  still differs the update fails and says so. Before, a dropped write stayed,
+  and the checksum table told the next updates it was fine. Every package now
+  records its files' sizes and checksums when it is installed (`/apps/<app>/.files`,
+  and the files an `unpack=` package such as Java puts in `/usr`). At every
+  start the built-in apps are checked by size and put back from the kernel's
+  copy if a file is missing or cut short. Apps installed before there were
+  lists are installed once more after the update, which also repairs what an
+  earlier update broke. **`pkg verify [app...]`** checks every file's
+  checksum, repairs a damaged built-in app, and says how to reinstall the others.
+- **Vim no longer hangs on `:wq` / `:qa!`:** a peek for input could turn into
+  a wait for ever when a millisecond tick fell between two clock reads
+  (the intermittent `shelltest -e` failures in CI). The GUI installer's
+  **Restart now** uses the system's restart, which tries the chipset reset
+  too; it froze PCs that ignore the keyboard controller's reset line.
+
 - **The real neofetch, and "Banana OS" spelled right:** `neofetch` on the
   64-bit system is now neofetch 7.1.0 itself (the bash script, `ports/neofetch`)
   with a Banana OS backend and a new banana logo. Banana OS has no `/proc`,

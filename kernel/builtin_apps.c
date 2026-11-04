@@ -104,6 +104,21 @@ static void mark(const char* name, const char* version, uint32_t crc, uint32_t z
     if (fi >= 0) fs_append(fi, line, (uint32_t)strlen(line));
 }
 
+/* /etc/builtin-apps-repair: "name\n" of each app `pkg verify` found damaged
+ * after the kernel's copies were given back: installed again at the next boot */
+#define REPAIRS "/etc/builtin-apps-repair"
+
+static int repair_requested(const char* name) {
+    int fi = fs_find_file(REPAIRS);
+    fs_file_t* f = fi >= 0 ? fs_get_file(fi) : NULL;
+    if (!f || !f->content) return 0;
+    char want[40];
+    ksnprintf(want, sizeof(want), "%s\n", name);
+    for (const char* p = f->content; (p = strstr(p, want)); p++)
+        if (p == f->content || p[-1] == '\n') return 1;
+    return 0;
+}
+
 /* /etc/builtin-apps-skip: "name\n" of each app an install profile left out */
 #define SKIPS "/etc/builtin-apps-skip"
 
@@ -127,8 +142,22 @@ void builtin_apps_install(void) {
         if (zlen <= 0) continue;
         /* the package this system already has (or left out on purpose): not unpacked again */
         uint32_t zcrc = crc32c(0, APPS[i].start, (uint32_t)zlen);
-        if (marked_z(APPS[i].name, zcrc)) {
-            pkg_info_t present;
+        /* an installed copy whose files went missing or changed size (a
+         * damaged disk, an update cut short): put back from this copy */
+        char first[64];
+        pkg_info_t present;
+        int damaged = 0;
+        if (pkg_get(APPS[i].name, &present) == 0) {
+            int v = pkg_verify(APPS[i].name, 0, first, sizeof(first));
+            if (v > 0) damaged = 1;
+            else if (repair_requested(APPS[i].name)) { damaged = 1; kstrlcpy(first, "a file (pkg verify)", sizeof(first)); }
+            /* installed from a built-in copy before there were file lists: once
+             * more, so it has one (and whatever an update broke is put back) */
+            else if (v == -1 && marked_version(APPS[i].name, present.version)) { damaged = 2; }
+        }
+        if (damaged == 1) klog("apps: %s: %s is damaged or missing - installed again\n", APPS[i].name, first);
+        if (damaged == 2) klog("apps: %s: installed again to record its files (pkg verify)\n", APPS[i].name);
+        if (!damaged && marked_z(APPS[i].name, zcrc)) {
             if (!banana_system_component(APPS[i].name) || pkg_get(APPS[i].name, &present) == 0) continue;
         }
         pkg_info_t have;
@@ -142,7 +171,9 @@ void builtin_apps_install(void) {
             int installed = pkg_get(mine.name, &have) == 0;
             uint32_t crc = crc32c(0, bpk, (uint32_t)len);
             int want;
-            if (installed)
+            if (installed && damaged)
+                want = repo_vercmp(have.version, mine.version) <= 0;   /* (not one from a repository that is newer) */
+            else if (installed)
                 /* left as it is when a newer version came from a repository, or it
                  * is this very package; else upgraded - also when the app changed
                  * under the same version number (an `update`d system gets it) */
@@ -163,8 +194,43 @@ void builtin_apps_install(void) {
         }
         kfree(bpk);
     }
+    if (fs_find_file(REPAIRS) >= 0) fs_delete(REPAIRS, 0);     /* (done) */
     if (unpacked) klog("apps: built-in apps checked in %u ms (%d unpacked)\n", timer_ms() - t0, unpacked);
     repo_builtin_refresh();          /* the App Store can install them again (builtin: source) */
+}
+
+/* name installed again from the kernel's own copy (pkg verify): 0; 1 at
+ * the next start (the copy was given back); -1 no built-in copy; -2 failed */
+int builtin_app_reinstall(const char* name, char* msg, int mcap) {
+    for (unsigned i = 0; i < sizeof(APPS) / sizeof(APPS[0]); i++) {
+        if (strcmp(APPS[i].name, name)) continue;
+        if (g_released) {
+            /* (the kernel's copy was given back after boot: at the next one) */
+            char line[40];
+            ksnprintf(line, sizeof(line), "%s\n", name);
+            int fi = fs_find_file(REPAIRS);
+            if (fi < 0) { fs_mkdir_p("/etc"); fi = fs_create(REPAIRS); }
+            if (fi < 0 || fs_append(fi, line, (uint32_t)strlen(line)) != 0) {
+                kstrlcpy(msg, "cannot write " REPAIRS, (size_t)mcap);
+                return -2;
+            }
+            ksnprintf(msg, (size_t)mcap, "%s will be installed again at the next start", name);
+            return 1;
+        }
+        int zlen = (int)(APPS[i].end - APPS[i].start), len = 0;
+        uint8_t* bpk = zlen > 0 ? (uint8_t*)stbi_zlib_decode_malloc((const char*)APPS[i].start, zlen, &len) : NULL;
+        if (!bpk || len <= 0) { kstrlcpy(msg, "the built-in package is damaged", (size_t)mcap); kfree(bpk); return -2; }
+        int rc = pkg_install_mem(bpk, (uint32_t)len, msg, mcap);
+        if (rc == 0) {
+            pkg_info_t mine;
+            char err[8];
+            if (pkg_inspect_mem(bpk, (uint32_t)len, &mine, err, sizeof(err)) == 0)
+                mark(mine.name, mine.version, crc32c(0, bpk, (uint32_t)len), crc32c(0, APPS[i].start, (uint32_t)zlen));
+        }
+        kfree(bpk);
+        return rc == 0 ? 0 : -2;
+    }
+    return -1;
 }
 
 /* ── the App Store's builtin: source ─────────────────────────────────── */

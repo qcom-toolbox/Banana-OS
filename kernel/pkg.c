@@ -9,6 +9,7 @@
 #include "explorer.h"
 #include "zip.h"
 #include "serial.h"
+#include "crc32c.h"
 
 #define ENT_SIZE   64u
 #define ENT_NAME   56u
@@ -266,6 +267,119 @@ int pkg_install(const char* bpk_path, char* msg, int mcap) {
     return r;
 }
 
+/* ── the package's files, to check them later (pkg verify) ───────────
+ * /apps/<name>/.files: one line per file the package put in its folder,
+ * "<crc32c hex> <size> <name>" - the ZIP an unpack= package unpacks is
+ * left out (it is deleted once unpacked). */
+#define FILE_LIST ".files"
+
+static void write_file_list(const char* dir, const uint8_t* d, uint32_t count, const char* skip) {
+    uint32_t cap = count * (ENT_NAME + 32u) + 1u, n = 0;
+    char* t = (char*)kmalloc(cap);
+    if (!t) return;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t* e = d + 8 + i * ENT_SIZE;
+        if (skip && !strcmp((const char*)e, skip)) continue;
+        uint32_t off = rd32(e + ENT_NAME), len = rd32(e + ENT_NAME + 4);
+        n += (uint32_t)ksnprintf(t + n, cap - n, "%08x %u %s\n", crc32c(0, d + off, len), len, (const char*)e);
+    }
+    char path[FS_PATH_LEN];
+    ksnprintf(path, sizeof(path), "%s/" FILE_LIST, dir);
+    fs_write_path(path, t, n);
+    kfree(t);
+}
+
+/* the files an unpack= package unpacked into udest, appended to its list
+ * by their full paths (java.bpk: /usr/java - its JDK, LWJGL and OpenGL) */
+static void append_unpacked(const char* dir, const char* udest) {
+    char path[FS_PATH_LEN];
+    ksnprintf(path, sizeof(path), "%s/" FILE_LIST, dir);
+    int li = fs_find_file(path);
+    if (li < 0) return;
+    int dirs[64], nd = 0, files[256];
+    int top = fs_find_dir(udest);
+    if (top < 0) return;
+    char line[FS_PATH_LEN + 32];
+    /* (folders to look at: a stack of paths) */
+    char (*stack)[FS_PATH_LEN] = (char (*)[FS_PATH_LEN])kmalloc(64 * FS_PATH_LEN);
+    if (!stack) return;
+    int sp = 0;
+    kstrlcpy(stack[sp++], udest, FS_PATH_LEN);
+    while (sp > 0) {
+        char here[FS_PATH_LEN];
+        kstrlcpy(here, stack[--sp], sizeof(here));
+        int nf = fs_list_files(here, files, 256);
+        for (int i = 0; i < nf && i < 256; i++) {
+            fs_pin(files[i]);
+            fs_file_t* f = fs_get_file(files[i]);
+            if (f && f->content) {
+                char fp[FS_PATH_LEN];
+                fs_file_path(files[i], fp, sizeof(fp));
+                int n = ksnprintf(line, sizeof(line), "%08x %u %s\n", crc32c(0, f->content, f->size), f->size, fp);
+                fs_append(li, line, (uint32_t)n);
+            }
+            fs_unpin(files[i]);
+        }
+        nd = fs_list_dirs(here, dirs, 64);
+        for (int i = 0; i < nd && i < 64 && sp < 64; i++) fs_dir_path(dirs[i], stack[sp++], FS_PATH_LEN);
+    }
+    kfree(stack);
+}
+
+/* how many files of package name are missing or not what it installed
+ * (full: their contents too, else their sizes); -1: no list (installed
+ * before there were lists), -2: not installed. The first damaged one's
+ * name goes to first. */
+int pkg_verify(const char* name, int full, char* first, int fcap) {
+    if (first && fcap > 0) first[0] = 0;
+    if (!valid_name(name)) return -2;
+    char dir[FS_PATH_LEN], path[FS_PATH_LEN];
+    app_dir(name, dir, sizeof(dir));
+    if (fs_find_dir(dir) < 0) return -2;
+    ksnprintf(path, sizeof(path), "%s/" FILE_LIST, dir);
+    int li = fs_find_file(path);
+    if (li < 0) return -1;
+    fs_pin(li);
+    fs_file_t* lf = fs_get_file(li);
+    if (!lf || !lf->content) { fs_unpin(li); return -1; }
+    char* list = (char*)kmalloc(lf->size + 1u);
+    if (!list) { fs_unpin(li); return -1; }
+    memcpy(list, lf->content, lf->size);
+    list[lf->size] = 0;
+    fs_unpin(li);
+    int bad = 0;
+    for (char* line = list; *line; ) {
+        char* end = strchr(line, '\n');
+        if (end) *end = 0;
+        uint32_t crc = 0, size = 0;
+        char* p = line;
+        while (*p && *p != ' ') { char c = *p++; crc = crc * 16u + (uint32_t)(c <= '9' ? c - '0' : (c | 32) - 'a' + 10); }
+        if (*p == ' ') p++;
+        while (*p >= '0' && *p <= '9') size = size * 10u + (uint32_t)(*p++ - '0');
+        if (*p == ' ') p++;
+        if (*p) {
+            if (*p == '/') kstrlcpy(path, p, sizeof(path));      /* (unpacked: its full path) */
+            else ksnprintf(path, sizeof(path), "%s/%s", dir, p);
+            int fi = fs_find_file(path), ok = 0;
+            fs_file_t* info = fi >= 0 ? fs_file_info(fi) : NULL;
+            if (info && info->size == size) {
+                if (!full) ok = 1;
+                else {
+                    fs_pin(fi);
+                    fs_file_t* f = fs_get_file(fi);
+                    ok = f && f->content && f->size == size && crc32c(0, f->content, size) == crc;
+                    fs_unpin(fi);
+                }
+            }
+            if (!ok) { if (!bad && first && fcap > 0) kstrlcpy(first, p, (size_t)fcap); bad++; }
+        }
+        if (!end) break;
+        line = end + 1;
+    }
+    kfree(list);
+    return bad;
+}
+
 int pkg_install_mem(const uint8_t* data, uint32_t size, char* msg, int mcap) {
     /* work on a copy: the package may live on a stick, or be replaced meanwhile */
     uint8_t* d = (uint8_t*)kmalloc(size + 1);
@@ -324,6 +438,7 @@ int pkg_install_mem(const uint8_t* data, uint32_t size, char* msg, int mcap) {
         /* the programs can be run (bash looks at the x bits) */
         if (!strncmp((const char*)e, "app-", 4) || !strncmp((const char*)e, "driver-", 7)) fs_chmod(path, 0755);
     }
+    write_file_list(dir, d, count, unpack ? ufile : NULL);
     kfree(d);
     char unpacked[96] = "";
     if (unpack) {
@@ -340,6 +455,7 @@ int pkg_install_mem(const uint8_t* data, uint32_t size, char* msg, int mcap) {
             return -1;
         }
         fs_delete(path, 0);
+        append_unpacked(dir, udest);
         ksnprintf(unpacked, sizeof(unpacked), " - %d files in %s", st.files, udest);
     }
     /* its commands in /bin (bin=) */
