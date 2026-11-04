@@ -112,6 +112,8 @@ static int repair_requested(const char* name) {
     int fi = fs_find_file(REPAIRS);
     fs_file_t* f = fi >= 0 ? fs_get_file(fi) : NULL;
     if (!f || !f->content) return 0;
+    /* "*": every one (the live system's repair) */
+    if (f->size >= 2 && f->content[0] == '*' && f->content[1] == '\n') return 1;
     char want[40];
     ksnprintf(want, sizeof(want), "%s\n", name);
     for (const char* p = f->content; (p = strstr(p, want)); p++)

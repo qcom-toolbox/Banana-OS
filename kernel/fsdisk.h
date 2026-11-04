@@ -79,6 +79,9 @@ int  fsdisk_compare_boot(void);
 int  fsdisk_update(void);
 /* the same on the disk chosen (several disks holding Banana OS) */
 int  fsdisk_update_on(const ata_disk_t* target);
+/* from the live system: the installed system on dp installs every built-in
+ * app again at its next start (repair); FSDISK_OK or an FSDISK_ERR_* */
+int  fsdisk_request_repair(const ata_disk_t* dp);
 /* the installed disk's layout: 4 (128 MB boot area, slots over the whole
  * disk), 3 (before: 32 MB, fixed slots - `update` moves it), 0 none */
 int  fsdisk_install_layout(void);
