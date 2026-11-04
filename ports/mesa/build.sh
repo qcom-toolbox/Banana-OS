@@ -109,6 +109,15 @@ fi
 # ── libOSMesa.so for Banana OS ────────────────────────────────────────
 KEEP=${KEEP:-1} JOBS=$JOBS python3 "$HERE/rebuild.py" "$REF" "$OUT/banana"
 cp "$OUT/banana/libOSMesa.so" "$OUT/libOSMesa.so"
+# the Intel drivers must ask banana/drm_shim.c which GPU this is, not
+# util/libdrm.h's always-failing stubs (rebuild.py: HAVE_LIBDRM)
+if [ "$CROCUS" != 0 ] || [ "$IRIS" != 0 ]; then
+    DEVINFO=$(ls "$OUT"/banana/objs/*libintel_dev.a.p_intel_device_info.c.o)
+    nm "$DEVINFO" | grep -q ' U drmGetDevice2$' ||
+        { echo "intel_device_info.c was built with libdrm stubs: the Intel drivers would refuse every GPU"; exit 1; }
+    nm -D "$OUT/libOSMesa.so" | grep -q ' U drmGetDevice2$' &&
+        { echo "libOSMesa.so imports drmGetDevice2: banana/drm_shim.c was not linked in"; exit 1; }
+fi
 
 # ── the test app and a test disk ──────────────────────────────────────
 make -C "$HERE/gl3test"

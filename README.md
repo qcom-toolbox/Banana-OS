@@ -1,5 +1,14 @@
 # 🍌 Banana OS 0.6
 
+- **Intel GPUs taken by Mesa on real hardware:** on a 2nd generation Core
+  desktop `glinfo` reported *Failed to query drm device* and *the driver did
+  not take this GPU*, and Minecraft drew on the processor. The Banana build of
+  Mesa compiled every file without libdrm, so Mesa's Intel code got stubs
+  that always fail before it could ask Banana's i915 interface which GPU it
+  was. Crocus and Iris now use Banana's libdrm shim (`ports/mesa/banana/drm_shim.c`),
+  and the Mesa build fails if the stubs come back. CI's Intel model tests ran the
+  Linux build of Mesa, which uses the real libdrm, so they never saw this.
+
 - **Java OpenGL on the Intel GPU:** `java.bpk` now ships the same `libOSMesa.so`
   as the Mesa ISO (Crocus for 1st–4th generation Core, e.g. Sandy Bridge
   HD 2000/3000; Iris for 5th–10th), instead of a software-only copy. Minecraft

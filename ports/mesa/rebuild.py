@@ -38,6 +38,12 @@ if LLVM_LIBRARY:
 POST = ["-UHAVE_ZLIB", "-UHAVE_COMPRESSION", "-UHAVE_SPIRV_TOOLS", "-UHAVE_LIBDRM", "-DNO_REGEX", "-fdiagnostics-color=never",
         "-mtls-dialect=gnu"]                 # (the SDK loader has no TLS descriptors)
 POST_CXX = ["-fno-exceptions"]               # (nor a C++ unwinder)
+# ...except Mesa's Intel code and drivers: they ask libdrm which GPU this is
+# (drmGetDevice2, drmGetVersion), which banana/drm_shim.c answers from the
+# kernel's i915 interface. Without HAVE_LIBDRM, util/libdrm.h gives them
+# stubs that always fail ("Failed to query drm device"): crocus and iris
+# then turned every real GPU down and apps drew on the processor.
+LIBDRM_USERS = re.compile(r"(^|/)src/(intel/|gallium/drivers/(crocus|iris)/|gallium/winsys/(crocus|iris)/)")
 EXTRA = os.environ.get("EXTRA", "").split()
 JOBS = int(os.environ.get("JOBS", os.cpu_count() or 2))
 KEEP = os.environ.get("KEEP") == "1"         # objects already there are kept
@@ -93,7 +99,7 @@ if ONLY:
     wanted = [o for o in wanted if any(s in o for s in ONLY)]
 
 
-def rewrite(cmd, out):
+def rewrite(cmd, out, directory="", source=""):
     a = shlex.split(cmd)
     while os.path.basename(a[0]) in ("ccache", "sccache"): a.pop(0)
     cxx = a[0].endswith("++")
@@ -114,7 +120,10 @@ def rewrite(cmd, out):
             continue
         res.append(x)
         i += 1
-    return res + POST + (POST_CXX if cxx else []) + EXTRA
+    post = POST
+    if LIBDRM_USERS.search(os.path.normpath(os.path.join(directory, source))):
+        post = [x for x in POST if x != "-UHAVE_LIBDRM"] + ["-DHAVE_LIBDRM"]
+    return res + post + (POST_CXX if cxx else []) + EXTRA
 
 
 # The reference build targets host headers. SDK or port header changes must
@@ -138,7 +147,7 @@ def build(o):
         return o, False, "no compile command"
     artifact = OUT + "/objs/" + objname(o)
     source = os.path.join(e["directory"], e["file"])
-    argv = rewrite(e["command"], o)
+    argv = rewrite(e["command"], o, e["directory"], e["file"])
     signature = hashlib.sha256((json.dumps(argv) + str(header_stamp) + compiler_id).encode()).hexdigest()
     stamp = artifact + ".signature"
     if KEEP and os.path.exists(artifact) and os.path.exists(stamp) and open(stamp).read() == signature and os.path.getmtime(artifact) >= os.path.getmtime(source):
