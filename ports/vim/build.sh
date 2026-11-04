@@ -55,6 +55,24 @@ if [ ! -f "$T/src/auto/config.mk" ] || [ "$(cat "$T/.configured" 2>/dev/null)" !
     echo "$sum" > "$T/.configured"
 fi
 cd "$T/src"
+# A timed wait must not become "wait for ever". inchar_loop() computes
+# wait_time = wtime - elapsed and on its first pass always calls the wait
+# function, also with a negative time, which means "block": with wtime 0
+# (a peek: settmode -> vpeekc_nomap while writing a file, :wq, :qa!) and
+# a clock tick between ELAPSED_INIT and the first ELAPSED_FUNC, Vim waited
+# for a key for ever. Banana OS's clock counts whole milliseconds, so this
+# happened about once in 15 runs of shelltest -e; Linux's microseconds make
+# it rare there.
+python3 - ui.c <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+mark = "/* Banana OS: never negative */"
+if mark not in s:
+    old = "\t    if (wtime >= 0)\n\t\twait_time = wtime - elapsed_time;\n"
+    assert s.count(old) == 1, "vim: inchar_loop changed - see ports/vim/build.sh"
+    s = s.replace(old, "\t    if (wtime >= 0)\n\t\twait_time = wtime - elapsed_time < 0 ? 0 : wtime - elapsed_time;  " + mark + "\n")
+    open(p, "w").write(s)
+PY
 B=$T/src                                           # (port_make, port_package work here)
 port_make vim
 
