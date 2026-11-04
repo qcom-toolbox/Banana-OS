@@ -362,8 +362,14 @@ int pkg_verify(const char* name, int full, char* first, int fcap) {
             else ksnprintf(path, sizeof(path), "%s/%s", dir, p);
             int fi = fs_find_file(path), ok = 0;
             fs_file_t* info = fi >= 0 ? fs_file_info(fi) : NULL;
+            /* (full 2: the contents of the programs and libraries only -
+             *  what must be right for anything to start; sizes for the rest) */
+            const char* base = strrchr(p, '/') ? strrchr(p, '/') + 1 : p;
+            size_t bl = strlen(base);
+            int code = !strncmp(base, "app-", 4) || !strncmp(base, "driver-", 7) ||
+                       (bl > 3 && !strcmp(base + bl - 3, ".so")) || strstr(base, ".so.") != NULL;
             if (info && info->size == size) {
-                if (!full) ok = 1;
+                if (!full || (full == 2 && !code)) ok = 1;
                 else {
                     fs_pin(fi);
                     fs_file_t* f = fs_get_file(fi);

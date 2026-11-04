@@ -148,7 +148,10 @@ void builtin_apps_install(void) {
         pkg_info_t present;
         int damaged = 0;
         if (pkg_get(APPS[i].name, &present) == 0) {
-            int v = pkg_verify(APPS[i].name, 0, first, sizeof(first));
+            /* (the programs' and libraries' contents: a program that is the
+             *  right size but not right any more - "not an ELF program",
+             *  bash among them - is put back too, and the system starts) */
+            int v = pkg_verify(APPS[i].name, 2, first, sizeof(first));
             if (v > 0) damaged = 1;
             else if (repair_requested(APPS[i].name)) { damaged = 1; kstrlcpy(first, "a file (pkg verify)", sizeof(first)); }
             /* installed from a built-in copy before there were file lists: once
