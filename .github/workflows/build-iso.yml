@@ -169,7 +169,7 @@ jobs:
 
   # Java for Banana OS (64-bit): java.bpk (ports/openjdk/package.sh) - the java
   # app, and /usr/java, which `pkg install java.bpk` unpacks: jdk/ (ports/openjdk),
-  # lib/libOSMesa.so (the mesa job's: Intel Crocus/Iris once gpu3d on, then
+  # lib/libOSMesa.so (the mesa job's: Intel Crocus/Iris unless gpu3d off, then
   # VirGL, then softpipe) and lwjgl/ (ports/lwjgl)
   boot:
     name: Validate ${{ matrix.variant }} ${{ matrix.firmware }} upgrade from build ${{ matrix.install_build }}
@@ -642,6 +642,6 @@ jobs:
             - **banana-sdk.tar.gz**: application SDK.
             - **banana-driver-sdk.tar.gz**: independent hardware Driver SDK (PCI, Ethernet/Wi-Fi, USB and laptop services).
 
-            Intel acceleration is experimental and has not been validated on physical Intel GPUs. Run `gpu3d test`, then `gpu3d on` and `glinfo`; `gpu3d off` restores software rendering.
+            Intel acceleration is experimental: crocus has run on a real Sandy Bridge (HD Graphics 2000); other generations are tested on models only. A supported GPU is used by default; `gpu3d test` checks it, `glinfo` shows the renderer, and `gpu3d off` restores software rendering.
 
             [Graphics setup and limits](https://github.com/qcom-toolbox/Banana-OS/blob/${{ github.sha }}/GPU.md#mesa-iso-in-prereleases)

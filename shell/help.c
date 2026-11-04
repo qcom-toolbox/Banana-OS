@@ -475,10 +475,10 @@ static const page_t PAGES[] = {
       "space. It starts the first time an app uses "
       "it. With no word: whether it runs, its ring, the GPU memory in use. test starts it if it is not running and checks "
       "it on the real GPU: a batch that writes memory, the 3D pipeline's write, 4000 submissions, the GPU's clock. A GPU "
-      "that hangs is reset after 2 seconds. Apps (OpenGL through Mesa) get the GPU only after gpu3d on - the choice is "
-      "kept; gpu3d off sends them back to drawing on the processor.",
-      "status|whether it is on and runs (the default)\non|OpenGL apps started from now on use the GPU\noff|they draw on the processor\ntest|check it on this GPU",
-      "gpu3d\ngpu3d test\ngpu3d on", "lsgpu, gpu" },
+      "that hangs is reset after 2 seconds. Apps (OpenGL through Mesa) use a supported GPU by default; gpu3d off sends "
+      "them back to drawing on the processor (the choice is kept), gpu3d on lets them use it again.",
+      "status|whether it is on and runs (the default)\non|OpenGL apps started from now on use the GPU (the default)\noff|they draw on the processor\ntest|check it on this GPU",
+      "gpu3d\ngpu3d test\ngpu3d off", "lsgpu, gpu" },
     { "lspci", "hardware", "lspci [-v] [-n]", "the PCI devices, as Linux's lspci",
       "One line per PCI function: its address (bus:device.function), class, maker, name and IDs. -v adds its interrupt, "
       "its memory and I/O regions and the Banana OS driver in use; -n prints the numbers only.",

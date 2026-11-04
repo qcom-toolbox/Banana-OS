@@ -1,5 +1,10 @@
 # 🍌 Banana OS 0.6
 
+- **Intel 3D on by default:** a supported Intel GPU (1st–10th generation Core)
+  now serves OpenGL apps without `gpu3d on` first: crocus ran Minecraft 1.20.4
+  on a real HD Graphics 2000. `gpu3d off` still sends apps back to the
+  processor and is kept across restarts.
+
 - **Intel GPUs taken by Mesa on real hardware:** on a 2nd generation Core
   desktop `glinfo` reported *Failed to query drm device* and *the driver did
   not take this GPU*, and Minecraft drew on the processor. The Banana build of
@@ -12,7 +17,7 @@
 - **Java OpenGL on the Intel GPU:** `java.bpk` now ships the same `libOSMesa.so`
   as the Mesa ISO (Crocus for 1st–4th generation Core, e.g. Sandy Bridge
   HD 2000/3000; Iris for 5th–10th), instead of a software-only copy. Minecraft
-  and other LWJGL apps draw on the GPU once `gpu3d on` is set, and otherwise
+  and other LWJGL apps draw on the GPU (unless `gpu3d off`), and otherwise
   fall back to VirGL or the processor as before. CI checks that the bundle carries
   the GPU-capable library. [Setup and limits](GPU.md#java-and-lwjgl).
 

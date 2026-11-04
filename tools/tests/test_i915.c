@@ -93,6 +93,8 @@ static void one(int g, int is_hsw, uint16_t devid) {
     check("present", i915_present());
 
     int A = 7;                                           /* an app */
+    g_on = -1;
+    check("never set: on (a supported GPU is used)", gem_enabled());
     g_on = 0;
     struct drm_version v0; memset(&v0, 0, sizeof v0);
     check("off (gpu3d off): apps get no GPU", io(A, WR, DRM_NR_VERSION, &v0, sizeof v0) == -19 && !i915_running());

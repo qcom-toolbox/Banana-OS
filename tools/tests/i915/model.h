@@ -428,8 +428,8 @@ void task_sleep_ms(uint32_t ms) { now_ms += ms ? ms : 1; pump(); }
 void task_yield(void) { pump(); }
 
 /* the settings: gpu3d on */
-static int g_on = 1;
-int  settings_get(const char* k, char* out, int cap) { (void)k; if (cap < 4) return 0; memcpy(out, g_on ? "on" : "off", g_on ? 3 : 4); return 1; }
+static int g_on = 1;                    /* 1 on, 0 off, -1 never set */
+int  settings_get(const char* k, char* out, int cap) { (void)k; if (cap < 4 || g_on < 0) return 0; memcpy(out, g_on ? "on" : "off", g_on ? 3 : 4); return 1; }
 void settings_set(const char* k, const char* v) { (void)k; g_on = v[1] == 110; }
 int  strcmp(const char* a, const char* b) { while (*a && *a == *b) a++, b++; return (unsigned char)*a - (unsigned char)*b; }
 

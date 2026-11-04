@@ -160,7 +160,7 @@ int devcmd_dispatch(int argc, char** argv) {
             return 1;
         }
         if (sub[0] && strcmp(sub, "status")) { say("usage: gpu3d [status | on | off | test]   (Intel graphics, 1st - 10th generation Core)"); return 1; }
-        say(gem_enabled() ? "gpu3d: on (Intel acceleration allowed; glinfo reports the actual renderer)" : "gpu3d: off (OpenGL apps draw on the processor; gpu3d on to use the GPU)");
+        say(gem_enabled() ? "gpu3d: on (Intel acceleration allowed; glinfo reports the actual renderer)" : "gpu3d: off (OpenGL apps draw on the processor; gpu3d on to use the GPU again)");
         if (!i915_present()) { terminal_write("gpu3d: "); say(i915_why()); return 1; }
         i915_info(buf, sizeof(buf));
         say(buf);

@@ -107,10 +107,11 @@ static uint32_t g_submits;
 
 static void on_reset(uint32_t done, uint32_t submitted);
 
-/* apps get the GPU only once it is switched on (gpu3d on): the driver is new */
+/* apps get a supported Intel GPU unless it was switched off (gpu3d off,
+ * kept in the settings); a GPU that hangs is reset after 2 seconds */
 int gem_enabled(void) {
     char v[8];
-    return settings_get("gpu3d", v, sizeof(v)) && !strcmp(v, "on");
+    return !(settings_get("gpu3d", v, sizeof(v)) && !strcmp(v, "off"));
 }
 void gem_set_enabled(int on) { settings_set("gpu3d", on ? "on" : "off"); }
 

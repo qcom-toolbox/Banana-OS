@@ -161,7 +161,8 @@ checks passed under address/undefined-behavior sanitizers.
 `kernel/gpu_i915.c` drives the render engine of Intel HD Graphics of the 1st
 to 4th generation Core (GTT, aliasing PPGTT, legacy ring, forcewake, Linux's
 workarounds, hang reset); `kernel/gpu_gem.c` implements the part of Linux's
-i915 interface Mesa's crocus uses. Apps get it after `gpu3d on`; `gpu3d test`
+i915 interface Mesa's crocus uses. Apps get a supported GPU by default (`gpu3d off`
+turns it off and is kept); `gpu3d test`
 checks the engine on the real GPU. Mesa with crocus:
 
 ```sh
@@ -183,8 +184,8 @@ generation Core (Sandy Bridge, gen6) Crocus gives OpenGL 3.3 core and
 compatibility, enough for Minecraft 1.7 to 1.20. If the Mesa runtime is also installed,
 `/lib/libOSMesa.so` is found first; it is the same build.
 
-Like every OpenGL app, Java gets the GPU only after `gpu3d test` and
-`gpu3d on`. Start Java again after switching. Run `glinfo` to see the renderer
+Like every OpenGL app, Java uses a supported Intel GPU by default (`gpu3d off`
+switches it off). Start Java again after switching. Run `glinfo` to see the renderer
 that apps will get. Minecraft also reports it in its log and F3 screen. Each
 frame is drawn on the GPU and copied back into the window, so the copy costs
 some speed at high resolutions.
@@ -211,9 +212,10 @@ At 512 MiB an installed Mesa system can exhaust memory when starting LibJS
 after OpenGL use; allocate at least 1 GiB for this combined profile and more
 for demanding pages.
 
-Intel acceleration is experimental, tested against register/command-streamer
-models, not physical Intel machines. On hardware, inspect `lsgpu` and run
-`gpu3d test` before `gpu3d on`. Then start a new GL app or run `glinfo` to see
+Intel acceleration is experimental. Crocus has run on a real Sandy Bridge desktop
+(HD Graphics 2000: Minecraft 1.20.4 through Java); the other generations are
+tested against register/command-streamer models only. On hardware, inspect
+`lsgpu` and run `gpu3d test`; apps use the GPU unless `gpu3d off` was given. Start a new GL app or run `glinfo` to see
 the actual renderer. `gpu3d off` restores software rendering and is saved.
 Unsupported hardware keeps the firmware display and software renderer;
 this image does not add Vulkan or hardware video decoding.
