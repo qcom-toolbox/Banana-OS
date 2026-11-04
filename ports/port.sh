@@ -32,7 +32,10 @@ port_fetch() {
     SRC=$PORT_DIR/src/$PORT_NAME-$PORT_VER
     if [ ! -d "$SRC" ]; then
         mkdir -p "$PORT_DIR/src"
-        [ -f "$file" ] || curl -fsSL -o "$file" "$url"
+        # (retried: a site that does not answer once must not fail the build;
+        #  a .part file, so a cut-off download is never taken for the archive)
+        [ -f "$file" ] || { curl -fsSL --retry 4 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+                                 -o "$file.part" "$url" && mv "$file.part" "$file"; }
         echo "$sha  $file" | sha256sum -c - >/dev/null
         tar -C "$PORT_DIR/src" -xf "$file"
     fi

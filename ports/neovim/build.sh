@@ -35,7 +35,8 @@ dep_git() {     # NAME REPO TAG COMMIT: $DL/NAME.tar.gz
     rm -rf "$DL/$1"
 }
 dep_url() {     # NAME URL SHA256
-    [ -f "$DL/$1.tar.gz" ] || curl -fsSL -o "$DL/$1.tar.gz" "$2"
+    [ -f "$DL/$1.tar.gz" ] || { curl -fsSL --retry 4 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+                                     -o "$DL/$1.tar.gz.part" "$2" && mv "$DL/$1.tar.gz.part" "$DL/$1.tar.gz"; }
     echo "$3  $DL/$1.tar.gz" | sha256sum -c - >/dev/null
 }
 dep_git libuv libuv/libuv v1.52.1 1cfa32ff59c076ffb6ed735bbc8c18361558661f
