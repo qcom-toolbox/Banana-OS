@@ -1157,6 +1157,27 @@ static void t_files(void) {
     if (tf >= 0) close(tf);
     int t4 = truncate(file, 2) == 0 && stat(file, &ts3) == 0 && ts3.st_size == 2;
     check("ftruncate shorter, longer (zeros); truncate", t1 && ts1.st_size == 4 && !memcmp(tb, "0123", 4) && t2 && ts2.st_size == 8 && t3 && t4, "");
+    /* pread / pwrite: at the offset, the position left where it was (one
+     * system call from API 34); lseek on a pipe: ESPIPE */
+    {
+        f = fopen(file, "w");
+        if (f) { fputs("abcdefghij", f); fclose(f); }
+        int pf = open(file, O_RDWR);
+        char pb[4] = "";
+        int okp = pf >= 0 && lseek(pf, 2, SEEK_SET) == 2 && pread(pf, pb, 3, 5) == 3 && !memcmp(pb, "fgh", 3) &&
+                  lseek(pf, 0, SEEK_CUR) == 2 && pwrite(pf, "XY", 2, 7) == 2 && lseek(pf, 0, SEEK_CUR) == 2 &&
+                  pread(pf, pb, 4, 6) == 4 && !memcmp(pb, "gXYj", 4) && pread(pf, pb, 4, 100) == 0;
+        if (pf >= 0) close(pf);
+        int pp[2], esp = 0;
+        if (pipe(pp) == 0) {
+            errno = 0;
+            esp = lseek(pp[0], 0, SEEK_CUR) == -1 && errno == ESPIPE;
+            errno = 0;
+            esp = esp && pread(pp[0], pb, 1, 0) == -1 && errno == ESPIPE;
+            close(pp[0]); close(pp[1]);
+        }
+        check("pread / pwrite keep the position; lseek / pread on a pipe: ESPIPE", okp && esp, "");
+    }
     char dt[] = "/tmp/posixtest-XXXXXX";
     struct stat ds;
     char* md = mkdtemp(dt);

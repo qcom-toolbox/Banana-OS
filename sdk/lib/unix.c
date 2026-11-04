@@ -206,7 +206,14 @@ char* mkdtemp(char* tmpl) {
     return NULL;
 }
 
+int __ufd_is(int fd);
 ssize_t pread(int fd, void* buf, size_t n, off_t off) {
+    if (off < 0) { errno = EINVAL; return -1; }
+    if (!__ufd_is(fd) && BANANA_HAS(__banana, pread)) {     /* (one call: API 34) */
+        long r = __banana->pread(fd, buf, n, (unsigned long)off);
+        if (r < 0) { errno = r < -1 ? (int)-r : EIO; return -1; }
+        return r;
+    }
     off_t cur = lseek(fd, 0, SEEK_CUR);
     if (cur < 0 || lseek(fd, off, SEEK_SET) < 0) return -1;
     ssize_t r = read(fd, buf, n);
@@ -215,6 +222,12 @@ ssize_t pread(int fd, void* buf, size_t n, off_t off) {
 }
 
 ssize_t pwrite(int fd, const void* buf, size_t n, off_t off) {
+    if (off < 0) { errno = EINVAL; return -1; }
+    if (!__ufd_is(fd) && BANANA_HAS(__banana, pwrite)) {
+        long r = __banana->pwrite(fd, buf, n, (unsigned long)off);
+        if (r < 0) { errno = r < -1 ? (int)-r : EIO; return -1; }
+        return r;
+    }
     off_t cur = lseek(fd, 0, SEEK_CUR);
     if (cur < 0 || lseek(fd, off, SEEK_SET) < 0) return -1;
     ssize_t r = write(fd, buf, n);

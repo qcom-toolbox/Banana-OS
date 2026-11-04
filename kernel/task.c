@@ -153,6 +153,10 @@ static void set_nice(task_t* t, int nice) {
  * task_wake() that came from an interrupt */
 static volatile uint32_t g_next_wake;
 static volatile int      g_have_sleeper, g_wake_pending;
+/* a thread came back from another core for a system call: the boot core's
+ * task gives way soon (a quarter of a millisecond), not after its slice -
+ * every such call waited up to 8 ms for whatever the boot core ran */
+static volatile int      g_home_pending;
 static int               g_nr_ready = 1;    /* runnable on the boot core at the last pick */
 static int               g_involuntary;     /* the coming switch is a preemption */
 
@@ -323,6 +327,7 @@ static void wake_expired(uint32_t now_ms) {
 /* The READY task with the least virtual run time other than cur (ties go
  * round robin after cur); cur itself only if nothing else is READY. */
 static task_t* pick_next(task_t* cur) {
+    g_home_pending = 0;                     /* (the ones home now are seen below) */
     task_t* best = NULL;
     uint64_t min_vr = ~0ull;
     int start = (cur == &g_idle || !cur) ? 0 : task_index(cur) + 1;
@@ -861,6 +866,9 @@ int task_should_yield(void) {
     if (slice < 2) slice = 2;
     if (slice > TASK_SLICE_MS) slice = TASK_SLICE_MS;
     if (ran >= (uint64_t)slice * g_counter_per_ms) return 1;
+    /* a thread is back from another core with a system call to do: soon
+     * (its call is short; the app's other threads may wait for it) */
+    if (g_home_pending && ran >= g_counter_per_ms / 4u) return 1;
     if (ran < g_counter_per_ms) return 0;       /* at least 1 ms, or switching costs more than it gives */
     /* a sleeper's time has come (or a driver woke one) */
     return g_wake_pending || (g_have_sleeper && (int32_t)(timer_ms() - g_next_wake) >= 0);
@@ -974,6 +982,7 @@ void task_ap_loop(int cpu) {
             t->came_home = 1;
             __sync_synchronize();
             t->state = TASK_READY;          /* its context is saved: the boot core may run it */
+            g_home_pending = 1;
             smp_send_ipi(0, SMP_VEC_KICK);
         }
     }

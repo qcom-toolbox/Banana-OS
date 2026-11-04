@@ -83,11 +83,14 @@ int fcntl(int fd, int cmd, ...) {
 
 off_t lseek(int fd, off_t off, int whence) {
     if (__ufd_is(fd)) { errno = ESPIPE; return -1; }
+    /* (the system refuses to seek what is not a file: the kind of
+     *  descriptor is asked only then, for the error - one call, not two) */
+    long r = __banana->seek(fd, off, whence);
+    if (r >= 0) return r;
     banana_fdinfo_t fi;
     if (KFD && __banana->fd_info(fd, &fi) == 0 && fi.type != BANANA_FD_FILE) { errno = ESPIPE; return -1; }
-    long r = __banana->seek(fd, off, whence);
-    if (r < 0) { errno = fd <= 2 ? ESPIPE : EINVAL; return -1; }
-    return r;
+    errno = fd <= 2 ? ESPIPE : EINVAL;
+    return -1;
 }
 
 /* (isatty: tty.c; stat, fstat, mkdir, realpath: ufs.c) */

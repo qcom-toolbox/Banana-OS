@@ -16,6 +16,7 @@
 #include "../kernel/applesmc.h"
 #include "../kernel/gamepad.h"
 #include "../kernel/task.h"
+#include "../kernel/app.h"
 #include "../kernel/smp.h"
 #include "../kernel/timer.h"
 #include "../kernel/daemon.h"
@@ -513,6 +514,33 @@ static void cmd_lscpu(void) {
 }
 
 /* sched: what the scheduler sees, task by task */
+/* sched calls [reset]: the system calls app threads made on the other
+ * cores - done there, or sent to the boot core (each costs two switches
+ * and a wait for the boot core) */
+static void cmd_sched_calls(int reset) {
+#ifndef __x86_64__
+    (void)reset;
+    terminal_writeln("sched calls: apps run on the other cores only on the 64-bit system");
+    return;
+#else
+    static app_call_stat_t st[256];
+    int n = app_call_stats(st, 256, reset);
+    char row[128];
+    ksnprintf(row, sizeof(row), "%-16s %10s %10s", "CALL", "ON ITS CORE", "BOOT CORE");
+    terminal_write_color(row, VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREEN);
+    terminal_putchar('\n');
+    uint64_t here = 0, home = 0;
+    for (int i = 0; i < n && i < 256; i++) {
+        ksnprintf(row, sizeof(row), "%-16s %10u %10u\n", st[i].name, st[i].here, st[i].home);
+        terminal_write(row);
+        here += st[i].here; home += st[i].home;
+    }
+    ksnprintf(row, sizeof(row), "%-16s %10llu %10llu%s\n", "total", (unsigned long long)here, (unsigned long long)home,
+              reset ? "   (counts reset)" : "");
+    terminal_write(row);
+#endif
+}
+
 static void cmd_sched(void) {
     static task_info_t t[TASK_MAX];
     int n = task_count();
@@ -596,7 +624,11 @@ int moncmd_dispatch(const char* line) {
     if (strcmp(argv[0], "swap") == 0) { cmd_swap(argc, argv); return 1; }
     if (strcmp(argv[0], "df") == 0) { cmd_df(argc, argv); return 1; }
     if (strcmp(argv[0], "htop") == 0) { cmd_htop(); return 1; }
-    if (strcmp(argv[0], "sched") == 0) { cmd_sched(); return 1; }
+    if (strcmp(argv[0], "sched") == 0) {
+        if (argc >= 2 && !strcmp(argv[1], "calls")) cmd_sched_calls(argc >= 3 && !strcmp(argv[2], "reset"));
+        else cmd_sched();
+        return 1;
+    }
     if (strcmp(argv[0], "lscpu") == 0) { cmd_lscpu(); return 1; }
     if (strcmp(argv[0], "sensors") == 0) { cmd_sensors(); return 1; }
     if (strcmp(argv[0], "gamepad") == 0) { cmd_gamepad(); return 1; }

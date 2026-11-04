@@ -16,6 +16,19 @@ Banana OS 0.6 is a minimal x86 operating system written from scratch (no Linux k
 
 <!-- New entries go here, at the top of this section - not above the introduction. -->
 
+- **Fewer trips to the boot core for app threads:** app threads run on the
+  other cores, but most system calls are done on the boot core - two switches
+  and a wait each. New **`sched calls`** counts them per call; with Java,
+  most were futex wakes and the reads of its jar files:
+  - `wake` (a futex wake) stays on its core also for lock words in the mmap
+    region (Java's heap and thread stacks): it only compares the address.
+    5059 of 5059 wakes in a Java benchmark, against 0 of 1302 before.
+  - `pread` / `pwrite` are one system call (API 34) instead of six (three
+    `lseek`, each with an `fd_info`, and the read); `lseek` asks the kind of
+    descriptor only after a failure.
+  - The boot core's task gives way within a quarter of a millisecond when a
+    thread comes back with a call, instead of finishing its 2 - 8 ms slice.
+
 - **Clocks to the nanosecond:** `clock_gettime` and `gettimeofday` counted
   whole milliseconds, so Java's `System.nanoTime()` (Minecraft's frame timing
   and frame limiter) moved in 1 ms steps, and two reads a tick apart looked a

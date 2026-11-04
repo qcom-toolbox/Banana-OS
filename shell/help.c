@@ -309,7 +309,11 @@ static const page_t PAGES[] = {
       "timer intervals, keyboard queue delay and drops. Uses the shared hardware clock; timing samples "
       "are unavailable with the IRQ-only fallback. p95 values are histogram upper bounds.",
       "on|start a fresh session\noff|stop and report\nstatus|report current sample", "latency on\nlatency status\nlatency off", "sched" },
-    { "sched", "system", "sched", "the scheduler's view of the tasks", NULL, NULL, NULL, "nice, renice" },
+    { "sched", "system", "sched [calls [reset]]", "the scheduler's view of the tasks",
+      "App threads run on the other cores; most system calls are done on the boot core (the thread goes there and "
+      "back). sched calls counts, per call, those done on the thread's own core and those sent to the boot core - "
+      "what keeps the boot core busy (reset: start counting again).", NULL, "sched\nsched calls reset\nsched calls",
+      "nice, renice, top" },
     { "nice", "system", "nice [-n N] <command>", "run a command at another priority",
       "Runs command with its nice value raised by N (10 by default; negative gets more processor time). "
       "nice alone shows the current value.", "-n N|the change", "nice -n 5 fstest /mnt/usb", "renice" },

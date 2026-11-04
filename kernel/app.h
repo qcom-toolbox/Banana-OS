@@ -98,4 +98,8 @@ int  app_console_focused(void);
  * kernel's memory: 0 with *raw (its allocation) and *entry, or -1 with err */
 int  app_load_image(const uint8_t* f, uint32_t size, uint8_t** raw, uintptr_t* entry, char* err, int ecap);
 
+/* system calls made on the other cores (sched calls): done there / on the boot core */
+typedef struct { const char* name; uint32_t here, home; } app_call_stat_t;
+int app_call_stats(app_call_stat_t* out, int max, int reset);
+
 #endif

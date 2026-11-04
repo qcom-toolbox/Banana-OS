@@ -881,6 +881,30 @@ static long a_seek(int fd, long off, int whence) {
     return np;
 }
 
+/* v34: pread / pwrite - at off, the descriptor's own position kept */
+static long a_pread(int fd, void* buf, unsigned long len, unsigned long off) {
+    kfile_t* f = get_fd(cur(), fd);
+    if (!f) return -9;
+    if (f->type != KF_FILE) return -29;
+    if (off > 0xFFFFFFFFul) return 0;            /* (files end below 4 GiB) */
+    uint32_t keep = f->pos;
+    f->pos = (uint32_t)off;
+    long r = a_read(fd, buf, len);
+    if (get_fd(cur(), fd) == f) f->pos = keep;   /* (unless it was closed meanwhile) */
+    return r;
+}
+static long a_pwrite(int fd, const void* buf, unsigned long len, unsigned long off) {
+    kfile_t* f = get_fd(cur(), fd);
+    if (!f) return -9;
+    if (f->type != KF_FILE) return -29;
+    if (off > 0xFFFFFFFFul) return -27;          /* EFBIG */
+    uint32_t keep = f->pos;
+    f->pos = (uint32_t)off;
+    long r = a_write(fd, buf, len);
+    if (get_fd(cur(), fd) == f) f->pos = keep;
+    return r;
+}
+
 static int a_close(int fd) {
     return fd_close(cur(), fd) == 0 ? 0 : -1;
 }
@@ -2791,6 +2815,8 @@ static void spec_init(void) {
     SPEC(web_ipc, "ibibi", 0);
     SPEC(poll_mask, "iiiL", 0);           /* fds: checked in a_poll */
     SPEC(uptime_ns, "o", sizeof(unsigned long long));
+    SPEC(pread, "iBii", 0);
+    SPEC(pwrite, "iBii", 0);
     SPEC(pkg_install, "sbi", 0);
     SPEC(app_run, "siibi", 0);          /* argv: checked in it */
     SPEC(repo_update, "bi", 0);
@@ -3067,6 +3093,27 @@ static int gather_args(app_proc_t* p, const sysspec_t* sp, const sysframe_t* r, 
 }
 
 #define API_SLOT(f) (__builtin_offsetof(banana_api_t, f) / sizeof(void*))
+/* how often each call was made on another core and done there, or had to
+ * go to the boot core for it (sched calls: what keeps the boot core busy) */
+static volatile uint32_t g_calls_here[API_SLOTS + 2], g_calls_home[API_SLOTS + 2];
+
+/* the calls apps made on the other cores: name, done there, done on the
+ * boot core - the busiest first (reset: counts start again) */
+int app_call_stats(app_call_stat_t* out, int max, int reset) {
+    int n = 0;
+    for (uint32_t s = 0; s < API_SLOTS; s++) {
+        uint32_t h = g_calls_here[s], b = g_calls_home[s];
+        if ((!h && !b) || !g_spec[s].name) continue;
+        if (n < max) { out[n].name = g_spec[s].name; out[n].here = h; out[n].home = b; n++; }
+    }
+    for (int i = 1; i < n; i++)
+        for (int k = i; k > 0 && out[k].home + out[k].here > out[k - 1].home + out[k - 1].here; k--) {
+            app_call_stat_t t = out[k]; out[k] = out[k - 1]; out[k - 1] = t;
+        }
+    if (reset) for (uint32_t s = 0; s < API_SLOTS + 2; s++) { g_calls_here[s] = 0; g_calls_home[s] = 0; }
+    return n;
+}
+
 static int web_syscall_allowed(uint64_t slot) {
     switch (slot) {
     case API_SLOT(exit): case API_SLOT(malloc): case API_SLOT(free):
@@ -3094,7 +3141,11 @@ static int syscall_here(sysframe_t* r) {
      * call that would read it goes to the boot core, where a fault may wait
      * (interrupts are off here) - the vm_* calls only take its addresses.
      * Checked before the arguments are (that reads strings, the stack) */
-    int vm = slot == API_SLOT(vm_map) || slot == API_SLOT(vm_unmap) || slot == API_SLOT(vm_protect);
+    /* (wake only compares the address with the sleepers': it reads nothing
+     *  there, so a lock word in the mmap region - Java's heap and thread
+     *  stacks, where most of its are - no longer sends it to the boot core) */
+    int vm = slot == API_SLOT(vm_map) || slot == API_SLOT(vm_unmap) || slot == API_SLOT(vm_protect) ||
+             slot == API_SLOT(wake);
     if (strlen(g_spec[slot].args) > 6 && in_uvm(r->rsp)) return 0;
     uint64_t reg[6] = { r->rdi, r->rsi, r->rdx, r->rcx, r->r8, r->r9 };
     uint32_t nargs = (uint32_t)strlen(g_spec[slot].args);
@@ -3155,7 +3206,9 @@ void app_syscall(sysframe_t* r) {
      * gate left them - and stay off for those) */
     if (cpu_id() != 0) {
         vm_exit_now_and_then(cpu_id());
-        if ((r->cs & 3) == 3 && syscall_here(r)) return;
+        uint64_t s = r->rax < API_SLOTS + 2 ? r->rax : API_SLOTS + 1;
+        if ((r->cs & 3) == 3 && syscall_here(r)) { __sync_fetch_and_add(&g_calls_here[s], 1); return; }
+        __sync_fetch_and_add(&g_calls_home[s], 1);
         task_ap_go_home();
     }
     __asm__ volatile("sti");
@@ -4269,6 +4322,8 @@ static void api_init(void) {
     g_api.fd_sync = G(a_fd_sync);
     g_api.web_ipc = G(a_web_ipc);
     g_api.uptime_ns = G(a_uptime_ns);
+    g_api.pread = G(a_pread);
+    g_api.pwrite = G(a_pwrite);
 #ifdef __x86_64__
     g_api.proc_list = G(a_proc_list);                  /* (the system calls' table: 64-bit) */
 #endif

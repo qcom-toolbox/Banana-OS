@@ -18,7 +18,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 33u
+#define BANANA_API_VERSION 34u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -641,6 +641,11 @@ typedef struct banana_api {
      * The SDK's clock_gettime and gettimeofday use it: before, they had
      * whole milliseconds only */
     int (*uptime_ns)(unsigned long long* out);
+    /* version 34: read / write a file at an offset, its own position left
+     * as it is (pread, pwrite): one call - the SDK took six (lseek, its
+     * fd_info, the read, two lseeks back). -29 (ESPIPE): not a file */
+    long (*pread)(int fd, void* buf, unsigned long len, unsigned long off);
+    long (*pwrite)(int fd, const void* buf, unsigned long len, unsigned long off);
 } banana_api_t;
 
 #define BANANA_SIG_DEFAULT 0
