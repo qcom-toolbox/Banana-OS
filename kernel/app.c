@@ -1187,8 +1187,14 @@ static int a_poll(void* fds, int n, int timeout_ms) {
         if (ready || !timeout_ms) return ready;
         if (timeout_ms > 0 && timer_ms() - start >= (uint32_t)timeout_ms) return 0;
         if (sig_waiting(p)) return -4;                   /* EINTR, as Linux (even with SA_RESTART) */
-        if (socks) net_wait(10);
-        else kpipe_sleep(gen, 10);                       /* (a pipe's other end wakes it) */
+        uint32_t nap = 10;                               /* (a timeout due sooner: then) */
+        if (timeout_ms > 0) {
+            uint32_t gone = timer_ms() - start;
+            if ((uint32_t)timeout_ms - gone < nap) nap = (uint32_t)timeout_ms - gone;
+            if (!nap) nap = 1;
+        }
+        if (socks) net_wait(nap);
+        else kpipe_sleep(gen, nap);                      /* (a pipe's other end wakes it) */
         breathe(p, 1);
     }
 }
@@ -2507,9 +2513,16 @@ static int a_wait(volatile int* addr, int expected, int timeout_ms) {
         if (sig_waiting(p)) return 0;       /* a signal for it: it goes to the handler first */
         if (*addr != expected) return 0;
         /* registered only while asleep: if the app is stopped in breathe()
-         * no stale entry is left behind; a wake in between costs <= 10 ms */
+         * no stale entry is left behind; a wake in between costs <= 10 ms.
+         * A timeout due sooner ends the sleep then: a 1 ms wait (Java's
+         * Thread.sleep(1), parkNanos) once took 10 ms */
+        uint32_t nap = 10;
+        if (timeout_ms >= 0) {
+            int32_t left = (int32_t)(end - timer_ms());
+            if (left < (int32_t)nap) nap = left > 0 ? (uint32_t)left : 1;
+        }
         int slot = waiter_add(addr);
-        if (*addr == expected) task_sleep_ms(slot >= 0 ? 10 : 1);
+        if (*addr == expected) task_sleep_ms(slot >= 0 ? nap : 1);
         if (slot >= 0) g_waiters[slot].addr = NULL;
     }
 }

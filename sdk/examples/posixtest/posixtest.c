@@ -337,6 +337,22 @@ static void t_threads(void) {
     snprintf(note, sizeof(note), "%ld ms for 150", took);
     check("pthread_cond_timedwait times out (CLOCK_MONOTONIC)", rc == ETIMEDOUT && took >= 140 && took < 1000, note);
 
+    /* short timed waits end at their time, not at the kernel's 10 ms wait
+     * step (Java's Thread.sleep(1) and parkNanos: 10 ms each, once) */
+    t0 = ms_now();
+    pthread_mutex_lock(&cm);
+    int all = 1;
+    for (int i = 0; i < 100; i++) {
+        clock_gettime(CLOCK_MONOTONIC, &until);
+        until.tv_nsec += 1000000L;
+        if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
+        if (pthread_cond_timedwait(&cv, &cm, &until) != ETIMEDOUT) all = 0;
+    }
+    pthread_mutex_unlock(&cm);
+    took = ms_now() - t0;
+    snprintf(note, sizeof(note), "%ld ms for 100 waits of 1 ms", took);
+    check("1 ms timed waits take about 1 ms", all && took >= 100 && took < 700, note);
+
 #ifdef __x86_64__
     ok = t_var == 42 && !t_big[2999];
     for (long i = 0; i < 6; i++) pthread_create(&th[i], NULL, tls_user, (void*)(i + 1));
