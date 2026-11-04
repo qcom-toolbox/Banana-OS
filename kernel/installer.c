@@ -454,10 +454,14 @@ static int setup_ok(void) {
     return 1;
 }
 
+/* the system's restart (shell/shell.c): it syncs the disk, then tries the
+ * keyboard controller, the chipset's reset register (0xCF9) and a triple
+ * fault in turn. The keyboard controller's reset line alone, as here
+ * before, is ignored by many PCs (UEFI ones, no 8042): the machine froze. */
+void shell_power(int restart);
 static void restart(void) {
     fsdisk_sync();                              /* (anything changed since the install) */
-    __asm__ volatile("outb %0,%1" :: "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64));   /* reset line */
-    for (;;) __asm__ volatile("hlt");
+    shell_power(1);
 }
 
 void installer_click(int mx, int my) {
