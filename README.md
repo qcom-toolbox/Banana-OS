@@ -16,6 +16,12 @@ Banana OS 0.6 is a minimal x86 operating system written from scratch (no Linux k
 
 <!-- New entries go here, at the top of this section - not above the introduction. -->
 
+- **No more "use install" on a damaged disk:** when a disk holds Banana OS
+  but its files cannot be read, `update` used to say "use 'install'" - and
+  installing erases everything. It now says the files are unreadable and
+  that installing would erase them; `install`, `disks` and the graphical
+  installer mark such a disk "Banana OS, but its files could not be read".
+
 - **Repairing a broken install:** built-in programs could go bad on the
   disk with their sizes unchanged ("not an ELF program": Terminal, the App
   Store, finally bash), and the check at every start only compared sizes.

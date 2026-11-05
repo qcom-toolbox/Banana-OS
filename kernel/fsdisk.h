@@ -42,6 +42,8 @@ int fsdisk_install_to(const ata_disk_t* target);
 int fsdisk_targets(ata_disk_t* out, int max);
 /* 1 if d holds a Banana OS install (any layout) */
 int fsdisk_holds_banana(const ata_disk_t* d);
+/* 1 if d has a Banana OS boot area but its files could not be read */
+int fsdisk_banana_unreadable(const ata_disk_t* d);
 /* the disks holding Banana OS: how many; *out the first (the one used) */
 int fsdisk_find_installed(ata_disk_t* out);
 

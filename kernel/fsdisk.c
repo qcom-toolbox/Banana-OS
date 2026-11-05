@@ -1987,6 +1987,19 @@ int fsdisk_holds_banana(const ata_disk_t* d) {
     return e4_detect(d) || v5_detect(d, &m) || detect(d, &l, sb, have);
 }
 
+/* 1 if d starts with a Banana OS boot image (its ISO9660 label at block 16)
+ * although no install is found on it: the files after it could not be read
+ * (a damaged filesystem) - installing on it erases them */
+int fsdisk_banana_unreadable(const ata_disk_t* d) {
+    if (d->is_atapi || !d->sectors || fsdisk_holds_banana(d)) return 0;
+    uint8_t* pvd = (uint8_t*)kmalloc(2048);
+    if (!pvd) return 0;
+    int r = disk_read(d, 16u * 4u, 4, pvd) == 0 && pvd[0] == 1 && !memcmp(pvd + 1, "CD001", 5) &&
+            !memcmp(pvd + 40, "BANANA_OS ", 10);
+    kfree(pvd);
+    return r;
+}
+
 int fsdisk_find_installed(ata_disk_t* out) {
     ata_disk_t all[DISK_MAX];
     int n = disk_probe(all, DISK_MAX), found = 0;

@@ -1846,6 +1846,8 @@ static int list_targets(ata_disk_t* out, int max) {
         terminal_write_color(u32_to_str((uint32_t)i + 1u, b, sizeof(b)), VGA_COLOR_WHITE, VGA_COLOR_BLACK);
         terminal_write_color("]", VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK);
         if (fsdisk_holds_banana(&out[i])) terminal_write_color(" (Banana OS)", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+        else if (fsdisk_banana_unreadable(&out[i]))
+            terminal_write_color(" (Banana OS - files unreadable)", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         print_disk_line(&out[i]);
     }
     return n;
@@ -1930,6 +1932,12 @@ static void cmd_install(const char* args) {
             "This disk already has Banana OS on it, with your files. To get the new version\n"
             "and KEEP them, answer N and run 'update' instead.\n",
             VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+    else if (fsdisk_banana_unreadable(&target))
+        terminal_write_color(
+            "This disk has a Banana OS system on it, but its files could not be read.\n"
+            "Installing ERASES them for good. If they matter, answer N and copy them off\n"
+            "the disk first (from another computer: it is an ext4 filesystem).\n",
+            VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     terminal_write_color("This will ERASE ", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     terminal_write(target.model[0] ? target.model : "the disk above");
     terminal_write_color(
@@ -2001,8 +2009,17 @@ static void cmd_update_mode(const char* args, int repair) {
     int n = fsdisk_targets(all, DISK_MAX), ni = 0;
     for (int i = 0; i < n; i++) if (fsdisk_holds_banana(&all[i])) inst[ni++] = all[i];
     if (!ni) {
-        terminal_write_color("update: no disk with Banana OS installed was found (use 'install').\n",
-                             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        int broken = 0;
+        for (int i = 0; i < n; i++) broken |= fsdisk_banana_unreadable(&all[i]);
+        if (broken)
+            /* (never "use install": that erases the files the update was meant to keep) */
+            terminal_write_color("update: a disk has Banana OS on it, but its files could not be read - it\n"
+                                 "        cannot be updated. 'install' would ERASE those files: copy them off\n"
+                                 "        first if they matter (it is an ext4 filesystem).\n",
+                                 VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        else
+            terminal_write_color("update: no disk with Banana OS installed was found (use 'install').\n",
+                                 VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }
     for (int i = 0; i < ni; i++) {

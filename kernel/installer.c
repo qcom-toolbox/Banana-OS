@@ -122,6 +122,12 @@ static void disk_note(int i) {
     const ata_disk_t* d = &g_list[i];
     g_list_warn[i] = 0;
     if (g_list_banana[i]) { kstrlcpy(g_list_note[i], "Banana OS is installed on it", sizeof(g_list_note[i])); return; }
+    if (fsdisk_banana_unreadable(d)) {
+        /* (installing would erase files the person probably wants kept) */
+        kstrlcpy(g_list_note[i], "Banana OS, but its files could not be read", sizeof(g_list_note[i]));
+        g_list_warn[i] = 1;
+        return;
+    }
     if (!big_enough(d)) { kstrlcpy(g_list_note[i], "too small (Banana OS needs 160 MB)", sizeof(g_list_note[i])); return; }
     blockdev_t* bd = disk_blockdev(d);
     vol_part_t parts[8];
