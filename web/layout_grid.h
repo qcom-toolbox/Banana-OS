@@ -4,7 +4,22 @@
 static int layout_grid(ctx_t* C, dom_node_t* e, int x, int y, int w) {
     const style_t* st=e->style;
     for(dom_node_t* c=e->first;c;c=c->next)
-        if(c->type==DOM_TEXT && !is_blank_text(c))return layout_children(C,e,x,y,w);
+        if(c->type==DOM_TEXT && !is_blank_text(c)) {
+            if(st->align_items!=FA_CENTER)return layout_children(C,e,x,y,w);
+            /* place-items: center around a text (an icon's letter, a badge's
+             * number): centered across and, in a box of given height, down */
+            int saved=C->dry,saved_w=C->max_w;
+            C->dry=1;
+            int ch=layout_children(C,e,x,y,w);
+            C->dry=saved;C->max_w=saved_w;
+            int box=st->height!=LEN_AUTO && st->height>0?st->height:ch,dy=box>ch?(box-ch)/2:0;
+            style_t* ms=(style_t*)st;
+            uint8_t align=ms->align;
+            ms->align=ALIGN_CENTER;
+            int h=layout_children(C,e,x,y+dy,w);
+            ms->align=align;
+            return h+dy;
+        }
     int n=st->grid_ncols?st->grid_ncols:1;
     /* Bound track arithmetic as well as the number of tracks. Huge CSS values
      * outside the drawable range must not wrap signed pixel coordinates. */

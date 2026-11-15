@@ -329,7 +329,7 @@ kernel/builtin_apps.o64: build/ports64.h
 
 # the Terminal app (apps/terminal): bash in windows and tabs, 64-bit only too
 WEBWORKER_BPKZ = apps/webworker/webworker-x86_64.bpk.z
-$(WEBWORKER_BPKZ): $(wildcard apps/webworker/*.c apps/webworker/*.h) apps/webworker/Makefile $(wildcard web/*.c web/*.h) kernel/image.c kernel/image.h kernel/font.c kernel/font.h kernel/fontbin.asm kernel/font8x8.c kernel/ttf.c kernel/ttf.h kernel/types.h $(wildcard fonts/*.ttf third_party/libwebp/src/*/*.c third_party/libwebp/src/*/*.h) web/test/image_stb_host.c $(SDK_DEPS)
+$(WEBWORKER_BPKZ): $(wildcard apps/webworker/*.c apps/webworker/*.h) apps/webworker/Makefile ports/ffmpeg/build.sh $(wildcard web/*.c web/*.h) kernel/image.c kernel/image.h kernel/font.c kernel/font.h kernel/fontbin.asm kernel/font8x8.c kernel/ttf.c kernel/ttf.h kernel/types.h $(wildcard fonts/*.ttf third_party/libwebp/src/*/*.c third_party/libwebp/src/*/*.h) web/test/image_stb_host.c $(SDK_DEPS)
 	$(MAKE) -C apps/webworker webworker-x86_64.bpk.z
 # LibJS stays a user-space renderer; only its compressed install package is
 # embedded. CI supplies the audited BPK from the same commit's Debian SDK job.

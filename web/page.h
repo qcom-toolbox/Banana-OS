@@ -45,6 +45,9 @@ typedef struct page_env {
     int  (*media_open)(void* ctx, void* owner, const char* url);
     void (*media_cmd)(void* ctx, int id, int cmd, int a, int b, int c);   /* SET: volume %, muted, loop */
     int  (*media_status)(void* ctx, int id, page_media_status_t* out);
+    /* optional: a <video> stream's latest picture, if newer than *seq: XRGB pixels
+     * kmalloc'd (caller kfree()s), its size; 0 = a new one */
+    int  (*media_frame)(void* ctx, int id, uint32_t* seq, uint32_t** px, int* w, int* h);
     /* optional: a local file's bytes (uploads: <input type=file>), kmalloc'd; 0 = ok */
     int  (*read_file)(void* ctx, const char* path, char** data, uint32_t* len);
     void* ctx;
@@ -75,6 +78,8 @@ typedef struct page {
     interp_t*    js;
     char         title[128];
     int          dirty;               /* DOM/styles changed: restyle + relayout */
+    int          anim_running;        /* a CSS animation runs (css_anim.h) */
+    uint32_t     anim_frame;          /* ...when it was last restyled */
     dom_node_t*  focus;               /* focused text field */
     int          live_keys;           /* the document's keys come from page_key_live */
     page_timer_t timers[PAGE_TIMERS];
@@ -123,8 +128,11 @@ typedef struct page {
     struct page_messages* messages; /* bounded asynchronous window message queue */
     struct jsdom_mutations* mutations; /* observers/records: owned by the page arena */
     int          view_h;              /* visible height (window.innerHeight) */
-    int          media[16];           /* its <audio> streams (closed with the page) */
+    int          media[16];           /* its <audio> / <video> streams (closed with the page) */
     int          nmedia;
+    struct dom_node* media_node[16];  /* ...the element showing each (a <video>), or NULL */
+    uint32_t     media_seq[16];       /* ...the picture it shows */
+    uint32_t     media_tick;          /* when the pictures were last asked for */
     /* CSS background images, fetched once per address */
     struct { const char* url; struct img_data* img; } bgcache[40];
     int          nbg;

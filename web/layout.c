@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "layout.h"
 #include "round_rect.h"
+#include "gradient.h"
 #include "kstring.h"
 #include "kheap.h"
 #include "font.h"
@@ -22,6 +23,7 @@ typedef struct {
     int       cb_x, cb_y, cb_w, cb_h;
     struct { dom_node_t* n; int sx, sy; } absq[64], fixq[32];
     int       nabs, nfix;
+    dom_node_t* placing;    /* the replaced element layout_box is drawing (not deferred again) */
     /* overflow: hidden - items are clipped to this (page coordinates) */
     int       clip_on, clip_x0, clip_y0, clip_x1, clip_y1;
 } ctx_t;
@@ -44,6 +46,7 @@ static void defer_abs(ctx_t* C, dom_node_t* e, int sx, int sy) {
 }
 
 static dl_item_t* push_raw(ctx_t* C, int kind);
+static uint32_t grad_text_color(ctx_t* C, const style_t* st, int x, int w);
 
 static dl_item_t* push(ctx_t* C, int kind) {
     dl_item_t* it = push_raw(C, kind);
@@ -335,7 +338,7 @@ static void place_word(inl_t* I, const char* s, uint32_t n, const style_t* st, u
     t->text = text;
     t->len = len;
     set_font(t, st);
-    t->color = st->color;
+    t->color = st->bg_clip_text && st->bg_grad && st->text_clear ? grad_text_color(I->C, st, I->cx + sw + ww / 2, I->w) : st->color;
     t->bold = st->bold;
     t->italic = st->italic;
     t->underline = st->underline;
@@ -592,6 +595,50 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
         mark_box(C, first, h);
         return;
     }
+    if (strcmp(tag, "video") == 0) {
+        /* the stream's current picture (page.c), or black until there is one;
+         * 300 x 150 unless sized; object-fit: contain / cover */
+        const char* aw = dom_attr(e, "width");
+        const char* ah = dom_attr(e, "height");
+        img_data_t* img = e->img;
+        int have = img && !img->failed && img->px && img->w > 0 && img->h > 0;
+        int nw = have ? img->w : 300, nh = have ? img->h : 150;
+        int w = aw ? attr_px(aw, st) : 0, h = ah ? attr_px(ah, st) : 0;
+        /* a percentage of the room - unless measuring (max-content): then its own size */
+        if (st->width_pct) w = I->w >= 50000 ? nw : I->w * st->width_pct / 100;
+        else if (st->width != LEN_AUTO && st->width > 0) w = st->width;
+        if (st->height != LEN_AUTO && st->height > 0) h = st->height;
+        if (!w && !h) { w = nw; h = nh; }
+        else if (!w) w = nw * h / nh;
+        else if (!h) h = nh * w / nw;
+        if (st->max_width != LEN_AUTO && st->max_width > 0 && w > st->max_width) { h = h * st->max_width / w; w = st->max_width; }
+        if (w > I->w && I->w > 0 && !st->width_pct) { h = h * I->w / w; w = I->w; }
+        if (w < 1) w = 1;
+        if (h < 1) h = 1;
+        int x = place_box(I, w, h);
+        if (!have) { rect(C, x, 0, w, h, 0x000000, e); mark_box(C, first, h); return; }
+        int dw = w, dh = h;
+        int fit = st->object_fit;
+        if (fit == 4) fit = nw > w || nh > h ? 1 : 3;
+        if (fit == 1 || fit == 2) {
+            int64_t a = (int64_t)w * nh, b = (int64_t)h * nw;   /* box wider than the picture: a > b */
+            int by_h = fit == 1 ? a > b : a < b;
+            if (by_h) { dh = h; dw = (int)((int64_t)nw * h / nh); }
+            else { dw = w; dh = (int)((int64_t)nh * w / nw); }
+        } else if (fit == 3) { dw = nw; dh = nh; }
+        /* drawn like a background: the picture dw x dh centred in the box, cut to it */
+        dl_item_t* it = push(C, DL_IMG);
+        it->x = x; it->w = w; it->h = h;
+        it->tile = 4;
+        it->tw = (int16_t)(dw > 30000 ? 30000 : dw);
+        it->th = (int16_t)(dh > 30000 ? 30000 : dh);
+        it->ox = (int16_t)((w - dw) / 2);
+        it->oy = (int16_t)((h - dh) / 2);
+        it->img = img;
+        it->node = e;
+        mark_box(C, first, h);
+        return;
+    }
     if (strcmp(tag, "img") == 0 || strcmp(tag, "svg") == 0) {
         const char* aw = dom_attr(e, "width");
         const char* ah = dom_attr(e, "height");
@@ -606,7 +653,7 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
             else if (!w) w = img->w * h / img->h;
             else if (!h) h = img->h * w / img->w;
         }
-        if (st->width_pct) {
+        if (st->width_pct && I->w < 50000) {
             w = I->w * st->width_pct / 100;
             if (have) h = img->h * w / img->w;
         }
@@ -742,7 +789,10 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
         uint32_t face = st->has_bg ? st->bg : (button ? 0xDDDDDD : 0xFFFFFF);
         uint32_t edge = C->L->focus == e ? 0x3060C0 : st->border_color[0];
         if (bw) rect(C, x, 0, w, h, edge, e);
-        if (!C->dry && bw && C->L->n) C->L->items[C->L->n - 1].radius = (int16_t)rad;
+        if (!C->dry && bw && C->L->n) {
+            C->L->items[C->L->n - 1].radius = (int16_t)rad;
+            if ((face >> 24) && (st->has_bg || !button)) C->L->items[C->L->n - 1].ring = (uint8_t)bw;   /* a see-through face: the edge must not show under it */
+        }
         if (st->has_bg || !bw || !button) {
             rect(C, x + bw, bw, w - 2 * bw, h - 2 * bw, face, e);
             if (!C->dry && C->L->n) C->L->items[C->L->n - 1].radius = (int16_t)(rad > bw ? rad - bw : 0);
@@ -815,9 +865,9 @@ static void inline_node(inl_t* I, dom_node_t* n, uint32_t bg, int has_bg) {
         return;
     }
     if (out_of_sight(st)) return;
-    if (st->position == POS_ABSOLUTE || st->position == POS_FIXED) { defer_abs(C, n, I->x0 + I->cx, I->y); return; }
+    if ((st->position == POS_ABSOLUTE || st->position == POS_FIXED) && n != C->placing) { defer_abs(C, n, I->x0 + I->cx, I->y); return; }
     if (!C->dry) { n->box_x = I->x0 + I->cx; n->box_y = I->y; }
-    int replaced = strcmp(tag, "img") == 0 || strcmp(tag, "svg") == 0 || strcmp(tag, "input") == 0 || strcmp(tag, "button") == 0 ||
+    int replaced = strcmp(tag, "img") == 0 || strcmp(tag, "svg") == 0 || strcmp(tag, "video") == 0 || strcmp(tag, "input") == 0 || strcmp(tag, "button") == 0 ||
                    strcmp(tag, "select") == 0 || strcmp(tag, "textarea") == 0 || strcmp(tag, "iframe") == 0;
     if (replaced) {
         if (!st->visible) return;
@@ -952,9 +1002,51 @@ static int is_blank_text(const dom_node_t* t) {
  * they are laid out by the inline code (as one atomic run) */
 static int flex_is_inline(const dom_node_t* e) {
     const char* t = e->tag;
-    if (strcmp(t, "img") == 0 || strcmp(t, "svg") == 0 || strcmp(t, "input") == 0 || strcmp(t, "button") == 0 ||
+    if (strcmp(t, "img") == 0 || strcmp(t, "svg") == 0 || strcmp(t, "video") == 0 || strcmp(t, "input") == 0 || strcmp(t, "button") == 0 ||
         strcmp(t, "select") == 0 || strcmp(t, "textarea") == 0 || strcmp(t, "iframe") == 0) return 1;
-    return e->style->display == DISP_INLINE && !has_block_child((dom_node_t*)e);
+    const style_t* s = e->style;
+    /* a flex item is blockified: an <a> or <span> with padding, a border, a
+     * background or a size is laid out as the box it draws */
+    if (s->padding[0] || s->padding[1] || s->padding[2] || s->padding[3] || s->border[0] || s->border[1] ||
+        s->border[2] || s->border[3] || s->has_bg || s->bg_grad || s->width != LEN_AUTO || s->height != LEN_AUTO)
+        return 0;
+    return s->display == DISP_INLINE && !has_block_child((dom_node_t*)e);
+}
+
+/* text directly inside a flex container: an anonymous inline item holding a
+ * copy of it (the copy's parent stays the container: its style and events) */
+static dom_node_t* flex_anon_text(ctx_t* C, dom_node_t* e, dom_node_t* text) {
+    dom_node_t* a = (dom_node_t*)arena_alloc(C->L->A, sizeof(dom_node_t));
+    dom_node_t* t = (dom_node_t*)arena_alloc(C->L->A, sizeof(dom_node_t));
+    style_t* st = (style_t*)arena_alloc(C->L->A, sizeof(style_t));
+    if (C->L->A->oom || !a || !t || !st) return NULL;
+    memset(a, 0, sizeof(*a));
+    *t = *text;
+    t->next = t->prev = NULL;
+    t->parent = e;
+    *st = *e->style;                          /* the inherited text properties */
+    memset(st->margin, 0, sizeof(st->margin));
+    memset(st->padding, 0, sizeof(st->padding));
+    memset(st->border, 0, sizeof(st->border));
+    st->display = DISP_INLINE;
+    st->has_bg = st->bg_grad = 0;
+    st->bg_url = NULL;
+    st->width = st->height = st->max_width = st->flex_basis = LEN_AUTO;
+    st->width_pct = 0;
+    st->margin_auto_lr = 0;
+    st->position = POS_STATIC;
+    st->overflow_hidden = st->flex_row = st->flex = st->grid = st->floated = 0;
+    st->flex_grow = 0;
+    st->flex_shrink = 100;
+    st->align_self = FA_AUTO;
+    st->radius = 0;
+    st->left = st->top = st->right = st->bottom = LEN_AUTO;
+    a->type = DOM_ELEM;
+    a->tag = (char*)"span";
+    a->style = st;
+    a->parent = e;
+    a->first = a->last = t;
+    return a;
 }
 
 static int flex_inline_item(ctx_t* C, dom_node_t* it, int x, int y, int w) {
@@ -1023,7 +1115,10 @@ static int layout_flex(ctx_t* C, dom_node_t* e, int x, int y, int w, int hgiven)
     int n = 0, nout = 0;
     for (dom_node_t* c = e->first; c; c = c->next) {
         if (c->type == DOM_TEXT) {
-            if (!is_blank_text(c)) return layout_children(C, e, x, y, w);   /* loose text: normal flow */
+            if (is_blank_text(c)) continue;
+            dom_node_t* a = n < FLEX_MAX ? flex_anon_text(C, e, c) : NULL;
+            if (!a) return layout_children(C, e, x, y, w);   /* loose text: normal flow */
+            items[n++] = a;
             continue;
         }
         if (c->type != DOM_ELEM || !c->style || c->style->display == DISP_NONE || out_of_sight(c->style)) continue;
@@ -1186,12 +1281,154 @@ static int layout_flex(ctx_t* C, dom_node_t* e, int x, int y, int w, int hgiven)
 
 /* ══ positioning ═══════════════════════════════════════════════════════ */
 
+
+/* "linear-gradient(110deg, #7db6ff, #b0a1ff 58%, #e0a3ef)" -> stops (lengths
+ * along a gradient line len px long) */
+static int grad_number(const char** pp, int* milli) {
+    const char* p = *pp;
+    int neg = 0, v = 0, frac = 0, scale = 1000, any = 0;
+    if (*p == '-') { neg = 1; p++; } else if (*p == '+') p++;
+    while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; any = 1; if (v > 100000) v = 100000; }
+    if (*p == '.') { p++; while (*p >= '0' && *p <= '9') { if (scale > 1) { scale /= 10; frac += (*p - '0') * scale; } p++; any = 1; } }
+    if (!any) return 0;
+    *milli = (v * 1000 + frac) * (neg ? -1 : 1);
+    *pp = p;
+    return 1;
+}
+
+static web_grad_t* grad_parse(arena_t* A, const char* src, int len) {
+    web_grad_t* g = (web_grad_t*)arena_alloc(A, sizeof(web_grad_t));
+    if (!g || A->oom) return NULL;
+    memset(g, 0, sizeof(*g));
+    g->repeating = strncmp(src, "repeating-", 10) == 0;
+    g->deg = 180;
+    const char* p = strchr(src, '(');
+    if (!p) return NULL;
+    p++;
+    int given[WEB_GRAD_STOPS];
+    int first = 1;
+    while (*p && *p != ')') {
+        while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+        const char* part = p;
+        int depth = 0;
+        while (*p && !(depth == 0 && (*p == ',' || *p == ')'))) { if (*p == '(') depth++; else if (*p == ')') depth--; p++; }
+        int ok;
+        uint32_t c = css_color_blend(part, &ok);
+        if (ok == 0 && first) {
+            /* the direction */
+            if (strncmp(part, "to ", 3) == 0) {
+                int up = 0, down = 0, left = 0, right = 0;
+                for (const char* q = part + 3; q < p; q++) {
+                    if (!strncmp(q, "top", 3)) up = 1;
+                    else if (!strncmp(q, "bottom", 6)) down = 1;
+                    else if (!strncmp(q, "left", 4)) left = 1;
+                    else if (!strncmp(q, "right", 5)) right = 1;
+                }
+                g->deg = up ? (right ? 45 : left ? 315 : 0) : down ? (right ? 135 : left ? 225 : 180) : right ? 90 : left ? 270 : 180;
+            } else {
+                const char* q = part;
+                int m;
+                if (grad_number(&q, &m)) {
+                    if (!strncmp(q, "turn", 4)) g->deg = m * 360 / 1000;
+                    else if (!strncmp(q, "rad", 3)) g->deg = m * 180 / 3142;
+                    else if (!strncmp(q, "grad", 4)) g->deg = m * 9 / 10000;
+                    else g->deg = m / 1000;
+                }
+            }
+        } else if (ok && g->n < WEB_GRAD_STOPS) {
+            if (ok == 2) c = 0xFF000000u | (g->n ? g->col[g->n - 1] & 0xFFFFFFu : 0);   /* transparent */
+            /* the colour, then up to two positions */
+            const char* q = part;
+            int d2 = 0;
+            while (q < p && !((*q == ' ') && d2 == 0)) { if (*q == '(') d2++; else if (*q == ')') d2--; q++; }
+            int npos = 0;
+            while (q < p && npos < 2) {
+                while (q < p && *q == ' ') q++;
+                int m;
+                if (q >= p || !grad_number(&q, &m)) break;
+                int pos = *q == '%' ? (int)((int64_t)m * 65536 / 100000) : -1 - m / 1000;   /* px: resolved later */
+                if (*q == '%') q++;
+                else while (q < p && *q >= 'a' && *q <= 'z') q++;
+                if (g->n < WEB_GRAD_STOPS) { g->col[g->n] = c; given[g->n] = pos; g->n++; npos++; }
+            }
+            if (!npos) { g->col[g->n] = c; given[g->n] = -0x7FFFFFFF; g->n++; }
+            /* an earlier transparent stop takes this colour's hue */
+            if (g->n >= 2 && (g->col[g->n - 2] >> 24) == 255 && !(g->col[g->n - 2] & 0xFFFFFFu))
+                g->col[g->n - 2] = 0xFF000000u | (c & 0xFFFFFFu);
+        }
+        first = 0;
+        if (*p == ',') p++;
+        if (p - src > len) break;
+    }
+    if (!g->n) return NULL;
+    for (int i = 0; i < g->n; i++) g->pos[i] = given[i];
+    return g;
+}
+
+/* positions in px along a len px line, missing ones spread evenly */
+static void grad_resolve(web_grad_t* g, int len) {
+    int n = g->n;
+    if (len < 1) len = 1;
+    for (int i = 0; i < n; i++)
+        if (g->pos[i] < 0 && g->pos[i] != -0x7FFFFFFF) g->pos[i] = (int)((int64_t)(-1 - g->pos[i]) * 65536 / len);
+    if (g->pos[0] == -0x7FFFFFFF) g->pos[0] = 0;
+    if (g->pos[n - 1] == -0x7FFFFFFF) g->pos[n - 1] = 65536;
+    for (int i = 1; i < n; i++) {
+        if (g->pos[i] != -0x7FFFFFFF) { if (g->pos[i] < g->pos[i - 1]) g->pos[i] = g->pos[i - 1]; continue; }
+        int j = i;
+        while (g->pos[j] == -0x7FFFFFFF) j++;
+        for (int k = i; k < j; k++) g->pos[k] = g->pos[i - 1] + (g->pos[j] - g->pos[i - 1]) * (k - i + 1) / (j - i + 1);
+    }
+}
+
+/* the gradient for e's box (bw x bh), placed per background-size / -position */
+static web_grad_t* grad_for_box(ctx_t* C, const style_t* st, int bw, int bh) {
+    if (!st->grad_src) return NULL;
+    web_grad_t* g = grad_parse(C->L->A, st->grad_src, 4096);
+    if (!g) return NULL;
+    int gw = bw, gh = bh;
+    if (st->bg_size == BG_SIZE_PX) {
+        int w2 = st->bg_size_w, h2 = st->bg_size_h;
+        if (w2 != LEN_AUTO) gw = st->bg_size_pct & 1 ? (int)((int64_t)bw * w2 / 100) : w2;
+        if (h2 != LEN_AUTO) gh = st->bg_size_pct & 2 ? (int)((int64_t)bh * h2 / 100) : h2;
+        if (gw > 60000) gw = 60000;
+        if (gh > 60000) gh = 60000;
+    }
+    if (gw < 1) gw = 1;
+    if (gh < 1) gh = 1;
+    g->gw = gw;
+    g->gh = gh;
+    g->ox = st->bg_pos_pct & 1 ? (int)((int64_t)(bw - gw) * st->bg_pos_x / 100) : st->bg_pos_x;
+    g->oy = st->bg_pos_pct & 2 ? (int)((int64_t)(bh - gh) * st->bg_pos_y / 100) : st->bg_pos_y;
+    if (st->bg_size == BG_SIZE_PX && (gw < bw || gh < bh)) {
+        g->tile = st->bg_repeat == BG_NO_REPEAT ? 0 : st->bg_repeat == BG_REPEAT_X ? 1 : st->bg_repeat == BG_REPEAT_Y ? 2 : 3;
+    }
+    grad_resolve(g, web_grad_len(g->deg, gw, gh));
+    return g;
+}
+
+/* gradient text (background-clip: text): the colour at this x of a line w wide */
+static uint32_t grad_text_color(ctx_t* C, const style_t* st, int x, int w) {
+    web_grad_t* g = grad_for_box(C, st, w > 0 ? w : 1, st->font_px > 0 ? st->font_px : 16);
+    if (!g) return st->color;
+    int s = web_sin1024(g->deg), len = web_grad_len(g->deg, g->gw, g->gh);
+    int64_t proj = (int64_t)(x - g->gw / 2) * s;
+    int t = 32768 + (int)(proj * 65536 / ((int64_t)len * 1024));
+    return web_grad_at(g, t) & 0xFFFFFFu;
+}
+
 #include "layout_grid.h"
+
+/* an offset in px: a percentage of base resolved */
+static int off_px(const style_t* s, int v, int bit, int base) {
+    if (v == LEN_AUTO || !(s->off_pct & bit)) return v;
+    return (int)((int64_t)base * v / 100);
+}
 
 static void layout_abs(ctx_t* C, dom_node_t* e, int sx, int sy, int cbx, int cby, int cbw, int cbh) {
     const style_t* s = e->style;
     int ml = s->margin[3], mr = s->margin[1], mt = s->margin[0], mb = s->margin[2];
-    int L = s->left, R = s->right, T = s->top, B = s->bottom;
+    int L = off_px(s, s->left, 1, cbw), R = off_px(s, s->right, 4, cbw), T = off_px(s, s->top, 2, cbh), B = off_px(s, s->bottom, 8, cbh);
     int bw;
     if (s->width_pct) bw = cbw * s->width_pct / 100;
     else if (s->width != LEN_AUTO && s->width > 0) bw = s->width + box_extra_w(s);
@@ -1200,7 +1437,9 @@ static void layout_abs(ctx_t* C, dom_node_t* e, int sx, int sy, int cbx, int cby
         int maxw, minw;
         measure(C, e, &maxw, &minw);
         bw = maxw;
-        if (bw > cbw - ml - mr) bw = cbw - ml - mr;
+        /* the room: the containing block less the offset given */
+        int room = cbw - ml - mr - (L != LEN_AUTO ? L : 0) - (R != LEN_AUTO ? R : 0);
+        if (bw > room) bw = room;
         if (bw < minw) bw = minw;
     }
     if (bw < 1) bw = 1;
@@ -1232,9 +1471,31 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     {
         const char* t = e->tag;
         if (strcmp(t, "select") == 0 || strcmp(t, "input") == 0 || strcmp(t, "button") == 0 ||
-            strcmp(t, "textarea") == 0 || strcmp(t, "img") == 0 || strcmp(t, "svg") == 0)
-            return flex_inline_item(C, e, x + st->margin[3], y + st->margin[0], avail - st->margin[1] - st->margin[3]) +
-                   st->margin[0] + st->margin[2];
+            strcmp(t, "textarea") == 0 || strcmp(t, "img") == 0 || strcmp(t, "svg") == 0 || strcmp(t, "video") == 0) {
+            dom_node_t* saved = C->placing;
+            C->placing = e;                          /* an absolute one is being placed now */
+            uint32_t from = C->dry ? 0 : C->L->n;
+            int h = flex_inline_item(C, e, x + st->margin[3], y + st->margin[0], avail - st->margin[1] - st->margin[3]) +
+                    st->margin[0] + st->margin[2];
+            C->placing = saved;
+            if (!C->dry && (st->tx || st->ty)) {     /* transform: translate() */
+                int x0 = 0x7FFFFFFF, x1 = -0x7FFFFFFF;
+                for (uint32_t i = from; i < C->L->n; i++) {
+                    if (C->L->items[i].x < x0) x0 = C->L->items[i].x;
+                    if (C->L->items[i].x + C->L->items[i].w > x1) x1 = C->L->items[i].x + C->L->items[i].w;
+                }
+                int bw = x1 > x0 ? x1 - x0 : 0, bh = h - st->margin[0] - st->margin[2];
+                int dx = st->t_pct & 1 ? (int)((int64_t)bw * st->tx / 100) : st->tx;
+                int dy = st->t_pct & 2 ? (int)((int64_t)bh * st->ty / 100) : st->ty;
+                for (uint32_t i = from; i < C->L->n; i++) {
+                    dl_item_t* it = &C->L->items[i];
+                    it->x += dx; it->y += dy;
+                    if (it->has_clip) { it->cx0 += dx; it->cx1 += dx; it->cy0 += dy; it->cy1 += dy; }
+                }
+                e->box_x += dx; e->box_y += dy;
+            }
+            return h;
+        }
     }
     if (st->display == DISP_TABLE) return layout_table(C, e, x, y, avail);
     int ml = st->margin[3], mr = st->margin[1], mt = st->margin[0], mb = st->margin[2];
@@ -1260,13 +1521,14 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     }
     /* gradient bands and the background image: reserved now (under the
      * content), sized once the box height is known */
-    #define GRAD_BANDS 24
     uint32_t grad_index = 0, bgimg_index = 0;
-    int has_grad = st->bg_grad && st->visible && !C->dry;
+    int has_grad = st->bg_grad && st->visible && !C->dry && !st->bg_clip_text;
     int has_bgimg = e->bg_img && !e->bg_img->failed && e->bg_img->px && st->visible && !C->dry;
     if (has_grad) {
         grad_index = C->L->n;
-        for (int k = 0; k < GRAD_BANDS; k++) rect(C, bx, by, 1, 1, st->grad_from, e);
+        dl_item_t* it = push(C, DL_GRAD);
+        it->node = e;
+        it->radius = (int16_t)(st->radius > 30000 ? 30000 : st->radius);
     }
     if (has_bgimg) {
         bgimg_index = C->L->n;
@@ -1306,22 +1568,10 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     if (st->has_bg && !body_like && st->visible && !C->dry) C->L->items[bg_index].h = bh;
     C->clip_on = clip_saved; C->clip_x0 = csx0; C->clip_y0 = csy0; C->clip_x1 = csx1; C->clip_y1 = csy1;
     if (has_grad) {
-        /* bands across the padding box, from one colour to the other */
-        int vertical = st->grad_dir == GRAD_DOWN || st->grad_dir == GRAD_UP;
-        int len = vertical ? bh : bw;
-        for (int k = 0; k < GRAD_BANDS; k++) {
-            dl_item_t* it = &C->L->items[grad_index + (uint32_t)k];
-            int a = len * k / GRAD_BANDS, b = len * (k + 1) / GRAD_BANDS;
-            int t = (k * 2 + 1) * 128 / GRAD_BANDS;            /* 0..255 */
-            if (st->grad_dir == GRAD_UP || st->grad_dir == GRAD_LEFT) t = 255 - t;
-            uint32_t f = st->grad_from, g = st->grad_to;
-            uint32_t r = (((f >> 16) & 255) * (uint32_t)(255 - t) + ((g >> 16) & 255) * (uint32_t)t) / 255;
-            uint32_t gg = (((f >> 8) & 255) * (uint32_t)(255 - t) + ((g >> 8) & 255) * (uint32_t)t) / 255;
-            uint32_t bb2 = ((f & 255) * (uint32_t)(255 - t) + (g & 255) * (uint32_t)t) / 255;
-            it->color = r << 16 | gg << 8 | bb2;
-            if (vertical) { it->x = bx; it->w = bw; it->y = by + a; it->h = b - a; }
-            else { it->x = bx + a; it->w = b - a; it->y = by; it->h = bh; }
-        }
+        dl_item_t* it = &C->L->items[grad_index];
+        it->x = bx; it->y = by; it->w = bw; it->h = bh;
+        it->grad = grad_for_box(C, st, bw, bh);
+        if (!it->grad) { it->kind = DL_RECT; it->color = st->grad_from; }
     }
     if (has_bgimg) {
         dl_item_t* it = &C->L->items[bgimg_index];
@@ -1357,8 +1607,10 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
         place_abs(C, abs_from);
         C->cb_x = scx; C->cb_y = scy; C->cb_w = scw; C->cb_h = sch;
         if (st->position == POS_RELATIVE || st->position == POS_STICKY) {
-            int dx = st->left != LEN_AUTO ? st->left : st->right != LEN_AUTO ? -st->right : 0;
-            int dy = st->top != LEN_AUTO ? st->top : st->bottom != LEN_AUTO ? -st->bottom : 0;
+            int L = off_px(st, st->left, 1, avail), R = off_px(st, st->right, 4, avail);
+            int T = off_px(st, st->top, 2, bh), B = off_px(st, st->bottom, 8, bh);
+            int dx = L != LEN_AUTO ? L : R != LEN_AUTO ? -R : 0;
+            int dy = T != LEN_AUTO ? T : B != LEN_AUTO ? -B : 0;
             if (dx || dy)
                 for (uint32_t i = first_item; i < C->L->n; i++) {
                     dl_item_t* it = &C->L->items[i];
@@ -1386,6 +1638,17 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
         st_vmetrics(st, &la, &ld, NULL);
         t->y = content_y + la - t->asc;                  /* on the first line's baseline */
         t->node = e;
+    }
+    if (!C->dry && (st->tx || st->ty)) {
+        /* transform: translate() - drawn moved, its room in the flow kept */
+        int dx = st->t_pct & 1 ? (int)((int64_t)bw * st->tx / 100) : st->tx;
+        int dy = st->t_pct & 2 ? (int)((int64_t)bh * st->ty / 100) : st->ty;
+        for (uint32_t i = bg_index; i < C->L->n; i++) {
+            dl_item_t* it = &C->L->items[i];
+            it->x += dx; it->y += dy;
+            if (it->has_clip) { it->cx0 += dx; it->cx1 += dx; it->cy0 += dy; it->cy1 += dy; }
+        }
+        bx += dx; by += dy;
     }
     if (!C->dry) { e->box_x = bx; e->box_y = by; e->box_w = bw; e->box_h = bh; }
     {
@@ -1424,9 +1687,30 @@ static void measure_cell(ctx_t* C, dom_node_t* cell, int* maxw, int* minw) {
     M.L = C->L;
     M.dry = 1;
     const style_t* st = cell->style;
+    int extra = st->padding[1] + st->padding[3] + st->border[1] + st->border[3];
+    if (st->flex && (st->flex_dir == FLEX_ROW || st->flex_dir == FLEX_ROW_REV)) {
+        /* a flex row: its items side by side, with the gaps between them */
+        int sum = 0, sum_min = 0, most_min = 0, k = 0;
+        for (dom_node_t* c = cell->first; c; c = c->next) {
+            dom_node_t* it = c;
+            if (c->type == DOM_TEXT) {
+                if (is_blank_text(c) || !(it = flex_anon_text(C, cell, c))) continue;
+            } else if (c->type != DOM_ELEM || !c->style || c->style->display == DISP_NONE || out_of_sight(c->style) ||
+                       c->style->position == POS_ABSOLUTE || c->style->position == POS_FIXED) continue;
+            int mx, mn, m = it->style->margin[1] + it->style->margin[3];
+            measure(C, it, &mx, &mn);
+            sum += mx + m + (k ? st->gap_col : 0);
+            sum_min += mn + m + (k ? st->gap_col : 0);
+            if (mn + m > most_min) most_min = mn + m;
+            k++;
+        }
+        *maxw = sum + extra;
+        *minw = (st->flex_wrap ? most_min : sum_min) + extra;
+        if (st->width != LEN_AUTO && st->width > 0) { *maxw = *minw = st->width + extra; }
+        return;
+    }
     if (st->grid) layout_grid(&M,cell,0,0,100000);
     else layout_children(&M, cell, 0, 0, 100000);
-    int extra = st->padding[1] + st->padding[3] + st->border[1] + st->border[3];
     *maxw = M.max_w + extra;
     *minw = M.max_word + extra;
     if (st->width != LEN_AUTO && st->width > 0) { *maxw = *minw = st->width + extra; }
@@ -1606,6 +1890,11 @@ layout_t* layout_build(arena_t* A, dom_node_t* doc, int width, dom_node_t* focus
     dom_node_t* body = dom_find_tag(doc, "body");
     if (html && html->style && html->style->has_bg) L->bg = html->style->bg;
     if (body && body->style && body->style->has_bg) L->bg = body->style->bg;
+    if (L->bg >> 24) {                       /* the canvas itself is opaque: see-through over white */
+        uint32_t a = 255 - (L->bg >> 24), c = L->bg;
+        L->bg = (((c >> 16) & 255) * a + 255 * (255 - a)) / 255 << 16 |
+                (((c >> 8) & 255) * a + 255 * (255 - a)) / 255 << 8 | ((c & 255) * a + 255 * (255 - a)) / 255;
+    }
     ctx_t C;
     memset(&C, 0, sizeof(C));
     C.L = L;
@@ -1628,7 +1917,7 @@ static int item_contains(const dl_item_t* it,int x,int y){
     if(!item_clip_contains(it,x,y))return 0;
     int64_t dx=(int64_t)x-it->x,dy=(int64_t)y-it->y;
     if(dx<0||dy<0||dx>=it->w||dy>=it->h)return 0;
-    if((it->kind!=DL_RECT&&it->kind!=DL_CARET)||(!it->radius&&!it->ring))return 1;
+    if((it->kind!=DL_RECT&&it->kind!=DL_CARET&&it->kind!=DL_GRAD)||(!it->radius&&!it->ring))return 1;
     int r=it->radius;
     if(r*2>it->w)r=it->w/2;
     if(r*2>it->h)r=it->h/2;

@@ -23,6 +23,12 @@ uint32_t remote_text_range(layout_t*, int, int, int, int, char*, uint32_t);
 void web_libjs_dom_tests(void (*report)(const char*,int,const char*));
 void web_libjs_tests(void (*report)(const char*,int,const char*));
 void web_isolation_tests(void (*report)(const char*,int,const char*));
+/* a restricted worker decoding one media stream (kernel/media.c drives it
+ * with the WW_MEDIA_* commands); NULL if none could start */
+void* media_worker_start(void);
+int  media_worker_call(void* w, unsigned int op, const int* args, const void* in, uint32_t n,
+                       void* out, uint32_t cap, uint32_t* out_used);
+void media_worker_stop(void* w);
 /* Browser and SDK webviews use only remote proxies. Other trusted engine
  * selftests may still link the engine, but never parse network data here. */
 #ifndef REMOTE_PAGE_IMPLEMENTATION

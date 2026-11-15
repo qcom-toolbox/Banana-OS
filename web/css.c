@@ -77,7 +77,9 @@ typedef struct bucket {
 
 #define BUCKETS 512
 
+struct css_kf;
 struct css_sheet {
+    struct css_kf* keyframes;   /* @keyframes (css_anim.h) */
     rule_t* rules;
     int     n, cap;
     int     origin;             /* 0 = default (user agent), 1 = page */
@@ -706,6 +708,8 @@ static uint32_t skip_comment(const char* s, uint32_t n, uint32_t i) {
     return i + 2 > n ? n : i + 2;
 }
 
+static void kf_parse(arena_t* A, css_sheet_t* sh, const char* head, uint32_t hn, const char* s, uint32_t n);
+
 static void parse_block_list(arena_t* A, css_sheet_t* sh, const char* s, uint32_t n, int mmin, int mmax) {
     uint32_t i = 0;
     while (i < n) {
@@ -775,6 +779,8 @@ static void parse_block_list(arena_t* A, css_sheet_t* sh, const char* s, uint32_
                        strncasecmp(s + st, "@container", 10) == 0 || strncasecmp(s + st, "@document", 9) == 0) {
                 /* "@supports not (...)" usually guards fallbacks for old browsers: keep those too */
                 parse_block_list(A, sh, s + bs, be - bs, mmin, mmax);
+            } else if (strncasecmp(s + st, "@keyframes", 10) == 0 || strncasecmp(s + st, "@-webkit-keyframes", 18) == 0) {
+                kf_parse(A, sh, s + st, sel_end - st, s + bs, be - bs);
             }
             continue;
         }
@@ -849,7 +855,7 @@ static const char DEFAULT_CSS[] =
     " section, article, header, footer, nav, aside, main, figure, figcaption, fieldset, hr, center,"
     " details, summary, legend, menu, hgroup, search { display: block }"
     "head, script, style, title, meta, link, base, template, noscript, datalist, canvas,"
-    " object, embed, video, audio, dialog:not([open]), [hidden], area, map, param, source, track { display: none }"
+    " object, embed, audio, dialog:not([open]), [hidden], area, map, param, source, track { display: none }"
     "iframe { display: inline-block }"
     "li { display: list-item }"
     "table { display: table; border-spacing: 0 }"
@@ -963,27 +969,49 @@ static uint32_t hsl_rgb(int h, int s, int l) {     /* h 0..360, s/l 0..100 */
     return (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
 }
 
-/* *ok: 1 a color, 0 not one, 2 transparent (alpha ~ 0) */
+/* *ok: 1 a color, 0 not one, 2 transparent (alpha ~ 0); *alpha: 0..255 */
+static uint32_t color_alpha(const char* s, int* ok, int* alpha);
+
 uint32_t css_color(const char* s, int* ok) {
+    int a;
+    return color_alpha(s, ok, &a);
+}
+
+/* a colour that may be see-through: 1 - alpha in the top byte (0: opaque),
+ * as the renderer blends it (backgrounds and borders). *ok 2 only when
+ * nothing shows at all. */
+uint32_t css_color_blend(const char* s, int* ok) {
+    int a;
+    uint32_t c = color_alpha(s, ok, &a);
+    if (*ok == 0) return 0;
+    if (a <= 0) { *ok = 2; return 0; }
+    *ok = 1;
+    return a >= 255 ? c : c | (uint32_t)(255 - a) << 24;
+}
+
+static uint32_t color_alpha(const char* s, int* ok, int* alpha) {
     *ok = 0;
+    *alpha = 255;
     while (is_ws(*s)) s++;
     if (*s == '#') {
         s++;
         int n = 0;
         while (hexv(s[n]) >= 0) n++;
         if (n == 3 || n == 4) {
+            if (n == 4) *alpha = hexv(s[3]) * 17;
             *ok = (n == 4 && hexv(s[3]) < 2) ? 2 : 1;
             return (uint32_t)(hexv(s[0]) * 17) << 16 | (uint32_t)(hexv(s[1]) * 17) << 8 | (uint32_t)(hexv(s[2]) * 17);
         }
         if (n == 6 || n == 8) {
             uint32_t v = 0;
             for (int i = 0; i < 6; i++) v = v * 16 + (uint32_t)hexv(s[i]);
+            if (n == 8) *alpha = hexv(s[6]) * 16 + hexv(s[7]);
             *ok = (n == 8 && hexv(s[6]) * 16 + hexv(s[7]) < 26) ? 2 : 1;
             return v;
         }
         return 0;
     }
-    if (strncasecmp(s, "transparent", 11) == 0) { *ok = 2; return 0; }
+    if (strncasecmp(s, "transparent", 11) == 0) { *ok = 2; *alpha = 0; return 0; }
     int is_rgb = strncasecmp(s, "rgb", 3) == 0, is_hsl = strncasecmp(s, "hsl", 3) == 0;
     if (is_rgb || is_hsl) {
         const char* p = strchr(s, '(');
@@ -1004,6 +1032,7 @@ uint32_t css_color(const char* s, int* ok) {
             } else if (strncasecmp(p, "deg", 3) == 0) p += 3;
             c[i] = m;
         }
+        *alpha = c[3] <= 0 ? 0 : c[3] >= 1000 ? 255 : c[3] * 255 / 1000;
         if (c[3] < 100) { *ok = 2; return 0; }
         *ok = 1;
         if (is_hsl) return hsl_rgb(c[0] / 1000, c[1] / 1000, c[2] / 1000);
@@ -1191,7 +1220,7 @@ static void border_side(style_t* st, const char* v, int side) {
                  strcasecmp(tok, "inset") == 0 || strcasecmp(tok, "outset") == 0) {}
         else if (strcasecmp(tok, "currentcolor") == 0) color = st->color;
         else {
-            uint32_t c = css_color(tok, &ok);
+            uint32_t c = css_color_blend(tok, &ok);
             if (ok == 1) color = c;
             else if (ok == 2) none = 1;              /* a transparent border draws nothing */
             else return;
@@ -1255,6 +1284,7 @@ static void bg_layers(style_t* st, const char* v) {
     const char* g = strstr(v, "linear-gradient(");
     if (!g) g = strstr(v, "repeating-linear-gradient(");
     if (g && !u) {
+        st->grad_src = g - v >= 10 && strncmp(g - 10, "repeating-", 10) == 0 ? g - 10 : g;
         g = strchr(g, '(') + 1;
         st->grad_dir = GRAD_DOWN;
         int ncol = 0;
@@ -1303,14 +1333,16 @@ static void bg_repeat_of(style_t* st, const char* v) {
 static void bg_size_of(style_t* st, const char* v, int shorthand) {
     css_value_tokens it = { v, 4096 };
     char token[CSS_VALUE_TOKEN];
-    int sizes[2] = { LEN_AUTO, LEN_AUTO }, n = 0, got, mode = BG_SIZE_PX;
+    int sizes[2] = { LEN_AUTO, LEN_AUTO }, n = 0, got, mode = BG_SIZE_PX, pct = 0;
     while (n < 2 && (got = css_next_value(&it, token)) == 1) {
         if (!n && (strcasecmp(token, "cover") == 0 || strcasecmp(token, "contain") == 0)) {
             mode = strcasecmp(token, "cover") == 0 ? BG_SIZE_COVER : BG_SIZE_CONTAIN;
             n++;
             break;
         }
-        int l = parse_len(token, st->font_px, -1, NULL);
+        int is_pct = 0, kind;
+        int l = parse_len_kind(token, st->font_px, -1, &is_pct, &kind);
+        if (kind == CSS_MATH_PERCENT) { l = is_pct; pct |= 1 << n; }
         if (strcasecmp(token, "auto") != 0 && (l == LEN_AUTO || l < 0)) {
             if (shorthand && n) break; /* repeat/color after position / size */
             return;
@@ -1322,6 +1354,7 @@ static void bg_size_of(style_t* st, const char* v, int shorthand) {
     st->bg_size = (uint8_t)mode;
     st->bg_size_w = sizes[0];
     st->bg_size_h = sizes[1];
+    st->bg_size_pct = (uint8_t)(mode == BG_SIZE_PX ? pct : 0);
 }
 
 /* "center", "left top", "50% 20%", "-32px 0" */
@@ -1452,6 +1485,49 @@ static void flex_shorthand(style_t* st, const char* v) {
 }
 
 /* flexbox properties that are not keyed by the switch below; 1 if handled */
+/* top / right / bottom / left: px, or a percentage of the containing block */
+static int offset_of(style_t* st, const char* v, int bit) {
+    st->off_pct &= (uint8_t)~bit;
+    if (has_word(v, "auto")) return LEN_AUTO;
+    int is_pct = 0, kind;
+    int l = parse_len_kind(v, st->font_px, -1, &is_pct, &kind);
+    if (kind == CSS_MATH_PERCENT) { st->off_pct |= (uint8_t)bit; return is_pct; }
+    return l;
+}
+
+/* transform: the translation in it (translate / translateX / translateY / translate3d) */
+static void transform_of(style_t* st, const char* v) {
+    st->tx = st->ty = 0;
+    st->t_pct = 0;
+    const char* p = strstr(v, "translate");
+    if (!p) return;
+    p += 9;
+    int which = 3;                                   /* x and y */
+    if (*p == 'X' || *p == 'x') { which = 1; p++; }
+    else if (*p == 'Y' || *p == 'y') { which = 2; p++; }
+    else if (!strncmp(p, "3d", 2) || !strncmp(p, "3D", 2)) p += 2;
+    if (*p != '(') return;
+    p++;
+    for (int axis = 0; axis < 2; axis++) {
+        if (!(which & (1 << axis)) && which != 3) continue;
+        while (is_ws(*p)) p++;
+        char tok[64];
+        int n = 0, d = 0;
+        while (*p && n < 63 && !(d == 0 && (*p == ',' || *p == ')'))) { if (*p == '(') d++; else if (*p == ')') d--; tok[n++] = *p++; }
+        while (n && is_ws(tok[n - 1])) n--;
+        tok[n] = 0;
+        int is_pct = 0, kind;
+        int l = parse_len_kind(tok, st->font_px, -1, &is_pct, &kind);
+        int ax = which == 3 ? axis : which - 1;
+        if (kind == CSS_MATH_PERCENT) { l = is_pct; st->t_pct |= (uint8_t)(1 << ax); }
+        else if (l == LEN_AUTO) l = 0;
+        if (ax) st->ty = l; else st->tx = l;
+        if (*p == ',') p++;
+        else break;
+        if (which != 3) break;
+    }
+}
+
 static int flex_decl(style_t* st, const char* prop, const char* v) {
     if (strcmp(prop, "gap") == 0 || strcmp(prop, "grid-gap") == 0) {
         css_value_tokens it = { v, 4096 };
@@ -1483,10 +1559,27 @@ static int flex_decl(style_t* st, const char* prop, const char* v) {
     if (strcmp(prop, "background-image") == 0) {
         st->bg_url = NULL;
         st->bg_grad = 0;
+        st->grad_src = NULL;
         if (!has_word(v, "none")) bg_layers(st, v);
         return 1;
     }
     if (strcmp(prop, "background-repeat") == 0) { bg_repeat_of(st, v); return 1; }
+    if (strcmp(prop, "object-fit") == 0) {
+        st->object_fit = (uint8_t)(has_word(v, "contain") ? 1 : has_word(v, "cover") ? 2 : has_word(v, "none") ? 3 :
+                                   has_word(v, "scale-down") ? 4 : 0);
+        return 1;
+    }
+    if (strcmp(prop, "background-clip") == 0 || strcmp(prop, "-webkit-background-clip") == 0) {
+        st->bg_clip_text = (uint8_t)has_word(v, "text");
+        return 1;
+    }
+    if (strcmp(prop, "-webkit-text-fill-color") == 0) {
+        int ok;
+        uint32_t c = css_color(v, &ok);
+        if (ok == 1) { st->color = c; st->visible = 1; st->text_clear = 0; }
+        else if (ok == 2) { st->visible = 0; st->text_clear = 1; }
+        return 1;
+    }
     if (strcmp(prop, "background-size") == 0) { bg_size_of(st, v, 0); return 1; }
     if (strcmp(prop, "background-position") == 0) { bg_pos_of(st, v, 0); return 1; }
     if (strcmp(prop, "border-radius") == 0) {
@@ -1495,13 +1588,15 @@ static int flex_decl(style_t* st, const char* prop, const char* v) {
         st->radius = r == LEN_AUTO || r < 0 ? 0 : is_pct ? (r >= 50 ? 100000 : r * 4) : r;
         return 1;
     }
-    if (strcmp(prop, "top") == 0) { st->top = has_word(v, "auto") ? LEN_AUTO : parse_len(v, st->font_px, -1, NULL); return 1; }
-    if (strcmp(prop, "right") == 0) { st->right = has_word(v, "auto") ? LEN_AUTO : parse_len(v, st->font_px, -1, NULL); return 1; }
-    if (strcmp(prop, "bottom") == 0) { st->bottom = has_word(v, "auto") ? LEN_AUTO : parse_len(v, st->font_px, -1, NULL); return 1; }
+    if (strcmp(prop, "top") == 0) { st->top = offset_of(st, v, 2); return 1; }
+    if (strcmp(prop, "right") == 0) { st->right = offset_of(st, v, 4); return 1; }
+    if (strcmp(prop, "bottom") == 0) { st->bottom = offset_of(st, v, 8); return 1; }
+    if (strcmp(prop, "transform") == 0 || strcmp(prop, "-webkit-transform") == 0) { transform_of(st, v); return 1; }
     return 0;
 }
 
 #include "css_grid.h"
+#include "css_anim.h"
 
 static void apply_decl(style_t* st, const style_t* parent, const char* prop, const char* v) {
     int ok;
@@ -1538,12 +1633,14 @@ static void apply_decl(style_t* st, const style_t* parent, const char* prop, con
     }
     if (!strcmp(prop, "grid-template-columns")) { grid_columns(st, v); return; }
     if (flex_decl(st, prop, v)) return;
+    if (prop[0] == 'a' || prop[0] == '-') { if (anim_decl(st, prop, v)) return; }
     switch (prop[0]) {
     case 'b':
         if (strcmp(prop, "background-color") == 0 || strcmp(prop, "background") == 0) {
             if (prop[10] == 0) {                     /* background: ... */
                 st->bg_url = NULL;
                 st->bg_grad = 0;
+                st->grad_src = NULL;
                 st->bg_repeat = BG_REPEAT;
                 bg_layers(st, v);
                 bg_repeat_of(st, v);
@@ -1555,7 +1652,7 @@ static void apply_decl(style_t* st, const style_t* parent, const char* prop, con
             const char* p = v;
             while (*p) {
                 while (is_ws(*p) || *p == ',') p++;
-                uint32_t c = css_color(p, &ok);
+                uint32_t c = css_color_blend(p, &ok);
                 if (ok == 1) { st->bg = c; st->has_bg = 1; return; }
                 if (ok == 2) { st->has_bg = 0; return; }
                 while (*p && !is_ws(*p) && *p != ',') {
@@ -1572,7 +1669,7 @@ static void apply_decl(style_t* st, const style_t* parent, const char* prop, con
         if (strcmp(prop, "border-left") == 0) { border_side(st, v, 3); return; }
         if (strcmp(prop, "border-width") == 0) { four(v, st->font_px, st->border, NULL); for (int i = 0; i < 4; i++) if (st->border[i] > 20) st->border[i] = 20; return; }
         if (strcmp(prop, "border-color") == 0) {
-            uint32_t c = css_color(v, &ok);
+            uint32_t c = css_color_blend(v, &ok);
             if (ok == 1) for (int i = 0; i < 4; i++) st->border_color[i] = c;
             else if (ok == 2) for (int i = 0; i < 4; i++) st->border[i] = 0;
             return;
@@ -1593,8 +1690,8 @@ static void apply_decl(style_t* st, const style_t* parent, const char* prop, con
     case 'c':
         if (strcmp(prop, "color") == 0) {
             uint32_t c = css_color(v, &ok);
-            if (ok == 1) st->color = c;
-            else if (ok == 2) st->visible = 0;           /* invisible text */
+            if (ok == 1) { st->color = c; st->text_clear = 0; }
+            else if (ok == 2) { st->visible = 0; st->text_clear = 1; }   /* invisible text */
             return;
         }
         if (strcmp(prop, "clip") == 0) { if (strstr(v, "rect(")) st->clipped = 1; return; }
@@ -1677,7 +1774,14 @@ static void apply_decl(style_t* st, const style_t* parent, const char* prop, con
         return;
     case 'h':
         if (strcmp(prop, "height") == 0) {
-            int l = parse_len(v, st->font_px, -1, NULL);
+            int is_pct = 0, kind;
+            int l = parse_len_kind(v, st->font_px, -1, &is_pct, &kind);
+            if (kind == CSS_MATH_PERCENT) {
+                /* against the parent's definite height (the viewport for the root):
+                 * html, body { height: 100% } and what is inside them */
+                int base = !parent ? css_viewport_h : parent->height != LEN_AUTO && parent->height > 0 ? parent->height : -1;
+                l = base > 0 && is_pct >= 0 ? (int)((int64_t)base * is_pct / 100) : LEN_AUTO;
+            }
             st->height = l;
         }
         return;
@@ -1685,6 +1789,7 @@ static void apply_decl(style_t* st, const style_t* parent, const char* prop, con
         if (strcmp(prop, "inset") == 0) {
             int sides[4] = { 0, 0, 0, 0 };
             four(v, st->font_px, sides, NULL);
+            st->off_pct = 0;
             st->top = sides[0];
             st->right = sides[1];
             st->bottom = sides[2];
@@ -1701,7 +1806,7 @@ static void apply_decl(style_t* st, const style_t* parent, const char* prop, con
             else if (has_word(v, "disc")) st->list_style = LIST_DISC;
             return;
         }
-        if (strcmp(prop, "left") == 0) { st->left = parse_len(v, st->font_px, -1, NULL); return; }
+        if (strcmp(prop, "left") == 0) { st->left = offset_of(st, v, 1); return; }
         return;
     case 'm':
         if (strcmp(prop, "margin") == 0) { four(v, st->font_px, st->margin, &st->margin_auto_lr); return; }
@@ -1817,6 +1922,7 @@ static void inherit(style_t* st, const style_t* p) {
     st->nowrap = p->nowrap;
     st->list_style = p->list_style;
     st->visible = p->visible;
+    st->text_clear = p->text_clear;
     st->font_px = p->font_px;
     st->scale = p->scale;
     st->mono = p->mono;
@@ -2061,6 +2167,10 @@ static void style_element(cascade_t* K, dom_node_t* e, const style_t* parent, cs
 
     }
     K->font_pass = K->computed_font = 0;
+    /* gradient text: background-clip: text under a transparent colour - the
+     * text is drawn, in the gradient's colours (layout.c) */
+    anim_apply(K->A, e, st, parent, sheets, nsheets);
+    if (st->bg_clip_text && st->bg_grad && st->text_clear) st->visible = 1;
 
     /* Grid owns placement. Blockify inline items so inline text bounds cannot
      * overwrite the grid's border-box geometry after layout. */

@@ -58,6 +58,7 @@ typedef struct dom_node {
     int      meas_max, meas_min;
     uint32_t mh_gen;             /* layout.c: outer height at border-box width mh_w, measured in pass mh_gen */
     int      mh_w, mh;
+    uint32_t anim_key, anim_t0;  /* css_anim.h: the running animation, and when it began */
 } dom_node_t;
 
 dom_node_t* html_parse(arena_t* A, const char* src, uint32_t len);

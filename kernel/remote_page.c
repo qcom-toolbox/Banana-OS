@@ -12,8 +12,9 @@
 #include "timer.h"
 #include "task.h"
 #include "serial.h"
+#include "media.h"
 #include "../sdk/include/banana_web_worker.h"
-#define WORKERS 4
+#define WORKERS 8                   /* pages, and media streams' decoders */
 #define TRANSFER_BUDGET (64u << 20)
 typedef struct remote_page {
     page_t p;                       /* kernel-owned compatibility proxy */
@@ -144,6 +145,36 @@ static void serve(remote_page_t* r) {
             char text[2048];memcpy(text,q->body,q->length);text[q->length]=0;
             r->environment.cookie_set(r->environment.ctx,q->url,text);a->result=0;
         }break;
+    case WW_MEDIA: {
+        /* <audio> / <video>: streams owned by this page (kernel/media.c) */
+        int b[5]={0};memcpy(b,q->body,q->length<sizeof(b)?q->length:sizeof(b));
+        if(q->arg==WWM_OPEN){
+            if(!r->network_enabled||!web_network_url(q->url))break;
+            int id=media_open(r,q->url);
+            if(id>=0&&(r->resource_data=kmalloc(sizeof(id)))){memcpy(r->resource_data,&id,sizeof(id));a->length=sizeof(id);a->result=0;}
+        }else if(q->arg==WWM_CMD){
+            if(!media_owned(b[0],r))break;
+            switch(b[1]){
+            case PAGE_MEDIA_PLAY:media_play(b[0]);break;
+            case PAGE_MEDIA_PAUSE:media_pause(b[0]);break;
+            case PAGE_MEDIA_SEEK:media_seek(b[0],b[2]<0?0u:(uint32_t)b[2]);break;
+            case PAGE_MEDIA_SET:media_set(b[0],b[2],b[3],b[4]);break;
+            case PAGE_MEDIA_CLOSE:media_close(b[0]);break;
+            default:break;
+            }
+            a->result=0;
+        }else if(q->arg==WWM_STATUS){
+            media_status_t m;ww_media_status_t* o;
+            if(!media_owned(b[0],r)||media_status(b[0],&m)||!(o=kzalloc(sizeof(*o))))break;
+            o->state=m.state;o->playing=m.playing;o->ended=m.ended;o->pos_ms=m.pos_ms;o->dur_ms=m.dur_ms;o->seq=m.seq;
+            kstrlcpy(o->error,m.error,sizeof(o->error));
+            r->resource_data=(char*)o;a->length=sizeof(*o);a->result=0;
+        }else if(q->arg==WWM_FRAME){
+            uint32_t bytes=0;
+            if(media_owned(b[0],r)&&(r->resource_data=media_frame(b[0],(uint32_t)b[1],&bytes))){a->length=bytes;a->result=0;}
+        }
+        break;
+    }
     case WW_MESSAGE:
         if(q->length<8192&&r->environment.message){
             char* text=kmalloc(q->length+1);
@@ -152,14 +183,15 @@ static void serve(remote_page_t* r) {
         }break;
     default:break;
     }
-    if(a->length>WW_DOCUMENT||a->length>TRANSFER_BUDGET-r->transferred){
+    if(a->length>WW_DOCUMENT||(q->kind!=WW_MEDIA&&a->length>TRANSFER_BUDGET-r->transferred)){
         if(r->resource_data)kfree(r->resource_data);r->resource_data=NULL;a->length=0;a->result=-1;
-    }else r->transferred+=a->length;
+    }else if(q->kind!=WW_MEDIA)r->transferred+=a->length;   /* pictures are not downloads */
 done:
     __sync_synchronize();r->resource_ready=2;
 }
 static void crashed(remote_page_t* r,const char* why) {
     if(!r->dead)app_web_kill(r->app,r->generation);
+    media_close_owner(r);
     if(r->slot>=0&&workers[r->slot]==r)workers[r->slot]=NULL;
     r->slot=-1;r->dead=1;r->stage=0;r->p.js=NULL;r->p.focus=NULL;r->p.dirty=0;
     r->p.nav_pending=r->p.alert_pending=r->p.file_pick_pending=0;
@@ -185,7 +217,7 @@ static void apply(remote_page_t* r) {
 }
 static int call(remote_page_t* r,unsigned int op,const int* args,const char* url,const void* data,
                 uint32_t n,void* out,uint32_t cap) {
-    if(!r||r->dead||r->busy||n>WW_DOCUMENT)return -1;
+    if(!r||r->dead||r->busy||n>(op==WW_MEDIA_OPEN?WW_MEDIA_BYTES:WW_DOCUMENT))return -1;
     r->busy=1;
     if(r->navbody)kfree(r->navbody);r->navbody=NULL;r->nav_used=0;r->p.nav_post=NULL;r->p.nav_post_len=0;
     memset(&r->cmd,0,sizeof(r->cmd));r->cmd.version=WW_VERSION;r->cmd.op=op;r->cmd.length=n;
@@ -244,9 +276,34 @@ page_t* remote_page_new_libjs(page_env_t* env,uint32_t limit) {
 page_t* remote_page_new(page_env_t* env,uint32_t limit) {
     return remote_page_new_worker(env,limit,"/apps/webworker/app-x86_64");
 }
+/* a media stream's decoder: the plain worker, no page in it */
+void* media_worker_start(void) {
+    int slot=-1;
+    for(int i=0;i<WORKERS;i++)if(!workers[i]){slot=i;break;}
+    if(slot<0)return NULL;
+    remote_page_t* r=kzalloc(sizeof(*r));if(!r)return NULL;
+    r->environment=*browser_env();r->slot=slot;r->app=-1;r->p.env=&r->environment;r->p.layout=&r->layout;
+    r->layout.A=(arena_t*)r;r->p.scroll_req=-1;
+    char err[128];
+    r->app=app_spawn_web_worker("/apps/webworker/app-x86_64",err,sizeof(err));
+    if(r->app<0){klog("media worker: %s\n",err);kfree(r);return NULL;}
+    r->generation=app_web_generation(r->app);
+    workers[slot]=r;
+    return r;
+}
+int media_worker_call(void* w,unsigned int op,const int* args,const void* in,uint32_t n,void* out,uint32_t cap,uint32_t* out_used) {
+    remote_page_t* r=w;
+    if(!r||r->dead)return -1;
+    int a[10]={0};if(args)memcpy(a,args,sizeof(a));
+    int rc=call(r,op,a,NULL,in,n,out,cap);
+    if(out_used)*out_used=r->out_used;
+    return r->dead?-1:rc;
+}
+void media_worker_stop(void* w){if(w)remote_page_free(&((remote_page_t*)w)->p);}
 void remote_page_free(page_t* p) {
     if(!p)return;remote_page_t* r=(remote_page_t*)p;
     r->dead=1;app_web_kill(r->app,r->generation);
+    media_close_owner(r);
     if(r->slot>=0&&workers[r->slot]==r)workers[r->slot]=NULL;
     /* Reclaim the old process before another page consumes its pool share.
      * The generation prevents a reused app slot from being killed here. */

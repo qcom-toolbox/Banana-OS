@@ -493,7 +493,8 @@ W.__banana_deliver = function(data){
     var m = st(el), u = srcOf(el);
     if (u && u !== m.url) {
       if (m.id >= 0) __media_cmd(m.id, CLOSE);
-      m.url = u; m.id = __media_open(u); m.ready = 0; m.dur = NaN; m.pos = 0; m.ended = false; m.err = null;
+      m.url = u; m.id = __media_open(u, el); m.ready = 0; m.dur = NaN; m.pos = 0; m.ended = false; m.err = null;
+      if (!m.touched) { m.touched = true; m.muted = el.hasAttribute('muted'); }
       pushSet(el);
       fire(el, 'loadstart');
       track(el);
@@ -537,7 +538,7 @@ W.__banana_deliver = function(data){
   EPR.load = function(){ if (!isMedia(this)) return; var m = st(this); m.url = ''; m.paused = true; ensure(this); };
   EPR.canPlayType = function(t){
     t = String(t || '').toLowerCase();
-    return /audio\/(mpeg|mp3|mpeg3|x-mpeg|wav|wave|x-wav|flac|x-flac)/.test(t) ? 'probably' : '';
+    return /^(audio\/(mpeg|mp3|mpeg3|x-mpeg|wav|wave|x-wav|flac|x-flac|aac|mp4|x-m4a|ogg|opus|webm)|video\/(mp4|webm|ogg|quicktime|x-matroska|x-m4v))/.test(t) ? 'probably' : '';
   };
   EPR.fastSeek = function(t){ this.currentTime = t; };
   function prop(name, get, set){
@@ -555,7 +556,7 @@ W.__banana_deliver = function(data){
   prop('paused', function(m){ return m.paused; });
   prop('ended', function(m){ return m.ended; });
   prop('volume', function(m){ return m.vol; }, function(m, v){ m.vol = Math.max(0, Math.min(1, +v || 0)); pushSet(this); fire(this, 'volumechange'); });
-  prop('muted', function(m){ return m.muted; }, function(m, v){ m.muted = !!v; pushSet(this); fire(this, 'volumechange'); });
+  prop('muted', function(m){ return m.touched ? m.muted : this.hasAttribute('muted'); }, function(m, v){ m.touched = true; m.muted = !!v; pushSet(this); fire(this, 'volumechange'); });
   prop('loop', function(m){ return m.loop || this.hasAttribute('loop'); }, function(m, v){ m.loop = !!v; pushSet(this); });
   prop('autoplay', function(m){ return this.hasAttribute('autoplay'); }, function(m, v){ if (v) this.setAttribute('autoplay', ''); else this.removeAttribute('autoplay'); });
   prop('readyState', function(m){ return m.ready; });
@@ -571,6 +572,14 @@ W.__banana_deliver = function(data){
   prop('played', function(m){ return { length: 0, start: function(){ return 0; }, end: function(){ return 0; } }; });
   prop('seekable', function(m){ var d = m.ready ? m.dur : 0, n = m.ready ? 1 : 0;
     return { length: n, start: function(){ return 0; }, end: function(){ return d; } }; });
+  /* <video autoplay> / <audio autoplay> in the document: they start once it is parsed
+   * (a muted one plays without asking, as in other browsers) */
+  function autoplay(){
+    var list = document.querySelectorAll('video[autoplay], audio[autoplay]');
+    for (var i = 0; i < list.length; i++) { var el = list[i]; if (!el.__ms || el.__ms.url === '') ensure(el); }
+  }
+  document.addEventListener('DOMContentLoaded', autoplay);
+  setTimeout(autoplay, 0);
   /* src: an attribute; a new one loads when it plays (or now, with autoplay / preload) */
   W.Audio = function(src){ var a = document.createElement('audio'); if (src !== undefined) a.setAttribute('src', src); return a; };
   W.Audio.prototype = EPR;

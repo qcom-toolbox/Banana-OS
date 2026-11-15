@@ -2857,7 +2857,12 @@ static value_t w_media_open(interp_t* I, value_t self, int argc, value_t* argv) 
     char url[PAGE_URL_MAX];
     url_resolve(p->base, arg_str(I, argc, argv, 0), url, sizeof(url));
     int id = p->env->media_open(p->env->ctx, p, url);
-    if (id >= 0) p->media[p->nmedia++] = id;
+    if (id >= 0) {
+        dom_node_t* el = argc > 1 ? node_of(argv[1]) : NULL;   /* a <video>: it shows the pictures */
+        p->media_node[p->nmedia] = el && el->type == DOM_ELEM && !strcmp(el->tag, "video") ? el : NULL;
+        p->media_seq[p->nmedia] = 0;
+        p->media[p->nmedia++] = id;
+    }
     return v_num(id);
 }
 
@@ -2869,7 +2874,13 @@ static value_t w_media_cmd(interp_t* I, value_t self, int argc, value_t* argv) {
     int a = argc > 2 ? (int)v_tonum(I, argv[2]) : 0, b = argc > 3 ? (int)v_tonum(I, argv[3]) : 0, c = argc > 4 ? (int)v_tonum(I, argv[4]) : 0;
     p->env->media_cmd(p->env->ctx, id, cmd, a, b, c);
     if (cmd == PAGE_MEDIA_CLOSE)
-        for (int i = 0; i < p->nmedia; i++) if (p->media[i] == id) { p->media[i] = p->media[--p->nmedia]; break; }
+        for (int i = 0; i < p->nmedia; i++) if (p->media[i] == id) {
+            p->nmedia--;
+            p->media[i] = p->media[p->nmedia];
+            p->media_node[i] = p->media_node[p->nmedia];
+            p->media_seq[i] = p->media_seq[p->nmedia];
+            break;
+        }
     return v_undef();
 }
 

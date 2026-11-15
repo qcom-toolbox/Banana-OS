@@ -33,11 +33,9 @@ const char* image_format(const uint8_t* d, uint32_t len) {
     return NULL;
 }
 
-int image_decode(const uint8_t* data, uint32_t len, image_t* out, char* err, uint32_t errlen) {
-#ifndef BANANA_USER_WORKER
-    extern int web_worker_decode(const uint8_t*,uint32_t,image_t*,char*,uint32_t);
-    return web_worker_decode(data,len,out,err,errlen);
-#else
+#ifdef BANANA_USER_WORKER
+/* channels: 3 = RGB888, 4 = RGBA8888 (transparency kept, for web pages) */
+static int decode_channels(const uint8_t* data, uint32_t len, image_t* out, char* err, uint32_t errlen, int channels) {
     memset(out, 0, sizeof(*out));
     if (len > 2147483647u) { ksnprintf(err,errlen,"image input is too large"); return -1; }
     const char* fmt = image_format(data, len);
@@ -67,7 +65,7 @@ int image_decode(const uint8_t* data, uint32_t len, image_t* out, char* err, uin
     }
     /* decoding needs w*h*3 bytes at once: say so up front instead of
      * failing half way */
-    uint64_t need = (uint64_t)w * (uint64_t)h * 3u;
+    uint64_t need = (uint64_t)w * (uint64_t)h * (uint64_t)channels;
     if (need > kheap_largest_free()) {
         ksnprintf(err, errlen, "%dx%d image needs %u MiB of RAM, only %u MiB free (use a smaller picture)",
                   w, h, (uint32_t)(need >> 20), kheap_largest_free() >> 20);
@@ -76,8 +74,9 @@ int image_decode(const uint8_t* data, uint32_t len, image_t* out, char* err, uin
     unsigned char* px;
     if (webp) {
         px=kmalloc((uint32_t)need);
-        if (px && !WebPDecodeRGBInto(data,len,px,(size_t)need,w*3)) { kfree(px); px=NULL; }
-    } else px = stbi_load_from_memory(data, (int)len, &w, &h, &comp, 3);
+        if (px && !(channels == 4 ? WebPDecodeRGBAInto(data,len,px,(size_t)need,w*4)
+                                  : WebPDecodeRGBInto(data,len,px,(size_t)need,w*3))) { kfree(px); px=NULL; }
+    } else px = stbi_load_from_memory(data, (int)len, &w, &h, &comp, channels);
     if (!px) {
         ksnprintf(err, errlen, "could not decode %s: %s", fmt, webp ? "corrupt data or insufficient memory" : stbi_failure_reason());
         return -1;
@@ -86,6 +85,19 @@ int image_decode(const uint8_t* data, uint32_t len, image_t* out, char* err, uin
     out->w = w;
     out->h = h;
     return 0;
+}
+
+int image_decode_rgba(const uint8_t* data, uint32_t len, image_t* out, char* err, uint32_t errlen) {
+    return decode_channels(data, len, out, err, errlen, 4);
+}
+#endif
+
+int image_decode(const uint8_t* data, uint32_t len, image_t* out, char* err, uint32_t errlen) {
+#ifndef BANANA_USER_WORKER
+    extern int web_worker_decode(const uint8_t*,uint32_t,image_t*,char*,uint32_t);
+    return web_worker_decode(data,len,out,err,errlen);
+#else
+    return decode_channels(data, len, out, err, errlen, 3);
 #endif
 }
 

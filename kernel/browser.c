@@ -9,6 +9,7 @@
 #include "kheap.h"
 #include "timer.h"
 #include "task.h"
+#include "spinlock.h"
 #include "image.h"
 #include "keyboard.h"
 #include "rtc.h"
@@ -532,10 +533,35 @@ static void push_cmd(int kind, int x, int y) {
     g_cmd_head = next;
 }
 
-static int g_quiet;                         /* a web view is fetching: not the browser's business */
+/* a web view or a media stream is fetching: not the browser's business - its
+ * own task stays quiet (the browser's task, loading a page meanwhile, not) */
+#define QUIET_MAX 8
+static int g_quiet_pid[QUIET_MAX], g_quiet_n[QUIET_MAX];
+static spinlock_t g_quiet_lock;
+static void quiet_on(void) {
+    int me = task_current_pid(), free_slot = -1;
+    spin_lock(&g_quiet_lock);
+    for (int i = 0; i < QUIET_MAX; i++) {
+        if (g_quiet_n[i] && g_quiet_pid[i] == me) { g_quiet_n[i]++; spin_unlock(&g_quiet_lock); return; }
+        if (!g_quiet_n[i] && free_slot < 0) free_slot = i;
+    }
+    if (free_slot >= 0) { g_quiet_pid[free_slot] = me; g_quiet_n[free_slot] = 1; }
+    spin_unlock(&g_quiet_lock);
+}
+static void quiet_off(void) {
+    int me = task_current_pid();
+    spin_lock(&g_quiet_lock);
+    for (int i = 0; i < QUIET_MAX; i++) if (g_quiet_n[i] && g_quiet_pid[i] == me) { g_quiet_n[i]--; break; }
+    spin_unlock(&g_quiet_lock);
+}
+static int quiet(void) {
+    int me = task_current_pid();
+    for (int i = 0; i < QUIET_MAX; i++) if (g_quiet_n[i] && g_quiet_pid[i] == me) return 1;
+    return 0;
+}
 
 static void set_status(const char* s, int err) {
-    if (g_quiet) return;
+    if (quiet()) return;
     tab_t* t = g_status_tab ? g_status_tab : cur_tab();
     if (!t) return;
     kstrlcpy(t->status, s, sizeof(t->status));
@@ -1167,6 +1193,25 @@ static void normalize_url(const char* in, char* out, int cap) {
     else ksnprintf(out, (size_t)cap, "http://%s", in);
     int n = (int)strlen(out);
     while (n > 0 && out[n - 1] == ' ') out[--n] = 0;
+    /* on the wire, as other browsers send them: spaces and non-ASCII bytes
+     * of an address percent-encoded ("Vidéo.mp4" -> "Vid%C3%A9o.mp4") */
+    if (strncasecmp(out, "http://", 7) == 0 || strncasecmp(out, "https://", 8) == 0) {
+        int need = 0;
+        for (const unsigned char* c = (const unsigned char*)out; *c; c++) if (*c >= 0x80 || *c == ' ') need = 1;
+        if (need) {
+            static const char hx[] = "0123456789ABCDEF";
+            char* t = kmalloc((size_t)cap);
+            if (!t) return;
+            int k = 0;
+            for (const unsigned char* c = (const unsigned char*)out; *c && k < cap - 4; c++) {
+                if (*c >= 0x80 || *c == ' ') { t[k++] = '%'; t[k++] = hx[*c >> 4]; t[k++] = hx[*c & 15]; }
+                else t[k++] = (char)*c;
+            }
+            t[k] = 0;
+            kstrlcpy(out, t, (size_t)cap);
+            kfree(t);
+        }
+    }
 }
 
 static int starts_ci(const char* s, const char* p) { return strncasecmp(s, p, strlen(p)) == 0; }
@@ -2041,9 +2086,9 @@ int browser_fetch_media(const char* url_in, char** data, uint32_t* len, char* er
     memset(&dl, 0, sizeof(dl));
     dl.force = 1;                                    /* (the big limit) */
     dl.ram = 1;
-    g_quiet++;
+    quiet_on();
     int rc = fetch_url(url, NULL, NULL, 0, NULL, data, len, ctype, sizeof(ctype), fin, sizeof(fin), err, ecap, &dl);
-    g_quiet--;
+    quiet_off();
     return rc;
 }
 
@@ -2055,10 +2100,10 @@ int browser_fetch_document(const char* url_in, const char* post, uint32_t post_l
     env_setup();
     char url[URL_MAX], ctype[96], err[200];
     normalize_url(url_in, url, sizeof(url));
-    g_quiet++;
+    quiet_on();
     int rc = fetch_url(url, NULL, post, post_len, NULL, data, len, ctype, sizeof(ctype), final_url, fcap,
                        err, sizeof(err), NULL);
-    g_quiet--;
+    quiet_off();
     if (rc != 0) {
         *data = error_page(url, err[0] ? err : "the page could not be loaded", len);
         kstrlcpy(final_url, url, (size_t)fcap);

@@ -58,9 +58,13 @@ raise DataCloneError. Cross-frame messaging and transferable ports remain
 unfinished. No CAPTCHA solver or challenge bypass is included.
 The existing default search provider is retained while this work continues.
 
-Page audio/video hooks are disabled during this milestone so those decoders do
-not run on untrusted browser content inside the kernel. Moving multimedia to a
-restricted process remains necessary. The 32-bit fallback refuses isolated
+Page audio and video are decoded in a restricted process: each `<audio>` /
+`<video>` stream gets a worker of its own (the plain web worker in media mode,
+`apps/webworker/media.c`, FFmpeg) that receives the file and returns sound and
+pictures (`WW_MEDIA_*`). The page's worker sees only its own streams' status
+and pictures through the broker (`WW_MEDIA`); the kernel (`kernel/media.c`)
+keeps the clock, plays the sound and never parses the media itself. Files are
+limited to 96 MB, pictures to 1280x720. The 32-bit fallback refuses isolated
 browsing rather than reverting to a kernel renderer.
 
 ## Verification

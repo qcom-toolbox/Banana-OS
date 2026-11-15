@@ -70,6 +70,20 @@ typedef struct style {
     int      bg_size_w, bg_size_h;  /* BG_SIZE_PX: px (LEN_AUTO: from the other one) */
     int      bg_pos_x, bg_pos_y;    /* px, or a percentage when bg_pos_pct has the bit */
     uint8_t  bg_pos_pct;            /* bit 0: x is %, bit 1: y is % */
+    uint8_t  bg_size_pct;           /* bit 0: bg_size_w is %, bit 1: bg_size_h is % */
+    uint8_t  bg_clip_text;          /* background-clip: text - the gradient colours the text */
+    uint8_t  off_pct;               /* bits: left 1, top 2, right 4, bottom 8 hold a percentage */
+    int      tx, ty;                /* transform: translate(), px or % (t_pct) of the own box */
+    uint8_t  t_pct;                 /* bit 0: tx is %, bit 1: ty is % */
+    uint8_t  object_fit;            /* <img> / <video>: 0 fill, 1 contain, 2 cover, 3 none, 4 scale-down */
+    uint8_t  text_clear;            /* color / -webkit-text-fill-color: transparent */
+    const char* grad_src;           /* "linear-gradient(...)": its stops, read by layout */
+    /* animation (css_anim.h): the first one */
+    const char* anim_name;          /* not NUL-terminated: anim_name_len long */
+    uint8_t  anim_name_len;
+    uint8_t  anim_dir, anim_timing, anim_fill;
+    int      anim_dur, anim_delay;  /* ms */
+    int      anim_iter;             /* 0 = 1, -1 = infinite */
     int      radius;                /* border-radius, px (large: a pill / circle) */
     struct css_var* vars;           /* custom properties (--x), inherited */
 } style_t;
@@ -92,7 +106,9 @@ typedef struct css_var {
 
 /* the viewport width @media queries are evaluated against (page.c sets it) */
 extern int css_viewport_w;
-extern int css_viewport_h;          /* viewport units; defaults to 600 until page.c sets it */
+extern int css_viewport_h;
+extern uint32_t css_anim_now;       /* page.c: the clock CSS animations are computed at, ms */
+extern int css_anim_running;        /* a restyle left some animation running */          /* viewport units; defaults to 600 until page.c sets it */
 
 typedef struct css_sheet css_sheet_t;
 
@@ -103,6 +119,9 @@ void css_style_tree(arena_t* A, dom_node_t* doc, css_sheet_t** sheets, int nshee
 css_sheet_t* css_default_sheet(arena_t* A);
 
 uint32_t css_color(const char* s, int* ok);     /* "red", "#f80", "rgb(1,2,3)" -> 0x00RRGGBB */
+/* the same with its transparency: 255 - alpha in the top byte (0 = opaque),
+ * which the renderer blends: backgrounds and borders */
+uint32_t css_color_blend(const char* s, int* ok);
 /* does an element match a selector list (querySelector)? */
 int  css_matches(arena_t* A, dom_node_t* el, const char* selector);
 dom_node_t* css_query(arena_t* A, dom_node_t* root, const char* selector);

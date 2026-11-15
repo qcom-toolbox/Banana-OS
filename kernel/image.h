@@ -29,6 +29,10 @@ const char* image_format(const uint8_t* data, uint32_t len);
 /* Decodes into out->rgb (kmalloc'd). Returns 0, or -1 with a reason in err. */
 int  image_decode(const uint8_t* data, uint32_t len, image_t* out, char* err, uint32_t errlen);
 void image_free(image_t* img);
+#ifdef BANANA_USER_WORKER
+/* the same, RGBA8888 in img->rgb (4 bytes a pixel): the web engine's images */
+int  image_decode_rgba(const uint8_t* data, uint32_t len, image_t* out, char* err, uint32_t errlen);
+#endif
 
 /* Renders `src` into a dw x dh XRGB8888 buffer per `mode`. */
 void image_render(const image_t* src, uint32_t* dst, int dw, int dh, image_mode_t mode, uint32_t bg);

@@ -7,6 +7,7 @@
 #include <string.h>
 #include "page.h"
 #include "render.h"
+#include "image_decode.h"
 
 void host_fonts(void);   /* font_host.c */
 
@@ -148,7 +149,8 @@ int main(int argc, char** argv) {
     static char src[8 << 20];
     size_t n = fread(src, 1, sizeof(src) - 1, f);
     fclose(f);
-    page_env_t env = { .fetch = fetch, .now_ms = now_ms, .log = logf_, .read_file = read_file, .request = request };
+    page_env_t env = { .fetch = fetch, .now_ms = now_ms, .log = logf_, .read_file = read_file, .request = request,
+                       .decode_image = web_decode_image };
     page_t* p = page_new(&env, 64u << 20);
     char url[600];
     if (getenv("PAGE_URL")) snprintf(url, sizeof(url), "%s", getenv("PAGE_URL"));   /* the page's real address */
@@ -207,6 +209,12 @@ int main(int argc, char** argv) {
     for (int i = 0; i < width * h; i++) { unsigned char px[3] = { buf[i] >> 16, buf[i] >> 8, buf[i] }; fwrite(px, 1, 3, o); }
     fclose(o);
     fprintf(stderr, "layout: %u items, height %d, arena %u KB\n", L->n, L->height, p->A.total / 1024);
+    if (getenv("PAGE_DUMP"))
+        for (uint32_t i = 0; i < L->n; i++)
+            fprintf(stderr, "  item %u kind %d at %d,%d %dx%d color %06x tag %s text %.*s\n", i, L->items[i].kind,
+                    L->items[i].x, L->items[i].y, L->items[i].w, L->items[i].h, L->items[i].color,
+                    L->items[i].node && L->items[i].node->tag ? L->items[i].node->tag : "-",
+                    L->items[i].kind == DL_TEXT ? (int)L->items[i].len : 0, L->items[i].kind == DL_TEXT ? L->items[i].text : "");
     if (getenv("BOXDUMP")) boxdump(dom_find_tag(p->doc, "html"), 0, atoi(getenv("BOXDUMP")));
     page_free(p);
     return 0;

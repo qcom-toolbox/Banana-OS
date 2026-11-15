@@ -593,6 +593,12 @@ page_t* page_new(page_env_t* env, uint32_t mem_limit) {
 void page_free(page_t* p) {
     if (p && p->env && p->env->media_cmd)            /* its sounds stop with it */
         for (int i = 0; i < p->nmedia; i++) p->env->media_cmd(p->env->ctx, p->media[i], PAGE_MEDIA_CLOSE, 0, 0, 0);
+    if (p)                                           /* <video> pictures live in the heap */
+        for (int i = 0; i < p->nmedia; i++)
+            if (p->media_node[i] && p->media_node[i]->img && p->media_node[i]->img->px) {
+                kfree(p->media_node[i]->img->px);
+                p->media_node[i]->img->px = NULL;
+            }
     if (!p) return;
     for (int i = 0; i < p->nframes; i++) page_free(p->frames[i]);   /* <iframe> children */
     script_destroy_backend(p->js);
@@ -616,7 +622,10 @@ void page_update(page_t* p, int width) {
     arena_init(&p->LA, LAYOUT_MEM);
     css_viewport_w = width;                 /* @media (min-width / max-width) */
     css_viewport_h = p->view_h > 0 ? p->view_h : 600;
+    css_anim_now = now(p);                  /* CSS animations: their values now */
+    css_anim_running = 0;
     css_style_tree(&p->LA, p->doc, p->sheets, p->nsheets);
+    p->anim_running = css_anim_running;
     if (p->env) load_bg_images(p, p->doc);
     int svgs = 0;
     load_inline_svgs(p, p->doc, &svgs);
@@ -1190,8 +1199,53 @@ int page_key_live(page_t* p, int down, const char* key, const char* code, int ke
     return down && prevented;
 }
 
-int page_tick(page_t* p) {
+/* <video>: the newest picture of each playing stream becomes its element's
+ * image (pixels kept in the kernel heap, reused while the size stays) */
+static int media_pictures(page_t* p) {
+    if (!p->env || !p->env->media_frame || !p->nmedia || (int32_t)(now(p) - p->media_tick) < 30) return 0;
+    p->media_tick = now(p);
     int any = 0;
+    for (int i = 0; i < p->nmedia; i++) {
+        dom_node_t* e = p->media_node[i];
+        if (!e) continue;
+        uint32_t* px = NULL;
+        int w = 0, h = 0;
+        uint32_t seq = p->media_seq[i];
+        if (p->env->media_frame(p->env->ctx, p->media[i], &seq, &px, &w, &h) != 0 || !px) continue;
+        if (w <= 0 || h <= 0 || w > 4096 || h > 4096) { kfree(px); continue; }
+        img_data_t* im = e->img;
+        if (!im || im->w != w || im->h != h || !im->px) {
+            if (!im) {
+                im = (img_data_t*)arena_alloc(&p->A, sizeof(img_data_t));
+                if (!im || p->A.oom) { kfree(px); continue; }
+                memset(im, 0, sizeof(*im));
+                e->img = im;
+            }
+            if (im->w != w || im->h != h) p->dirty = 1;   /* its natural size changed: lay out again */
+            if (im->px) kfree(im->px);
+            im->px = px;
+            im->w = w;
+            im->h = h;
+            im->alpha = NULL;
+            im->failed = 0;
+        } else {
+            memcpy(im->px, px, (size_t)w * (size_t)h * 4);
+            kfree(px);
+        }
+        p->media_seq[i] = seq;
+        any = 1;
+    }
+    return any;
+}
+
+int page_tick(page_t* p) {
+    int any = media_pictures(p);
+    /* a CSS animation runs: restyle and redraw, about 20 times a second */
+    if (p->anim_running && (int32_t)(now(p) - p->anim_frame) >= 50) {
+        p->anim_frame = now(p);
+        p->dirty = 1;
+        any = 1;
+    }
     /* run the timers of the <iframe> children too, then keep their layouts current */
     for (int i = 0; i < p->nframes; i++)
         if (page_tick(p->frames[i])) any = 1;

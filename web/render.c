@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "render.h"
 #include "round_rect.h"
+#include "gradient.h"
 #include "font8x8.h"
 #include "font.h"
 
@@ -13,6 +14,19 @@ typedef struct {
 static void fill(target_t* T, int x, int y, int w, int h, uint32_t c) {
     int x0 = x < T->cx0 ? T->cx0 : x, y0 = y < T->cy0 ? T->cy0 : y;
     int x1 = x + w > T->cx1 ? T->cx1 : x + w, y1 = y + h > T->cy1 ? T->cy1 : y + h;
+    if (c >> 24) {                       /* see-through (css_color_blend): over what is there */
+        uint32_t a = 255 - (c >> 24), na = 255 - a;
+        uint32_t sr = ((c >> 16) & 255) * a, sg = ((c >> 8) & 255) * a, sb = (c & 255) * a;
+        for (int yy = y0; yy < y1; yy++) {
+            uint32_t* p = T->buf + yy * T->stride;
+            for (int xx = x0; xx < x1; xx++) {
+                uint32_t d = p[xx];
+                p[xx] = (sr + ((d >> 16) & 255) * na) / 255 << 16 | (sg + ((d >> 8) & 255) * na) / 255 << 8 |
+                        (sb + (d & 255) * na) / 255;
+            }
+        }
+        return;
+    }
     for (int yy = y0; yy < y1; yy++) {
         uint32_t* p = T->buf + yy * T->stride;
         for (int xx = x0; xx < x1; xx++) p[xx] = c;
@@ -121,6 +135,58 @@ static void image_at(target_t* T, const img_data_t* im, int x, int y, int w, int
     }
 }
 
+
+/* a CSS linear gradient over the item's box, rounded by radius, tiled when
+ * background-size made it smaller than the box */
+static void gradient(target_t* T, const dl_item_t* it, int x, int y) {
+    const web_grad_t* g = it->grad;
+    if (!g || it->w <= 0 || it->h <= 0) return;
+    int r = it->radius;
+    if (r * 2 > it->w) r = it->w / 2;
+    if (r * 2 > it->h) r = it->h / 2;
+    if (r < 0) r = 0;
+    int y0 = y < T->cy0 ? T->cy0 : y, y1 = y + it->h > T->cy1 ? T->cy1 : y + it->h;
+    if (y0 >= y1) return;
+    /* the colour along the line, 512 steps (repeating: over one period) */
+    uint32_t lut[512];
+    int a = 0, b = 65536;
+    if (g->repeating && g->n > 1 && g->pos[g->n - 1] > g->pos[0]) { a = g->pos[0]; b = g->pos[g->n - 1]; }
+    for (int i = 0; i < 512; i++) lut[i] = web_grad_at(g, a + (int)((int64_t)(b - a) * i / 511));
+    int s = web_sin1024(g->deg), c = web_cos1024(g->deg);
+    int64_t len = (int64_t)web_grad_len(g->deg, g->gw, g->gh) * 1024;
+    int gx = x + g->ox, gy = y + g->oy;
+    for (int py = y0; py < y1; py++) {
+        int yy = py - y, in = 0;
+        if (yy < r) in = web_corner_inset(r, yy);
+        else if (yy >= it->h - r) in = web_corner_inset(r, it->h - 1 - yy);
+        int x0 = x + in, x1 = x + it->w - in;
+        if (x0 < T->cx0) x0 = T->cx0;
+        if (x1 > T->cx1) x1 = T->cx1;
+        if (x0 >= x1) continue;
+        int ly = py - gy;
+        if (g->tile & 2) { ly %= g->gh; if (ly < 0) ly += g->gh; }
+        else if (ly < 0 || ly >= g->gh) continue;
+        int64_t row = -(int64_t)(ly - g->gh / 2) * c;         /* y down, the angle's 0 is up */
+        uint32_t* p = T->buf + py * T->stride;
+        for (int px = x0; px < x1; px++) {
+            int lx = px - gx;
+            if (g->tile & 1) { if (lx < 0 || lx >= g->gw) { lx %= g->gw; if (lx < 0) lx += g->gw; } }
+            else if (lx < 0 || lx >= g->gw) continue;
+            int64_t proj = row + (int64_t)(lx - g->gw / 2) * s;
+            int t = 32768 + (int)(proj * 65536 / len);           /* 0..65536 along the line */
+            int k;
+            if (b > a && (g->repeating)) { int q = (t - a) % (b - a); if (q < 0) q += b - a; k = (int)((int64_t)q * 511 / (b - a)); }
+            else { k = t <= 0 ? 0 : t >= 65536 ? 511 : t * 511 / 65536; }
+            uint32_t col = lut[k];
+            if (!(col >> 24)) { p[px] = col; continue; }
+            uint32_t al = 255 - (col >> 24), na = 255 - al, d = p[px];
+            p[px] = ((((col >> 16) & 255) * al + ((d >> 16) & 255) * na) / 255) << 16 |
+                    ((((col >> 8) & 255) * al + ((d >> 8) & 255) * na) / 255) << 8 |
+                    (((col & 255) * al + (d & 255) * na) / 255);
+        }
+    }
+}
+
 /* draws L's display list into the clip already set in T; the document's
  * (0,0) maps to (ox, oy), scrolled down by `scroll`. Recurses for iframes. */
 static void render_into(const layout_t* L, target_t T, int ox, int oy, int scroll) {
@@ -147,6 +213,9 @@ static void render_into(const layout_t* L, target_t T, int ox, int oy, int scrol
             break;
         case DL_IMG:
             image(&T, it, x, y);
+            break;
+        case DL_GRAD:
+            gradient(&T, it, x, y);
             break;
         case DL_IFRAME: {
             int bw = 2;                              /* a thin border, then the frame's page inside */

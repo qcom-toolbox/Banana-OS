@@ -21,7 +21,7 @@ typedef struct img_data {
     int       failed;       /* could not load: draw a placeholder */
 } img_data_t;
 
-enum { DL_RECT = 1, DL_TEXT, DL_IMG, DL_CARET, DL_IFRAME };
+enum { DL_RECT = 1, DL_TEXT, DL_IMG, DL_CARET, DL_IFRAME, DL_GRAD };
 
 typedef struct dl_item {
     uint8_t  kind;
@@ -35,6 +35,7 @@ typedef struct dl_item {
     uint8_t  ulspace;       /* the leading space belongs to the same element: underline it too */
     int16_t  yoff, boxh;
     img_data_t* img;
+    const struct web_grad* grad;  /* DL_GRAD: a CSS linear gradient (gradient.h), radius rounds it */
     int16_t  radius;        /* DL_RECT: rounded corners (px) */
     uint8_t  face, px, asc; /* DL_TEXT: font (font.h), size in pixels, ascent (baseline = y + asc) */
     uint8_t  ring;          /* DL_RECT: an outline this wide instead of a filled box */

@@ -5,11 +5,12 @@
 #include "types.h"
 
 /*
- * Sound streams for the browser's <audio> / new Audio() (and web views):
- * a stream downloads a file (http(s)://, file://, a path), opens its codec
- * (media/: WAV, FLAC, MP3) and, while playing, a "media" task decodes it
- * into the sound card's queue. One stream plays at a time: playing one
- * pauses the others. owner groups a page's streams (closed with it).
+ * The browser's <audio> / <video> / new Audio() streams: a stream downloads
+ * a file and a restricted worker process decodes it with FFmpeg (MP4, WebM,
+ * MKV, MP3, AAC, Ogg, FLAC... - apps/webworker/media.c); a "media" task
+ * plays its sound and keeps its newest picture. One stream is heard at a
+ * time. owner is the page (closed with it, and the only one that may
+ * control or see its streams: media_owned).
  */
 
 enum { MEDIA_EMPTY = 0, MEDIA_LOADING, MEDIA_READY, MEDIA_ERROR };
@@ -31,5 +32,9 @@ void media_pause(int id);
 void media_seek(int id, uint32_t ms);
 void media_set(int id, int volume_percent, int muted, int loop);
 int  media_status(int id, media_status_t* st);         /* 0, or -1 for a bad id */
+int  media_owned(int id, void* owner);
+/* the newest picture if it is not have_seq: a kmalloc'd ww_media_frame_t and
+ * its XRGB pixels (*bytes long), or NULL */
+void* media_frame(int id, uint32_t have_seq, uint32_t* bytes);
 
 #endif

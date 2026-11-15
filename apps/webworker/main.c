@@ -12,6 +12,9 @@
 #include "../../kernel/kstring.h"
 
 char* worker_github_releases(page_env_t*,const char*,const char*,uint32_t,uint32_t*);
+/* media.c (the plain worker only): a media stream's decoder */
+int ww_media_execute(unsigned int op,const int* a,const void* data,unsigned int n,
+                     unsigned char** out,unsigned int* out_len) __attribute__((weak));
 
 static page_t* page;
 static page_env_t env;
@@ -37,7 +40,7 @@ static void output(unsigned int kind,const void* data,unsigned int n) {
     }
 }
 static void* input(unsigned int n) {
-    if(n>WW_DOCUMENT)__banana->exit(122);
+    if(n>(cmd.op==WW_MEDIA_OPEN?WW_MEDIA_BYTES:WW_DOCUMENT))__banana->exit(122);
     unsigned char* b=malloc((size_t)n+1);
     if(!b)__banana->exit(120);
     unsigned int off=0;
@@ -99,6 +102,35 @@ static int read_file(void* c,const char* path,char** data,uint32_t* n) {
     *data=(char*)response_data;response_data=NULL;*n=response.length;return 0;
 }
 static void message(void* c,const char* text) { (void)c;resource(WW_MESSAGE,"",NULL,text,strlen(text),NULL,0); }
+/* <audio> / <video>: streams the kernel runs (kernel/media.c), each decoded
+ * by a worker of its own; this page only gets their status and pictures */
+static int media_open(void* c,void* owner,const char* url) {
+    (void)c;(void)owner;int id;
+    if(resource(WW_MEDIA,url,NULL,NULL,0,NULL,WWM_OPEN)||response.length!=sizeof(id))return -1;
+    memcpy(&id,response_data,sizeof(id));return id;
+}
+static void media_cmd(void* c,int id,int op,int a,int b,int d) {
+    (void)c;int body[5]={id,op,a,b,d};resource(WW_MEDIA,"",NULL,body,sizeof(body),NULL,WWM_CMD);
+}
+static int media_status(void* c,int id,page_media_status_t* out) {
+    (void)c;ww_media_status_t st;
+    if(resource(WW_MEDIA,"",NULL,&id,sizeof(id),NULL,WWM_STATUS)||response.length!=sizeof(st))return -1;
+    memcpy(&st,response_data,sizeof(st));st.error[sizeof(st.error)-1]=0;
+    memset(out,0,sizeof(*out));out->state=st.state;out->playing=st.playing;out->ended=st.ended;
+    out->pos_ms=st.pos_ms;out->dur_ms=st.dur_ms;out->seq=st.seq;kstrlcpy(out->error,st.error,sizeof(out->error));
+    return 0;
+}
+static int media_frame(void* c,int id,uint32_t* seq,uint32_t** px,int* w,int* h) {
+    (void)c;int body[2]={id,(int)*seq};ww_media_frame_t f;
+    if(resource(WW_MEDIA,"",NULL,body,sizeof(body),NULL,WWM_FRAME)||response.length<sizeof(f))return -1;
+    memcpy(&f,response_data,sizeof(f));
+    if(f.width<=0||f.height<=0||f.width>4096||f.height>4096||
+       response.length!=sizeof(f)+(unsigned)f.width*(unsigned)f.height*4u)return -1;
+    uint32_t* pixels=malloc((size_t)f.width*f.height*4);
+    if(!pixels)return -1;
+    memcpy(pixels,response_data+sizeof(f),(size_t)f.width*f.height*4);
+    *px=pixels;*w=f.width;*h=f.height;*seq=f.seq;return 0;
+}
 static uint32_t now_ms(void) { return __banana->ticks_ms(); }
 static void clock_now(script_tm_t* tm) {
     banana_time_t t;memset(&t,0,sizeof(t));__banana->localtime(&t);
@@ -262,7 +294,11 @@ static void execute(void) {
             }else denied=0;
             result=denied?0:-1;
         }break;
-    default:result=-1;break;
+    default:
+        if(cmd.op>=WW_MEDIA_OPEN&&cmd.op<=WW_MEDIA_SEEK&&ww_media_execute)
+            result=ww_media_execute(cmd.op,cmd.a,data,cmd.length,&result_data,&result_length);
+        else result=-1;
+        break;
     }
 #ifdef BANANA_LIBJS_WORKER
     if(page&&page->js)script_checkpoint(page->js);
@@ -281,6 +317,7 @@ int main(int argc,char** argv) {
     memset(&env,0,sizeof(env));env.fetch=fetch;env.request=request;
     env.decode_image=web_decode_image;env.now_ms=now_ms;env.yield=yield;
     env.cookie_get=cookie_get;env.cookie_set=cookie_set;env.read_file=read_file;env.message=message;
+    env.media_open=media_open;env.media_cmd=media_cmd;env.media_status=media_status;env.media_frame=media_frame;
     web_yield_hook=yield;script_clock=clock_now;
     for(;;){
         int n=ipc(WW_WAIT,NULL,0,&cmd,sizeof(cmd));
