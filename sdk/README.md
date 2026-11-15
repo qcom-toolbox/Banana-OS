@@ -265,6 +265,28 @@ API version 30: POSIX regular expressions (`<regex.h>`), timers
 system), an atomic `sigsuspend` and `pause`, and the process list
 (`banana_api_t`'s `proc_list`: what `ps` shows).
 
+### Rust: banana-cargo
+
+Rust programs build with `tools/banana-cargo`, cargo with Banana OS's
+link: Rust's standard library for `x86_64-unknown-linux-musl`, linked by
+`banana-cc` against this SDK's C library instead of musl, into one static
+program (64-bit). `std` works as it does on Linux - files and folders,
+threads and their locks and channels, time, environment variables,
+`std::process`, `std::net` (TCP, UDP, name lookup). C code built by crates
+(the `cc` crate) goes through `banana-cc` too.
+
+    rustup target add x86_64-unknown-linux-musl     # once
+    cd examples/rust-hello
+    ../../tools/banana-cargo build --release        # target/x86_64-unknown-linux-musl/release/
+    ../../tools/banana-cargo package --release      # rust-hello.bpk
+
+On Banana OS, `pkg install rust-hello.bpk` and then `rust-hello` runs it
+(the package's command has the binary's name). Any cargo command passes
+through (`check`, `clippy`, `test --no-run`...). Programs abort on panic:
+the message is printed and the program ends (`panic=abort`; unwinding
+and backtraces are not available). Window, sound and the other Banana
+APIs are C functions (`banana.h`): call them through `extern "C"`.
+
 ### Drivers
 
 Hardware drivers are not apps: they run inside the kernel. The Driver Kit

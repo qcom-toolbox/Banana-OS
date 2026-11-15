@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: BSD-2-Clause
+"""banana-cargo - build Rust programs for Banana OS (64-bit) with cargo:
+
+    banana-cargo build [--release] [cargo options]   the program(s)
+    banana-cargo package [--release] [--bin NAME]      ... and NAME.bpk to install
+    banana-cargo <any cargo command>                   (check, test --no-run, clippy...)
+
+Rust's standard library comes from the x86_64-unknown-linux-musl target
+(`rustup target add x86_64-unknown-linux-musl`), linked against the SDK's
+C library by sdk/tools/banana-cc instead of musl: std works as on Linux -
+files and folders, threads, sync, time, environment, std::net (TCP / UDP,
+DNS), std::process. The program is one static position-independent ELF
+the kernel's loader runs. Programs abort on panic (panic=abort: the
+message is printed, then the program ends with SIGABRT); C code from
+crates (the cc crate) is compiled by banana-cc too.
+
+The binaries land in target/x86_64-unknown-linux-musl/<profile>/. package
+writes <name>.bpk (a console app: name, version and description from
+Cargo.toml; `pkg install name.bpk` on Banana OS, then type its name).
+
+Environment: CARGO (default cargo), BANANA_CC_* as for banana-cc.
+"""
+import os
+import subprocess
+import sys
+import shutil
+
+TOOLS = os.path.dirname(os.path.realpath(__file__))
+SDK = os.path.dirname(TOOLS)
+TARGET = "x86_64-unknown-linux-musl"
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "banana-cargo")
+
+
+def die(msg):
+    sys.stderr.write("banana-cargo: %s\n" % msg)
+    sys.exit(1)
+
+
+def runtime():
+    """the shim (sdk/rust/banana_rt.c) compiled by banana-cc, cached by content"""
+    import hashlib
+    src = os.path.join(SDK, "rust", "banana_rt.c")
+    h = hashlib.sha256(open(src, "rb").read()).hexdigest()[:16]
+    obj = os.path.join(CACHE, "banana_rt-%s.o" % h)
+    if not os.path.exists(obj):
+        os.makedirs(CACHE, exist_ok=True)
+        tmp = obj + ".%d.tmp" % os.getpid()
+        if subprocess.call([os.path.join(TOOLS, "banana-cc"), "-O2", "-c", src, "-o", tmp]):
+            die("could not compile %s" % src)
+        os.replace(tmp, obj)
+    return obj
+
+
+def linker():
+    """a linker for rustc: banana-cc, minus what the musl target adds for musl itself"""
+    path = os.path.join(CACHE, "banana-rust-link")
+    rt = runtime()
+    script = """#!/bin/sh
+# made by sdk/tools/banana-cargo: rustc's link line, through banana-cc
+set -- "$@" '%s'
+n=$#
+i=0
+while [ $i -lt $n ]; do
+    a=$1; shift; i=$((i+1))
+    case "$a" in
+        *self-contained*|-nostartfiles|-nodefaultlibs|-nostdlib|-static-pie|-pie|-no-pie|-static) ;;
+        -lc|-lunwind|-lgcc_s|-lgcc_eh|-lutil|-lrt|-lpthread|-lm|-ldl) ;;
+        -Wl,-Bdynamic|-Wl,-Bstatic) ;;
+        *) set -- "$@" "$a" ;;
+    esac
+done
+exec '%s' "$@"
+""" % (rt, os.path.join(TOOLS, "banana-cc"))
+    if not os.path.exists(path) or open(path).read() != script:
+        os.makedirs(CACHE, exist_ok=True)
+        with open(path + ".tmp", "w") as f:
+            f.write(script)
+        os.chmod(path + ".tmp", 0o755)
+        os.replace(path + ".tmp", path)
+    return path
+
+
+def check_target():
+    try:
+        out = subprocess.run(["rustc", "--print", "sysroot"], capture_output=True, text=True).stdout.strip()
+    except FileNotFoundError:
+        die("rustc not found - install Rust (https://rustup.rs)")
+    if not os.path.isdir(os.path.join(out, "lib", "rustlib", TARGET)):
+        die("Rust's standard library for %s is missing: rustup target add %s" % (TARGET, TARGET))
+
+
+def cargo_env():
+    env = dict(os.environ)
+    link = linker()
+    var = TARGET.upper().replace("-", "_")
+    env["CARGO_TARGET_%s_LINKER" % var] = link
+    flags = ["-C", "link-self-contained=no", "-C", "relocation-model=pic",
+             "-C", "target-feature=+crt-static", "-C", "panic=abort"]
+    old = env.get("CARGO_TARGET_%s_RUSTFLAGS" % var, "")
+    env["CARGO_TARGET_%s_RUSTFLAGS" % var] = (old + " " + " ".join(flags)).strip()
+    # crates that build C code (the cc crate): the SDK's compiler and headers
+    cc = os.path.join(TOOLS, "banana-cc")
+    env["CC_%s" % TARGET.replace("-", "_")] = cc
+    env["AR_%s" % TARGET.replace("-", "_")] = env.get("AR", "ar")
+    return env
+
+
+def metadata(env):
+    import json
+    out = subprocess.run([env.get("CARGO", "cargo"), "metadata", "--no-deps", "--format-version", "1"],
+                         capture_output=True, text=True, env=env)
+    if out.returncode:
+        sys.stderr.write(out.stderr)
+        die("cargo metadata failed")
+    return json.loads(out.stdout)
+
+
+def package(args, env):
+    import tempfile
+    release = "--release" in args
+    name = None
+    if "--bin" in args:
+        i = args.index("--bin")
+        if i + 1 < len(args):
+            name = args[i + 1]
+    meta = metadata(env)
+    root = meta["workspace_root"]
+    target_dir = meta.get("target_directory") or os.path.join(root, "target")
+    pkg = None
+    for p in meta["packages"]:
+        bins = [t["name"] for t in p["targets"] if "bin" in t["kind"]]
+        if bins and (not name or name in bins):
+            pkg = p
+            name = name or bins[0]
+            break
+    if not pkg:
+        die("no binary to package")
+    binary = os.path.join(target_dir, TARGET, "release" if release else "debug", name)
+    if not os.path.exists(binary):
+        die("%s was not built" % binary)
+    desc = (pkg.get("description") or "").replace("\n", " ")
+    authors = ", ".join(a.split("<")[0].strip() for a in pkg.get("authors") or [])
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "manifest"), "w") as f:
+            f.write("name=%s\ntitle=%s\nversion=%s\ntype=console\ndescription=%s\nauthor=%s\ncategory=Developer Tools\nbin=%s\n"
+                    % (name, name, pkg["version"], desc or "A Rust program", authors or "unknown", name))
+        app = os.path.join(tmp, "app-x86_64")
+        shutil.copy(binary, app)
+        subprocess.call(["strip", "--strip-debug", app])
+        out = os.path.join(os.getcwd(), name + ".bpk")
+        bpkg = os.path.join(TOOLS, "bpkg")
+        if subprocess.call([sys.executable, bpkg, "pack", "-o", out, os.path.join(tmp, "manifest"), app]) or \
+           subprocess.call([sys.executable, bpkg, "check", out]):
+            die("packaging failed")
+    print("banana-cargo: %s (pkg install %s.bpk)" % (out, name))
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
+    check_target()
+    env = cargo_env()
+    cargo = env.get("CARGO", "cargo")
+    if args[0] == "package":
+        rest = [a for a in args[1:]]
+        build = [cargo, "build", "--target", TARGET] + rest
+        if subprocess.call(build, env=env):
+            sys.exit(1)
+        package(rest, env)
+        return
+    if args[0] in ("run",):
+        die("run: Banana OS programs run on Banana OS - build, then copy target/%s/... over" % TARGET)
+    cmd = [cargo, args[0], "--target", TARGET] + args[1:] if args[0] in (
+        "build", "check", "test", "bench", "clippy", "doc", "rustc", "install") else [cargo] + args
+    sys.exit(subprocess.call(cmd, env=env))
+
+
+main()

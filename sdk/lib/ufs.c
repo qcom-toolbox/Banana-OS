@@ -402,7 +402,53 @@ struct __dir {
     int           synth;              /* /dev (1), /dev/fd (2), /dev/pts (3): made up here */
     int           next;               /* (/dev/fd, /dev/pts: the number to try next) */
     struct dirent ent;
+    /* the folder's names, read at the first readdir: entries removed or added
+     * while it is read do not make others skipped or repeated (rm -r, Rust's
+     * remove_dir_all delete as they go) - names NUL-separated, a type each */
+    char*         names;
+    unsigned char* types;
+    size_t*       offs;               /* where each name starts */
+    int           count, loaded;
 };
+
+static void load_names(DIR* d) {
+    size_t cap = 4096, used = 0;
+    int n = 0, tcap = 64;
+    char* names = malloc(cap);
+    unsigned char* types = malloc((size_t)tcap);
+    size_t* offs = malloc(sizeof(size_t) * (size_t)tcap);
+    banana_dirent_t e;
+    while (names && types && offs && __banana->readdir(d->path, n, &e) == 0) {
+        size_t len = strlen(e.name) + 1;
+        if (used + len > cap) {
+            char* m = realloc(names, cap * 2 + len);
+            if (!m) break;
+            names = m;
+            cap = cap * 2 + len;
+        }
+        if (n == tcap) {
+            unsigned char* t = realloc(types, (size_t)tcap * 2);
+            if (!t) break;
+            types = t;
+            size_t* o = realloc(offs, sizeof(size_t) * (size_t)tcap * 2);
+            if (!o) break;
+            offs = o;
+            tcap *= 2;
+        }
+        offs[n] = used;
+        memcpy(names + used, e.name, len);
+        used += len;
+        types[n++] = e.is_dir ? DT_DIR : V28 ? DT_UNKNOWN : DT_REG;
+    }
+    free(d->names);
+    free(d->types);
+    free(d->offs);
+    d->names = names;
+    d->types = types;
+    d->offs = offs;
+    d->count = names && types && offs ? n : 0;
+    d->loaded = 1;
+}
 
 /* /dev's devices (kernel/app.c: dev_open), as ls /dev shows them */
 static const char* const g_devnames[] = {
@@ -494,11 +540,13 @@ struct dirent* readdir(DIR* d) {
     } else if (d->synth) {
         if (!synth_next(d)) return NULL;
     } else {
-        banana_dirent_t e;
-        if (__banana->readdir(d->path, d->index - 2, &e) != 0) return NULL;
-        snprintf(d->ent.d_name, sizeof(d->ent.d_name), "%s", e.name);
+        if (!d->loaded) load_names(d);
+        int k = d->index - 2;
+        if (k >= d->count) return NULL;
+        const char* name = d->names + d->offs[k];
+        snprintf(d->ent.d_name, sizeof(d->ent.d_name), "%s", name);
         /* (a file might be a link: the caller asks lstat when it matters) */
-        d->ent.d_type = e.is_dir ? DT_DIR : V28 ? DT_UNKNOWN : DT_REG;
+        d->ent.d_type = d->types[k];
     }
     d->index++;
     d->ent.d_ino = (ino_t)d->index;
@@ -516,10 +564,13 @@ int readdir_r(DIR* d, struct dirent* e, struct dirent** out) {
 int closedir(DIR* d) {
     if (!d) return fail(EBADF);
     if (d->fd >= 0) close(d->fd);
+    free(d->names);
+    free(d->types);
+    free(d->offs);
     free(d);
     return 0;
 }
-void rewinddir(DIR* d) { d->index = 0; d->next = 0; }
+void rewinddir(DIR* d) { d->index = 0; d->next = 0; d->loaded = 0; }   /* (read afresh) */
 long telldir(DIR* d) { return d->index; }
 void seekdir(DIR* d, long pos) { d->index = (int)pos; }
 int dirfd(DIR* d) {

@@ -1,0 +1,41 @@
+name: Rust SDK
+on:
+  pull_request:
+    paths:
+      - 'sdk/**'
+      - '.github/workflows/rust-sdk.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'sdk/**'
+      - '.github/workflows/rust-sdk.yml'
+permissions:
+  contents: read
+jobs:
+  example:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install toolchain
+        run: |
+          sudo python3 tools/ci_apt_mirrors.py
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc binutils make python3
+          rustup toolchain install stable --profile minimal
+          rustup target add x86_64-unknown-linux-musl
+      - name: Build and package the Rust example with banana-cargo
+        working-directory: sdk/examples/rust-hello
+        run: |
+          ../../tools/banana-cargo package --release
+          python3 ../../tools/bpkg check rust-hello.bpk
+      - name: The program is a static Banana OS executable (no interpreter, no musl)
+        working-directory: sdk/examples/rust-hello
+        run: |
+          f=target/x86_64-unknown-linux-musl/release/rust-hello
+          readelf -h "$f" | grep -q 'DYN'
+          if readelf -l "$f" | grep -q INTERP; then echo "has an ELF interpreter"; exit 1; fi
+          readelf -h "$f" | grep -q 'Entry point'
+          nm "$f" | grep -q ' T _banana_start'
