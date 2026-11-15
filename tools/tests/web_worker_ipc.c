@@ -61,6 +61,10 @@ int main(void){
     CHECK(web_worker_ipc(11,17,WW_RESPONSE,NULL,0,reply,sizeof(ww_response_t))==(int)sizeof(ww_response_t));
     context.requests=512;
     CHECK(web_worker_ipc(11,17,WW_RESOURCE,q,sizeof(*q),NULL,0)<0);
+    /* a playing video's pictures and commands are not downloads: not capped */
+    q->kind=WW_MEDIA;
+    CHECK(!web_worker_ipc(11,17,WW_RESOURCE,q,sizeof(*q),NULL,0)&&context.requests==512);
+    q->kind=WW_FETCH;
     /* Fuzz op/length/offset/state combinations against the real endpoint. */
     unsigned random=17;
     for(int i=0;i<12000;i++){

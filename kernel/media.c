@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Web page <audio> / <video> streams. Each stream downloads its file, then
- * hands it to a restricted worker process of its own (the plain web worker,
- * apps/webworker/media.c, FFmpeg) that decodes it: no media decoder runs in
+ * hands it to a restricted worker process of its own (the media worker,
+ * apps/webmedia, FFmpeg) that decodes it: no media decoder runs in
  * the kernel on what a page sent. A "media" task keeps each playing
  * stream's clock, feeds the sound card from the one stream heard (16-bit
  * stereo, WW_MEDIA_RATE) and keeps each video's newest picture, which its
@@ -64,6 +64,7 @@ static void stop_output(int id) {
 }
 
 static void fail(stream_t* s, const char* why) {
+    klog("media: %s: %s\n", s->url, why);
     kstrlcpy(s->error, why, sizeof(s->error));
     s->state = MEDIA_ERROR;
     s->playing = s->want_play = 0;

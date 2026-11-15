@@ -12,9 +12,6 @@
 #include "../../kernel/kstring.h"
 
 char* worker_github_releases(page_env_t*,const char*,const char*,uint32_t,uint32_t*);
-/* media.c (the plain worker only): a media stream's decoder */
-int ww_media_execute(unsigned int op,const int* a,const void* data,unsigned int n,
-                     unsigned char** out,unsigned int* out_len) __attribute__((weak));
 
 static page_t* page;
 static page_env_t env;
@@ -40,7 +37,7 @@ static void output(unsigned int kind,const void* data,unsigned int n) {
     }
 }
 static void* input(unsigned int n) {
-    if(n>(cmd.op==WW_MEDIA_OPEN?WW_MEDIA_BYTES:WW_DOCUMENT))__banana->exit(122);
+    if(n>WW_DOCUMENT)__banana->exit(122);
     unsigned char* b=malloc((size_t)n+1);
     if(!b)__banana->exit(120);
     unsigned int off=0;
@@ -294,11 +291,7 @@ static void execute(void) {
             }else denied=0;
             result=denied?0:-1;
         }break;
-    default:
-        if(cmd.op>=WW_MEDIA_OPEN&&cmd.op<=WW_MEDIA_SEEK&&ww_media_execute)
-            result=ww_media_execute(cmd.op,cmd.a,data,cmd.length,&result_data,&result_length);
-        else result=-1;
-        break;
+    default:result=-1;break;
     }
 #ifdef BANANA_LIBJS_WORKER
     if(page&&page->js)script_checkpoint(page->js);

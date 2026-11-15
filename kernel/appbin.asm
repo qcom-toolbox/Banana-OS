@@ -38,6 +38,10 @@ global app_webworker, app_webworker_end
 app_webworker: incbin "apps/webworker/webworker-x86_64.bpk.z"
 app_webworker_end:
 align 16
+global app_webmedia, app_webmedia_end
+app_webmedia: incbin "apps/webmedia/webmedia-x86_64.bpk.z"
+app_webmedia_end:
+align 16
 app_terminal: incbin "apps/terminal/terminal-x86_64.bpk.z"
 app_terminal_end:
 section .rodata                 ; (not .payload: that goes to the heap once released)

@@ -7,7 +7,7 @@
 /*
  * The browser's <audio> / <video> / new Audio() streams: a stream downloads
  * a file and a restricted worker process decodes it with FFmpeg (MP4, WebM,
- * MKV, MP3, AAC, Ogg, FLAC... - apps/webworker/media.c); a "media" task
+ * MKV, MP3, AAC, Ogg, FLAC... - apps/webmedia); a "media" task
  * plays its sound and keeps its newest picture. One stream is heard at a
  * time. owner is the page (closed with it, and the only one that may
  * control or see its streams: media_owned).

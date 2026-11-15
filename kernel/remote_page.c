@@ -88,13 +88,17 @@ int web_worker_ipc(int app,uint32_t generation,int op,const void* in,uint32_t le
         r->state=s;__sync_synchronize();r->stage=3;return 0;
     }
     case WW_RESOURCE: {
-        if(r->stage!=2||len!=sizeof(ww_resource_t)||r->resource_ready==1||r->requests>=512)return -1;
+        if(r->stage!=2||len!=sizeof(ww_resource_t)||r->resource_ready==1)return -1;
         ww_resource_t* q=kmalloc(sizeof(*q));if(!q)return -1;memcpy(q,in,sizeof(*q));
         if(q->length>WW_REQUEST_BODY||!terminated(q->url,sizeof(q->url))||
            !terminated(q->method,sizeof(q->method))||!terminated(q->type,sizeof(q->type))){kfree(q);return -1;}
+        /* 512 downloads, files and messages a page; its media streams' pictures
+         * and commands (no network, no files) are asked for many times a second */
+        if(q->kind!=WW_MEDIA&&r->requests>=512){kfree(q);return -1;}
         if(r->request)kfree(r->request);if(r->resource_data)kfree(r->resource_data);
         r->resource_data=NULL;r->request=q;memset(&r->response,0,sizeof(r->response));
-        r->requests++;__sync_synchronize();r->resource_ready=1;return 0;
+        if(q->kind!=WW_MEDIA)r->requests++;
+        __sync_synchronize();r->resource_ready=1;return 0;
     }
     case WW_RESPONSE:
         if(r->stage!=2||len||cap!=sizeof(ww_response_t))return -1;
@@ -276,7 +280,7 @@ page_t* remote_page_new_libjs(page_env_t* env,uint32_t limit) {
 page_t* remote_page_new(page_env_t* env,uint32_t limit) {
     return remote_page_new_worker(env,limit,"/apps/webworker/app-x86_64");
 }
-/* a media stream's decoder: the plain worker, no page in it */
+/* a media stream's decoder (apps/webmedia): restricted like the renderers */
 void* media_worker_start(void) {
     int slot=-1;
     for(int i=0;i<WORKERS;i++)if(!workers[i]){slot=i;break;}
@@ -285,7 +289,7 @@ void* media_worker_start(void) {
     r->environment=*browser_env();r->slot=slot;r->app=-1;r->p.env=&r->environment;r->p.layout=&r->layout;
     r->layout.A=(arena_t*)r;r->p.scroll_req=-1;
     char err[128];
-    r->app=app_spawn_web_worker("/apps/webworker/app-x86_64",err,sizeof(err));
+    r->app=app_spawn_web_worker("/apps/webmedia/app-x86_64",err,sizeof(err));
     if(r->app<0){klog("media worker: %s\n",err);kfree(r);return NULL;}
     r->generation=app_web_generation(r->app);
     workers[slot]=r;

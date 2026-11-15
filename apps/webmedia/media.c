@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* The decoder of one web page <audio> / <video> stream. The kernel
- * (kernel/media.c) starts a plain web worker for each stream and drives it:
+ * (kernel/media.c) starts this restricted worker for each stream and drives it:
  * WW_MEDIA_OPEN gives the file, WW_MEDIA_AUDIO asks for sound (16-bit
  * stereo at WW_MEDIA_RATE), WW_MEDIA_VIDEO for the picture due at a time,
  * WW_MEDIA_SEEK goes elsewhere. FFmpeg (ports/ffmpeg) runs here, in the
@@ -42,6 +42,12 @@ static int g_pcm_n, g_pcm_ms = -1;
 static pic_t g_pics[PICS];
 static int g_npics;
 static int g_skip_ms = -1;            /* after a seek: nothing earlier than this */
+
+/* a call reads and decodes for this long at most, then answers with what it
+ * has: the kernel's media task waits for each answer */
+#define BUDGET_MS 150
+static unsigned int deadline(void) { return __banana->ticks_ms() + BUDGET_MS; }
+static int late(unsigned int d) { return (int)(__banana->ticks_ms() - d) > 0; }
 
 static int io_read(void* o, uint8_t* buf, int n) {
     (void)o;
@@ -235,12 +241,13 @@ static void pcm_drop_before(int ms) {
 static int media_audio(int want, int from, unsigned char** out, unsigned int* out_len) {
     if (!g_adec) return -1;
     if (want <= 0 || want > WW_MEDIA_RATE) want = WW_MEDIA_RATE / 10;
+    unsigned int d = deadline();
     pcm_drop_before(from);
-    for (int i = 0; i < 4000 && (g_pcm_ms < 0 || g_pcm_ms + 5000 < from) && !g_eof; i++) {   /* far behind: read on */
+    for (int i = 0; i < 4000 && (g_pcm_ms < 0 || g_pcm_ms + 5000 < from) && !g_eof && !late(d); i++) {   /* far behind: read on */
         step();
         pcm_drop_before(from);
     }
-    for (int i = 0; i < 4000 && g_pcm_n < want && !g_eof; i++) {
+    for (int i = 0; i < 4000 && g_pcm_n < want && !g_eof && !late(d); i++) {
         step();
         if (g_npics == PICS && g_pcm_n == 0 && i > 200) break;   /* a stretch of pictures only */
     }
@@ -261,10 +268,8 @@ static int media_audio(int want, int from, unsigned char** out, unsigned int* ou
 static int media_video(int t, int had, unsigned char** out, unsigned int* out_len) {
     if (!g_vdec) return -1;
     /* read on until a picture later than t waits (or the file ends) */
-    for (int i = 0; i < 4000 && !g_eof && (!g_npics || g_pics[g_npics - 1].pts <= t); i++) {
-        step();
-        if (g_pcm_n >= PCM_MAX - WW_MEDIA_RATE / 4 && !g_adec) break;
-    }
+    unsigned int d = deadline();
+    for (int i = 0; i < 4000 && !g_eof && (!g_npics || g_pics[g_npics - 1].pts <= t) && !late(d); i++) step();
     /* the last one due by t (or the first, before the first is due) */
     int k = -1;
     for (int i = 0; i < g_npics; i++) if (g_pics[i].pts <= t) k = i;

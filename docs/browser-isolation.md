@@ -59,8 +59,8 @@ unfinished. No CAPTCHA solver or challenge bypass is included.
 The existing default search provider is retained while this work continues.
 
 Page audio and video are decoded in a restricted process: each `<audio>` /
-`<video>` stream gets a worker of its own (the plain web worker in media mode,
-`apps/webworker/media.c`, FFmpeg) that receives the file and returns sound and
+`<video>` stream gets a restricted worker of its own (`apps/webmedia`, FFmpeg,
+kept apart from the page renderer) that receives the file and returns sound and
 pictures (`WW_MEDIA_*`). The page's worker sees only its own streams' status
 and pictures through the broker (`WW_MEDIA`); the kernel (`kernel/media.c`)
 keeps the clock, plays the sound and never parses the media itself. Files are
