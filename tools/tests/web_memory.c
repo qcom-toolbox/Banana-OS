@@ -15,6 +15,8 @@ static uint32_t mock_heap_used;
 static uint32_t mock_heap_total=128u<<20;
 uint32_t kheap_total_bytes(void){return mock_heap_total;}
 uint32_t kheap_used_bytes(void){return mock_heap_used;}
+static uint32_t mock_evictable;   /* file data cached from the disk: the heap evicts it when short */
+uint32_t fs_evictable_bytes(void){return mock_evictable;}
 static int checks;
 #define CHECK(x) do{checks++;if(!(x)){printf("FAIL %d: %s\n",__LINE__,#x);exit(1);}}while(0)
 int main(void){
@@ -51,6 +53,10 @@ int main(void){
     CHECK(a.reserved==(8u<<20)&&b.reserved==(8u<<20));
     /* Large-memory machines get the higher cap, while the half-heap rule
      * remains authoritative on smaller machines. Exercise the actual ledger. */
+    /* cached file data counts as free: 96 MiB used, 64 MiB of it evictable -> a 48 MiB pool, not 16 */
+    g_pool_limit=0;g_pool_used=0;mock_heap_used=96u<<20;mock_evictable=64u<<20;
+    CHECK(pool_take(0)&&g_pool_limit==(48u<<20));
+    mock_evictable=0;
     g_pool_limit=0;g_pool_used=0;mock_heap_used=0;
     mock_heap_total=3u<<30;
     umem_web_pool_init();
