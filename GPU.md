@@ -174,6 +174,55 @@ cc -O1 -no-pie -w -I kernel -I tools/tests tools/tests/test_i915.c kernel/gpu_i9
 No hardware contexts: every batch re-emits the whole state (the Banana patch
 in `crocus_batch.c`). No aperture (GTT) maps, no PRIME or flink, no BLT ring.
 
+## 8. AMD Radeon HD 5000 - 7000 (TeraScale 2): the HD 7450
+
+Experimental, off unless `gpu experimental on` (kept in the settings); written
+without the card at hand. Everything is checked against a model first
+(`tools/tests/radeon_kms.sh`) and touches the card only after the firmware's
+own state matches what the driver expects.
+
+**The display (done).** `kernel/gpu_radeon.c` takes the CRTC that scans out
+the firmware's framebuffer and adds the hardware pointer and vsync. On
+Evergreen and Northern Islands (DCE 4 / 5: Cedar ... Cayman, the HD 7450 is
+a Caicos) it also sets **modes**:
+
+- The video BIOS comes from the ACPI VFCT table (UEFI), the PCI expansion
+  ROM (turned on for a moment if the firmware disabled it, as Linux's
+  `ni_read_disabled_bios`), or the legacy copy at 0xC0000 (BIOS boot) - and
+  must carry the AtomBIOS signature and this card's PCI ids.
+- Its command tables run in Linux's AtomBIOS interpreter, vendored in
+  `third_party/radeon` (MIT, notices in `/usr/share/licenses/radeon`), with
+  every read bounded by the image's size. `kernel/radeon_atom.c` gives it
+  the card's registers (MMIO, the I/O BAR, the memory controller's indirect
+  ones) and reads what the BIOS describes: the display paths (connector,
+  encoders, DDC line: `Object_Header`) and the pixel PLLs' limits
+  (`FirmwareInfo`).
+- The monitor's EDID is read through the BIOS's `ProcessI2cChannelTransaction`
+  on each output's DDC line (`kernel/edid.c`: detailed, established and
+  standard timings, the VESA DMT table); Settings > Screen offers its sizes
+  that the output can clock (single-link DVI / HDMI 165 MHz, dual-link DVI
+  330 MHz, VGA 400 MHz, and the BIOS's own maximum).
+- `kernel/radeon_kms.c` sets one, as Linux's atombios_crtc.c / atombios_encoders.c:
+  the output off; the CRTC locked, blanked and off; spread spectrum off; the
+  pixel clock adjusted (`AdjustDisplayPll`), the PLL dividers computed
+  (`radeon_compute_pll_avivo`'s search) and set (`SetPixelClock` 1.5 / 1.6:
+  PPLL1 for even CRTCs, PPLL2 for odd); the timing (`SetCRTC_UsingDTDTiming`);
+  the scanout surface (XRGB8888, linear, a framebuffer 64 MiB into video
+  memory); the line buffer and DCE 5's DMIF buffers; then the encoder - a DIG
+  engine and its UNIPHY transmitter for DVI / HDMI (single or dual link, DVI
+  signalling), the DAC for VGA - and the CRTC back on.
+- Not done: DisplayPort (link training - DP monitors keep the firmware's
+  mode), HDMI audio and deep colour, spread spectrum, two monitors on one PLL.
+
+`gpu radeon dump [folder]` saves the video BIOS, the display registers and
+what the driver found (`/home/banana/radeon-report` by default): with them,
+a problem on a real card can be replayed on the model.
+
+**3D (in progress).** The command processor (AMD's CAICOS_pfp / me / BTC_rlc
+microcode), the GART and video memory manager, interrupts and fences, a
+radeon DRM interface with command-stream relocation and register checking
+(TeraScale 2 has no per-process GPU address space), and Mesa's r600 driver.
+
 ## Java and LWJGL
 
 `java.bpk` carries the Intel Mesa runtime's `libOSMesa.so` in `/usr/java/lib`

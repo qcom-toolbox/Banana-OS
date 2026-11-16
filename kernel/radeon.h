@@ -1,0 +1,84 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef RADEON_H
+#define RADEON_H
+/* AMD Radeon HD 5000 - 7000 TeraScale 2 (Evergreen, Northern Islands:
+ * Cedar ... Cayman - the HD 7450 is a Caicos), the parts of the driver
+ * that share the card:
+ *   radeon_atom.c   the video BIOS: found, its AtomBIOS tables run by the
+ *                   interpreter (third_party/radeon/atom.c), the display
+ *                   paths and clocks it describes, EDID through its I2C
+ *   radeon_kms.c    mode setting: PLLs, CRTC timings, encoders
+ *   gpu_radeon.c    the display driver (gpu_t) on top of them
+ * After Linux's radeon driver (MIT licensed), written without the card at
+ * hand: experimental, off unless asked for (gpu experimental on). */
+#include "types.h"
+#include "pci.h"
+#include "../third_party/radeon/radeon_family.h"
+#include "edid.h"
+
+struct atom_context;
+
+/* a display output the video BIOS lists (its display path) */
+typedef struct {
+    uint16_t device;          /* ATOM_DEVICE_*_SUPPORT: what it drives (CRT1, DFP1...) */
+    uint16_t conn_obj;        /* the connector's object id (type | enum) */
+    uint8_t  conn_type;       /* CONNECTOR_OBJECT_ID_* (DVI_I, HDMI_TYPE_A, VGA, DISPLAYPORT...) */
+    uint8_t  i2c_id;          /* the DDC line (ProcessI2cChannelTransaction's line number); 0: none */
+    uint8_t  nenc;
+    uint16_t enc_obj[2];      /* its encoders' object ids (DVI-I: the DAC and the UNIPHY) */
+} rad_path_t;
+
+/* the pixel clock PLLs' limits (FirmwareInfo), in 10 kHz units */
+typedef struct {
+    uint32_t ref_freq, pll_out_min, pll_out_max, pll_in_min, pll_in_max;
+    uint32_t max_pixel_clock, default_dispclk, dp_extclk;
+} rad_clocks_t;
+
+#define RAD_PATHS 8
+
+typedef struct radeon {
+    pci_dev_t pci;
+    int       family;          /* CHIP_* (third_party/radeon/radeon_family.h) */
+    const char* name;
+    volatile uint8_t* mmio;    /* the registers (BAR 2) */
+    uint32_t  mmio_size;
+    uint16_t  io_base;         /* the I/O BAR: the BIOS's indirect register access (0: none) */
+    uint8_t*  bios;            /* the video BIOS image (kmalloc'd) */
+    uint32_t  bios_size;
+    const char* bios_from;     /* "ACPI VFCT", "PCI ROM", "legacy shadow" */
+    struct atom_context* atom;
+    rad_path_t paths[RAD_PATHS];
+    int       npaths;
+    rad_clocks_t clk;
+} radeon_t;
+
+uint32_t rad_rd(radeon_t* r, uint32_t reg);
+void     rad_wr(radeon_t* r, uint32_t reg, uint32_t v);
+
+/* the family of a TeraScale 2 device id (CHIP_*), -1 if not one */
+int  rad_family(uint16_t device);
+const char* rad_family_name(int family);
+
+/* radeon_atom.c: the video BIOS found and parsed (0), or -1 (why) */
+int  rad_atom_init(radeon_t* r, char* why, int cap);
+/* a command table run: 0, or -1 (not in this BIOS, or it failed) */
+int  rad_atom_exec(radeon_t* r, int index, void* params, int size);
+/* a command table's version: 0 (frev / crev set), or -1 if the BIOS has none */
+int  rad_atom_cmd_rev(radeon_t* r, int index, uint8_t* frev, uint8_t* crev);
+/* a 128-byte EDID block from the DDC line i2c_id: 0, or -1 */
+int  rad_atom_read_edid(radeon_t* r, uint8_t i2c_id, uint8_t* edid);
+/* the video BIOS's own description, for lsgpu */
+void rad_atom_info(radeon_t* r, char* buf, int cap);
+
+/* radeon_kms.c: what an output is driven as (digital: the monitor's EDID
+ * says it is a digital one - DVI-I carries both) */
+enum { RAD_OUT_NONE = 0, RAD_OUT_TMDS, RAD_OUT_VGA, RAD_OUT_DP };
+int      rad_kms_path_kind(const rad_path_t* p, int digital);
+uint32_t rad_kms_max_clock(radeon_t* r, const rad_path_t* p, int kind);   /* kHz */
+/* mode m on CRTC crtc through output path, scanning out the w x h XRGB
+ * surface at fb_mc (the memory controller's address), pitch_px pixels a
+ * row: 0, or -1 (why) */
+int      rad_kms_set(radeon_t* r, int crtc, int path, int digital, const edid_mode_t* m,
+                     uint64_t fb_mc, int w, int h, int pitch_px, char* why, int cap);
+
+#endif

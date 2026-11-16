@@ -17,7 +17,12 @@
  * exactly the framebuffer the firmware handed over (its memory-controller
  * address against the video memory BAR); if not, it leaves the card alone
  * and the screen stays the firmware's (write-combining, kernel/gpu_fw.c).
- * Mode setting and acceleration stay out of reach. */
+ *
+ * On TeraScale 2 (DCE 4 / 5) it also sets modes: the video BIOS is read and
+ * run (kernel/radeon_atom.c), the monitor's modes come from its EDID over
+ * the BIOS's DDC, and a new mode is set on that CRTC (kernel/radeon_kms.c)
+ * with a framebuffer of its own 64 MiB into the video memory. `gpu radeon
+ * dump` saves the BIOS and the display registers (a report to send). */
 #include "gpu.h"
 #include "timer.h"
 #include "fb.h"
@@ -25,6 +30,10 @@
 #include "serial.h"
 #include "paging.h"
 #include "settings.h"
+#include "radeon.h"
+#include "edid.h"
+#include "fs.h"
+#include "kheap.h"
 
 /* byte offsets in the register BAR; the same for CRTC 0 on DCE 4, 5 and 11 */
 #define MC_VM_FB_LOCATION          0x2024   /* 15:0 the video memory's start in the MC's space, in 16 MiB */
@@ -76,10 +85,106 @@ static int g_pitch = 64;
 #define CUR_BYTES ((uint32_t)g_pitch * 64u * 4u)
 static char g_why[96] = "not tried (gpu experimental on)";
 
+/* mode setting (DCE 4 / 5) */
+static radeon_t g_rad;
+static int g_kms;                          /* 1: the BIOS runs and an output has a monitor */
+static char g_kms_why[96] = "";
+static int g_path = -1, g_digital;         /* the output the monitor is on; its EDID says digital */
+static edid_mode_t g_modes[32];
+static int g_nmodes;
+static char g_monitor[24];
+static uintptr_t g_vb;                     /* the video memory BAR */
+static uint64_t g_vram_mc;                 /* ... where the memory controller puts it */
+static int g_cur_w, g_cur_h;
+#define NEW_FB_OFF (64ull << 20)
+
 static uint32_t rd(uint32_t r) { return r + 4 <= g_reg_size ? *(volatile uint32_t*)(g_reg + r) : 0; }
 static void wr(uint32_t r, uint32_t v) { if (r + 4 <= g_reg_size) *(volatile uint32_t*)(g_reg + r) = v; }
 
-static int rad_set_mode(gpu_t* g, int w, int h) { (void)g; (void)w; (void)h; return -1; }
+/* the sizes the monitor takes (one entry a size: the refresh nearest 60 Hz is the one set) */
+static int rad_modes(gpu_t* g, display_mode_t* out, int max) {
+    (void)g;
+    int n = 0;
+    if (max > 0 && g_cur_w) out[n++] = (display_mode_t){ g_cur_w, g_cur_h };
+    for (int i = 0; i < g_nmodes && n < max; i++) {
+        int dup = 0;
+        for (int k = 0; k < n; k++) if (out[k].w == g_modes[i].hdisplay && out[k].h == g_modes[i].vdisplay) dup = 1;
+        if (!dup) out[n++] = (display_mode_t){ g_modes[i].hdisplay, g_modes[i].vdisplay };
+    }
+    return n;
+}
+
+static int rad_set_mode(gpu_t* g, int w, int h) {
+    (void)g;
+    if (w == g_cur_w && h == g_cur_h) return 0;
+    if (!g_kms) return -1;
+    const edid_mode_t* best = NULL;
+    for (int i = 0; i < g_nmodes; i++) {
+        const edid_mode_t* m = &g_modes[i];
+        if (m->hdisplay != w || m->vdisplay != h) continue;
+        int d = m->refresh > 60 ? m->refresh - 60 : 60 - m->refresh;
+        int bd = best ? (best->refresh > 60 ? best->refresh - 60 : 60 - best->refresh) : 1000;
+        if (d < bd) best = m;
+    }
+    if (!best) return -1;
+    /* its framebuffer: rows of a multiple of 64 pixels, 64 MiB into the video memory */
+    int pitch = (w + 63) & ~63;
+    uint64_t bytes = (uint64_t)pitch * (uint64_t)h * 4u;
+    uint32_t vram_mb = rd(0x5428);                    /* (CONFIG_MEMSIZE: MiB on Evergreen) */
+    if (bytes > (64ull << 20) || (vram_mb && NEW_FB_OFF + bytes > (uint64_t)vram_mb << 20)) return -1;
+    uintptr_t va = g_vb + (uintptr_t)NEW_FB_OFF;
+    if (!mmio_map(va, bytes)) return -1;
+    paging_set_wc(va, bytes);
+    for (uint64_t i = 0; i < bytes / 4; i++) ((volatile uint32_t*)va)[i] = 0;
+    char why[96];
+    if (rad_kms_set(&g_rad, g_crtc_n, g_path, g_digital, best, g_vram_mc + NEW_FB_OFF, w, h, pitch, why, sizeof(why)) != 0) {
+        klog("radeon: %dx%d not set: %s\n", w, h, why);
+        kstrlcpy(g_kms_why, why, sizeof(g_kms_why));
+        return -1;
+    }
+    g_cur_w = w;
+    g_cur_h = h;
+    gpu_set_framebuffer(va, w, h, pitch * 4);
+    return 0;
+}
+
+/* the video BIOS, the outputs, the monitor's modes: mode setting possible (DCE 4 / 5) */
+static void kms_init(const pci_dev_t* d) {
+    memset(&g_rad, 0, sizeof(g_rad));
+    g_rad.pci = *d;
+    g_rad.family = rad_family(d->device);
+    g_rad.mmio = g_reg;
+    g_rad.mmio_size = g_reg_size;
+    for (int b = 0; b < 6; b++) {
+        int io = 0;
+        uintptr_t a = pci_bar(d, b, &io);
+        if (io && a) { g_rad.io_base = (uint16_t)a; break; }
+    }
+    if (g_rad.family < 0) { kstrlcpy(g_kms_why, "not a TeraScale 2 part", sizeof(g_kms_why)); return; }
+    if (rad_atom_init(&g_rad, g_kms_why, sizeof(g_kms_why)) != 0) return;
+    /* the monitor: the first output whose DDC answers (a digital one first) */
+    uint8_t edid[128];
+    for (int pass = 0; pass < 2 && g_path < 0; pass++)
+        for (int i = 0; i < g_rad.npaths && g_path < 0; i++) {
+            const rad_path_t* p = &g_rad.paths[i];
+            if (!p->i2c_id || rad_atom_read_edid(&g_rad, p->i2c_id, edid) != 0) continue;
+            int digital = (edid[20] & 0x80) != 0;
+            if (pass == 0 && !digital) continue;
+            g_path = i;
+            g_digital = digital;
+        }
+    if (g_path < 0) { kstrlcpy(g_kms_why, "no monitor answers on the outputs' DDC lines", sizeof(g_kms_why)); return; }
+    edid_name(edid, g_monitor, sizeof(g_monitor));
+    int kind = rad_kms_path_kind(&g_rad.paths[g_path], g_digital);
+    if (kind == RAD_OUT_DP) { kstrlcpy(g_kms_why, "the monitor is on DisplayPort: the firmware's mode is kept", sizeof(g_kms_why)); return; }
+    uint32_t max = rad_kms_max_clock(&g_rad, &g_rad.paths[g_path], kind);
+    edid_mode_t all[32];
+    int n = edid_modes(edid, all, 32);
+    g_nmodes = 0;
+    for (int i = 0; i < n; i++) if (all[i].clock <= max && all[i].hdisplay <= 4096 && all[i].vdisplay <= 4096) g_modes[g_nmodes++] = all[i];
+    g_kms = g_nmodes > 0;
+    ksnprintf(g_kms_why, sizeof(g_kms_why), "%s, %d modes", g_monitor, g_nmodes);
+}
 
 static void rad_wait_vblank(gpu_t* g) {
     (void)g;
@@ -122,11 +227,52 @@ static void rad_cursor_move(gpu_t* g, int x, int y, int visible) {
 static void rad_info(gpu_t* g, char* buf, int cap) {
     (void)g;
     const fb_info_t* fi = fb_info();
-    ksnprintf(buf, (size_t)cap, "EXPERIMENTAL: DCE %d, CRTC %d, frame %u\n"
-              "the firmware's framebuffer, %ux%u, write-combining; cursor at 0x%llx\n"
-              "turn off: gpu experimental off (and restart)",
-              g_dce, g_crtc_n, rd(CRTC_STATUS_FRAME_COUNT + g_crtc), fi ? fi->width : 0, fi ? fi->height : 0,
-              (unsigned long long)g_cur_mc);
+    int n = ksnprintf(buf, (size_t)cap, "EXPERIMENTAL: DCE %d, CRTC %d, frame %u\n"
+                      "framebuffer %ux%u, write-combining; cursor at 0x%llx\n",
+                      g_dce, g_crtc_n, rd(CRTC_STATUS_FRAME_COUNT + g_crtc), fi ? fi->width : 0, fi ? fi->height : 0,
+                      (unsigned long long)g_cur_mc);
+    if (g_dce <= 5 && n < cap) {
+        n += ksnprintf(buf + n, (size_t)(cap - n), "mode setting: %s\n", g_kms ? "yes" : "no");
+        if (n < cap) n += ksnprintf(buf + n, (size_t)(cap - n), "  %s\n", g_kms_why);
+        if (g_rad.atom && n < cap) { rad_atom_info(&g_rad, buf + n, cap - n); n += (int)strlen(buf + n); }
+    }
+    if (n < cap) ksnprintf(buf + n, (size_t)(cap - n), "a report: gpu radeon dump; turn off: gpu experimental off (and restart)");
+}
+
+/* `gpu radeon dump`: the video BIOS and the display registers, saved (a report) */
+int gpu_radeon_dump(const char* dir, char* msg, int cap) {
+    if (!g_reg) { kstrlcpy(msg, "no Radeon driven (gpu experimental on, lsgpu)", (size_t)cap); return -1; }
+    char path[FS_PATH_LEN];
+    fs_mkdir_p(dir);
+    int saved = 0;
+    if (g_rad.bios) {
+        ksnprintf(path, sizeof(path), "%s/radeon-vbios.rom", dir);
+        if (fs_write_path(path, g_rad.bios, g_rad.bios_size) >= 0) saved++;
+    }
+    /* the display engine's registers (0x6000 - 0x10000) and a few of the memory controller's */
+    uint32_t n = 0x10000 / 4;
+    uint32_t* regs = kmalloc(n * 4);
+    if (regs) {
+        for (uint32_t i = 0; i < n; i++) regs[i] = i * 4 >= 0x6000 || i * 4 < 0x3000 ? rd(i * 4) : 0;
+        ksnprintf(path, sizeof(path), "%s/radeon-regs.bin", dir);
+        if (fs_write_path(path, regs, n * 4) >= 0) saved++;
+        kfree(regs);
+    }
+    char* info = kmalloc(4096);
+    if (info) {
+        int k = ksnprintf(info, 4096, "device %04x:%04x family %s, DCE %d, CRTC %d\nmode setting: %s (%s)\n",
+                          g_gpu.pci.vendor, g_gpu.pci.device, rad_family_name(g_rad.family), g_dce, g_crtc_n,
+                          g_kms ? "yes" : "no", g_kms_why);
+        if (g_rad.atom) { rad_atom_info(&g_rad, info + k, 4096 - k); k += (int)strlen(info + k); }
+        for (int i = 0; i < g_nmodes && k < 4000; i++)
+            k += ksnprintf(info + k, (size_t)(4096 - k), "mode %dx%d@%u %u kHz\n", g_modes[i].hdisplay, g_modes[i].vdisplay,
+                           g_modes[i].refresh, g_modes[i].clock);
+        ksnprintf(path, sizeof(path), "%s/radeon-info.txt", dir);
+        if (fs_write_path(path, info, (uint32_t)strlen(info)) >= 0) saved++;
+        kfree(info);
+    }
+    ksnprintf(msg, (size_t)cap, "%d files in %s (radeon-vbios.rom, radeon-regs.bin, radeon-info.txt)", saved, dir);
+    return saved ? 0 : -1;
 }
 
 /* the memory BAR the framebuffer is in: its base, or 0 */
@@ -191,12 +337,18 @@ static int try_card(const pci_dev_t* d) {
     wr(CUR_SIZE + g_crtc, 63u << 16 | 63u);
     wr(CUR_UPDATE + g_crtc, rd(CUR_UPDATE + g_crtc) & ~CUR_UPDATE_LOCK);
     pci_claim(d, "radeon");
+    g_vb = vb;
+    g_vram_mc = vram_mc;
+    g_cur_w = (int)fi->width;
+    g_cur_h = (int)fi->height;
+    if (f->dce <= 5) kms_init(d);
 
     memset(&g_gpu, 0, sizeof(g_gpu));
     kstrlcpy(g_gpu.name, f->name, sizeof(g_gpu.name));
     g_gpu.driver = "radeon (experimental)";
     g_gpu.pci = *d;
     g_gpu.set_mode = rad_set_mode;
+    g_gpu.modes = rad_modes;
     g_gpu.wait_vblank = rad_wait_vblank;
     g_gpu.cursor_image = rad_cursor_image;
     g_gpu.cursor_move = rad_cursor_move;
@@ -204,7 +356,8 @@ static int try_card(const pci_dev_t* d) {
     g_gpu.info = rad_info;
     if (gpu_register(&g_gpu) < 0) { kstrlcpy(g_why, "no room for another display driver", sizeof(g_why)); return -1; }
     ksnprintf(g_why, sizeof(g_why), "on: CRTC %d, DCE %d", found, f->dce);
-    klog("radeon: %s - EXPERIMENTAL hardware cursor and vsync on CRTC %d\n", f->name, found);
+    klog("radeon: %s - EXPERIMENTAL hardware cursor and vsync on CRTC %d; mode setting: %s\n", f->name, found,
+         f->dce <= 5 ? g_kms_why : "not on this generation");
     return 0;
 }
 

@@ -34,7 +34,8 @@ WEBP_SRCS = $(wildcard third_party/libwebp/src/dec/*.c third_party/libwebp/src/d
 
 C_SRCS   = $(wildcard kernel/*.c) $(wildcard shell/*.c) $(wildcard net/*.c) \
            $(wildcard crypto/*.c) $(wildcard usb/*.c) $(wildcard web/*.c) $(wildcard media/*.c) \
-           third_party/stb/stb_image_impl.c $(wildcard third_party/igc/*.c) $(wildcard third_party/rge/*.c) $(wildcard third_party/uacpi/source/*.c)
+           third_party/stb/stb_image_impl.c $(wildcard third_party/igc/*.c) $(wildcard third_party/rge/*.c) $(wildcard third_party/uacpi/source/*.c) \
+           third_party/radeon/atom.c
 ASM_SRCS   = boot/boot.asm kernel/isr.asm kernel/task_switch.asm kernel/appcall.asm kernel/exbin.asm kernel/frameworkbin.asm kernel/fontbin.asm kernel/appbin.asm kernel/s3_resume.asm
 ASM_SRCS64 = boot/boot64.asm kernel/isr64.asm kernel/task_switch64.asm kernel/appcall64.asm kernel/exbin.asm kernel/frameworkbin.asm kernel/fontbin.asm kernel/landscapebin.asm kernel/appbin.asm kernel/smp_tramp.asm kernel/s3_resume.asm
 kernel/landscapebin.o kernel/landscapebin.o64: $(wildcard assets/wallpapers/landscapes/*.jpg)
@@ -95,6 +96,10 @@ STB_FLAGS = -I third_party/stb/libc -Wno-unused-function -Wno-sign-compare \
             -Wno-unused-parameter -Wno-implicit-fallthrough -Wno-type-limits
 third_party/stb/stb_image_impl.o: CFLAGS += $(STB_FLAGS)
 third_party/stb/stb_image_impl.o64: CFLAGS64 += $(STB_FLAGS)
+# vendored AtomBIOS interpreter (Linux's radeon atom.c, MIT): its own warnings left as upstream has them
+RADEON_ATOM_FLAGS = -Wno-unused-parameter -Wno-sign-compare
+third_party/radeon/atom.o: CFLAGS += $(RADEON_ATOM_FLAGS)
+third_party/radeon/atom.o64: CFLAGS64 += $(RADEON_ATOM_FLAGS)
 
 kernel.bin: $(OBJS)
 	ld $(LDFLAGS) -o $@ $^ $(LIBGCC)
@@ -402,6 +407,7 @@ net/r8125.o net/r8125.o64: third_party/rge/NOTICES
 kernel/aml_host.o kernel/aml_host.o64: third_party/uacpi/LICENSE
 
 net/igc.o net/igc.o64: third_party/igc/NOTICES
+kernel/radeon_atom.o kernel/radeon_atom.o64: third_party/radeon/NOTICES
 
 net/mt7601u.o net/mt7601u.o64: firmware/mediatek/mt7601u.bin firmware/mediatek/NOTICES
 

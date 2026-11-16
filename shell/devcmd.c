@@ -170,10 +170,17 @@ int devcmd_dispatch(int argc, char** argv) {
     }
     if (!strcmp(argv[0], "gpu")) {
         const char* w = argc > 2 ? argv[2] : "";
-        if (argc < 2 || strcmp(argv[1], "experimental")) { say("usage: gpu experimental [on | off]   (lsgpu: the graphics card)"); return 1; }
+        if (argc >= 3 && !strcmp(argv[1], "radeon") && !strcmp(argv[2], "dump")) {
+            char msg[160];
+            gpu_radeon_dump(argc > 3 ? argv[3] : "/home/banana/radeon-report", msg, sizeof(msg));
+            terminal_write("gpu radeon dump: ");
+            say(msg);
+            return 1;
+        }
+        if (argc < 2 || strcmp(argv[1], "experimental")) { say("usage: gpu experimental [on | off] | gpu radeon dump [folder]   (lsgpu: the graphics card)"); return 1; }
         if (!strcmp(w, "on")) {
             gpu_set_experimental(1);
-            say("gpu: experimental drivers on (AMD Radeon HD 5000-7000, RX 400/500: hardware cursor and vsync)");
+            say("gpu: experimental drivers on (AMD Radeon HD 5000-7000: resolutions, hardware cursor, vsync; RX 400/500: cursor and vsync)");
             if (gpu_radeon_try() == 0) say("gpu: the Radeon driver runs now");
             else { terminal_write("gpu: not used here: "); say(gpu_radeon_status()); }
         } else if (!strcmp(w, "off")) {

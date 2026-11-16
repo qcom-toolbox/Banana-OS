@@ -408,6 +408,8 @@ jobs:
             cc -m"$bits" -O1 -I kernel tools/tests/test_gpu_drivers.c kernel/gpu_intel.c kernel/gpu_radeon.c -o "/tmp/display-$bits"
             "/tmp/display-$bits"
           done
+      - name: Test Radeon TeraScale 2 mode setting on a model video BIOS
+        run: bash tools/tests/radeon_kms.sh
       - name: Test both Mesa drivers on Intel models
         env:
           MESA_REF: ${{ github.workspace }}/ports/mesa/build-crocus-iris/ref

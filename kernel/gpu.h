@@ -117,6 +117,8 @@ int gpu_intel_probe(const pci_dev_t* d);
  * cursor and vsync, EXPERIMENTAL - only with `gpu experimental on`
  * (kernel/gpu_radeon.c) */
 int  gpu_radeon_try(void);               /* now: 0, or -1 (gpu_radeon_status says why) */
+/* the video BIOS and display registers saved in dir (a report): 0, or -1; msg says what */
+int  gpu_radeon_dump(const char* dir, char* msg, int cap);
 const char* gpu_radeon_status(void);
 void gpu_radeon_boot(void);              /* settings_boot: when asked for */
 int  gpu_experimental(void);             /* the setting */

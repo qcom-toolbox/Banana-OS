@@ -475,12 +475,15 @@ static const page_t PAGES[] = {
       "devmgr\ndevmgr -c\ndevmgr show e1000\ndevmgr gui", "lspci, lsusb, lsblk, drivers" },
     { "lsdev", "hardware", "lsdev", "the same as devmgr", NULL, NULL, NULL, "devmgr" },
     { "devmgmt.msc", "hardware", "devmgmt.msc", "the Device Manager window", NULL, NULL, NULL, "devmgr" },
-    { "gpu", "hardware", "gpu experimental [on | off]", "experimental graphics drivers",
+    { "gpu", "hardware", "gpu experimental [on | off] | gpu radeon dump [folder]", "experimental graphics drivers",
       "Turns on (or off) the graphics drivers written without the hardware to try them on: for AMD Radeon HD 5000 / 6000 / "
       "7000 TeraScale 2 cards (the HD 7450...) and RX 400 / 500 Polaris cards (the RX 580...), a hardware mouse pointer and "
-      "vsync over the firmware's screen. The driver first checks that the card scans out exactly the screen the firmware "
-      "handed over, else it leaves the card alone. The choice is kept; off takes effect at the next start. With no word: "
-      "whether it is on and what the driver found. Intel HD / UHD / Iris Graphics (1st to 10th generation Core) need no switch: their "
+      "vsync over the firmware's screen; on TeraScale 2 also the monitor's resolutions (Settings > Screen), set through the "
+      "card's video BIOS from the monitor's EDID (DVI, HDMI, VGA; DisplayPort keeps the firmware's mode). The driver first "
+      "checks that the card scans out exactly the screen the firmware handed over, else it leaves the card alone. The choice "
+      "is kept; off takes effect at the next start. With no word: whether it is on and what the driver found. `gpu radeon "
+      "dump` saves the card's video BIOS, display registers and what the driver found (default /home/banana/radeon-report) "
+      "- a report to send if the screen goes wrong. Intel HD / UHD / Iris Graphics (1st to 10th generation Core) need no switch: their "
       "driver is always on. NVIDIA cards keep the firmware's screen.",
       NULL, "gpu experimental on\ngpu experimental", "lsgpu, devmgr" },
     { "gpu3d", "hardware", "gpu3d [status | on | off | test]", "3D on Intel HD / UHD / Iris Graphics (1st - 10th generation Core)",

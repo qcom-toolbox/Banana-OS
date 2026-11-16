@@ -57,6 +57,24 @@ int pci_scan(int (*cb)(const pci_dev_t*, void*), void* ctx) { return cb(&g_dev, 
 static gpu_t* g_reg_gpu;
 int gpu_register(gpu_t* g) { g_reg_gpu = g; return 0; }
 void gpu_note_vblank(int t) { (void)t; }
+/* TeraScale 2 mode setting (kernel/radeon_atom.c, radeon_kms.c, edid.c): out of this test's
+ * reach - tools/tests/radeon_kms.sh runs it on a model BIOS; here the BIOS is never found */
+#include "radeon.h"
+int rad_family(uint16_t d) { (void)d; return -1; }
+const char* rad_family_name(int f) { (void)f; return "?"; }
+int rad_atom_init(radeon_t* r, char* why, int cap) { (void)r; kstrlcpy(why, "model: no video BIOS", (size_t)cap); return -1; }
+int rad_atom_read_edid(radeon_t* r, uint8_t id, uint8_t* e) { (void)r; (void)id; (void)e; return -1; }
+void rad_atom_info(radeon_t* r, char* b, int cap) { (void)r; if (cap) b[0] = 0; }
+int rad_kms_path_kind(const rad_path_t* p, int d) { (void)p; (void)d; return 0; }
+uint32_t rad_kms_max_clock(radeon_t* r, const rad_path_t* p, int k) { (void)r; (void)p; (void)k; return 0; }
+int rad_kms_set(radeon_t* r, int c, int p, int d, const edid_mode_t* m, uint64_t fb, int w, int h, int pp, char* why, int cap) {
+    (void)r; (void)c; (void)p; (void)d; (void)m; (void)fb; (void)w; (void)h; (void)pp; kstrlcpy(why, "model", (size_t)cap); return -1;
+}
+int edid_modes(const uint8_t* e, edid_mode_t* o, int max) { (void)e; (void)o; (void)max; return 0; }
+void edid_name(const uint8_t* e, char* o, int cap) { (void)e; if (cap) o[0] = 0; }
+int fs_mkdir_p(const char* p) { (void)p; return 0; }
+int fs_write_path(const char* p, const void* d, uint32_t n) { (void)p; (void)d; (void)n; return 0; }
+void gpu_set_framebuffer(uintptr_t a, int w, int h, int pitch) { (void)a; (void)w; (void)h; (void)pitch; }
 int settings_get(const char* k, char* v, int cap) { (void)k; kstrlcpy(v, "on", (size_t)cap); return 1; }
 void settings_set(const char* k, const char* v) { (void)k; (void)v; }
 
