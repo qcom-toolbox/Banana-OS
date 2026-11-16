@@ -854,7 +854,7 @@ static const char DEFAULT_CSS[] =
     "html, body, div, p, h1, h2, h3, h4, h5, h6, ul, ol, dl, dt, dd, pre, form, blockquote, address,"
     " section, article, header, footer, nav, aside, main, figure, figcaption, fieldset, hr, center,"
     " details, summary, legend, menu, hgroup, search { display: block }"
-    "head, script, style, title, meta, link, base, template, noscript, datalist, canvas,"
+    "head, script, style, title, meta, link, base, template, noscript, datalist,"
     " object, embed, audio, dialog:not([open]), [hidden], area, map, param, source, track { display: none }"
     "iframe { display: inline-block }"
     "li { display: list-item }"

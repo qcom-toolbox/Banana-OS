@@ -133,6 +133,8 @@ typedef struct page {
     struct dom_node* media_node[16];  /* ...the element showing each (a <video>), or NULL */
     uint32_t     media_seq[16];       /* ...the picture it shows */
     uint32_t     media_tick;          /* when the pictures were last asked for */
+    struct canvas* canvases;          /* its <canvas> elements' 2D contexts (canvas.c) */
+    int          canvas_dirty;        /* one was drawn on: show it again */
     /* CSS background images, fetched once per address */
     struct { const char* url; struct img_data* img; } bgcache[40];
     int          nbg;

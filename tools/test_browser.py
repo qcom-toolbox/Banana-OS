@@ -82,14 +82,14 @@ obj = out / 'frameworkbin.o'
 run(['nasm', '-f', 'elf32' if args.bits32 else 'elf64', 'kernel/frameworkbin.asm', '-o', obj])
 engine = ['web/test/framework_test.c', 'web/test/font_host.c', 'web/framework_test.c',
           'web/framework_fixtures.c', obj, 'web/arena.c', 'web/html.c', 'web/css.c',
-          'web/layout.c', 'web/render.c', 'web/page.c', 'web/jsdom.c', *scripts, *images,
+          'web/layout.c', 'web/render.c', 'web/page.c', 'web/jsdom.c', 'web/canvas.c', *scripts, *images,
           'web/svg.c', 'kernel/font.c', 'kernel/ttf.c']
 run([build('frameworks', engine, ['-DFONT_HOST'])])
 if args.swm:
     curl_flags = subprocess.check_output(['pkg-config', '--cflags', '--libs', 'libcurl'], text=True).split()
     live_sources = ['web/test/site_test.c', 'web/test/font_host.c', 'web/site_test.c',
                     'web/arena.c', 'web/html.c', 'web/css.c', 'web/layout.c', 'web/render.c',
-                    'web/page.c', 'web/jsdom.c', *scripts, *images, 'web/svg.c', 'kernel/font.c', 'kernel/ttf.c']
+                    'web/page.c', 'web/jsdom.c', 'web/canvas.c', *scripts, *images, 'web/svg.c', 'kernel/font.c', 'kernel/ttf.c']
     binary = out / 'swm'
     run([os.environ.get('CC', 'cc'), *flags, '-DFONT_HOST', *live_sources,
          '-lm', *curl_flags, '-o', binary])

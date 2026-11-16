@@ -595,6 +595,29 @@ static void inline_replaced(inl_t* I, dom_node_t* e, const style_t* st) {
         mark_box(C, first, h);
         return;
     }
+    if (strcmp(tag, "canvas") == 0) {
+        /* its 2D context's pixels (canvas.c), drawn at the CSS size; transparent until drawn on */
+        const char* aw = dom_attr(e, "width");
+        const char* ah = dom_attr(e, "height");
+        int nw = aw ? attr_px(aw, st) : 300, nh = ah ? attr_px(ah, st) : 150;
+        if (nw <= 0) nw = aw ? 0 : 300;
+        if (nh <= 0) nh = ah ? 0 : 150;
+        int w = nw, h = nh;
+        if (st->width_pct && I->w < 50000) w = I->w * st->width_pct / 100;
+        else if (st->width != LEN_AUTO && st->width > 0) w = st->width;
+        if (st->height != LEN_AUTO && st->height > 0) h = st->height;
+        else if (w != nw && nw > 0) h = (int)((int64_t)nh * w / nw);       /* the same proportions */
+        if (st->max_width != LEN_AUTO && st->max_width > 0 && w > st->max_width) { if (w) h = h * st->max_width / w; w = st->max_width; }
+        int x = place_box(I, w, h);
+        if (st->has_bg) rect(C, x, 0, w, h, st->bg, e);   /* (under a transparent canvas) */
+        img_data_t* img = e->img;
+        dl_item_t* it = push(C, DL_IMG);          /* (always: clicks on it find the canvas) */
+        it->x = x; it->w = w; it->h = h;
+        it->img = img && img->px && img->w > 0 && img->h > 0 ? img : NULL;
+        it->node = e;
+        mark_box(C, first, h);
+        return;
+    }
     if (strcmp(tag, "video") == 0) {
         /* the stream's current picture (page.c), or black until there is one;
          * 300 x 150 unless sized; object-fit: contain / cover */
@@ -867,7 +890,7 @@ static void inline_node(inl_t* I, dom_node_t* n, uint32_t bg, int has_bg) {
     if (out_of_sight(st)) return;
     if ((st->position == POS_ABSOLUTE || st->position == POS_FIXED) && n != C->placing) { defer_abs(C, n, I->x0 + I->cx, I->y); return; }
     if (!C->dry) { n->box_x = I->x0 + I->cx; n->box_y = I->y; }
-    int replaced = strcmp(tag, "img") == 0 || strcmp(tag, "svg") == 0 || strcmp(tag, "video") == 0 || strcmp(tag, "input") == 0 || strcmp(tag, "button") == 0 ||
+    int replaced = strcmp(tag, "img") == 0 || strcmp(tag, "svg") == 0 || strcmp(tag, "video") == 0 || strcmp(tag, "canvas") == 0 || strcmp(tag, "input") == 0 || strcmp(tag, "button") == 0 ||
                    strcmp(tag, "select") == 0 || strcmp(tag, "textarea") == 0 || strcmp(tag, "iframe") == 0;
     if (replaced) {
         if (!st->visible) return;
@@ -1002,7 +1025,7 @@ static int is_blank_text(const dom_node_t* t) {
  * they are laid out by the inline code (as one atomic run) */
 static int flex_is_inline(const dom_node_t* e) {
     const char* t = e->tag;
-    if (strcmp(t, "img") == 0 || strcmp(t, "svg") == 0 || strcmp(t, "video") == 0 || strcmp(t, "input") == 0 || strcmp(t, "button") == 0 ||
+    if (strcmp(t, "img") == 0 || strcmp(t, "svg") == 0 || strcmp(t, "video") == 0 || strcmp(t, "canvas") == 0 || strcmp(t, "input") == 0 || strcmp(t, "button") == 0 ||
         strcmp(t, "select") == 0 || strcmp(t, "textarea") == 0 || strcmp(t, "iframe") == 0) return 1;
     const style_t* s = e->style;
     /* a flex item is blockified: an <a> or <span> with padding, a border, a
@@ -1471,7 +1494,8 @@ static int layout_box(ctx_t* C, dom_node_t* e, int x, int y, int avail) {
     {
         const char* t = e->tag;
         if (strcmp(t, "select") == 0 || strcmp(t, "input") == 0 || strcmp(t, "button") == 0 ||
-            strcmp(t, "textarea") == 0 || strcmp(t, "img") == 0 || strcmp(t, "svg") == 0 || strcmp(t, "video") == 0) {
+            strcmp(t, "textarea") == 0 || strcmp(t, "img") == 0 || strcmp(t, "svg") == 0 || strcmp(t, "video") == 0 ||
+            strcmp(t, "canvas") == 0) {
             dom_node_t* saved = C->placing;
             C->placing = e;                          /* an absolute one is being placed now */
             uint32_t from = C->dry ? 0 : C->L->n;

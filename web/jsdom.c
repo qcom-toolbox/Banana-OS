@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "page.h"
+#include "canvas.h"
 #include "script_int.h"
 #include "kstring.h"
 #include "kheap.h"
@@ -29,6 +30,7 @@ static dom_node_t* node_of(value_t v) {
     if (v.t != V_OBJ || v.o->kind != OBJ_HOST || v.o->hc != &elem_class) return NULL;
     return (dom_node_t*)v.o->host;
 }
+dom_node_t* jsdom_node_of(value_t v) { return node_of(v); }
 
 static dom_node_t* self_node(interp_t* I, value_t self) {
     dom_node_t* n = node_of(self);
@@ -902,6 +904,12 @@ static value_t elem_get(interp_t* I, obj_t* self, const char* key, int* found) {
         if (*found) return v;
     }
     *found = 1;
+    if (n->type == DOM_ELEM && !strcmp(n->tag, "canvas") && (K("width") || K("height"))) {
+        const char* v = dom_attr(n, key);                 /* <canvas width height>: 300 x 150 */
+        int x = 0, any = 0;
+        for (; v && *v >= '0' && *v <= '9' && x < 100000; v++) { x = x * 10 + (*v - '0'); any = 1; }
+        return v_num(any ? x : K("width") ? 300 : 150);
+    }
     /* tree */
     if (K("parentNode")) return n->parent ? wrap(p, n->parent) : v_null();
     if (K("parentElement")) return n->parent && n->parent->type == DOM_ELEM ? wrap(p, n->parent) : v_null();
@@ -1076,6 +1084,18 @@ static int elem_set(interp_t* I, obj_t* self, const char* key, value_t v) {
         }
         return 0;
     }
+    if (n->type == DOM_ELEM && !strcmp(n->tag, "canvas") && (K("width") || K("height"))) {
+        /* setting either clears the canvas, even to the same size */
+        num_t x = v_tonum(I, v);
+        char num[16];
+        ksnprintf(num, sizeof(num), "%d", x >= 0 && x < 100000 ? (int)x : 0);
+        set_attr(p, n, key, num);
+#ifdef BANANA_USER_WORKER
+        if (n->canvas) canvas_attr_changed(p, n);
+#endif
+        changed(p);
+        return 1;
+    }
     if (n->type != DOM_ELEM) {
         if (K("textContent") || K("nodeValue") || K("data")) {
             const char* s = v.t == V_NULL || (!K("data") && v.t == V_UNDEF) ? "" : v_cstr(I, v);
@@ -1197,6 +1217,9 @@ static value_t m_setAttribute(interp_t* I, value_t self, int argc, value_t* argv
     } else if (strcmp(name, "src") == 0) {
         n->img = NULL;
     }
+#ifdef BANANA_USER_WORKER
+    if ((!strcmp(name, "width") || !strcmp(name, "height")) && n->canvas) canvas_attr_changed(p, n);
+#endif
     changed(p);
     return v_undef();
 }
@@ -3103,6 +3126,9 @@ void jsdom_install(page_t* p) {
     obj_set(I, ce, "whenDefined", v_native(I, "whenDefined", ce_whenDefined));
     obj_set(I, ce, "upgrade", v_native(I, "upgrade", ce_upgrade));
     script_def_global(I, "customElements", v_obj(ce));
+#ifdef BANANA_USER_WORKER
+    canvas_install(I);                               /* <canvas> 2D (canvas.c): the prelude builds the context on it */
+#endif
     if (p->env && p->env->media_open) {              /* sound: the prelude builds <audio> on these */
         script_def_global(I, "__media_open", v_native(I, "__media_open", w_media_open));
         script_def_global(I, "__media_cmd", v_native(I, "__media_cmd", w_media_cmd));

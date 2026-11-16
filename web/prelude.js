@@ -468,6 +468,195 @@ W.__banana_deliver = function(data){
   if (typeof W.onmessage === 'function') { try { W.onmessage(e); } catch (x) {} }
   W.dispatchEvent(e);
 };
+/* <canvas>: getContext('2d') - CanvasRenderingContext2D drawn by web/canvas.c
+ * through __cv(element, op, ...). The JS side keeps the readable state
+ * (fillStyle, font...) and Path2D; pixels and paths live in C. */
+(function(){
+  if (typeof __cv !== 'function') return;
+  var CAP = { butt: 0, round: 1, square: 2 }, JOIN = { miter: 0, round: 1, bevel: 2 };
+  var COMP = { 'source-over': 0, 'destination-out': 1, 'lighter': 2, 'copy': 3, 'destination-over': 4,
+               'source-atop': 5, 'destination-in': 6, 'source-in': 7 };
+  var ALIGN = { start: 0, left: 0, center: 1, right: 2, end: 2 };
+  var BASE = { alphabetic: 0, top: 1, hanging: 1, middle: 2, bottom: 3, ideographic: 3 };
+  var HEX = []; for (var hx = 0; hx < 256; hx++) HEX.push((hx < 16 ? '0' : '') + hx.toString(16));
+  function CanvasGradient(id){ this.__g = id; }
+  CanvasGradient.prototype.addColorStop = function(o, c){ __cv(null, 24, this.__g, +o, String(c)); };
+  function CanvasPattern(id){ this.__p = id; }
+  CanvasPattern.prototype.setTransform = function(){};
+  function ImageData(a, b, c){
+    if (typeof a === 'number') { this.width = a; this.height = b; this.data = new Uint8ClampedArray(a * b * 4); }
+    else { this.data = a; this.width = b; this.height = c || (a.length / 4 / b); }
+    this.colorSpace = 'srgb';
+  }
+  function Path2D(p){
+    this.__ops = [];
+    if (p instanceof Path2D) this.__ops = p.__ops.slice();
+    else if (typeof p === 'string') svgPath(this, p);
+  }
+  var PATH_OPS = ['moveTo', 'lineTo', 'closePath', 'rect', 'roundRect', 'arc', 'arcTo', 'quadraticCurveTo',
+                  'bezierCurveTo', 'ellipse'];
+  PATH_OPS.forEach(function(n){ Path2D.prototype[n] = function(){ this.__ops.push([n, Array.prototype.slice.call(arguments)]); }; });
+  Path2D.prototype.addPath = function(p){ if (p && p.__ops) this.__ops = this.__ops.concat(p.__ops); };
+  /* SVG path data ("M10 10 L20 20 Z"), absolute and relative commands */
+  function svgPath(path, d){
+    var t = String(d).match(/[a-zA-Z]|-?[0-9]*\.?[0-9]+(?:e[-+]?[0-9]+)?/g) || [], i = 0, cmd = '', x = 0, y = 0, sx = 0, sy = 0;
+    function n(){ return +t[i++]; }
+    while (i < t.length) {
+      if (/[a-zA-Z]/.test(t[i])) cmd = t[i++];
+      var rel = cmd === cmd.toLowerCase(), C = cmd.toUpperCase(), ox = rel ? x : 0, oy = rel ? y : 0;
+      if (C === 'M') { x = ox + n(); y = oy + n(); sx = x; sy = y; path.moveTo(x, y); cmd = rel ? 'l' : 'L'; }
+      else if (C === 'L') { x = ox + n(); y = oy + n(); path.lineTo(x, y); }
+      else if (C === 'H') { x = ox + n(); path.lineTo(x, y); }
+      else if (C === 'V') { y = (rel ? y : 0) + n(); path.lineTo(x, y); }
+      else if (C === 'C') { var a = ox + n(), b = oy + n(), c = ox + n(), e = oy + n(); x = ox + n(); y = oy + n(); path.bezierCurveTo(a, b, c, e, x, y); }
+      else if (C === 'Q') { var qa = ox + n(), qb = oy + n(); x = ox + n(); y = oy + n(); path.quadraticCurveTo(qa, qb, x, y); }
+      else if (C === 'Z') { path.closePath(); x = sx; y = sy; }
+      else if (C === 'A') { n(); n(); n(); n(); n(); x = ox + n(); y = oy + n(); path.lineTo(x, y); }
+      else if (C === 'S' || C === 'T') { if (C === 'S') { n(); n(); } x = ox + n(); y = oy + n(); path.lineTo(x, y); }
+      else i++;
+    }
+  }
+  function Ctx(el){
+    this.canvas = el;
+    this.__el = el;
+    this.__s = { fillStyle: '#000000', strokeStyle: '#000000', lineWidth: 1, lineCap: 'butt', lineJoin: 'miter',
+      miterLimit: 10, globalAlpha: 1, globalCompositeOperation: 'source-over', font: '10px sans-serif',
+      textAlign: 'start', textBaseline: 'alphabetic', lineDashOffset: 0, imageSmoothingEnabled: true,
+      imageSmoothingQuality: 'low', shadowColor: 'rgba(0, 0, 0, 0)', shadowBlur: 0, shadowOffsetX: 0, shadowOffsetY: 0,
+      filter: 'none', direction: 'ltr', letterSpacing: '0px', fontKerning: 'auto' };
+    this.__stack = [];
+    this.__dash = [];
+  }
+  var CP = Ctx.prototype;
+  function cv(ctx, op){ var a = [ctx.__el, op]; for (var i = 2; i < arguments.length; i++) a.push(arguments[i]); return __cv.apply(null, a); }
+  function style(ctx, which, v){
+    if (v instanceof CanvasGradient) { cv(ctx, 22, which, 1, v.__g); return true; }
+    if (v instanceof CanvasPattern) { cv(ctx, 22, which, 2, v.__p); return true; }
+    return !!cv(ctx, 22, which, 0, String(v));
+  }
+  function prop(name, set){
+    Object.defineProperty(CP, name, { configurable: true, enumerable: true,
+      get: function(){ return this.__s[name]; },
+      set: function(v){ if (set.call(this, v) !== false) this.__s[name] = v; } });
+  }
+  prop('fillStyle', function(v){ return style(this, 0, v); });
+  prop('strokeStyle', function(v){ return style(this, 1, v); });
+  prop('lineWidth', function(v){ v = +v; if (!(v > 0) || !isFinite(v)) return false; cv(this, 26, v); });
+  prop('lineCap', function(v){ if (!(v in CAP)) return false; cv(this, 27, CAP[v]); });
+  prop('lineJoin', function(v){ if (!(v in JOIN)) return false; cv(this, 28, JOIN[v]); });
+  prop('miterLimit', function(v){ v = +v; if (!(v > 0)) return false; cv(this, 29, v); });
+  prop('globalAlpha', function(v){ v = +v; if (!(v >= 0 && v <= 1)) return false; cv(this, 30, v); });
+  prop('globalCompositeOperation', function(v){ if (!(v in COMP)) return false; cv(this, 31, COMP[v]); });
+  prop('font', function(v){ cv(this, 32, String(v)); });
+  prop('textAlign', function(v){ if (!(v in ALIGN)) return false; cv(this, 33, ALIGN[v]); });
+  prop('textBaseline', function(v){ if (!(v in BASE)) return false; cv(this, 34, BASE[v]); });
+  prop('lineDashOffset', function(v){ v = +v; if (!isFinite(v)) return false; cv(this, 44, v); });
+  prop('imageSmoothingEnabled', function(v){ cv(this, 47, v ? 1 : 0); });
+  ['imageSmoothingQuality', 'shadowColor', 'shadowBlur', 'shadowOffsetX', 'shadowOffsetY', 'filter', 'direction',
+   'letterSpacing', 'fontKerning'].forEach(function(n){ prop(n, function(){}); });
+  CP.fillRect = function(x, y, w, h){ cv(this, 1, +x, +y, +w, +h); };
+  CP.strokeRect = function(x, y, w, h){ cv(this, 2, +x, +y, +w, +h); };
+  CP.clearRect = function(x, y, w, h){ cv(this, 3, +x, +y, +w, +h); };
+  CP.beginPath = function(){ cv(this, 4); };
+  CP.moveTo = function(x, y){ cv(this, 5, +x, +y); };
+  CP.lineTo = function(x, y){ cv(this, 6, +x, +y); };
+  CP.closePath = function(){ cv(this, 7); };
+  CP.rect = function(x, y, w, h){ cv(this, 8, +x, +y, +w, +h); };
+  CP.roundRect = function(x, y, w, h, r){ var rr = r; if (rr && typeof rr === 'object') rr = rr.length !== undefined ? rr[0] : rr.x; if (rr && typeof rr === 'object') rr = rr.x || 0; cv(this, 46, +x, +y, +w, +h, +(rr || 0)); };
+  CP.arc = function(x, y, r, a0, a1, ccw){ cv(this, 9, +x, +y, +r, +a0, +a1, ccw ? 1 : 0); };
+  CP.arcTo = function(x1, y1, x2, y2, r){ cv(this, 10, +x1, +y1, +x2, +y2, +r); };
+  CP.quadraticCurveTo = function(a, b, x, y){ cv(this, 11, +a, +b, +x, +y); };
+  CP.bezierCurveTo = function(a, b, c, d, x, y){ cv(this, 12, +a, +b, +c, +d, +x, +y); };
+  CP.ellipse = function(x, y, rx, ry, rot, a0, a1, ccw){ cv(this, 13, +x, +y, +rx, +ry, +rot, +a0, +a1, ccw ? 1 : 0); };
+  function rule(r){ return r === 'evenodd' ? 1 : 0; }
+  function usePath(ctx, p){ cv(ctx, 4); for (var i = 0; i < p.__ops.length; i++) ctx[p.__ops[i][0]].apply(ctx, p.__ops[i][1]); }
+  CP.fill = function(a, b){ if (a instanceof Path2D) { usePath(this, a); cv(this, 14, rule(b)); } else cv(this, 14, rule(a)); };
+  CP.stroke = function(a){ if (a instanceof Path2D) usePath(this, a); cv(this, 15); };
+  CP.clip = function(a, b){ if (a instanceof Path2D) { usePath(this, a); cv(this, 16, rule(b)); } else cv(this, 16, rule(a)); };
+  CP.isPointInPath = function(a, b, c, d){ if (a instanceof Path2D) { usePath(this, a); return cv(this, 45, +b, +c, rule(d)); } return cv(this, 45, +a, +b, rule(c)); };
+  CP.isPointInStroke = function(a, b, c){ if (a instanceof Path2D) { usePath(this, a); return cv(this, 50, +b, +c); } return cv(this, 50, +a, +b); };
+  CP.save = function(){ this.__stack.push([Object.assign({}, this.__s), this.__dash.slice()]); cv(this, 17); };
+  CP.restore = function(){ var s = this.__stack.pop(); if (!s) return; this.__s = s[0]; this.__dash = s[1]; cv(this, 18); };
+  CP.reset = function(){ var el = this.__el; Ctx.call(this, el); cv(this, 49); };
+  CP.translate = function(x, y){ cv(this, 19, 1, 0, 0, 1, +x, +y); };
+  CP.scale = function(x, y){ cv(this, 19, +x, 0, 0, +y, 0, 0); };
+  CP.rotate = function(a){ a = +a; var c = Math.cos(a), s = Math.sin(a); cv(this, 19, c, s, -s, c, 0, 0); };
+  CP.transform = function(a, b, c, d, e, f){ cv(this, 19, +a, +b, +c, +d, +e, +f); };
+  CP.setTransform = function(a, b, c, d, e, f){
+    if (a === undefined) { cv(this, 21); return; }
+    if (typeof a === 'object') { var m = a; cv(this, 20, m.a !== undefined ? m.a : m.m11, m.b !== undefined ? m.b : m.m12, m.c !== undefined ? m.c : m.m21, m.d !== undefined ? m.d : m.m22, m.e !== undefined ? m.e : m.m41, m.f !== undefined ? m.f : m.m42); return; }
+    cv(this, 20, +a, +b, +c, +d, +e, +f);
+  };
+  CP.resetTransform = function(){ cv(this, 21); };
+  CP.getTransform = function(){ var m = cv(this, 48); if (typeof DOMMatrix === 'function') { try { return new DOMMatrix([m.a, m.b, m.c, m.d, m.e, m.f]); } catch (x) {} } m.is2D = true; return m; };
+  CP.createLinearGradient = function(x0, y0, x1, y1){ return new CanvasGradient(__cv(null, 23, 0, +x0, +y0, +x1, +y1)); };
+  CP.createRadialGradient = function(x0, y0, r0, x1, y1, r1){ return new CanvasGradient(__cv(null, 23, 1, +x0, +y0, +r0, +x1, +y1, +r1)); };
+  CP.createConicGradient = function(a, x, y){ return new CanvasGradient(__cv(null, 23, 0, x - 1, y, x + 1, y)); };
+  CP.createPattern = function(img, rep){
+    rep = rep || 'repeat';
+    var id = cv(this, 25, img, rep === 'repeat' || rep === 'repeat-x' ? 1 : 0, rep === 'repeat' || rep === 'repeat-y' ? 1 : 0);
+    return id >= 0 ? new CanvasPattern(id) : null;
+  };
+  CP.fillText = function(t, x, y, mw){ cv(this, 35, String(t), +x, +y, mw === undefined ? undefined : +mw); };
+  CP.strokeText = function(t, x, y, mw){ cv(this, 36, String(t), +x, +y, mw === undefined ? undefined : +mw); };
+  CP.measureText = function(t){ return cv(this, 37, String(t)); };
+  CP.drawImage = function(img){
+    var a = Array.prototype.slice.call(arguments, 1).map(Number);
+    if (img && img.tagName === undefined && img.canvas && img.canvas.tagName) img = img.canvas;   /* (a context: its canvas) */
+    if (!img || (a.length !== 2 && a.length !== 4 && a.length !== 8)) throw new TypeError('drawImage: bad arguments');
+    var args = [this.__el, 38, img, a.length].concat(a);
+    __cv.apply(null, args);
+  };
+  CP.setLineDash = function(d){ if (!d || typeof d.length !== 'number') return; var v = []; for (var i = 0; i < d.length; i++) { var x = +d[i]; if (!(x >= 0) || !isFinite(x)) return; v.push(x); }
+    this.__dash = v.length & 1 ? v.concat(v) : v; __cv.apply(null, [this.__el, 43, v.length].concat(v)); };
+  CP.getLineDash = function(){ return this.__dash.slice(); };
+  CP.createImageData = function(w, h){ if (w && w.width) return new ImageData(w.width, w.height); return new ImageData(Math.abs(w | 0), Math.abs(h | 0)); };
+  CP.getImageData = function(x, y, w, h){
+    w = w | 0; h = h | 0;
+    if (w < 0) { x += w; w = -w; }
+    if (h < 0) { y += h; h = -h; }
+    var s = cv(this, 39, x | 0, y | 0, w, h), bin = atob(s || ''), d = new Uint8ClampedArray(w * h * 4);
+    for (var i = 0, n = Math.min(bin.length, d.length); i < n; i++) d[i] = bin.charCodeAt(i);
+    return new ImageData(d, w, h);
+  };
+  CP.putImageData = function(img, dx, dy, sx, sy, sw, sh){
+    /* the bytes as hex (plain ASCII crosses into C the same in every engine) */
+    var d = img.data, parts = new Array(d.length);
+    for (var i = 0; i < d.length; i++) parts[i] = HEX[d[i] & 255];
+    var b64 = parts.join('');
+    if (sx === undefined) cv(this, 40, b64, img.width, img.height, dx | 0, dy | 0, 0, 0, img.width, img.height);
+    else cv(this, 40, b64, img.width, img.height, dx | 0, dy | 0, sx | 0, sy | 0, sw | 0, sh | 0);
+  };
+  CP.getContextAttributes = function(){ return { alpha: true, desynchronized: false, colorSpace: 'srgb', willReadFrequently: false }; };
+  CP.isContextLost = function(){ return false; };
+  CP.drawFocusIfNeeded = function(){};
+  CP.scrollPathIntoView = function(){};
+  EPR.getContext = function(type, opts){
+    if (this.tagName !== 'CANVAS') return undefined;
+    type = String(type).toLowerCase();
+    if (type === '2d') return this.__ctx2d || (this.__ctx2d = new Ctx(this));
+    if ((type === 'webgl' || type === 'experimental-webgl' || type === 'webgl2') && typeof W.__webglContext === 'function')
+      return W.__webglContext(this, type, opts);
+    return null;
+  };
+  EPR.toDataURL = function(type){ if (this.tagName !== 'CANVAS') return undefined; if (!this.__ctx2d) this.getContext('2d'); return __cv(this, 41); };
+  EPR.toBlob = function(cb, type){
+    var url = this.toDataURL(type), bin = atob(url.split(',')[1] || ''), u = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    var blob = typeof Blob === 'function' ? new Blob([u], { type: 'image/png' }) : null;
+    setTimeout(function(){ cb(blob); }, 0);
+  };
+  EPR.captureStream = function(){ return null; };
+  EPR.transferControlToOffscreen = function(){ throw new Error('OffscreenCanvas is not supported'); };
+  W.CanvasRenderingContext2D = Ctx;
+  W.CanvasGradient = CanvasGradient;
+  W.CanvasPattern = CanvasPattern;
+  W.Path2D = Path2D;
+  if (typeof W.ImageData === 'undefined') W.ImageData = ImageData;
+  /* requestAnimationFrame callbacks get the time, as elsewhere */
+  var raf = W.requestAnimationFrame;
+  if (raf) W.requestAnimationFrame = function(cb){ return raf(function(){ cb(P.now()); }); };
+})();
 /* <audio> / <video> / new Audio(): sound through the system's media streams
  * (__media_*: kernel/media.c). The element's state lives in el.__ms; a timer
  * polls the stream and fires the usual events. */

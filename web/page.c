@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "page.h"
+#include "canvas.h"
 #include "kstring.h"
 #include "../kernel/utf8.h"
 #include "kheap.h"
@@ -600,6 +601,9 @@ void page_free(page_t* p) {
                 p->media_node[i]->img->px = NULL;
             }
     if (!p) return;
+#ifdef BANANA_USER_WORKER
+    if (canvas_free_all) canvas_free_all(p);         /* (weak: tools that link no canvas.c) */
+#endif
     for (int i = 0; i < p->nframes; i++) page_free(p->frames[i]);   /* <iframe> children */
     script_destroy_backend(p->js);
     arena_free_all(&p->LA);
@@ -1240,6 +1244,7 @@ static int media_pictures(page_t* p) {
 
 int page_tick(page_t* p) {
     int any = media_pictures(p);
+    if (p->canvas_dirty) { p->canvas_dirty = 0; any = 1; }   /* a <canvas> was drawn on: show it */
     /* a CSS animation runs: restyle and redraw, about 20 times a second */
     if (p->anim_running && (int32_t)(now(p) - p->anim_frame) >= 50) {
         p->anim_frame = now(p);
