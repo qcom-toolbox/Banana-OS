@@ -18,7 +18,8 @@ source = a.source.read_text()
 start = source.index('static inline uint8_t  inb ')
 end = source.index('static char usb_status_buf', start)
 source = source[:start] + """
-static inline uint8_t inb(uint16_t p){(void)p;return 0;}
+uint8_t test_port64, test_port60;   /* (the 8042's status and data, as the test sets them) */
+static inline uint8_t inb(uint16_t p){return p==0x64?test_port64:p==0x60?test_port60:0;}
 static inline uint16_t inw(uint16_t p){(void)p;return 0;}
 static inline uint32_t inl(uint16_t p){(void)p;return 0;}
 static inline void outb(uint16_t p,uint8_t v){(void)p;(void)v;}

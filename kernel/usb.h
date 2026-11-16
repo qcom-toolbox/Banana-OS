@@ -40,6 +40,9 @@ void         mouse_init(void);
 /* a PS/2 (8042) controller is there - Macs and some new PCs have none: its
  * ports then read 0xFF, which looks like a byte waiting forever */
 int          ps2_controller_present(void);
+/* the 8042's status, 0 once it has gone away (three 0xFF reads: the
+ * firmware's emulation ended) - every poll reads it through this */
+uint8_t      ps2_status(void);
 mouse_state_t mouse_read(void);   /* non-blocking, returns last known state */
 mouse_state_t mouse_read_raw(void); /* games: same devices, no desktop speed scaling */
 /* timer interrupt only (kernel/gui.c): the motion of the waiting PS/2

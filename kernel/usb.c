@@ -252,20 +252,41 @@ const char* usb_status(void) {
 #define PS2_STATUS  0x64
 #define PS2_CMD     0x64
 
-static int mouse_enabled = 0;
 static uint8_t mouse_pkt[6];
 static int mouse_pkt_i = 0;
 static int mouse_pkt_size = 3;
 
+/* Whether there is an 8042 at 0x60 / 0x64. It can go away after boot: on a
+ * PC without one, the firmware's USB legacy emulation answers there until
+ * the USB controller is taken over (xhci / ehci bios_handoff), then the
+ * ports float and read 0xFF - a status no real 8042 gives (timeout and
+ * parity errors, with everything else). Read as mouse bytes, 0xFF is
+ * "left 1, down 1, every button held", endlessly: the pointer dragged to
+ * the bottom-left corner whatever USB mouse moved it, and the keyboard
+ * fed 0xFF scancodes. So every read of the status checks (ps2_status). */
+static int g_ps2_present = -1, g_ps2_ff;
+static int mouse_enabled = 0;
+
 int ps2_controller_present(void) {
-    static int present = -1;
-    if (present < 0) {
+    if (g_ps2_present < 0) {
         int ff = 0;
         for (int i = 0; i < 4; i++) if (inb(PS2_STATUS) == 0xFF) ff++;
-        present = ff < 4;
-        if (!present) klog("ps2: no PS/2 controller (a Mac, or a PC without one) - USB keyboards and mice only\n");
+        g_ps2_present = ff < 4;
+        if (!g_ps2_present) klog("ps2: no PS/2 controller (a Mac, or a PC without one) - USB keyboards and mice only\n");
     }
-    return present;
+    return g_ps2_present;
+}
+
+uint8_t ps2_status(void) {
+    if (g_ps2_present == 0) return 0;
+    uint8_t st = inb(PS2_STATUS);
+    if (st != 0xFF) { g_ps2_ff = 0; return st; }
+    if (++g_ps2_ff >= 3) {
+        g_ps2_present = 0;
+        mouse_enabled = 0;
+        klog("ps2: the PS/2 controller went away (the firmware's USB emulation, ended by the USB handoff) - USB only from now\n");
+    }
+    return 0;
 }
 
 static void ps2_wait_write(void) {
@@ -747,7 +768,7 @@ static void scale_motion(int* dx, int* dy) {
 int mouse_irq_motion(int* dx, int* dy) {
     if (!mouse_enabled || syn_detected) return 0;
     for (int n = 0; n < 64; n++) {             /* (bounded: never stuck in the timer interrupt) */
-        uint8_t st = inb(PS2_STATUS);
+        uint8_t st = ps2_status();
         if (!((st & 0x01) && (st & 0x20))) break;
         mouse_on_aux_byte(inb(PS2_DATA));
     }
@@ -809,7 +830,7 @@ static mouse_state_t mouse_read_locked(void) {
     if (mouse_enabled && syn_detected) {
         /* the touchpad's packets become motion / clicks (mouse_inject) */
         for (int n = 0; n < 64; n++) {
-            uint8_t st = inb(PS2_STATUS);
+            uint8_t st = ps2_status();
             if (!((st & 0x01) && (st & 0x20))) break;
             mouse_on_aux_byte(inb(PS2_DATA));
         }
@@ -846,7 +867,7 @@ static mouse_state_t mouse_read_locked(void) {
     /* Drain the AUX bytes waiting in the controller (status: bit 0 =
      * data available, bit 5 = from the mouse) into the packet queue */
     for (int n = 0; mouse_enabled && n < 64; n++) {
-        uint8_t st = inb(PS2_STATUS);
+        uint8_t st = ps2_status();
         if (!((st & 0x01) && (st & 0x20))) break;
         mouse_on_aux_byte(inb(PS2_DATA));
     }

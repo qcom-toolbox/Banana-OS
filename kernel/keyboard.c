@@ -876,7 +876,7 @@ char keyboard_try_getchar(void) {
     if (!ps2_controller_present()) return 0;    /* (USB keyboards come through usb_poll) */
     uintptr_t fl;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(fl) :: "memory");
-    uint8_t st = inb(KB_STATUS_PORT);
+    uint8_t st = ps2_status();                  /* (0 once the controller has gone away) */
     if (!(st & 0x01)) {                         /* no data */
         if (fl & 0x200) __asm__ volatile("sti");
         return 0;

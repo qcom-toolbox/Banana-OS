@@ -8,6 +8,7 @@ static unsigned checks;
 static int integrate=1;
 #define CHECK(x) do{checks++;if(!(x)){fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x);exit(1);}}while(0)
 void usb_poll(void){}
+void klog(const char* f,...){(void)f;}
 void i2chid_poll(void){}
 void vmtools_poll_pointer(void){if(integrate)mouse_set_abs(32000,16000);}
 void tp_tick(touchpad_t* t){(void)t;}
@@ -55,5 +56,22 @@ int main(void){
  mouse_on_aux_byte(9);mouse_on_aux_byte(0);mouse_on_aux_byte(0);mouse_on_aux_byte(1);
  m=mouse_read();CHECK(m.btn_left&&m.dz==1&&m.abs);
  packet(0,0,0);m=mouse_read();CHECK(!m.btn_left);
+ /* The firmware's USB legacy emulation answered at 0x60 / 0x64 at boot (a
+  * controller "present"); the USB handoff ended it and the ports float at
+  * 0xFF. Those bytes must not become motion: before, each was "left 1,
+  * down 1, every button held" and dragged the pointer to the bottom-left. */
+ packet(0,0,0);m=mouse_read();
+ integrate=0;g_ps2_present=1;mouse_enabled=1;mouse_pkt_size=3;mouse_pkt_i=0;
+ test_port64=0xFF;test_port60=0xFF;
+ int moved=0,held=0;
+ for(int i=0;i<50;i++){m=mouse_read();moved|=m.dx||m.dy;held|=m.btn_left||m.btn_right||m.btn_middle;
+  int dx=0,dy=0;moved|=mouse_irq_motion(&dx,&dy)&&(dx||dy);}
+ CHECK(!moved&&!held);
+ CHECK(g_ps2_present==0&&!mouse_enabled&&!ps2_controller_present());
+ CHECK(ps2_status()==0);
+ /* a USB mouse still moves the pointer afterwards */
+ int usb=mouse_source();mouse_inject_src(usb,12,-4,0);m=mouse_read();CHECK(m.dx==12&&m.dy==-4&&!m.btn_left);
+ mouse_source_free(usb);
+ test_port64=0;test_port60=0;
  printf("Mouse input: %u checks passed\n",checks);return 0;
 }
