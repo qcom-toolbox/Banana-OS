@@ -177,7 +177,14 @@ int devcmd_dispatch(int argc, char** argv) {
             say(msg);
             return 1;
         }
-        if (argc < 2 || strcmp(argv[1], "experimental")) { say("usage: gpu experimental [on | off] | gpu radeon dump [folder]   (lsgpu: the graphics card)"); return 1; }
+        if (argc >= 3 && !strcmp(argv[1], "radeon") && !strcmp(argv[2], "3d")) {
+            char msg[160];
+            int r = gpu_radeon_3d(msg, sizeof(msg));
+            terminal_write(r == 0 ? "gpu radeon 3d: " : "gpu radeon 3d: not started: ");
+            say(msg);
+            return 1;
+        }
+        if (argc < 2 || strcmp(argv[1], "experimental")) { say("usage: gpu experimental [on | off] | gpu radeon dump [folder] | gpu radeon 3d   (lsgpu: the graphics card)"); return 1; }
         if (!strcmp(w, "on")) {
             gpu_set_experimental(1);
             say("gpu: experimental drivers on (AMD Radeon HD 5000-7000: resolutions, hardware cursor, vsync; RX 400/500: cursor and vsync)");

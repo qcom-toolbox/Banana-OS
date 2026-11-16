@@ -120,6 +120,8 @@ int  gpu_radeon_try(void);               /* now: 0, or -1 (gpu_radeon_status say
 /* the video BIOS and display registers saved in dir (a report): 0, or -1; msg says what */
 int  gpu_radeon_dump(const char* dir, char* msg, int cap);
 const char* gpu_radeon_status(void);
+/* `gpu radeon 3d`: the 3D engine brought up and tested (Caicos): 0, or -1 (msg) */
+int  gpu_radeon_3d(char* msg, int cap);
 void gpu_radeon_boot(void);              /* settings_boot: when asked for */
 int  gpu_experimental(void);             /* the setting */
 void gpu_set_experimental(int on);

@@ -234,9 +234,16 @@ static void rad_info(gpu_t* g, char* buf, int cap) {
     if (g_dce <= 5 && n < cap) {
         n += ksnprintf(buf + n, (size_t)(cap - n), "mode setting: %s\n", g_kms ? "yes" : "no");
         if (n < cap) n += ksnprintf(buf + n, (size_t)(cap - n), "  %s\n", g_kms_why);
+        if (n < cap) n += ksnprintf(buf + n, (size_t)(cap - n), "3D engine: %s\n", rad_gfx_status());
         if (g_rad.atom && n < cap) { rad_atom_info(&g_rad, buf + n, cap - n); n += (int)strlen(buf + n); }
     }
     if (n < cap) ksnprintf(buf + n, (size_t)(cap - n), "a report: gpu radeon dump; turn off: gpu experimental off (and restart)");
+}
+
+/* `gpu radeon 3d`: the 3D engine started (and tested) */
+int gpu_radeon_3d(char* msg, int cap) {
+    if (!g_reg || g_dce > 5) { kstrlcpy(msg, "no Radeon HD 5000-7000 driven (gpu experimental on, lsgpu)", (size_t)cap); return -1; }
+    return rad_gfx_init(&g_rad, g_vb, g_vram_mc, msg, cap);
 }
 
 /* `gpu radeon dump`: the video BIOS and the display registers, saved (a report) */
@@ -260,9 +267,9 @@ int gpu_radeon_dump(const char* dir, char* msg, int cap) {
     }
     char* info = kmalloc(4096);
     if (info) {
-        int k = ksnprintf(info, 4096, "device %04x:%04x family %s, DCE %d, CRTC %d\nmode setting: %s (%s)\n",
+        int k = ksnprintf(info, 4096, "device %04x:%04x family %s, DCE %d, CRTC %d\nmode setting: %s (%s)\n3D engine: %s\n",
                           g_gpu.pci.vendor, g_gpu.pci.device, rad_family_name(g_rad.family), g_dce, g_crtc_n,
-                          g_kms ? "yes" : "no", g_kms_why);
+                          g_kms ? "yes" : "no", g_kms_why, rad_gfx_status());
         if (g_rad.atom) { rad_atom_info(&g_rad, info + k, 4096 - k); k += (int)strlen(info + k); }
         for (int i = 0; i < g_nmodes && k < 4000; i++)
             k += ksnprintf(info + k, (size_t)(4096 - k), "mode %dx%d@%u %u kHz\n", g_modes[i].hdisplay, g_modes[i].vdisplay,

@@ -11,6 +11,7 @@ extern const uint8_t ax88179a_notice_start[],ax88179a_notice_end[];
 extern const uint8_t aqc107_notice_start[],aqc107_notice_end[];
 extern const uint8_t r8125_notice_start[],r8125_notice_end[];
 extern const uint8_t radeon_notice_start[],radeon_notice_end[];
+extern const uint8_t rad_fw_licence[],rad_fw_licence_end[];
 static void install_notice(const char* dir,const char* path,const uint8_t* start,const uint8_t* end) {
     if(fs_mkdir_p(dir)<0) return;
     int f=fs_find_file(path);
@@ -40,4 +41,6 @@ void wifi_boot_files(void) {
                    igc_notices_start,igc_notices_end);
     install_notice("/usr/share/licenses/radeon","/usr/share/licenses/radeon/NOTICES",
                    radeon_notice_start,radeon_notice_end);
+    install_notice("/usr/share/licenses/radeon","/usr/share/licenses/radeon/LICENSE.radeon-firmware",
+                   rad_fw_licence,rad_fw_licence_end);
 }

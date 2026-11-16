@@ -70,6 +70,8 @@ uint32_t rad_kms_max_clock(radeon_t* r, const rad_path_t* p, int k) { (void)r; (
 int rad_kms_set(radeon_t* r, int c, int p, int d, const edid_mode_t* m, uint64_t fb, int w, int h, int pp, char* why, int cap) {
     (void)r; (void)c; (void)p; (void)d; (void)m; (void)fb; (void)w; (void)h; (void)pp; kstrlcpy(why, "model", (size_t)cap); return -1;
 }
+int rad_gfx_init(radeon_t* r, uintptr_t vc, uint64_t vm, char* why, int cap) { (void)r; (void)vc; (void)vm; kstrlcpy(why, "model", (size_t)cap); return -1; }
+const char* rad_gfx_status(void) { return "model"; }
 int edid_modes(const uint8_t* e, edid_mode_t* o, int max) { (void)e; (void)o; (void)max; return 0; }
 void edid_name(const uint8_t* e, char* o, int cap) { (void)e; if (cap) o[0] = 0; }
 int fs_mkdir_p(const char* p) { (void)p; return 0; }

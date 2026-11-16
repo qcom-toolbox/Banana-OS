@@ -410,6 +410,8 @@ jobs:
           done
       - name: Test Radeon TeraScale 2 mode setting on a model video BIOS
         run: bash tools/tests/radeon_kms.sh
+      - name: Test the Radeon HD 7450 3D engine bring-up on a model command processor
+        run: sh tools/tests/radeon_gfx.sh
       - name: Test both Mesa drivers on Intel models
         env:
           MESA_REF: ${{ github.workspace }}/ports/mesa/build-crocus-iris/ref

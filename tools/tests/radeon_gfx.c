@@ -1,0 +1,251 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* The Radeon HD 7450's 3D engine bring-up (kernel/radeon_gfx.c, with
+ * Linux's evergreen_gfx.c / r600_gfx.c / ni_gfx.c) on a model of the card:
+ * its registers, its video memory, and a command processor that runs what
+ * the ring holds - type 0 / 2 / 3 packets, SET_CONFIG_REG, MEM_WRITE,
+ * EVENT_WRITE_EOP, INDIRECT_BUFFER fetched through the GART's page table
+ * as the memory controller would walk it.
+ *   radeon_gfx ok | dead | gddr5 | cedar */
+#define RADEON_MODEL 1
+
+#include "../../kernel/types.h"
+static unsigned char g_arena[64 << 10] __attribute__((aligned(4096)));
+static size_t g_arena_used;
+#define ARENA_PHYS 0x20000000ull
+#define RAD_PHYS(p) ((uint64_t)((uintptr_t)(p) - (uintptr_t)g_arena) + ARENA_PHYS)
+#include "../../kernel/radeon_gfx.c"
+extern int printf(const char*, ...);
+extern int vprintf(const char*, __builtin_va_list);
+extern void* calloc(size_t, size_t);
+extern void free(void*);
+extern void exit(int);
+/* (the Linux files are their own units, as in the kernel: their headers disagree) */
+#define MC_SEQ_SUP_CNTL           0x28c8
+#define RUN_MASK                  (1 << 0)
+#define MC_SEQ_SUP_PGM            0x28cc
+#define MC_IO_PAD_CNTL_D0         0x29d0
+#define MEM_FALL_OUT_CMD          (1 << 8)
+#define MC_SEQ_MISC0              0x2a00
+#define MC_SEQ_MISC0_GDDR5_SHIFT  28
+#define MC_SEQ_MISC0_GDDR5_VALUE  5
+
+/* the microcode, as the kernel has it */
+__asm__(".section .rodata\n.balign 4\n"
+        ".global rad_fw_caicos_pfp\nrad_fw_caicos_pfp:\n.incbin \"firmware/amd/CAICOS_pfp.bin\"\n.global rad_fw_caicos_pfp_end\nrad_fw_caicos_pfp_end:\n"
+        ".balign 4\n.global rad_fw_caicos_me\nrad_fw_caicos_me:\n.incbin \"firmware/amd/CAICOS_me.bin\"\n.global rad_fw_caicos_me_end\nrad_fw_caicos_me_end:\n"
+        ".balign 4\n.global rad_fw_btc_rlc\nrad_fw_btc_rlc:\n.incbin \"firmware/amd/BTC_rlc.bin\"\n.global rad_fw_btc_rlc_end\nrad_fw_btc_rlc_end:\n"
+        ".balign 4\n.global rad_fw_caicos_mc\nrad_fw_caicos_mc:\n.incbin \"firmware/amd/CAICOS_mc.bin\"\n.global rad_fw_caicos_mc_end\nrad_fw_caicos_mc_end:\n"
+        ".balign 4\n.global rad_fw_licence\nrad_fw_licence:\n.incbin \"firmware/amd/LICENSE.radeon\"\n.global rad_fw_licence_end\nrad_fw_licence_end:\n.byte 0\n"
+        ".previous\n");
+
+/* ---- the kernel's services ---- */
+static uint64_t g_ns;
+void* kmalloc(size_t n) { return calloc(1, n ? n : 1); }
+void* kzalloc(size_t n) { return calloc(1, n ? n : 1); }
+void* kmalloc_aligned(size_t n, size_t a) {
+    size_t at = (g_arena_used + a - 1) & ~(a - 1);
+    if (at + n > sizeof(g_arena)) return NULL;
+    g_arena_used = at + n;
+    return g_arena + at;
+}
+void kfree(void* p) { if ((uint8_t*)p < g_arena || (uint8_t*)p >= g_arena + sizeof(g_arena)) free(p); }
+static int g_quiet;
+void klog(const char* fmt, ...) {
+    if (g_quiet) return;
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    printf("  | ");
+    vprintf(fmt, ap);
+    __builtin_va_end(ap);
+}
+uint64_t timer_counter(void) { return g_ns += 1000; }
+uint32_t timer_ms(void) { return (uint32_t)(g_ns / 1000000u); }
+void timer_sleep_ms(uint32_t ms) { g_ns += (uint64_t)ms * 1000000u; }
+uint32_t pci_read32(uint8_t b, uint8_t d, uint8_t f, uint8_t o) { (void)b; (void)d; (void)f; (void)o; return 0; }
+uint16_t pci_read16(uint8_t b, uint8_t d, uint8_t f, uint8_t o) { (void)b; (void)d; (void)f; (void)o; return 0; }
+void pci_write16(uint8_t b, uint8_t d, uint8_t f, uint8_t o, uint16_t v) { (void)b; (void)d; (void)f; (void)o; (void)v; }
+int mmio_map(uint64_t p, uint64_t n) { (void)p; (void)n; return 1; }
+const char* rad_family_name(int f) { return f == CHIP_CAICOS ? "Caicos" : f == CHIP_CEDAR ? "Cedar" : "?"; }
+
+/* ---- the card ---- */
+#define VRAM_MB    1024u
+#define VRAM_HOST  (130u << 20)                  /* (what the driver touches: the first 129 MiB) */
+static uint32_t R[(128u << 10) / 4];
+static uint8_t* VR;
+static int g_cp_alive = 1, g_gddr5;
+static unsigned g_rptr;
+static uint32_t g_pfp_tot, g_me_tot, g_pfp_n, g_me_n, g_rlc_n, g_mc_n, g_bad_pfp, g_bad_me, g_bad_rlc, g_bad_mc;
+static uint32_t g_pkt_cfg, g_pkt_eop, g_pkt_ib, g_pkt_mem, g_pkt_init, g_bad_addr, g_bad_pkt;
+
+static uint32_t fw_dw(const uint8_t* fw, uint32_t i) { const uint8_t* p = fw + 4 * i; return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
+
+/* a memory controller address, as the card resolves it: video memory, or the GTT through the page table */
+static void* mc(uint64_t a, uint32_t bytes) {
+    uint64_t vend = (uint64_t)((R[MC_VM_FB_LOCATION / 4] >> 16) + 1) << 24;
+    if (a < vend) {
+        if (a + bytes > VRAM_HOST) { printf("  model: VRAM 0x%llx out of reach\n", (unsigned long long)a); g_bad_addr++; return NULL; }
+        return VR + a;
+    }
+    uint64_t gs = (uint64_t)R[VM_CONTEXT0_PAGE_TABLE_START_ADDR / 4] << 12, ge = (uint64_t)R[VM_CONTEXT0_PAGE_TABLE_END_ADDR / 4] << 12;
+    if (!(R[VM_CONTEXT0_CNTL / 4] & 1) || a < gs || a > ge + 0xFFF) { g_bad_addr++; return NULL; }
+    uint64_t* pt = mc((uint64_t)R[VM_CONTEXT0_PAGE_TABLE_BASE_ADDR / 4] << 12, 8);
+    if (!pt) return NULL;
+    uint64_t pte = pt[(a - gs) >> 12];
+    if ((pte & 3) != 3) { if (!g_quiet) printf("  model: GTT 0x%llx unmapped\n", (unsigned long long)a); g_bad_addr++; return NULL; }            /* (valid, system) */
+    uint64_t pa = (pte & 0xFFFFFFFFFF000ull) | (a & 0xFFF);
+    if (pa < ARENA_PHYS || pa + bytes > ARENA_PHYS + sizeof(g_arena)) { g_bad_addr++; return NULL; }
+    return g_arena + (pa - ARENA_PHYS);
+}
+
+static void reg_write(uint32_t reg, uint32_t v);
+static void run(const uint32_t* (*at)(uint32_t i, void* c), void* c, uint32_t start, uint32_t end, int depth);
+
+static const uint32_t* ring_at(uint32_t i, void* c) {
+    (void)c;
+    uint32_t n = 2u << (R[CP_RB_CNTL / 4] & 0x3F);
+    uint32_t* ring = mc((uint64_t)R[CP_RB_BASE / 4] << 8, n * 4);
+    return ring ? &ring[i & (n - 1)] : NULL;
+}
+static const uint32_t* ib_at(uint32_t i, void* c) { return mc(*(uint64_t*)c + 4ull * i, 4); }
+
+static void run(const uint32_t* (*at)(uint32_t i, void* c), void* c, uint32_t i, uint32_t end, int depth) {
+    while (i != end) {
+        const uint32_t* hp = at(i, c);
+        if (!hp) return;
+        uint32_t h = *hp, type = h >> 30, n = ((h >> 16) & 0x3FFF) + 1;
+        uint32_t p[256];
+        if (type == 2) { i++; continue; }
+        if (type == 1 || n > 256) { printf("  model: packet %08x\n", h); g_bad_pkt++; return; }
+        for (uint32_t k = 0; k < n; k++) { const uint32_t* q = at(i + 1 + k, c); if (!q) return; p[k] = *q; }
+        i += 1 + n;
+        if (type == 0) { for (uint32_t k = 0; k < n; k++) reg_write(((h & 0xFFFF) << 2) + 4 * k, p[k]); continue; }
+        switch ((h >> 8) & 0xFF) {
+        case PACKET3_SET_CONFIG_REG:
+            g_pkt_cfg++;
+            for (uint32_t k = 1; k < n; k++) reg_write(PACKET3_SET_CONFIG_REG_START + 4 * (p[0] + k - 1), p[k]);
+            break;
+        case PACKET3_MEM_WRITE: {
+            g_pkt_mem++;
+            uint32_t* d = mc(p[0] | (uint64_t)(p[1] & 0xFF) << 32, 4);
+            if (d) *d = p[2];
+            break;
+        }
+        case PACKET3_EVENT_WRITE_EOP: {
+            g_pkt_eop++;
+            uint32_t sel = (p[2] >> 29) & 7;
+            uint32_t* d = mc(p[1] | (uint64_t)(p[2] & 0xFF) << 32, 8);
+            if (d && sel >= 1) d[0] = p[3];
+            if (d && sel == 2) d[1] = p[4];
+            break;
+        }
+        case PACKET3_INDIRECT_BUFFER: {
+            g_pkt_ib++;
+            if (depth) { g_bad_pkt++; break; }
+            uint64_t base = (p[0] & ~3u) | (uint64_t)(p[1] & 0xFF) << 32;
+            run(ib_at, &base, 0, p[2], 1);
+            break;
+        }
+        case PACKET3_ME_INITIALIZE: g_pkt_init++; break;
+        default: break;
+        }
+    }
+}
+
+static void cp_kick(void) {
+    if (!g_cp_alive || (R[CP_ME_CNTL / 4] & (CP_ME_HALT | CP_PFP_HALT)) || !R[CP_RB_BASE / 4]) return;
+    uint32_t n = 2u << (R[CP_RB_CNTL / 4] & 0x3F);
+    uint32_t w = R[CP_RB_WPTR / 4] & (n - 1);
+    run(ring_at, NULL, g_rptr, w, 0);
+    g_rptr = w;
+}
+
+static void reg_write(uint32_t reg, uint32_t v) {
+    if (reg + 4 > sizeof(R)) return;
+    switch (reg) {
+    case CP_PFP_UCODE_ADDR: g_pfp_n = v; break;
+    case CP_PFP_UCODE_DATA: if (g_pfp_n < EVERGREEN_PFP_UCODE_SIZE && v != fw_dw(rad_fw_caicos_pfp, g_pfp_n)) g_bad_pfp++; g_pfp_n++; g_pfp_tot++; return;
+    case CP_ME_RAM_WADDR: g_me_n = v; break;
+    case CP_ME_RAM_DATA: if (g_me_n < EVERGREEN_PM4_UCODE_SIZE && v != fw_dw(rad_fw_caicos_me, g_me_n)) g_bad_me++; g_me_n++; g_me_tot++; return;
+    case RLC_UCODE_DATA: if (v != fw_dw(rad_fw_btc_rlc, R[RLC_UCODE_ADDR / 4])) g_bad_rlc++; g_rlc_n++; return;
+    case MC_SEQ_SUP_PGM: if (g_mc_n < BTC_MC_UCODE_SIZE && v != fw_dw(rad_fw_caicos_mc, g_mc_n)) g_bad_mc++; g_mc_n++; return;
+    case CP_RB_RPTR_WR: if (R[CP_RB_CNTL / 4] & RB_RPTR_WR_ENA) g_rptr = v; break;
+    }
+    R[reg / 4] = v;
+    if (reg == CP_RB_WPTR || reg == CP_ME_CNTL) cp_kick();
+}
+
+uint32_t rad_rd(radeon_t* r, uint32_t reg) {
+    (void)r;
+    if (reg + 4 > sizeof(R)) return 0;
+    switch (reg) {
+    case CP_RB_RPTR: return g_rptr;
+    case VM_CONTEXT0_REQUEST_RESPONSE: return 1u << RESPONSE_TYPE_SHIFT;     /* (the TLB flushed) */
+    case MC_SEQ_MISC0: return g_gddr5 ? (uint32_t)MC_SEQ_MISC0_GDDR5_VALUE << MC_SEQ_MISC0_GDDR5_SHIFT : 0;
+    case MC_SEQ_SUP_CNTL: return R[reg / 4] == 1 ? RUN_MASK : 0;
+    case MC_IO_PAD_CNTL_D0: return MEM_FALL_OUT_CMD;
+    }
+    return R[reg / 4];
+}
+void rad_wr(radeon_t* r, uint32_t reg, uint32_t v) { (void)r; reg_write(reg, v); }
+
+static int g_fails;
+#define CHECK(c, ...) do { if (c) printf("ok   " __VA_ARGS__); else { printf("FAIL " __VA_ARGS__); g_fails++; } printf("\n"); } while (0)
+
+int main(int argc, char** argv) {
+    const char* mode = argc > 1 && argv[1] ? argv[1] : "ok";
+    VR = calloc(1, VRAM_HOST);
+    R[MC_VM_FB_LOCATION / 4] = ((VRAM_MB / 16 - 1) << 16) | 0;      /* (0 .. 1 GiB) */
+    R[CONFIG_MEMSIZE / 4] = VRAM_MB;
+    R[CP_ME_CNTL / 4] = CP_ME_HALT | CP_PFP_HALT;
+    g_cp_alive = strcmp(mode, "dead") != 0;
+    g_gddr5 = !strcmp(mode, "gddr5");
+    static radeon_t rt;
+    rt.family = !strcmp(mode, "cedar") ? CHIP_CEDAR : CHIP_CAICOS;
+    rt.pci.device = 0x6779;
+    char why[160] = "";
+    int r = rad_gfx_init(&rt, (uintptr_t)VR, 0, why, sizeof(why));
+    printf("%s: rad_gfx_init = %d: %s\n", mode, r, why);
+
+    if (!strcmp(mode, "cedar")) {
+        CHECK(r == -1 && strstr(why, "Caicos"), "another family: refused, it has no microcode here");
+        CHECK(R[CP_RB_BASE / 4] == 0 && g_pfp_n == 0, "and the card untouched");
+    } else if (!strcmp(mode, "dead")) {
+        CHECK(r == -1 && strstr(why, "ring test"), "a command processor that does not run: the ring test fails");
+        CHECK(R[CP_ME_CNTL / 4] == (CP_ME_HALT | CP_PFP_HALT), "the command processor halted again");
+        CHECK(!(R[VM_CONTEXT0_CNTL / 4] & 1), "the GART off again");
+        CHECK(!rad_gfx_ready(), "not ready");
+    } else {
+        CHECK(r == 0 && rad_gfx_ready(), "brought up");
+        CHECK(g_bad_pfp == 0 && g_bad_me == 0 && g_pfp_tot == EVERGREEN_PFP_UCODE_SIZE && g_me_tot == EVERGREEN_PM4_UCODE_SIZE,
+              "the PFP (%u) and ME (%u) microcode loaded, as the files have it", g_pfp_tot, g_me_tot);
+        CHECK(g_bad_rlc == 0 && g_rlc_n == EVERGREEN_RLC_UCODE_SIZE, "the RLC microcode (%u dwords)", g_rlc_n);
+        if (g_gddr5) CHECK(g_bad_mc == 0 && g_mc_n == BTC_MC_UCODE_SIZE, "GDDR5, the sequencer not running: its microcode loaded (%u dwords)", g_mc_n);
+        else CHECK(g_mc_n == 0, "DDR3: the memory controller's microcode left as the BIOS has it");
+        CHECK(R[VM_CONTEXT0_CNTL / 4] & 1, "the GART on");
+        CHECK(((uint64_t)R[VM_CONTEXT0_PAGE_TABLE_BASE_ADDR / 4] << 12) == GFX_OFF, "its page table at 128 MiB into video memory");
+        CHECK(((uint64_t)R[VM_CONTEXT0_PAGE_TABLE_START_ADDR / 4] << 12) == (uint64_t)VRAM_MB << 20, "the GTT right after video memory");
+        CHECK(R[CP_RB_BASE / 4] == RING_OFF >> 8 && (2u << (R[CP_RB_CNTL / 4] & 0x3F)) == RING_BYTES / 4, "the ring: 64 KiB at its offset");
+        CHECK(g_pkt_init == 1, "ME_INITIALIZE run");
+        CHECK(g_pkt_eop == 2 && g_pkt_ib == 1 && g_pkt_mem == 1, "two fences, one indirect buffer (and its next-rptr write)");
+        CHECK(g_bad_addr == 0 && g_bad_pkt == 0, "every address resolved, every packet understood (%u, %u)", g_bad_addr, g_bad_pkt);
+        CHECK(*(uint32_t*)(VR + WB_OFF + R600_WB_EVENT_OFFSET) == 2, "the fence written back: 2");
+        int cleared = 1;
+        for (uint32_t i = 0; i < 65536; i++) if ((((uint64_t*)(VR + GFX_OFF))[i] & 1)) cleared = 0;
+        CHECK(cleared, "the test page unbound again");
+        CHECK(R[SCRATCH_REG0 / 4] == 0xDEADBEEF && g_pkt_cfg == 2, "the ring test and the indirect buffer set the scratch register (%u SET_CONFIG_REGs)", g_pkt_cfg);
+        uint64_t pa = ARENA_PHYS;
+        CHECK(rad_gart_bind(65535, &pa, 2) == 0 && rad_gart_bind(70000, &pa, 1) == 0, "binding past the GTT refused");
+        uint64_t ga = rad_gart_bind(5, &pa, 1);
+        CHECK(ga == ((uint64_t)VRAM_MB << 20) + 5 * 4096 && mc(ga, 4) == (void*)g_arena, "a page bound: the card reads system memory there");
+        rad_gart_unbind(5, 1);
+        g_quiet = 1;
+        CHECK(mc(ga, 4) == NULL, "and unbound");
+        g_quiet = 0;
+        char again[64];
+        CHECK(rad_gfx_init(&rt, (uintptr_t)VR, 0, again, sizeof(again)) == 0 && g_pkt_init == 1, "a second start: left as it is");
+        CHECK(strstr(rad_gfx_status(), "up:") != NULL, "status: %s", rad_gfx_status());
+    }
+    free(VR);
+    printf(g_fails ? "%d FAILED\n" : "all passed\n", g_fails);
+    return g_fails != 0;
+}

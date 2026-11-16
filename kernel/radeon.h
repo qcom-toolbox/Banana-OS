@@ -8,6 +8,8 @@
  *                   interpreter (third_party/radeon/atom.c), the display
  *                   paths and clocks it describes, EDID through its I2C
  *   radeon_kms.c    mode setting: PLLs, CRTC timings, encoders
+ *   radeon_gfx.c    the 3D engine: GART, command processor, ring, fences
+ *                   (Caicos; the microcode in firmware/amd)
  *   gpu_radeon.c    the display driver (gpu_t) on top of them
  * After Linux's radeon driver (MIT licensed), written without the card at
  * hand: experimental, off unless asked for (gpu experimental on). */
@@ -80,5 +82,20 @@ uint32_t rad_kms_max_clock(radeon_t* r, const rad_path_t* p, int kind);   /* kHz
  * row: 0, or -1 (why) */
 int      rad_kms_set(radeon_t* r, int crtc, int path, int digital, const edid_mode_t* m,
                      uint64_t fb_mc, int w, int h, int pitch_px, char* why, int cap);
+
+/* radeon_gfx.c: the 3D engine brought up and tested (0), or -1 (why).
+ * vram_cpu: the video memory BAR (the CPU's address); vram_mc: the memory
+ * controller's address of the video memory */
+int  rad_gfx_init(radeon_t* r, uintptr_t vram_cpu, uint64_t vram_mc, char* why, int cap);
+int  rad_gfx_ready(void);
+const char* rad_gfx_status(void);
+/* n pages of system memory (physical addresses phys[]) at GTT page first:
+ * their GPU address, or 0 */
+uint64_t rad_gart_bind(uint32_t first, const uint64_t* phys, uint32_t n);
+void     rad_gart_unbind(uint32_t first, uint32_t n);
+uint64_t rad_gtt_base(void);
+uint32_t rad_gtt_pages(void);
+/* the microcode's licence (shown with the other notices) */
+const char* rad_fw_notice(uint32_t* len);
 
 #endif

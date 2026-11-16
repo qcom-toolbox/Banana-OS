@@ -218,10 +218,35 @@ a Caicos) it also sets **modes**:
 what the driver found (`/home/banana/radeon-report` by default): with them,
 a problem on a real card can be replayed on the model.
 
-**3D (in progress).** The command processor (AMD's CAICOS_pfp / me / BTC_rlc
-microcode), the GART and video memory manager, interrupts and fences, a
-radeon DRM interface with command-stream relocation and register checking
-(TeraScale 2 has no per-process GPU address space), and Mesa's r600 driver.
+**The 3D engine (started; Caicos).** `gpu radeon 3d` brings up the 3D
+engine of a Radeon HD 6450 / 7450 / 8450 (Caicos) as Linux's
+`evergreen_startup` does, with Linux's own code for it
+(`third_party/radeon/evergreen_gfx.c`, `r600_gfx.c`, `ni_gfx.c`, MIT) on
+`kernel/radeon_gfx.c`:
+
+- AMD's microcode, built in from linux-firmware (`firmware/amd`: CAICOS_pfp,
+  CAICOS_me, BTC_rlc, CAICOS_mc; AMD's redistribution licence, shown in
+  `/usr/share/licenses/radeon`). The memory controller's is loaded only on
+  GDDR5 cards whose sequencer the video BIOS has not started.
+- The GART: a 256 MiB window of system memory (the GTT) right after video
+  memory in the memory controller's space, its page table 128 MiB into
+  video memory (below that is the display's), every page the dummy one
+  until bound (`rad_gart_bind`: valid, system, snooped, read / write).
+- The engine's set-up (`evergreen_gpu_init`: pipes, SIMDs, backends, the
+  tiling configuration), the run-list controller, the command processor's
+  PFP and ME microcode, and a 64 KiB ring in video memory with a writeback
+  page (read pointer, scratch registers, fences).
+- Then it proves the engine runs: a scratch register set from the ring, a
+  fence (`EVENT_WRITE_EOP`) written back, and an indirect buffer in system
+  memory fetched through the GART that sets a scratch register. Any step
+  failing stops the command processor, turns the GART off again and says
+  which (lsgpu, `gpu radeon dump`).
+- `tools/tests/radeon_gfx.sh` runs all of it against a model command
+  processor (ring, type 0 / 2 / 3 packets, writebacks, the page-table walk),
+  checking the microcode uploaded word for word.
+- Next: a radeon DRM interface (buffer objects in video memory and the GTT,
+  command submission with relocations and the register checker - TeraScale 2
+  has no per-process GPU address space), interrupts, and Mesa's r600 driver.
 
 ## Java and LWJGL
 
