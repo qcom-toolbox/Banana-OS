@@ -11,6 +11,7 @@
 /* host controller drivers */
 int xhci_init_controller(const pci_dev_t* pd);
 int ehci_init_controller(const pci_dev_t* pd);
+void ehci_bios_handoff_early(const pci_dev_t* pd);
 int uhci_init_controller(const pci_dev_t* pd);
 int ohci_init_controller(const pci_dev_t* pd);
 
@@ -333,6 +334,11 @@ void usb_stack_init(void) {
     /* xHCI first: on Intel chipsets taking it over also switches the
      * shared USB 2.0 ports from the EHCI controller to it */
     hc_scan_t s;
+    /* every EHCI taken from the firmware first: its USB legacy support must
+     * stop before the xHCI takes the ports it was using */
+    s.n = 0; s.prog_if = 0x20;
+    pci_scan(scan_cb, &s);
+    for (int i = 0; i < s.n; i++) ehci_bios_handoff_early(&s.list[i]);
     s.n = 0; s.prog_if = 0x30;
     pci_scan(scan_cb, &s);
     for (int i = 0; i < s.n; i++) xhci_init_controller(&s.list[i]);

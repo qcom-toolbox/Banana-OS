@@ -628,6 +628,21 @@ static void bios_handoff(ehci_t* e, const pci_dev_t* pd) {
     }
 }
 
+/* only the handoff - usbcore runs it on every EHCI before the xHCI takes the
+ * shared ports: on Intel 7-series boards (B75...) the firmware's USB legacy
+ * support (a PS/2 mouse it fakes from the USB one) runs through EHCI, and
+ * pulling the ports from under it while it still owned the controller left
+ * it feeding the PS/2 port. Linux hands every controller off first too. */
+void ehci_bios_handoff_early(const pci_dev_t* pd) {
+    int is_io = 0;
+    uintptr_t bar = pci_bar(pd, 0, &is_io);
+    if (is_io || !bar) return;
+    ehci_t tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.cap = (volatile uint8_t*)(uintptr_t)bar;
+    bios_handoff(&tmp, pd);
+}
+
 int ehci_init_controller(const pci_dev_t* pd) {
     if (g_ehci_count >= MAX_EHCI) return -1;
     int is_io = 0;
