@@ -7,6 +7,7 @@
 #include "../kernel/usb.h"
 #include "../kernel/timer.h"
 #include "../kernel/kheap.h"
+#include "../kernel/serial.h"
 #include "../kernel/fs.h"
 #include "../kernel/rtc.h"
 #include "../net/net.h"
@@ -1039,6 +1040,17 @@ int netcmd_dispatch(const char* line) {
     if (strcmp(c, "wallpaper") == 0)                 { cmd_wallpaper(argc, argv); return 1; }
     if (strcmp(c, "lsusb") == 0)                     { usb_list(); return 1; }
     if (strcmp(c, "lsinput") == 0)                   { input_list(); return 1; }
+    if (strcmp(c, "dmesg") == 0) {                   /* the kernel log, the last 64 KiB */
+        char* b = kmalloc(65536 + 1);
+        if (!b) { terminal_writeln("dmesg: out of memory"); return 1; }
+        uint32_t n = klog_read(b, 65536);
+        b[n] = 0;
+        char* s = b;
+        if (n == 65536) { char* nl = strchr(s, '\n'); if (nl) s = nl + 1; }   /* (the oldest line, cut: skipped) */
+        terminal_write(s);
+        kfree(b);
+        return 1;
+    }
     if (strcmp(c, "usb") == 0) {
         if (argc >= 2 && strcmp(argv[1], "rescan") == 0) { usb_rescan(); usb_list(); }
         else terminal_writeln("usage: usb rescan     (lsusb lists devices)");

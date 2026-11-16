@@ -594,7 +594,10 @@ static void detach_port(xhci_t* x, int p) {
         for (int j = 0; j < RING_TRBS; j++)
             if (r->owner[j]) { r->owner[j]->status = USB_XFER_GONE; r->owner[j] = NULL; }
     }
-    if (xd->udev) usb_device_gone(xd->udev);
+    if (xd->udev) {
+        klog("xhci: port %d: device %04x:%04x disconnected\n", p, xd->udev->desc.idVendor, xd->udev->desc.idProduct);
+        usb_device_gone(xd->udev);
+    }
     command(x, 0, 0, (TRB_DISABLE_SLOT << 10) | ((uint32_t)xd->slot << 24));
     x->slots[xd->slot] = NULL;
     x->dcbaa[xd->slot] = 0;

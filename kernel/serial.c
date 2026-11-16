@@ -3,6 +3,7 @@
 #include "kstring.h"
 #include "io.h"
 #include "terminal.h"
+#include "timer.h"
 
 #define COM1 0x3F8
 
@@ -110,13 +111,49 @@ int serial_try_getc(void) {
 static int g_klog_screen;
 void klog_to_screen(int on) { g_klog_screen = on; }
 
+/* the last 64 KiB of the log, kept in memory for `dmesg` - real PCs have no
+ * serial port to read it from */
+#define KLOG_RING 65536u
+static char g_klog_ring[KLOG_RING];
+static uint32_t g_klog_len;                  /* (bytes ever written; the ring holds the last KLOG_RING) */
+static int g_klog_bol = 1;
+
+static void ring_put(const char* s) {
+    uintptr_t f;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(f) :: "memory");
+    for (; *s; s++) {
+        if (g_klog_bol) {                    /* each line stamped with the time since boot */
+            char t[16];
+            uint32_t ms = timer_ms();
+            ksnprintf(t, sizeof(t), "[%5u.%03u] ", ms / 1000, ms % 1000);
+            for (const char* p = t; *p; p++) g_klog_ring[g_klog_len++ % KLOG_RING] = *p;
+            g_klog_bol = 0;
+        }
+        g_klog_ring[g_klog_len++ % KLOG_RING] = *s;
+        if (*s == '\n') g_klog_bol = 1;
+    }
+    if (f & 0x200) __asm__ volatile("sti" ::: "memory");
+}
+
+uint32_t klog_read(char* out, uint32_t cap) {
+    uintptr_t f;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(f) :: "memory");
+    uint32_t n = g_klog_len < KLOG_RING ? g_klog_len : KLOG_RING;
+    if (n > cap) n = cap;
+    uint32_t start = g_klog_len - n;
+    for (uint32_t i = 0; i < n; i++) out[i] = g_klog_ring[(start + i) % KLOG_RING];
+    if (f & 0x200) __asm__ volatile("sti" ::: "memory");
+    return n;
+}
+
 void klog(const char* fmt, ...) {
-    if (!g_present && !g_klog_screen) return;
     char buf[256];
     __builtin_va_list ap;
     __builtin_va_start(ap, fmt);
     kvsnprintf(buf, sizeof(buf), fmt, ap);
     __builtin_va_end(ap);
+    ring_put(buf);
+    if (!g_present && !g_klog_screen) return;
     if (g_present) serial_write(buf);
     if (g_klog_screen) {
         terminal_write(buf);

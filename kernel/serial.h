@@ -25,5 +25,7 @@ void serial_panic_write(const char* text);
 void klog(const char* fmt, ...);
 /* "verbose" boot: the log is also written on the screen (kernel/kernel.c) */
 void klog_to_screen(int on);
+/* the last 64 KiB of the log (dmesg): its bytes copied to out, how many */
+uint32_t klog_read(char* out, uint32_t cap);
 
 #endif

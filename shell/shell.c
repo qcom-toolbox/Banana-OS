@@ -1303,7 +1303,7 @@ static const char* const known_cmds[] = {
     "grep", "wc", "head", "tail", "find", "time", "nice",
     /* shell/netcmds.c + shell/wpcmd.c */
     "ntp", "ifconfig", "dhcp", "ping", "nslookup", "host", "netstat", "arp", "curl", "wget",
-    "cryptotest", "wallpaper", "lsusb", "lsinput", "usb", "httpd", "sshd", "rdpd", "rdp", "passwd", "files", "browser", "notepad",
+    "cryptotest", "wallpaper", "lsusb", "lsinput", "dmesg", "usb", "httpd", "sshd", "rdpd", "rdp", "passwd", "files", "browser", "notepad",
     /* shell/syscmds.c */
     "mount", "umount", "eject", "fstest", "selftest", "crashtest", "pkg", "apt", "apt-get", "adb", "fastboot", "apps", "taskmgr", "settings", "notify", "play", "beep", "volume", "lsaudio",
     /* shell/moncmds.c */

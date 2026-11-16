@@ -133,7 +133,11 @@ static void hub_poll(usb_device_t* d) {
         if (ch & (1u << 3)) port_feature(d, 0, F_C_PORT_OVERCURR, p);
         if (ch & CH_RESET) port_feature(d, 0, F_C_PORT_RESET, p);
         int connected = (st & ST_CONNECTION) != 0;
-        if (h->child[p] && (!connected || (ch & CH_CONNECTION) || !h->child[p]->present)) child_gone(d, h, p);
+        if (h->child[p] && (!connected || (ch & CH_CONNECTION) || !h->child[p]->present)) {
+            klog("usb-hub: port %d: device %04x:%04x lost (status %08x: %s)\n", p, h->child[p]->desc.idVendor,
+                 h->child[p]->desc.idProduct, st, !connected ? "disconnected" : (ch & CH_CONNECTION) ? "reconnected" : "gone");
+            child_gone(d, h, p);
+        }
         if (connected && !h->child[p] && ((ch & CH_CONNECTION) || !(st & ST_ENABLE))) port_connect(d, h, p);
     }
 }

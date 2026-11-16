@@ -550,7 +550,10 @@ static void detach_port(ehci_t* e, int p) {
     edev_t* ed = e->port_dev[p];
     if (!ed) return;
     e->port_dev[p] = NULL;
-    if (ed->udev) usb_device_gone(ed->udev);    /* (a hub there takes its children with it) */
+    if (ed->udev) {
+        klog("ehci: port %d: device %04x:%04x disconnected\n", p, ed->udev->desc.idVendor, ed->udev->desc.idProduct);
+        usb_device_gone(ed->udev);              /* (a hub there takes its children with it) */
+    }
     edev_free(e, ed);
 }
 

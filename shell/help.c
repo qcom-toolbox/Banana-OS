@@ -505,6 +505,10 @@ static const page_t PAGES[] = {
       "its memory and I/O regions and the Banana OS driver in use; -n prints the numbers only.",
       "-v|interrupt, regions, driver\n-n|numeric IDs", "lspci\nlspci -v", "devmgr, lsusb" },
     { "lsusb", "hardware", "lsusb", "USB controllers and devices", NULL, NULL, NULL, "usb" },
+    { "dmesg", "system", "dmesg", "the kernel's log (the last 64 KiB)",
+      "What the kernel has reported since it started - drivers, devices found or lost (USB connects and disconnects), "
+      "errors - each line with the time since boot. Real PCs have no serial port to read it from; this is the same log. "
+      "`dmesg | grep usb` for the USB part, `dmesg > file` to keep it.", NULL, "dmesg | tail -40", "lsusb, lsinput" },
     { "lsinput", "hardware", "lsinput", "what each pointing device has sent (motion totals)",
       "Every way into the mouse pointer - the PS/2 port, each USB or I2C pointer (its source number is in lsusb), a virtual "
       "machine's integration - with how many reports it has sent and the motion they add up to. Run it, move the mouse, run "
