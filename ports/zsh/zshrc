@@ -22,6 +22,7 @@ alias ll='ls -l'
 command_not_found_handler() {
     case $1 in
         nvim) print -u2 "$1: not installed - apt install neovim" ;;
+        git) print -u2 "$1: not installed - apt install git" ;;
         *) print -u2 "zsh: command not found: $1" ;;
     esac
     return 127

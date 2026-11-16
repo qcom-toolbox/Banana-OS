@@ -273,7 +273,7 @@ kernel/appbin.o64: $(foreach a,$(APPS),apps/$(a)/$(a)-x86_64.bpk.z) build/builti
 PORTS64    = bash coreutils grep sed findutils diffutils gawk ncurses less zsh nano vim vi neofetch
 # optional ones: built in the same way, but installed only when asked for
 # (`apt install neovim`, the App Store: the builtin: source)
-OPTPORTS64 = neovim
+OPTPORTS64 = neovim git
 # Optional Intel Mesa ISO: the same OS plus the user-space GL runtime.
 # Empty for the standard ISO; pass the audited runtime BPK for the Mesa ISO.
 MESA_BPK ?=

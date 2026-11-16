@@ -1,0 +1,11 @@
+# Git's system configuration on Banana OS (/apps/git/gitconfig).
+# A file or folder here belongs to the owner of the folder it was made in
+# (/tmp, a USB stick: root's or nobody's), not to the program that made it,
+# so Git's check that a repository is the user's own would refuse most of
+# them: every folder is trusted instead.
+[safe]
+	directory = *
+[init]
+	defaultBranch = main
+[core]
+	pager = less -FRX

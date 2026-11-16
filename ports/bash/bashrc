@@ -17,6 +17,7 @@ HISTFILESIZE=2000
 command_not_found_handle() {
     case $1 in
         nvim) printf '%s: not installed - apt install neovim\n' "$1" >&2 ;;
+        git) printf '%s: not installed - apt install git\n' "$1" >&2 ;;
         *) printf 'bash: %s: command not found\n' "$1" >&2 ;;
     esac
     return 127
