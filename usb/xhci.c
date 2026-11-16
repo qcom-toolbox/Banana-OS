@@ -520,9 +520,15 @@ static void port_ack(xhci_t* x, int p, uint32_t bits) {
 static int port_reset(xhci_t* x, int p) {
     uint32_t v = portsc(x, p);
     if (!(v & PORT_CCS)) return -1;
-    if (!(v & PORT_PED)) {
-        /* USB 2 ports need a reset to enable; USB 3 ports come up by
-         * themselves (and a reset does no harm) */
+    /* A USB 2 port is always reset before its device is addressed, enabled
+     * or not (as Linux's hub_port_reset): after a warm reboot, or on a port
+     * the firmware's own xHCI driver was using, the device is still enabled
+     * and addressed from before - Address Device then talks to a device not
+     * in its default state and the setup fails (a mouse that worked only
+     * from a cold start, and not on the ports the firmware drove). A USB 3
+     * link already enabled came up by itself and keeps its state. */
+    int super = ((v >> 10) & 0xF) == 4;
+    if (!(v & PORT_PED) || !super) {
         wr(x->op, OP_PORTSC(p), (v & PORT_PRESERVE) | PORT_PR);
         uint32_t start = timer_ms();
         while (!(portsc(x, p) & PORT_PRC)) {
@@ -537,7 +543,7 @@ static int port_reset(xhci_t* x, int p) {
 
 static void attach_port(xhci_t* x, int p) {
     if (port_reset(x, p) != 0) {
-        klog("xhci: port %d: reset failed\n", p);
+        klog("xhci: port %d: reset failed (PORTSC %08x)\n", p, portsc(x, p));
         return;
     }
     uint32_t speed = (portsc(x, p) >> 10) & 0xF;

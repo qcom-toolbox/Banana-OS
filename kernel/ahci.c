@@ -144,6 +144,32 @@ static void start_port(volatile uint8_t* r) {
     wr(r, PX_CMD, rd(r, PX_CMD) | CMD_ST);
 }
 
+/* the device's signature, once it has said who it is (BSY clear), or ffffffff */
+static uint32_t wait_signature(volatile uint8_t* r) {
+    uint32_t t0 = timer_ms();
+    while ((uint32_t)(timer_ms() - t0) < 3000) {
+        uint32_t tfd = rd(r, PX_TFD), sig = rd(r, PX_SIG);
+        if (!(tfd & TFD_BSY) && sig != 0xFFFFFFFFu) return sig;
+    }
+    return rd(r, PX_SIG);
+}
+
+/* COMRESET (as Linux's sata_link_hardreset): the port stopped, DET = 1 for
+ * over 1 ms, then 0; the link back up, the port started again */
+static void comreset(volatile uint8_t* r) {
+    wr(r, PX_CMD, rd(r, PX_CMD) & ~CMD_ST);
+    wait_clear(r, PX_CMD, CMD_CR, 500);
+    wr(r, PX_SCTL, (rd(r, PX_SCTL) & ~0xFu) | 1u);
+    uint32_t t0 = timer_ms();
+    while ((uint32_t)(timer_ms() - t0) < 2) { }
+    wr(r, PX_SCTL, rd(r, PX_SCTL) & ~0xFu);
+    t0 = timer_ms();
+    while ((rd(r, PX_SSTS) & 0xF) != 3 && (uint32_t)(timer_ms() - t0) < 1000) { }
+    wr(r, PX_SERR, 0xFFFFFFFFu);
+    wr(r, PX_IS, 0xFFFFFFFFu);
+    start_port(r);
+}
+
 static int setup_port(port_t* p) {
     volatile uint8_t* r = port_regs(p);
     stop_port(r);
@@ -348,18 +374,39 @@ static void init_all(void) {
                 uint32_t t0 = timer_ms();
                 while ((rd(r, PX_SSTS) & 0xF) != 3 && (uint32_t)(timer_ms() - t0) < 50) { }
                 ssts = rd(r, PX_SSTS);
-                if ((ssts & 0xF) != 3) continue;
+                if ((ssts & 0xF) != 3) {
+                    if (ssts & 0xF) klog("ahci: port %d: link not up (SSTS %08x)\n", pn, ssts);
+                    continue;
+                }
             }
-            /* the signature arrives with the device's first D2H FIS */
-            uint32_t t0 = timer_ms();
-            while ((rd(r, PX_TFD) & TFD_BSY) && (uint32_t)(timer_ms() - t0) < 3000) { }
-            uint32_t sig = rd(r, PX_SIG);
-            if (sig != SIG_ATA && sig != SIG_ATAPI) continue;
+            /* The port is set up first - its command list and received-FIS
+             * area, FIS receive on - and only then the signature read: it is
+             * latched from the device's first D2H FIS, which the port takes
+             * in only with FIS receive on. A firmware that never used the
+             * port (booted from a USB stick: the SATA disk untouched) left it
+             * off, the signature read ffffffff, and the disk was skipped -
+             * "install: no hard disk found". */
             port_t* p = &g_ports[g_nports];
+            memset(p, 0, sizeof(*p));
             p->hba = h;
             p->port = pn;
+            if (setup_port(p) != 0) {
+                klog("ahci: port %d: could not be started (CMD %08x, TFD %08x)\n", pn, rd(r, PX_CMD), rd(r, PX_TFD));
+                continue;
+            }
+            uint32_t sig = wait_signature(r);
+            if (sig != SIG_ATA && sig != SIG_ATAPI) {
+                comreset(r);              /* a fresh D2H FIS: the device announces itself again */
+                sig = wait_signature(r);
+            }
+            if (sig != SIG_ATA && sig != SIG_ATAPI) {
+                klog("ahci: port %d: device signature %08x (TFD %08x, CMD %08x) - not a disk or drive\n", pn, sig,
+                     rd(r, PX_TFD), rd(r, PX_CMD));
+                stop_port(r);
+                continue;
+            }
             p->atapi = sig == SIG_ATAPI;
-            if (setup_port(p) != 0) continue;
+            klog("ahci: port %d: %s\n", pn, p->atapi ? "ATAPI drive" : "disk");
             p->w.pid = -1;
             g_nports++;
         }
