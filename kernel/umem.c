@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "umem.h"
+#include "fs.h"
 #include "kheap.h"
 #include "kstring.h"
 #include "serial.h"
@@ -73,14 +74,17 @@ struct umem {
 };
 
 /* Restricted processes share a finite pool, leaving at least half of the
- * currently free kernel heap for the system and ordinary applications. */
+ * currently free kernel heap for the system and ordinary applications. File
+ * data cached from the disk counts as free: the heap evicts it when an
+ * allocation finds no room (fs.c's reclaim). (An installed system that had
+ * just read 200 MiB of files left the second browser renderer no pool.) */
 static spinlock_t g_pool_lock = SPINLOCK_INIT;
 static uint32_t g_pool_limit, g_pool_used;
 static int pool_take(uint32_t bytes) {
     uintptr_t flags=spin_lock_irq(&g_pool_lock);
     if(!g_pool_limit){
-        uint32_t free=kheap_total_bytes()-kheap_used_bytes();
-        g_pool_limit=free/2u;
+        uint64_t free=(uint64_t)(kheap_total_bytes()-kheap_used_bytes())+fs_evictable_bytes();
+        g_pool_limit=(uint32_t)(free/2u);
         if(g_pool_limit>(1024u<<20))g_pool_limit=1024u<<20;
     }
     int ok=bytes<=g_pool_limit-g_pool_used;
