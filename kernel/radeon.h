@@ -95,6 +95,8 @@ uint64_t rad_gart_bind(uint32_t first, const uint64_t* phys, uint32_t n);
 void     rad_gart_unbind(uint32_t first, uint32_t n);
 uint64_t rad_gtt_base(void);
 uint32_t rad_gtt_pages(void);
+/* the video memory really there (MiB: probed by the engine), 0 before it runs */
+uint32_t rad_vram_mb(void);
 /* the microcode's licence (shown with the other notices) */
 const char* rad_fw_notice(uint32_t* len);
 

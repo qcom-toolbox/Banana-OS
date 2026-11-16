@@ -484,7 +484,7 @@ static const page_t PAGES[] = {
       "is kept; off takes effect at the next start. With no word: whether it is on and what the driver found. `gpu radeon "
       "dump` saves the card's video BIOS, display registers and what the driver found (default /home/banana/radeon-report) "
       "- a report to send if the screen goes wrong. `gpu radeon 3d` starts the card's 3D engine (Radeon HD 6450 / 7450 / "
-      "8450, Caicos: AMD's microcode is built in) - its memory mapping (GART), its command processor and ring - and proves "
+      "8450, Caicos, or HD 5450 / 6350 / 7350, Cedar: AMD's microcode is built in) - its memory mapping (GART), its command processor and ring - and proves "
       "it runs: the command processor answers, writes a fence back and runs a command buffer from system memory; lsgpu "
       "shows the result. Intel HD / UHD / Iris Graphics (1st to 10th generation Core) need no switch: their "
       "driver is always on. NVIDIA cards keep the firmware's screen.",

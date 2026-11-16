@@ -1,4 +1,4 @@
-# AMD Radeon microcode (Caicos: Radeon HD 6450 / 7450 / 8450)
+# AMD Radeon microcode (Caicos: HD 6450 / 7450 / 8450; Cedar: HD 5450 / 6350 / 7350)
 
 From linux-firmware (`radeon/`), unmodified, under AMD's redistribution
 licence (`LICENSE.radeon`: binary form only, notice reproduced, no reverse
@@ -12,3 +12,6 @@ only when the video BIOS has not started it already).
 | CAICOS_me.bin  | command processor micro engine    | 1376 |
 | BTC_rlc.bin    | run-list controller (Barts, Turks, Caicos) | 768 |
 | CAICOS_mc.bin  | memory controller sequencer       | 6024 |
+| CEDAR_pfp.bin  | Cedar's prefetch parser           | 1120 |
+| CEDAR_me.bin   | Cedar's micro engine              | 1376 |
+| CEDAR_rlc.bin  | Cedar's run-list controller       | 768 |

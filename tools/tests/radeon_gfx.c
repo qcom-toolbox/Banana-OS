@@ -5,7 +5,8 @@
  * the ring holds - type 0 / 2 / 3 packets, SET_CONFIG_REG, MEM_WRITE,
  * EVENT_WRITE_EOP, INDIRECT_BUFFER fetched through the GART's page table
  * as the memory controller would walk it.
- *   radeon_gfx ok | dead | gddr5 | cedar */
+ *   radeon_gfx ok | dead | gddr5 | cedar | real2g | fake2g | juniper
+ * fake2g: a BIOS that says 2 GiB on 1 GiB of memory, which repeats past its end */
 #define RADEON_MODEL 1
 
 #include "../../kernel/types.h"
@@ -35,6 +36,9 @@ __asm__(".section .rodata\n.balign 4\n"
         ".balign 4\n.global rad_fw_caicos_me\nrad_fw_caicos_me:\n.incbin \"firmware/amd/CAICOS_me.bin\"\n.global rad_fw_caicos_me_end\nrad_fw_caicos_me_end:\n"
         ".balign 4\n.global rad_fw_btc_rlc\nrad_fw_btc_rlc:\n.incbin \"firmware/amd/BTC_rlc.bin\"\n.global rad_fw_btc_rlc_end\nrad_fw_btc_rlc_end:\n"
         ".balign 4\n.global rad_fw_caicos_mc\nrad_fw_caicos_mc:\n.incbin \"firmware/amd/CAICOS_mc.bin\"\n.global rad_fw_caicos_mc_end\nrad_fw_caicos_mc_end:\n"
+        ".balign 4\n.global rad_fw_cedar_pfp\nrad_fw_cedar_pfp:\n.incbin \"firmware/amd/CEDAR_pfp.bin\"\n.global rad_fw_cedar_pfp_end\nrad_fw_cedar_pfp_end:\n"
+        ".balign 4\n.global rad_fw_cedar_me\nrad_fw_cedar_me:\n.incbin \"firmware/amd/CEDAR_me.bin\"\n.global rad_fw_cedar_me_end\nrad_fw_cedar_me_end:\n"
+        ".balign 4\n.global rad_fw_cedar_rlc\nrad_fw_cedar_rlc:\n.incbin \"firmware/amd/CEDAR_rlc.bin\"\n.global rad_fw_cedar_rlc_end\nrad_fw_cedar_rlc_end:\n"
         ".balign 4\n.global rad_fw_licence\nrad_fw_licence:\n.incbin \"firmware/amd/LICENSE.radeon\"\n.global rad_fw_licence_end\nrad_fw_licence_end:\n.byte 0\n"
         ".previous\n");
 
@@ -65,14 +69,16 @@ uint32_t pci_read32(uint8_t b, uint8_t d, uint8_t f, uint8_t o) { (void)b; (void
 uint16_t pci_read16(uint8_t b, uint8_t d, uint8_t f, uint8_t o) { (void)b; (void)d; (void)f; (void)o; return 0; }
 void pci_write16(uint8_t b, uint8_t d, uint8_t f, uint8_t o, uint16_t v) { (void)b; (void)d; (void)f; (void)o; (void)v; }
 int mmio_map(uint64_t p, uint64_t n) { (void)p; (void)n; return 1; }
-const char* rad_family_name(int f) { return f == CHIP_CAICOS ? "Caicos" : f == CHIP_CEDAR ? "Cedar" : "?"; }
+const char* rad_family_name(int f) { return f == CHIP_CAICOS ? "Caicos" : f == CHIP_CEDAR ? "Cedar" : f == CHIP_JUNIPER ? "Juniper" : "?"; }
 
 /* ---- the card ---- */
-#define VRAM_MB    1024u
+static uint32_t VRAM_MB = 1024, REAL_MB = 1024;
+static uint32_t g_sink[2];
 #define VRAM_HOST  (130u << 20)                  /* (what the driver touches: the first 129 MiB) */
 static uint32_t R[(128u << 10) / 4];
 static uint8_t* VR;
-static int g_cp_alive = 1, g_gddr5;
+static int g_cp_alive = 1, g_gddr5, g_cedar;
+static const uint8_t *FW_PFP, *FW_ME, *FW_RLC;
 static unsigned g_rptr;
 static uint32_t g_pfp_tot, g_me_tot, g_pfp_n, g_me_n, g_rlc_n, g_mc_n, g_bad_pfp, g_bad_me, g_bad_rlc, g_bad_mc;
 static uint32_t g_pkt_cfg, g_pkt_eop, g_pkt_ib, g_pkt_mem, g_pkt_init, g_bad_addr, g_bad_pkt;
@@ -83,6 +89,8 @@ static uint32_t fw_dw(const uint8_t* fw, uint32_t i) { const uint8_t* p = fw + 4
 static void* mc(uint64_t a, uint32_t bytes) {
     uint64_t vend = (uint64_t)((R[MC_VM_FB_LOCATION / 4] >> 16) + 1) << 24;
     if (a < vend) {
+        a %= (uint64_t)REAL_MB << 20;                            /* (the chips there: past them it repeats) */
+        if (a >= VRAM_HOST && bytes <= sizeof(g_sink)) return g_sink;   /* (beyond what the model keeps) */
         if (a + bytes > VRAM_HOST) { printf("  model: VRAM 0x%llx out of reach\n", (unsigned long long)a); g_bad_addr++; return NULL; }
         return VR + a;
     }
@@ -163,10 +171,10 @@ static void reg_write(uint32_t reg, uint32_t v) {
     if (reg + 4 > sizeof(R)) return;
     switch (reg) {
     case CP_PFP_UCODE_ADDR: g_pfp_n = v; break;
-    case CP_PFP_UCODE_DATA: if (g_pfp_n < EVERGREEN_PFP_UCODE_SIZE && v != fw_dw(rad_fw_caicos_pfp, g_pfp_n)) g_bad_pfp++; g_pfp_n++; g_pfp_tot++; return;
+    case CP_PFP_UCODE_DATA: if (g_pfp_n < EVERGREEN_PFP_UCODE_SIZE && v != fw_dw(FW_PFP, g_pfp_n)) g_bad_pfp++; g_pfp_n++; g_pfp_tot++; return;
     case CP_ME_RAM_WADDR: g_me_n = v; break;
-    case CP_ME_RAM_DATA: if (g_me_n < EVERGREEN_PM4_UCODE_SIZE && v != fw_dw(rad_fw_caicos_me, g_me_n)) g_bad_me++; g_me_n++; g_me_tot++; return;
-    case RLC_UCODE_DATA: if (v != fw_dw(rad_fw_btc_rlc, R[RLC_UCODE_ADDR / 4])) g_bad_rlc++; g_rlc_n++; return;
+    case CP_ME_RAM_DATA: if (g_me_n < EVERGREEN_PM4_UCODE_SIZE && v != fw_dw(FW_ME, g_me_n)) g_bad_me++; g_me_n++; g_me_tot++; return;
+    case RLC_UCODE_DATA: if (v != fw_dw(FW_RLC, R[RLC_UCODE_ADDR / 4])) g_bad_rlc++; g_rlc_n++; return;
     case MC_SEQ_SUP_PGM: if (g_mc_n < BTC_MC_UCODE_SIZE && v != fw_dw(rad_fw_caicos_mc, g_mc_n)) g_bad_mc++; g_mc_n++; return;
     case CP_RB_RPTR_WR: if (R[CP_RB_CNTL / 4] & RB_RPTR_WR_ENA) g_rptr = v; break;
     }
@@ -193,6 +201,12 @@ static int g_fails;
 
 int main(int argc, char** argv) {
     const char* mode = argc > 1 && argv[1] ? argv[1] : "ok";
+    if (!strcmp(mode, "fake2g")) VRAM_MB = 2048;
+    if (!strcmp(mode, "real2g")) VRAM_MB = REAL_MB = 2048;
+    g_cedar = !strcmp(mode, "cedar");
+    FW_PFP = g_cedar ? rad_fw_cedar_pfp : rad_fw_caicos_pfp;
+    FW_ME = g_cedar ? rad_fw_cedar_me : rad_fw_caicos_me;
+    FW_RLC = g_cedar ? rad_fw_cedar_rlc : rad_fw_btc_rlc;
     VR = calloc(1, VRAM_HOST);
     R[MC_VM_FB_LOCATION / 4] = ((VRAM_MB / 16 - 1) << 16) | 0;      /* (0 .. 1 GiB) */
     R[CONFIG_MEMSIZE / 4] = VRAM_MB;
@@ -200,13 +214,13 @@ int main(int argc, char** argv) {
     g_cp_alive = strcmp(mode, "dead") != 0;
     g_gddr5 = !strcmp(mode, "gddr5");
     static radeon_t rt;
-    rt.family = !strcmp(mode, "cedar") ? CHIP_CEDAR : CHIP_CAICOS;
+    rt.family = g_cedar ? CHIP_CEDAR : !strcmp(mode, "juniper") ? CHIP_JUNIPER : CHIP_CAICOS;
     rt.pci.device = 0x6779;
     char why[160] = "";
     int r = rad_gfx_init(&rt, (uintptr_t)VR, 0, why, sizeof(why));
     printf("%s: rad_gfx_init = %d: %s\n", mode, r, why);
 
-    if (!strcmp(mode, "cedar")) {
+    if (!strcmp(mode, "juniper")) {
         CHECK(r == -1 && strstr(why, "Caicos"), "another family: refused, it has no microcode here");
         CHECK(R[CP_RB_BASE / 4] == 0 && g_pfp_n == 0, "and the card untouched");
     } else if (!strcmp(mode, "dead")) {
@@ -219,16 +233,21 @@ int main(int argc, char** argv) {
         CHECK(g_bad_pfp == 0 && g_bad_me == 0 && g_pfp_tot == EVERGREEN_PFP_UCODE_SIZE && g_me_tot == EVERGREEN_PM4_UCODE_SIZE,
               "the PFP (%u) and ME (%u) microcode loaded, as the files have it", g_pfp_tot, g_me_tot);
         CHECK(g_bad_rlc == 0 && g_rlc_n == EVERGREEN_RLC_UCODE_SIZE, "the RLC microcode (%u dwords)", g_rlc_n);
-        if (g_gddr5) CHECK(g_bad_mc == 0 && g_mc_n == BTC_MC_UCODE_SIZE, "GDDR5, the sequencer not running: its microcode loaded (%u dwords)", g_mc_n);
+        if (g_cedar) CHECK(g_mc_n == 0 && strstr(why, "Cedar"), "Cedar (Evergreen): its own microcode, none for the memory controller");
+        else if (g_gddr5) CHECK(g_bad_mc == 0 && g_mc_n == BTC_MC_UCODE_SIZE, "GDDR5, the sequencer not running: its microcode loaded (%u dwords)", g_mc_n);
         else CHECK(g_mc_n == 0, "DDR3: the memory controller's microcode left as the BIOS has it");
         CHECK(R[VM_CONTEXT0_CNTL / 4] & 1, "the GART on");
         CHECK(((uint64_t)R[VM_CONTEXT0_PAGE_TABLE_BASE_ADDR / 4] << 12) == GFX_OFF, "its page table at 128 MiB into video memory");
         CHECK(((uint64_t)R[VM_CONTEXT0_PAGE_TABLE_START_ADDR / 4] << 12) == (uint64_t)VRAM_MB << 20, "the GTT right after video memory");
         CHECK(R[CP_RB_BASE / 4] == RING_OFF >> 8 && (2u << (R[CP_RB_CNTL / 4] & 0x3F)) == RING_BYTES / 4, "the ring: 64 KiB at its offset");
         CHECK(g_pkt_init == 1, "ME_INITIALIZE run");
-        CHECK(g_pkt_eop == 2 && g_pkt_ib == 1 && g_pkt_mem == 1, "two fences, one indirect buffer (and its next-rptr write)");
+        uint32_t probes = VRAM_MB == 2048 ? 3 : 2;             /* (256, 512 [, 1024] MiB past the probe dword) */
+        CHECK(g_pkt_eop == 2 + probes && g_pkt_ib == 1 && g_pkt_mem == 1 + probes,
+              "two fences, one indirect buffer (and its next-rptr write), %u memory probes", probes);
+        if (VRAM_MB != REAL_MB) CHECK(rad_vram_mb() == REAL_MB && strstr(why, "BIOS says 2048"), "a BIOS saying 2 GiB on 1 GiB: %u MiB found and said", rad_vram_mb());
+        else CHECK(rad_vram_mb() == VRAM_MB && !strstr(why, "BIOS says"), "all %u MiB there", rad_vram_mb());
         CHECK(g_bad_addr == 0 && g_bad_pkt == 0, "every address resolved, every packet understood (%u, %u)", g_bad_addr, g_bad_pkt);
-        CHECK(*(uint32_t*)(VR + WB_OFF + R600_WB_EVENT_OFFSET) == 2, "the fence written back: 2");
+        CHECK(*(uint32_t*)(VR + WB_OFF + R600_WB_EVENT_OFFSET) == g_seq, "the last fence written back: %u", g_seq);
         int cleared = 1;
         for (uint32_t i = 0; i < 65536; i++) if ((((uint64_t*)(VR + GFX_OFF))[i] & 1)) cleared = 0;
         CHECK(cleared, "the test page unbound again");

@@ -218,14 +218,15 @@ a Caicos) it also sets **modes**:
 what the driver found (`/home/banana/radeon-report` by default): with them,
 a problem on a real card can be replayed on the model.
 
-**The 3D engine (started; Caicos).** `gpu radeon 3d` brings up the 3D
-engine of a Radeon HD 6450 / 7450 / 8450 (Caicos) as Linux's
+**The 3D engine (started; Caicos, Cedar).** `gpu radeon 3d` brings up the 3D
+engine of a Radeon HD 6450 / 7450 / 8450 (Caicos) - or of the HD 5450 /
+6350 / 7350 (Cedar) that many cheap "HD 7450"s really are - as Linux's
 `evergreen_startup` does, with Linux's own code for it
 (`third_party/radeon/evergreen_gfx.c`, `r600_gfx.c`, `ni_gfx.c`, MIT) on
 `kernel/radeon_gfx.c`:
 
 - AMD's microcode, built in from linux-firmware (`firmware/amd`: CAICOS_pfp,
-  CAICOS_me, BTC_rlc, CAICOS_mc; AMD's redistribution licence, shown in
+  CAICOS_me, BTC_rlc, CAICOS_mc; CEDAR_pfp, CEDAR_me, CEDAR_rlc; AMD's redistribution licence, shown in
   `/usr/share/licenses/radeon`). The memory controller's is loaded only on
   GDDR5 cards whose sequencer the video BIOS has not started.
 - The GART: a 256 MiB window of system memory (the GTT) right after video
@@ -241,6 +242,11 @@ engine of a Radeon HD 6450 / 7450 / 8450 (Caicos) as Linux's
   memory fetched through the GART that sets a scratch register. Any step
   failing stops the command processor, turns the GART off again and says
   which (lsgpu, `gpu radeon dump`).
+- It measures the video memory: the engine writes 256 MiB, 512 MiB, 1 GiB...
+  past a dword the CPU can see, and where the write shows up there the memory
+  repeats. A BIOS that says 2 GiB on 1 GiB of chips (sold as 2 GB) is reported
+  (lsgpu: "1024 MiB DDR3 (BIOS says 2048!)") and only the memory really there
+  is used.
 - `tools/tests/radeon_gfx.sh` runs all of it against a model command
   processor (ring, type 0 / 2 / 3 packets, writebacks, the page-table walk),
   checking the microcode uploaded word for word.

@@ -9,6 +9,6 @@ gcc -O1 -g -fsanitize=address,undefined -fno-sanitize=shift --param asan-globals
     -Wall -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function \
     -I kernel tools/tests/radeon_gfx.c third_party/radeon/evergreen_gfx.c third_party/radeon/r600_gfx.c \
     third_party/radeon/ni_gfx.c kernel/kstring.c -o "$out/test"
-for mode in ok gddr5 dead cedar; do
+for mode in ok gddr5 dead cedar real2g fake2g juniper; do
     ASAN_OPTIONS=detect_leaks=0 "$out/test" $mode
 done

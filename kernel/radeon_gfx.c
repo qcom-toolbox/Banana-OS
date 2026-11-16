@@ -59,12 +59,18 @@ FW(rad_fw_caicos_pfp, "CAICOS_pfp.bin")
 FW(rad_fw_caicos_me,  "CAICOS_me.bin")
 FW(rad_fw_btc_rlc,    "BTC_rlc.bin")
 FW(rad_fw_caicos_mc,  "CAICOS_mc.bin")
+FW(rad_fw_cedar_pfp,  "CEDAR_pfp.bin")
+FW(rad_fw_cedar_me,   "CEDAR_me.bin")
+FW(rad_fw_cedar_rlc,  "CEDAR_rlc.bin")
 FW(rad_fw_licence,    "LICENSE.radeon")
 #else
 extern const uint8_t rad_fw_caicos_pfp[], rad_fw_caicos_pfp_end[], rad_fw_caicos_me[], rad_fw_caicos_me_end[];
 extern const uint8_t rad_fw_btc_rlc[], rad_fw_btc_rlc_end[], rad_fw_caicos_mc[], rad_fw_caicos_mc_end[];
+extern const uint8_t rad_fw_cedar_pfp[], rad_fw_cedar_pfp_end[], rad_fw_cedar_me[], rad_fw_cedar_me_end[];
+extern const uint8_t rad_fw_cedar_rlc[], rad_fw_cedar_rlc_end[];
 extern const uint8_t rad_fw_licence[], rad_fw_licence_end[];
 #endif
+#define FWOF(n) (struct firmware){ n, (size_t)(n##_end - n) }
 
 static struct radeon_device g_dev;
 static struct firmware g_pfp, g_me, g_rlc, g_mc;
@@ -74,6 +80,9 @@ static uint8_t* g_dummy;               /* where pages not bound read and write *
 static int g_state;                    /* 0 not tried, 1 up, -1 failed */
 static char g_status[128] = "not started (gpu radeon 3d)";
 static uint32_t g_ring_us, g_fence_us, g_ib_us;
+static uint32_t g_seq;                 /* the last fence's sequence number */
+static uint32_t g_bios_mb, g_real_mb;  /* the video memory the BIOS says, and what is there */
+#define PROBE_OFF      (WB_OFF + 3584u)  /* (a writeback dword nothing else uses) */
 
 const char* rad_fw_notice(uint32_t* len) {
     *len = (uint32_t)(rad_fw_licence_end - rad_fw_licence);
@@ -220,14 +229,48 @@ static uint32_t wait_fence(volatile uint32_t* at, uint32_t seq) {
     return 0;
 }
 
+/* the engine writes v at video memory offset off; a fence after it (0: no fence) */
+static int gpu_write_vram(struct radeon_device* rdev, uint64_t off, uint32_t v) {
+    struct radeon_ring* ring = &rdev->ring[0];
+    uint64_t a = rdev->mc.vram_start + off;
+    if (radeon_ring_lock(rdev, ring, 32) != 0) return 0;
+    radeon_ring_write(ring, PACKET3(PACKET3_MEM_WRITE, 3));
+    radeon_ring_write(ring, (u32)a & 0xFFFFFFFCu);
+    radeon_ring_write(ring, (upper_32_bits(a) & 0xFF) | (1u << 18));    /* (32 bits) */
+    radeon_ring_write(ring, v);
+    radeon_ring_write(ring, 0);
+    struct radeon_fence f = { 0, ++g_seq };
+    r600_fence_ring_emit(rdev, &f);
+    radeon_ring_unlock_commit(rdev, ring, false);
+    return wait_fence(rdev->fence_drv[0].cpu_addr, g_seq) != 0;
+}
+
+/* the size the memory repeats at (MiB), the BIOS's if it does not; 0 if the engine stops */
+static uint32_t probe_vram(struct radeon_device* rdev, uint32_t bios_mb) {
+    volatile uint32_t* seen = (volatile uint32_t*)(g_vram + PROBE_OFF);
+    uint64_t top = rdev->mc.vram_end - rdev->mc.vram_start + 1;
+    for (uint64_t size = 256ull << 20; size < ((uint64_t)bios_mb << 20) && PROBE_OFF + size < top; size <<= 1) {
+        uint32_t mark = 0x5EED0000u | (uint32_t)(size >> 20);
+        *seen = 0;
+        mb();
+        if (!gpu_write_vram(rdev, PROBE_OFF + size, mark)) return 0;
+        WREG32(HDP_MEM_COHERENCY_FLUSH_CNTL, 1);
+        (void)RREG32(HDP_MEM_COHERENCY_FLUSH_CNTL);
+        if (*seen == mark) return (uint32_t)(size >> 20);
+    }
+    return bios_mb;
+}
+uint32_t rad_vram_mb(void) { return g_real_mb; }
+
 int rad_gfx_ready(void) { return g_state > 0; }
 const char* rad_gfx_status(void) { return g_status; }
 
 int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, char* why, int cap) {
     if (g_state > 0) { kstrlcpy(why, "already up", (size_t)cap); return 0; }
     struct radeon_device* rdev = &g_dev;
-    if (rt->family != CHIP_CAICOS) {
-        ksnprintf(g_status, sizeof(g_status), "no microcode for %s (only Caicos: HD 6450 / 7450 / 8450)", rad_family_name(rt->family));
+    if (rt->family != CHIP_CAICOS && rt->family != CHIP_CEDAR) {
+        ksnprintf(g_status, sizeof(g_status), "no microcode for %s (only Caicos: HD 6450 / 7450 / 8450; Cedar: HD 5450 / 6350 / 7350)",
+                  rad_family_name(rt->family));
         kstrlcpy(why, g_status, (size_t)cap);
         return -1;
     }
@@ -271,12 +314,14 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, char* why, 
     memset(g_dummy, 0, 4096);
     rdev->dummy_page.addr = RAD_PHYS(g_dummy);
 
-    g_pfp = (struct firmware){ rad_fw_caicos_pfp, (size_t)(rad_fw_caicos_pfp_end - rad_fw_caicos_pfp) };
-    g_me  = (struct firmware){ rad_fw_caicos_me,  (size_t)(rad_fw_caicos_me_end - rad_fw_caicos_me) };
-    g_rlc = (struct firmware){ rad_fw_btc_rlc,    (size_t)(rad_fw_btc_rlc_end - rad_fw_btc_rlc) };
-    g_mc  = (struct firmware){ rad_fw_caicos_mc,  (size_t)(rad_fw_caicos_mc_end - rad_fw_caicos_mc) };
+    /* (Cedar is Evergreen: its memory controller needs no microcode) */
+    int ni = rt->family == CHIP_CAICOS;
+    g_pfp = ni ? FWOF(rad_fw_caicos_pfp) : FWOF(rad_fw_cedar_pfp);
+    g_me  = ni ? FWOF(rad_fw_caicos_me) : FWOF(rad_fw_cedar_me);
+    g_rlc = ni ? FWOF(rad_fw_btc_rlc) : FWOF(rad_fw_cedar_rlc);
+    g_mc  = FWOF(rad_fw_caicos_mc);
     if (g_pfp.size != EVERGREEN_PFP_UCODE_SIZE * 4 || g_me.size != EVERGREEN_PM4_UCODE_SIZE * 4 ||
-        g_rlc.size != EVERGREEN_RLC_UCODE_SIZE * 4 || g_mc.size != BTC_MC_UCODE_SIZE * 4) {
+        g_rlc.size != EVERGREEN_RLC_UCODE_SIZE * 4 || (ni && g_mc.size != BTC_MC_UCODE_SIZE * 4)) {
         kstrlcpy(why, "the microcode is not the size it should be", (size_t)cap);
         kstrlcpy(g_status, why, sizeof(g_status));
         g_state = -1;
@@ -285,7 +330,7 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, char* why, 
     rdev->pfp_fw = &g_pfp;
     rdev->me_fw = &g_me;
     rdev->rlc_fw = &g_rlc;
-    rdev->mc_fw = &g_mc;
+    rdev->mc_fw = ni ? &g_mc : NULL;
 
     /* the GART: every page the dummy one to begin with */
     g_gart = (uint64_t*)(g_vram + GFX_OFF);
@@ -319,7 +364,7 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, char* why, 
 
     int r;
     /* (evergreen_startup's order) */
-    if ((r = ni_mc_load_microcode(rdev)) != 0) FAIL("memory controller microcode", r);
+    if (ni && (r = ni_mc_load_microcode(rdev)) != 0) FAIL("memory controller microcode", r);
     /* the AGP aperture off: nothing of the GTT goes there */
     WREG32(MC_VM_AGP_BASE, 0);
     WREG32(MC_VM_AGP_TOP, 0x0FFFFFFF);
@@ -369,9 +414,25 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, char* why, 
         FAIL(why, -EINVAL);
     }
 
+    g_seq = 2;
+    /* how much video memory is really there: cards sold with more than they carry
+     * (a BIOS saying 2 GiB on 1 GiB of chips) repeat the memory past its end */
+    g_bios_mb = (uint32_t)mb;
+    g_real_mb = probe_vram(rdev, g_bios_mb);
+    if (!g_real_mb) FAIL("the video memory probe's fence not written back", -ETIMEDOUT);
+    rdev->mc.real_vram_size = (uint64_t)g_real_mb << 20;
+    uint32_t mtype = (RREG32(0x2a00) >> 28) & 0xF;           /* (MC_SEQ_MISC0) */
+
     g_state = 1;
-    ksnprintf(g_status, sizeof(g_status), "up: %u SIMDs, %u backends; ring %u us, fence %u us, GART indirect buffer %u us",
-              rdev->config.evergreen.max_simds, rdev->config.evergreen.max_backends, g_ring_us, g_fence_us, g_ib_us);
+    char mem[64];
+    if (g_real_mb == g_bios_mb) ksnprintf(mem, sizeof(mem), "%u MiB %s", g_real_mb, mtype == 5 ? "GDDR5" : "DDR3");
+    else ksnprintf(mem, sizeof(mem), "%u MiB %s (BIOS says %u!)", g_real_mb, mtype == 5 ? "GDDR5" : "DDR3", g_bios_mb);
+    ksnprintf(g_status, sizeof(g_status), "up: %s, %u SIMDs, %u RB; %s; ring %u us, fence %u us, GART IB %u us",
+              rad_family_name(rt->family), rdev->config.evergreen.max_simds, rdev->config.evergreen.max_backends, mem,
+              g_ring_us, g_fence_us, g_ib_us);
+    if (g_real_mb != g_bios_mb)
+        klog("radeon: WARNING: the video BIOS says %u MiB, but the memory repeats after %u MiB: only that is used\n",
+             g_bios_mb, g_real_mb);
     klog("radeon: 3D engine %s\n", g_status);
     kstrlcpy(why, g_status, (size_t)cap);
     return 0;
