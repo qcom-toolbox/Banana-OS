@@ -447,8 +447,14 @@ static int stream_image(const img_src_t* src, uint32_t iso_bytes, image_sink_t s
         uint32_t after = done + n < total ? 1u : 0u;
         if (need && !need(done, n)) { done += n; g_prog_done = done; have_before = 0; continue; }
         uint32_t t0 = timer_ms();
-        if (!have_before && src_read(src, done - 1u, 1, buf) != 0) { rc = -1; break; }
-        if (src_read(src, done, n + after, buf + CARRY) != 0) { rc = -1; break; }
+        if (!have_before && src_read(src, done - 1u, 1, buf) != 0) {
+            klog("install: reading the %s failed at block %u\n", src->usb ? "USB stick" : "CD", done - 1u);
+            rc = -1; break;
+        }
+        if (src_read(src, done, n + after, buf + CARRY) != 0) {
+            klog("install: reading the %s failed at blocks %u-%u (of %u)\n", src->usb ? "USB stick" : "CD", done, done + n + after - 1u, total);
+            rc = -1; break;
+        }
         g_tm.read_ms += timer_ms() - t0;
         memcpy(prev, buf + CARRY + (n - 1u) * 2048u, CARRY);      /* (as read: the next chunk's "before") */
         patch_marker(buf, CARRY + (n + after) * 2048u);
@@ -456,6 +462,7 @@ static int stream_image(const img_src_t* src, uint32_t iso_bytes, image_sink_t s
         t0 = timer_ms();
         rc = sink(done, n, buf + CARRY, ctx);
         g_tm.disk_ms += timer_ms() - t0;
+        if (rc) klog("install: writing the disk failed at blocks %u-%u (of %u)\n", done, done + n - 1u, total);
         done += n;
         g_prog_done = done;
         memcpy(buf, prev, CARRY);
@@ -2140,10 +2147,12 @@ int fsdisk_install_to(const ata_disk_t* tp) {
     blockdev_set_system(disk_blockdev(&target));
 
     img_src_t source;
-    if (!find_source(&source)) return FSDISK_ERR_NO_SOURCE;
+    if (!find_source(&source)) { klog("install: no CD or USB stick with the image\n"); return FSDISK_ERR_NO_SOURCE; }
 
     uint32_t iso_bytes;
-    if (src_iso_size(&source, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
+    if (src_iso_size(&source, &iso_bytes) != 0) { klog("install: the image's size could not be read\n"); return FSDISK_ERR_NO_SOURCE; }
+    klog("install: from the %s (%u MB) to %s, %llu MB\n", source.usb ? "USB stick" : "CD", iso_bytes >> 20,
+         target.model, (unsigned long long)(target.sectors >> 11));
     uint32_t base = boot_install_base(iso_bytes);
     if (!base) return FSDISK_ERR_ISO_TOO_BIG;
     if (target.sectors <= (uint64_t)base + V4_TAIL_SECTORS + V4_MIN_SLOT_SECTORS)
@@ -2161,9 +2170,9 @@ int fsdisk_install_to(const ata_disk_t* tp) {
     if (!layout_v4(&target, &l)) return FSDISK_ERR_TOO_SMALL;
     if (bytes_to_sectors(fs_snapshot_size()) > end - base) return FSDISK_ERR_FULL;
 
-    if (htab_drop(&target) != 0) return FSDISK_ERR_IO;
-    if (copy_boot_image(&source, &target, iso_bytes, partition) != 0) return FSDISK_ERR_IO;
-    if (verify_and_fix(&source, &target, iso_bytes, partition) != FSDISK_OK) return FSDISK_ERR_IO;
+    if (htab_drop(&target) != 0) { klog("install: the disk's first write failed\n"); return FSDISK_ERR_IO; }
+    if (copy_boot_image(&source, &target, iso_bytes, partition) != 0) { klog("install: copying the boot image failed\n"); return FSDISK_ERR_IO; }
+    if (verify_and_fix(&source, &target, iso_bytes, partition) != FSDISK_OK) { klog("install: the copy does not read back the same\n"); return FSDISK_ERR_IO; }
     /* old headers: a layout-3 install's (past the new image), a layout-4 one's */
     if (iso_bytes <= V3_BASE_LBA * FSDISK_SECTOR) wipe_header(&target, V3_BASE_LBA);
     if (iso_bytes <= V4_BASE_LBA * FSDISK_SECTOR) wipe_header(&target, V4_BASE_LBA);
@@ -2172,6 +2181,7 @@ int fsdisk_install_to(const ata_disk_t* tp) {
     uint32_t t_files = timer_ms();
     int rc = e4_format(&target);
     g_tm.files_ms = timer_ms() - t_files;
+    if (rc != FSDISK_OK) klog("install: writing the files (ext4) failed (%d)\n", rc);
     if (rc == FSDISK_OK) htab_save(&target, iso_bytes);     /* (the next update: only what changed) */
     g_tm.total_ms = timer_ms() - t_start;
     if (rc != FSDISK_OK) return rc;
