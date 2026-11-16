@@ -14,7 +14,7 @@
 #include "serial.h"
 #include "media.h"
 #include "../sdk/include/banana_web_worker.h"
-#define WORKERS 8                   /* pages, and media streams' decoders */
+#define WORKERS 16                  /* pages, media streams' decoders, WebGL contexts' GPU workers */
 #define TRANSFER_BUDGET (64u << 20)
 typedef struct remote_page {
     page_t p;                       /* kernel-owned compatibility proxy */
@@ -94,10 +94,10 @@ int web_worker_ipc(int app,uint32_t generation,int op,const void* in,uint32_t le
            !terminated(q->method,sizeof(q->method))||!terminated(q->type,sizeof(q->type))){kfree(q);return -1;}
         /* 512 downloads, files and messages a page; its media streams' pictures
          * and commands (no network, no files) are asked for many times a second */
-        if(q->kind!=WW_MEDIA&&r->requests>=512){kfree(q);return -1;}
+        if(q->kind!=WW_MEDIA&&q->kind!=WW_GL&&r->requests>=512){kfree(q);return -1;}
         if(r->request)kfree(r->request);if(r->resource_data)kfree(r->resource_data);
         r->resource_data=NULL;r->request=q;memset(&r->response,0,sizeof(r->response));
-        if(q->kind!=WW_MEDIA)r->requests++;
+        if(q->kind!=WW_MEDIA&&q->kind!=WW_GL)r->requests++;
         __sync_synchronize();r->resource_ready=1;return 0;
     }
     case WW_RESPONSE:
@@ -107,6 +107,20 @@ int web_worker_ipc(int app,uint32_t generation,int op,const void* in,uint32_t le
     default:return -1;
     }
 }
+/* WebGL contexts: a GPU worker each (apps/webgl), owned by a page */
+#define GL_CONTEXTS 8
+typedef struct { int used; remote_page_t* owner; void* worker; uint8_t* cmds; uint32_t n, cap; int w, h; } glctx_t;
+static glctx_t g_gl[GL_CONTEXTS];
+static void* gpu_worker_start(void);
+static void gl_close(int id){
+    if(id<0||id>=GL_CONTEXTS||!g_gl[id].used)return;
+    glctx_t* g=&g_gl[id];
+    if(g->worker)media_worker_stop(g->worker);
+    if(g->cmds)kfree(g->cmds);
+    memset(g,0,sizeof(*g));
+}
+static void gl_close_owner(remote_page_t* r){for(int i=0;i<GL_CONTEXTS;i++)if(g_gl[i].used&&g_gl[i].owner==r)gl_close(i);}
+static glctx_t* gl_owned(int id,remote_page_t* r){return id>=0&&id<GL_CONTEXTS&&g_gl[id].used&&g_gl[id].owner==r?&g_gl[id]:NULL;}
 static int granted(remote_page_t* r,const char* path) {
     for(int i=0;i<r->ngrants;i++)if(!strcmp(path,r->grants[i]))return 1;
     return 0;
@@ -179,6 +193,51 @@ static void serve(remote_page_t* r) {
         }
         break;
     }
+    case WW_GL: {
+        /* WebGL (web/webgl.c): the page's command bytes, played by its GPU worker */
+        int b[4]={0};memcpy(b,q->body,q->length<sizeof(b)?q->length:sizeof(b));
+        if(q->arg==WWG_OPEN){
+            int id=-1;
+            for(int i=0;i<GL_CONTEXTS;i++)if(!g_gl[i].used){id=i;break;}
+            int w=b[0],h=b[1];
+            if(id<0||w<1||h<1||w>4096||h>4096)break;
+            glctx_t* g=&g_gl[id];
+            memset(g,0,sizeof(*g));g->used=1;g->owner=r;g->w=w;g->h=h;
+            g->worker=gpu_worker_start();
+            int args[10]={w,h};
+            if(!g->worker||media_worker_call(g->worker,WW_GL_INIT,args,NULL,0,NULL,0,NULL)!=0){
+                klog("webgl: no OpenGL ES context (is Mesa installed?)\n");gl_close(id);break;
+            }
+            if((r->resource_data=kmalloc(sizeof(id)))){memcpy(r->resource_data,&id,sizeof(id));a->length=sizeof(id);a->result=0;}
+        }else if(q->arg==WWG_APPEND){
+            glctx_t* g=gl_owned(b[0],r);
+            if(!g||q->length<4)break;
+            uint32_t n=q->length-4;
+            if(g->n+n>WW_GL_COMMANDS)break;
+            if(g->n+n>g->cap){
+                uint32_t nc=g->cap?g->cap:65536;while(nc<g->n+n)nc*=2;
+                uint8_t* c=krealloc(g->cmds,nc);if(!c)break;g->cmds=c;g->cap=nc;
+            }
+            memcpy(g->cmds+g->n,q->body+4,n);g->n+=n;a->result=0;
+        }else if(q->arg==WWG_EXEC){
+            glctx_t* g=gl_owned(b[0],r);
+            if(!g)break;
+            uint32_t cap=WW_DOCUMENT;
+            uint8_t* out=kmalloc(cap);
+            if(!out)break;
+            int args[10]={b[1]==1};
+            uint32_t got=0;
+            int rc=media_worker_call(g->worker,WW_GL_EXEC,args,g->cmds,g->n,out,cap,&got);
+            g->n=0;
+            if(rc!=0||got<sizeof(ww_gl_reply_t)){kfree(out);kstrlcpy(a->error,"The WebGL context was lost",sizeof(a->error));
+                gl_close(b[0]);break;}
+            r->resource_data=(char*)out;a->length=got;a->result=0;
+        }else if(q->arg==WWG_CLOSE){
+            if(gl_owned(b[0],r))gl_close(b[0]);
+            a->result=0;
+        }
+        break;
+    }
     case WW_MESSAGE:
         if(q->length<8192&&r->environment.message){
             char* text=kmalloc(q->length+1);
@@ -187,15 +246,17 @@ static void serve(remote_page_t* r) {
         }break;
     default:break;
     }
-    if(a->length>WW_DOCUMENT||(q->kind!=WW_MEDIA&&a->length>TRANSFER_BUDGET-r->transferred)){
+    int local=q->kind==WW_MEDIA||q->kind==WW_GL;             /* pictures and frames are not downloads */
+    if(a->length>WW_DOCUMENT||(!local&&a->length>TRANSFER_BUDGET-r->transferred)){
         if(r->resource_data)kfree(r->resource_data);r->resource_data=NULL;a->length=0;a->result=-1;
-    }else if(q->kind!=WW_MEDIA)r->transferred+=a->length;   /* pictures are not downloads */
+    }else if(!local)r->transferred+=a->length;
 done:
     __sync_synchronize();r->resource_ready=2;
 }
 static void crashed(remote_page_t* r,const char* why) {
     if(!r->dead)app_web_kill(r->app,r->generation);
     media_close_owner(r);
+    gl_close_owner(r);
     if(r->slot>=0&&workers[r->slot]==r)workers[r->slot]=NULL;
     r->slot=-1;r->dead=1;r->stage=0;r->p.js=NULL;r->p.focus=NULL;r->p.dirty=0;
     r->p.nav_pending=r->p.alert_pending=r->p.file_pick_pending=0;
@@ -280,8 +341,12 @@ page_t* remote_page_new_libjs(page_env_t* env,uint32_t limit) {
 page_t* remote_page_new(page_env_t* env,uint32_t limit) {
     return remote_page_new_worker(env,limit,"/apps/webworker/app-x86_64");
 }
-/* a media stream's decoder (apps/webmedia): restricted like the renderers */
-void* media_worker_start(void) {
+static void* helper_start(const char* path,int gpu);
+void* media_worker_start(void){return helper_start("/apps/webmedia/app-x86_64",0);}
+static void* gpu_worker_start(void){return helper_start("/apps/webgl/app-x86_64",1);}
+/* a media stream's decoder (apps/webmedia), restricted like the renderers, or
+ * a WebGL context's GPU worker (apps/webgl), which may also reach the GPU */
+static void* helper_start(const char* path,int gpu) {
     int slot=-1;
     for(int i=0;i<WORKERS;i++)if(!workers[i]){slot=i;break;}
     if(slot<0)return NULL;
@@ -289,8 +354,8 @@ void* media_worker_start(void) {
     r->environment=*browser_env();r->slot=slot;r->app=-1;r->p.env=&r->environment;r->p.layout=&r->layout;
     r->layout.A=(arena_t*)r;r->p.scroll_req=-1;
     char err[128];
-    r->app=app_spawn_web_worker("/apps/webmedia/app-x86_64",err,sizeof(err));
-    if(r->app<0){klog("media worker: %s\n",err);kfree(r);return NULL;}
+    r->app=gpu?app_spawn_gpu_worker(path,err,sizeof(err)):app_spawn_web_worker(path,err,sizeof(err));
+    if(r->app<0){klog("helper worker %s: %s\n",path,err);kfree(r);return NULL;}
     r->generation=app_web_generation(r->app);
     workers[slot]=r;
     return r;
@@ -308,6 +373,7 @@ void remote_page_free(page_t* p) {
     if(!p)return;remote_page_t* r=(remote_page_t*)p;
     r->dead=1;app_web_kill(r->app,r->generation);
     media_close_owner(r);
+    gl_close_owner(r);
     if(r->slot>=0&&workers[r->slot]==r)workers[r->slot]=NULL;
     /* Reclaim the old process before another page consumes its pool share.
      * The generation prevents a reused app slot from being killed here. */

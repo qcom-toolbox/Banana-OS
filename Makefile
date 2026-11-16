@@ -223,7 +223,7 @@ run-tap: Banana_OS.iso
 clean:
 	for e in $(EXAMPLES); do $(MAKE) -s -C sdk/examples/$$e clean; done
 	rm -f $(EXAMPLE_BPKZ)
-	for a in $(APPS) $(APPS64) terminal webworker webmedia; do $(MAKE) -s -C apps/$$a clean; done
+	for a in $(APPS) $(APPS64) terminal webworker webmedia webgl; do $(MAKE) -s -C apps/$$a clean; done
 	for d in $(DRIVER_EXAMPLES); do $(MAKE) -s -C driver-sdk/examples/$$d clean; done
 	rm -f banana-sdk.tar.gz
 	rm -f $(OBJS) $(OBJS64) $(DEPS) kernel.bin kernel64.bin Banana_OS.iso build/builtin-meta-*.bin build/libjsworker-x86_64.bpk.z
@@ -337,6 +337,11 @@ WEBMEDIA_BPKZ = apps/webmedia/webmedia-x86_64.bpk.z
 $(WEBMEDIA_BPKZ): $(wildcard apps/webmedia/*.c apps/webmedia/*.h) apps/webmedia/Makefile ports/ffmpeg/build.sh $(SDK_DEPS)
 	$(MAKE) -C apps/webmedia webmedia-x86_64.bpk.z
 kernel/appbin.o64 build/builtin-meta-x86_64.bin: $(WEBMEDIA_BPKZ)
+# WebGL: a page's context played by the browser's GPU worker (apps/webgl, Mesa)
+WEBGL_BPKZ = apps/webgl/webgl-x86_64.bpk.z
+$(WEBGL_BPKZ): $(wildcard apps/webgl/*.c) apps/webgl/Makefile web/webgl_ops.h $(SDK_DEPS)
+	$(MAKE) -C apps/webgl webgl-x86_64.bpk.z
+kernel/appbin.o64 build/builtin-meta-x86_64.bin: $(WEBGL_BPKZ)
 # LibJS stays a user-space renderer; only its compressed install package is
 # embedded. CI supplies the audited BPK from the same commit's Debian SDK job.
 # Local builds compile it with the pinned Debian 13/GCC 14 toolchain.
@@ -367,7 +372,7 @@ kernel/appbin.o64: $(TERMINAL_BPKZ)
 build/builtin-meta-%.bin: tools/mkbuiltinmeta.py $(foreach a,$(APPS),apps/$(a)/$(a)-%.bpk.z) $(EXAMPLE_BPKZ)
 	mkdir -p build
 	python3 tools/mkbuiltinmeta.py $@ $(foreach a,$(APPS),$(a).bpk=apps/$(a)/$(a)-$*.bpk.z) \
-	    $(if $(filter x86_64,$*),webworker.bpk=$(WEBWORKER_BPKZ) webmedia.bpk=$(WEBMEDIA_BPKZ) libjsworker.bpk=$(LIBJS_WORKER_BPKZ) terminal.bpk=$(TERMINAL_BPKZ) $(foreach p,$(PORTS64) $(OPTPORTS64),$(p).bpk=ports/$(p)/build/$(p)-x86_64.bpk.z) \
+	    $(if $(filter x86_64,$*),webworker.bpk=$(WEBWORKER_BPKZ) webmedia.bpk=$(WEBMEDIA_BPKZ) webgl.bpk=$(WEBGL_BPKZ) libjsworker.bpk=$(LIBJS_WORKER_BPKZ) terminal.bpk=$(TERMINAL_BPKZ) $(foreach p,$(PORTS64) $(OPTPORTS64),$(p).bpk=ports/$(p)/build/$(p)-x86_64.bpk.z) \
 	      $(foreach a,$(APPS64),$(a).bpk=apps/$(a)/$(a)-x86_64.bpk.z)) \
 	    $(foreach e,$(EXAMPLES),$(e).bpk=sdk/examples/$(e)/$(e).bpk.z)
 

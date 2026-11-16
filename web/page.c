@@ -602,6 +602,7 @@ void page_free(page_t* p) {
             }
     if (!p) return;
 #ifdef BANANA_USER_WORKER
+    if (webgl_free_all) webgl_free_all(p);           /* (weak: tools that link no webgl.c) */
     if (canvas_free_all) canvas_free_all(p);         /* (weak: tools that link no canvas.c) */
 #endif
     for (int i = 0; i < p->nframes; i++) page_free(p->frames[i]);   /* <iframe> children */

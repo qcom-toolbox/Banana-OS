@@ -634,7 +634,7 @@ W.__banana_deliver = function(data){
   EPR.getContext = function(type, opts){
     if (this.tagName !== 'CANVAS') return undefined;
     type = String(type).toLowerCase();
-    if (type === '2d') return this.__ctx2d || (this.__ctx2d = new Ctx(this));
+    if (type === '2d') return this.__gl ? null : this.__ctx2d || (this.__ctx2d = new Ctx(this));
     if ((type === 'webgl' || type === 'experimental-webgl' || type === 'webgl2') && typeof W.__webglContext === 'function')
       return W.__webglContext(this, type, opts);
     return null;
@@ -656,6 +656,307 @@ W.__banana_deliver = function(data){
   /* requestAnimationFrame callbacks get the time, as elsewhere */
   var raf = W.requestAnimationFrame;
   if (raf) W.requestAnimationFrame = function(cb){ return raf(function(){ cb(P.now()); }); };
+})();
+/* WebGL 1 (getContext('webgl')): calls recorded by web/webgl.c through
+ * __gl(canvas, op, ...) and played on the GPU by the browser's GPU worker
+ * (apps/webgl, Mesa). Frames are shown after the task that drew them. */
+(function(){
+  if (typeof __gl !== 'function') return;
+  var C = {};
+  ('DEPTH_BUFFER_BIT=256 STENCIL_BUFFER_BIT=1024 COLOR_BUFFER_BIT=16384 POINTS=0 LINES=1 LINE_LOOP=2 LINE_STRIP=3 ' +
+   'TRIANGLES=4 TRIANGLE_STRIP=5 TRIANGLE_FAN=6 ZERO=0 ONE=1 SRC_COLOR=768 ONE_MINUS_SRC_COLOR=769 SRC_ALPHA=770 ' +
+   'ONE_MINUS_SRC_ALPHA=771 DST_ALPHA=772 ONE_MINUS_DST_ALPHA=773 DST_COLOR=774 ONE_MINUS_DST_COLOR=775 ' +
+   'SRC_ALPHA_SATURATE=776 FUNC_ADD=32774 BLEND_EQUATION=32777 BLEND_EQUATION_RGB=32777 BLEND_EQUATION_ALPHA=34877 ' +
+   'FUNC_SUBTRACT=32778 FUNC_REVERSE_SUBTRACT=32779 BLEND_DST_RGB=32968 BLEND_SRC_RGB=32969 BLEND_DST_ALPHA=32970 ' +
+   'BLEND_SRC_ALPHA=32971 CONSTANT_COLOR=32769 ONE_MINUS_CONSTANT_COLOR=32770 CONSTANT_ALPHA=32771 ' +
+   'ONE_MINUS_CONSTANT_ALPHA=32772 BLEND_COLOR=32773 ARRAY_BUFFER=34962 ELEMENT_ARRAY_BUFFER=34963 ' +
+   'ARRAY_BUFFER_BINDING=34964 ELEMENT_ARRAY_BUFFER_BINDING=34965 STREAM_DRAW=35040 STATIC_DRAW=35044 ' +
+   'DYNAMIC_DRAW=35048 BUFFER_SIZE=34660 BUFFER_USAGE=34661 CURRENT_VERTEX_ATTRIB=34342 FRONT=1028 BACK=1029 ' +
+   'FRONT_AND_BACK=1032 CULL_FACE=2884 BLEND=3042 DITHER=3024 STENCIL_TEST=2960 DEPTH_TEST=2929 SCISSOR_TEST=3089 ' +
+   'POLYGON_OFFSET_FILL=32823 SAMPLE_ALPHA_TO_COVERAGE=32926 SAMPLE_COVERAGE=32928 NO_ERROR=0 INVALID_ENUM=1280 ' +
+   'INVALID_VALUE=1281 INVALID_OPERATION=1282 OUT_OF_MEMORY=1285 CW=2304 CCW=2305 LINE_WIDTH=2849 ' +
+   'ALIASED_POINT_SIZE_RANGE=33901 ALIASED_LINE_WIDTH_RANGE=33902 CULL_FACE_MODE=2885 FRONT_FACE=2886 ' +
+   'DEPTH_RANGE=2928 DEPTH_WRITEMASK=2930 DEPTH_CLEAR_VALUE=2931 DEPTH_FUNC=2932 STENCIL_CLEAR_VALUE=2961 ' +
+   'STENCIL_FUNC=2962 STENCIL_FAIL=2964 STENCIL_PASS_DEPTH_FAIL=2965 STENCIL_PASS_DEPTH_PASS=2966 STENCIL_REF=2967 ' +
+   'STENCIL_VALUE_MASK=2963 STENCIL_WRITEMASK=2968 STENCIL_BACK_FUNC=34816 STENCIL_BACK_FAIL=34817 ' +
+   'STENCIL_BACK_PASS_DEPTH_FAIL=34818 STENCIL_BACK_PASS_DEPTH_PASS=34819 STENCIL_BACK_REF=36003 ' +
+   'STENCIL_BACK_VALUE_MASK=36004 STENCIL_BACK_WRITEMASK=36005 VIEWPORT=2978 SCISSOR_BOX=3088 COLOR_CLEAR_VALUE=3106 ' +
+   'COLOR_WRITEMASK=3107 UNPACK_ALIGNMENT=3317 PACK_ALIGNMENT=3333 MAX_TEXTURE_SIZE=3379 MAX_VIEWPORT_DIMS=3386 ' +
+   'SUBPIXEL_BITS=3408 RED_BITS=3410 GREEN_BITS=3411 BLUE_BITS=3412 ALPHA_BITS=3413 DEPTH_BITS=3414 STENCIL_BITS=3415 ' +
+   'POLYGON_OFFSET_UNITS=10752 POLYGON_OFFSET_FACTOR=32824 TEXTURE_BINDING_2D=32873 SAMPLE_BUFFERS=32936 SAMPLES=32937 ' +
+   'SAMPLE_COVERAGE_VALUE=32938 SAMPLE_COVERAGE_INVERT=32939 COMPRESSED_TEXTURE_FORMATS=34467 DONT_CARE=4352 ' +
+   'FASTEST=4353 NICEST=4354 GENERATE_MIPMAP_HINT=33170 BYTE=5120 UNSIGNED_BYTE=5121 SHORT=5122 UNSIGNED_SHORT=5123 ' +
+   'INT=5124 UNSIGNED_INT=5125 FLOAT=5126 DEPTH_COMPONENT=6402 ALPHA=6406 RGB=6407 RGBA=6408 LUMINANCE=6409 ' +
+   'LUMINANCE_ALPHA=6410 UNSIGNED_SHORT_4_4_4_4=32819 UNSIGNED_SHORT_5_5_5_1=32820 UNSIGNED_SHORT_5_6_5=33635 ' +
+   'FRAGMENT_SHADER=35632 VERTEX_SHADER=35633 MAX_VERTEX_ATTRIBS=34921 MAX_VERTEX_UNIFORM_VECTORS=36347 ' +
+   'MAX_VARYING_VECTORS=36348 MAX_COMBINED_TEXTURE_IMAGE_UNITS=35661 MAX_VERTEX_TEXTURE_IMAGE_UNITS=35660 ' +
+   'MAX_TEXTURE_IMAGE_UNITS=34930 MAX_FRAGMENT_UNIFORM_VECTORS=36349 SHADER_TYPE=35663 DELETE_STATUS=35712 ' +
+   'LINK_STATUS=35714 VALIDATE_STATUS=35715 ATTACHED_SHADERS=35717 ACTIVE_UNIFORMS=35718 ACTIVE_ATTRIBUTES=35721 ' +
+   'SHADING_LANGUAGE_VERSION=35724 CURRENT_PROGRAM=35725 NEVER=512 LESS=513 EQUAL=514 LEQUAL=515 GREATER=516 ' +
+   'NOTEQUAL=517 GEQUAL=518 ALWAYS=519 KEEP=7680 REPLACE=7681 INCR=7682 DECR=7683 INVERT=5386 INCR_WRAP=34055 ' +
+   'DECR_WRAP=34056 VENDOR=7936 RENDERER=7937 VERSION=7938 NEAREST=9728 LINEAR=9729 NEAREST_MIPMAP_NEAREST=9984 ' +
+   'LINEAR_MIPMAP_NEAREST=9985 NEAREST_MIPMAP_LINEAR=9986 LINEAR_MIPMAP_LINEAR=9987 TEXTURE_MAG_FILTER=10240 ' +
+   'TEXTURE_MIN_FILTER=10241 TEXTURE_WRAP_S=10242 TEXTURE_WRAP_T=10243 TEXTURE_2D=3553 TEXTURE=5890 ' +
+   'TEXTURE_CUBE_MAP=34067 TEXTURE_BINDING_CUBE_MAP=34068 TEXTURE_CUBE_MAP_POSITIVE_X=34069 ' +
+   'TEXTURE_CUBE_MAP_NEGATIVE_X=34070 TEXTURE_CUBE_MAP_POSITIVE_Y=34071 TEXTURE_CUBE_MAP_NEGATIVE_Y=34072 ' +
+   'TEXTURE_CUBE_MAP_POSITIVE_Z=34073 TEXTURE_CUBE_MAP_NEGATIVE_Z=34074 MAX_CUBE_MAP_TEXTURE_SIZE=34076 ' +
+   'TEXTURE0=33984 ACTIVE_TEXTURE=34016 REPEAT=10497 CLAMP_TO_EDGE=33071 MIRRORED_REPEAT=33648 FLOAT_VEC2=35664 ' +
+   'FLOAT_VEC3=35665 FLOAT_VEC4=35666 INT_VEC2=35667 INT_VEC3=35668 INT_VEC4=35669 BOOL=35670 BOOL_VEC2=35671 ' +
+   'BOOL_VEC3=35672 BOOL_VEC4=35673 FLOAT_MAT2=35674 FLOAT_MAT3=35675 FLOAT_MAT4=35676 SAMPLER_2D=35678 ' +
+   'SAMPLER_CUBE=35680 VERTEX_ATTRIB_ARRAY_ENABLED=34338 VERTEX_ATTRIB_ARRAY_SIZE=34339 ' +
+   'VERTEX_ATTRIB_ARRAY_STRIDE=34340 VERTEX_ATTRIB_ARRAY_TYPE=34341 VERTEX_ATTRIB_ARRAY_NORMALIZED=34922 ' +
+   'VERTEX_ATTRIB_ARRAY_POINTER=34373 VERTEX_ATTRIB_ARRAY_BUFFER_BINDING=34975 IMPLEMENTATION_COLOR_READ_TYPE=35738 ' +
+   'IMPLEMENTATION_COLOR_READ_FORMAT=35739 COMPILE_STATUS=35713 LOW_FLOAT=36336 MEDIUM_FLOAT=36337 HIGH_FLOAT=36338 ' +
+   'LOW_INT=36339 MEDIUM_INT=36340 HIGH_INT=36341 FRAMEBUFFER=36160 RENDERBUFFER=36161 RGBA4=32854 RGB5_A1=32855 ' +
+   'RGB565=36194 DEPTH_COMPONENT16=33189 STENCIL_INDEX8=36168 DEPTH_STENCIL=34041 RENDERBUFFER_WIDTH=36162 ' +
+   'RENDERBUFFER_HEIGHT=36163 RENDERBUFFER_INTERNAL_FORMAT=36164 COLOR_ATTACHMENT0=36064 DEPTH_ATTACHMENT=36096 ' +
+   'STENCIL_ATTACHMENT=36128 DEPTH_STENCIL_ATTACHMENT=33306 NONE=0 FRAMEBUFFER_COMPLETE=36053 ' +
+   'FRAMEBUFFER_INCOMPLETE_ATTACHMENT=36054 FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT=36055 ' +
+   'FRAMEBUFFER_INCOMPLETE_DIMENSIONS=36057 FRAMEBUFFER_UNSUPPORTED=36061 FRAMEBUFFER_BINDING=36006 ' +
+   'RENDERBUFFER_BINDING=36007 MAX_RENDERBUFFER_SIZE=34024 INVALID_FRAMEBUFFER_OPERATION=1286 ' +
+   'UNPACK_FLIP_Y_WEBGL=37440 UNPACK_PREMULTIPLY_ALPHA_WEBGL=37441 CONTEXT_LOST_WEBGL=37442 ' +
+   'UNPACK_COLORSPACE_CONVERSION_WEBGL=37443 BROWSER_DEFAULT_WEBGL=37444').split(' ').forEach(function(kv){
+    var i = kv.indexOf('='); C[kv.slice(0, i)] = +kv.slice(i + 1); });
+  /* the command numbers (web/webgl_ops.h) */
+  var N = 0, O = {};
+  ['RESIZE', 'CREATE', 'DELETE', 'SHADER_SOURCE', 'COMPILE', 'ATTACH', 'DETACH', 'LINK', 'USE', 'VALIDATE',
+   'SHADER_PARAM', 'PROGRAM_PARAM', 'SHADER_LOG', 'PROGRAM_LOG', 'ATTRIB_LOC', 'BIND_ATTRIB_LOC', 'UNIFORM_LOC',
+   'ACTIVE', 'UNIFORM_F', 'UNIFORM_I', 'UNIFORM_FV', 'UNIFORM_IV', 'UNIFORM_MAT', 'ATTRIB_PTR', 'ENABLE_ATTRIB',
+   'DISABLE_ATTRIB', 'ATTRIB_F', 'BIND_BUFFER', 'BUFFER_DATA', 'BUFFER_SUB', 'DRAW_ARRAYS', 'DRAW_ELEMENTS',
+   'VIEWPORT', 'SCISSOR', 'CLEAR_COLOR', 'CLEAR_DEPTH', 'CLEAR_STENCIL', 'CLEAR', 'ENABLE', 'DISABLE',
+   'BLEND_FUNC', 'BLEND_EQ', 'BLEND_COLOR', 'DEPTH_FUNC', 'DEPTH_MASK', 'DEPTH_RANGE', 'COLOR_MASK', 'CULL_FACE',
+   'FRONT_FACE', 'LINE_WIDTH', 'POLYGON_OFFSET', 'STENCIL_FUNC', 'STENCIL_OP', 'STENCIL_MASK', 'HINT',
+   'PIXEL_STORE', 'ACTIVE_TEXTURE', 'BIND_TEXTURE', 'TEX_PARAM_I', 'TEX_PARAM_F', 'TEX_IMAGE', 'TEX_SUB_IMAGE',
+   'GEN_MIPMAP', 'BIND_FRAMEBUFFER', 'FB_TEXTURE', 'FB_RENDERBUFFER', 'CHECK_FB', 'BIND_RENDERBUFFER',
+   'RB_STORAGE', 'READ_PIXELS', 'GET_ERROR', 'GET_PARAM', 'IS_ENABLED', 'GET_STRING', 'FINISH', 'COPY_TEX_IMAGE',
+   'COPY_TEX_SUB_IMAGE', 'SAMPLE_COVERAGE'].forEach(function(n){ O[n] = ++N; });
+  var X_OPEN = 200, X_CREATE = 201, X_PRESENT = 202, X_TEX_EL = 203, X_TEX_SUB_EL = 204, X_UNPACK = 205, X_TYPED = 206, X_LOST = 207;
+  var K = { buffer: 0, texture: 1, framebuffer: 2, renderbuffer: 3, program: 4, shader: 5 };
+  var HEX = []; for (var hx = 0; hx < 256; hx++) HEX.push((hx < 16 ? '0' : '') + hx.toString(16));
+  var direct = null;                                 /* can C read our typed arrays itself? */
+  function bytesOf(cv, d){
+    if (d === null || d === undefined) return null;
+    var u = ArrayBuffer.isView(d) ? new Uint8Array(d.buffer, d.byteOffset, d.byteLength) : d instanceof ArrayBuffer ? new Uint8Array(d) : null;
+    if (!u) return null;
+    if (direct === null) direct = !!__gl(cv, X_TYPED, new Uint8Array(1));
+    if (direct) return u;
+    var s = new Array(u.length);
+    for (var i = 0; i < u.length; i++) s[i] = HEX[u[i]];
+    return s.join('');
+  }
+  function f32(cv, v){ return bytesOf(cv, v instanceof Float32Array ? v : new Float32Array(v)); }
+  function i32(cv, v){ return bytesOf(cv, v instanceof Int32Array ? v : new Int32Array(v)); }
+  function Obj(kind, id){ this.__k = kind; this.__id = id; this.__dead = false; }
+  function WebGLBuffer(){} function WebGLTexture(){} function WebGLProgram(){} function WebGLShader(){}
+  function WebGLFramebuffer(){} function WebGLRenderbuffer(){} function WebGLUniformLocation(){}
+  function WebGLActiveInfo(o){ this.size = o.size; this.type = o.type; this.name = o.name; }
+  function WebGLShaderPrecisionFormat(r0, r1, p){ this.rangeMin = r0; this.rangeMax = r1; this.precision = p; }
+  var CTOR = { buffer: WebGLBuffer, texture: WebGLTexture, framebuffer: WebGLFramebuffer, renderbuffer: WebGLRenderbuffer,
+               program: WebGLProgram, shader: WebGLShader };
+  function idOf(o){ return o && !o.__dead && o.__id ? o.__id : 0; }
+  function GL(cv, opts){
+    this.canvas = cv; this.__cv = cv; this.__opts = opts; this.__err = 0; this.__flipY = 0; this.__premul = 0; this.__shown = false;
+    this.drawingBufferColorSpace = 'srgb'; this.unpackColorSpace = 'srgb';
+  }
+  var GP = GL.prototype;
+  for (var key in C) GP[key] = C[key];
+  Object.defineProperty(GP, 'drawingBufferWidth', { get: function(){ return this.__cv.width; } });
+  Object.defineProperty(GP, 'drawingBufferHeight', { get: function(){ return this.__cv.height; } });
+  function g(gl, op){ var a = [gl.__cv, op]; for (var i = 2; i < arguments.length; i++) a.push(arguments[i]); var r = __gl.apply(null, a); return r; }
+  function drew(gl){                                 /* shown after this task, as browsers do */
+    if (gl.__pending) return;
+    gl.__pending = true;
+    setTimeout(function(){ gl.__pending = false; __gl(gl.__cv, X_PRESENT); }, 0);
+  }
+  function make(gl, kind, type){
+    var F = CTOR[kind], o = new F();
+    o.__k = kind; o.__id = g(gl, X_CREATE, K[kind], type || 0); o.__dead = false;
+    return o.__id ? o : null;
+  }
+  GP.createBuffer = function(){ return make(this, 'buffer'); };
+  GP.createTexture = function(){ return make(this, 'texture'); };
+  GP.createFramebuffer = function(){ return make(this, 'framebuffer'); };
+  GP.createRenderbuffer = function(){ return make(this, 'renderbuffer'); };
+  GP.createProgram = function(){ return make(this, 'program'); };
+  GP.createShader = function(t){ var s = make(this, 'shader', t); if (s) s.__type = t; return s; };
+  function del(kind){ return function(o){ if (!o || o.__dead) return; g(this, O.DELETE, K[kind], o.__id); o.__dead = true; }; }
+  GP.deleteBuffer = del('buffer'); GP.deleteTexture = del('texture'); GP.deleteFramebuffer = del('framebuffer');
+  GP.deleteRenderbuffer = del('renderbuffer'); GP.deleteProgram = del('program'); GP.deleteShader = del('shader');
+  GP.isBuffer = GP.isTexture = GP.isFramebuffer = GP.isRenderbuffer = GP.isProgram = GP.isShader = function(o){ return !!(o && !o.__dead && o.__id); };
+  GP.shaderSource = function(s, src){ s.__src = String(src); g(this, O.SHADER_SOURCE, idOf(s), String(src)); };
+  GP.getShaderSource = function(s){ return s && s.__src !== undefined ? s.__src : null; };
+  GP.compileShader = function(s){ g(this, O.COMPILE, idOf(s)); };
+  GP.attachShader = function(p, s){ g(this, O.ATTACH, idOf(p), idOf(s)); };
+  GP.detachShader = function(p, s){ g(this, O.DETACH, idOf(p), idOf(s)); };
+  GP.linkProgram = function(p){ g(this, O.LINK, idOf(p)); if (p) p.__locs = {}; };
+  GP.useProgram = function(p){ g(this, O.USE, idOf(p)); this.__prog = p; };
+  GP.validateProgram = function(p){ g(this, O.VALIDATE, idOf(p)); };
+  GP.getShaderParameter = function(s, pn){ if (pn === C.SHADER_TYPE) return s.__type; var v = g(this, O.SHADER_PARAM, idOf(s), pn); return pn === C.COMPILE_STATUS || pn === C.DELETE_STATUS ? !!v : v; };
+  GP.getProgramParameter = function(p, pn){ var v = g(this, O.PROGRAM_PARAM, idOf(p), pn); return pn === C.LINK_STATUS || pn === C.VALIDATE_STATUS || pn === C.DELETE_STATUS ? !!v : v; };
+  GP.getShaderInfoLog = function(s){ return g(this, O.SHADER_LOG, idOf(s)) || ''; };
+  GP.getProgramInfoLog = function(p){ return g(this, O.PROGRAM_LOG, idOf(p)) || ''; };
+  GP.getAttribLocation = function(p, n){ return g(this, O.ATTRIB_LOC, idOf(p), String(n)); };
+  GP.bindAttribLocation = function(p, i, n){ g(this, O.BIND_ATTRIB_LOC, idOf(p), i, String(n)); };
+  GP.getUniformLocation = function(p, n){
+    if (!p) return null;
+    var c = p.__locs || (p.__locs = {});
+    if (n in c) return c[n];
+    var l = g(this, O.UNIFORM_LOC, idOf(p), String(n)), o = null;
+    if (l >= 0) { o = new WebGLUniformLocation(); o.__l = l; o.__p = p; }
+    return c[n] = o;
+  };
+  GP.getActiveAttrib = function(p, i){ var o = g(this, O.ACTIVE, idOf(p), 0, i); return o ? new WebGLActiveInfo(o) : null; };
+  GP.getActiveUniform = function(p, i){ var o = g(this, O.ACTIVE, idOf(p), 1, i); return o ? new WebGLActiveInfo(o) : null; };
+  GP.getAttachedShaders = function(){ return []; };
+  GP.getShaderPrecisionFormat = function(st, pt){ return pt >= C.LOW_INT ? new WebGLShaderPrecisionFormat(31, 30, 0) : new WebGLShaderPrecisionFormat(127, 127, 23); };
+  function loc(l){ return l ? l.__l : -1; }
+  [1, 2, 3, 4].forEach(function(n){
+    GP['uniform' + n + 'f'] = function(l){ if (!l) return; var a = [this, O.UNIFORM_F, loc(l), n]; for (var i = 1; i <= n; i++) a.push(+arguments[i]); g.apply(null, a); };
+    GP['uniform' + n + 'i'] = function(l){ if (!l) return; var a = [this, O.UNIFORM_I, loc(l), n]; for (var i = 1; i <= n; i++) a.push(arguments[i] | 0); g.apply(null, a); };
+    GP['uniform' + n + 'fv'] = function(l, v){ if (!l || !v) return; g(this, O.UNIFORM_FV, loc(l), n, (v.length / n) | 0, f32(this.__cv, v)); };
+    GP['uniform' + n + 'iv'] = function(l, v){ if (!l || !v) return; g(this, O.UNIFORM_IV, loc(l), n, (v.length / n) | 0, i32(this.__cv, v)); };
+  });
+  [2, 3, 4].forEach(function(n){
+    GP['uniformMatrix' + n + 'fv'] = function(l, tr, v){ if (!l || !v) return; g(this, O.UNIFORM_MAT, loc(l), n, (v.length / (n * n)) | 0, f32(this.__cv, v)); };
+  });
+  GP.vertexAttribPointer = function(i, size, type, norm, stride, off){ g(this, O.ATTRIB_PTR, i, size, type, norm ? 1 : 0, stride, off); };
+  GP.enableVertexAttribArray = function(i){ g(this, O.ENABLE_ATTRIB, i); };
+  GP.disableVertexAttribArray = function(i){ g(this, O.DISABLE_ATTRIB, i); };
+  [1, 2, 3, 4].forEach(function(n){
+    GP['vertexAttrib' + n + 'f'] = function(i){ var a = [this, O.ATTRIB_F, i, n]; for (var k = 1; k <= n; k++) a.push(+arguments[k]); g.apply(null, a); };
+    GP['vertexAttrib' + n + 'fv'] = function(i, v){ var a = [this, O.ATTRIB_F, i, n]; for (var k = 0; k < n; k++) a.push(+v[k]); g.apply(null, a); };
+  });
+  GP.bindBuffer = function(t, b){ g(this, O.BIND_BUFFER, t, idOf(b)); };
+  GP.bufferData = function(t, d, usage){
+    if (typeof d === 'number') g(this, O.BUFFER_DATA, t, usage, d, null);
+    else { var b = bytesOf(this.__cv, d); g(this, O.BUFFER_DATA, t, usage, d ? d.byteLength : 0, b); }
+  };
+  GP.bufferSubData = function(t, off, d){ g(this, O.BUFFER_SUB, t, off, bytesOf(this.__cv, d)); };
+  GP.drawArrays = function(m, first, count){ g(this, O.DRAW_ARRAYS, m, first, count); drew(this); };
+  GP.drawElements = function(m, count, type, off){ g(this, O.DRAW_ELEMENTS, m, count, type, off); drew(this); };
+  GP.viewport = function(x, y, w, h){ g(this, O.VIEWPORT, x, y, w, h); };
+  GP.scissor = function(x, y, w, h){ g(this, O.SCISSOR, x, y, w, h); };
+  GP.clearColor = function(r, gg, b, a){ g(this, O.CLEAR_COLOR, +r, +gg, +b, +a); };
+  GP.clearDepth = function(d){ g(this, O.CLEAR_DEPTH, +d); };
+  GP.clearStencil = function(s){ g(this, O.CLEAR_STENCIL, s); };
+  GP.clear = function(m){ g(this, O.CLEAR, m); drew(this); };
+  GP.enable = function(c){ g(this, O.ENABLE, c); };
+  GP.disable = function(c){ g(this, O.DISABLE, c); };
+  GP.isEnabled = function(c){ return !!g(this, O.IS_ENABLED, c); };
+  GP.blendFunc = function(s, d){ g(this, O.BLEND_FUNC, s, d, s, d); };
+  GP.blendFuncSeparate = function(a, b, c, d){ g(this, O.BLEND_FUNC, a, b, c, d); };
+  GP.blendEquation = function(m){ g(this, O.BLEND_EQ, m, m); };
+  GP.blendEquationSeparate = function(a, b){ g(this, O.BLEND_EQ, a, b); };
+  GP.blendColor = function(r, gg, b, a){ g(this, O.BLEND_COLOR, +r, +gg, +b, +a); };
+  GP.depthFunc = function(f){ g(this, O.DEPTH_FUNC, f); };
+  GP.depthMask = function(f){ g(this, O.DEPTH_MASK, f ? 1 : 0); };
+  GP.depthRange = function(n, f){ g(this, O.DEPTH_RANGE, +n, +f); };
+  GP.colorMask = function(r, gg, b, a){ g(this, O.COLOR_MASK, r ? 1 : 0, gg ? 1 : 0, b ? 1 : 0, a ? 1 : 0); };
+  GP.cullFace = function(m){ g(this, O.CULL_FACE, m); };
+  GP.frontFace = function(m){ g(this, O.FRONT_FACE, m); };
+  GP.lineWidth = function(w){ g(this, O.LINE_WIDTH, +w); };
+  GP.polygonOffset = function(f, u){ g(this, O.POLYGON_OFFSET, +f, +u); };
+  GP.stencilFunc = function(f, r, m){ g(this, O.STENCIL_FUNC, C.FRONT_AND_BACK, f, r, m); };
+  GP.stencilFuncSeparate = function(face, f, r, m){ g(this, O.STENCIL_FUNC, face, f, r, m); };
+  GP.stencilOp = function(a, b, c){ g(this, O.STENCIL_OP, C.FRONT_AND_BACK, a, b, c); };
+  GP.stencilOpSeparate = function(face, a, b, c){ g(this, O.STENCIL_OP, face, a, b, c); };
+  GP.stencilMask = function(m){ g(this, O.STENCIL_MASK, C.FRONT_AND_BACK, m); };
+  GP.stencilMaskSeparate = function(face, m){ g(this, O.STENCIL_MASK, face, m); };
+  GP.hint = function(t, m){ g(this, O.HINT, t, m); };
+  GP.sampleCoverage = function(v, inv){ g(this, O.SAMPLE_COVERAGE, +v, inv ? 1 : 0); };
+  GP.pixelStorei = function(pn, v){
+    if (pn === C.UNPACK_FLIP_Y_WEBGL) { this.__flipY = v ? 1 : 0; g(this, X_UNPACK, this.__flipY, this.__premul); }
+    else if (pn === C.UNPACK_PREMULTIPLY_ALPHA_WEBGL) { this.__premul = v ? 1 : 0; g(this, X_UNPACK, this.__flipY, this.__premul); }
+    else if (pn === C.UNPACK_COLORSPACE_CONVERSION_WEBGL) {}
+    else g(this, O.PIXEL_STORE, pn, v);
+  };
+  GP.activeTexture = function(u){ g(this, O.ACTIVE_TEXTURE, u); };
+  GP.bindTexture = function(t, tex){ g(this, O.BIND_TEXTURE, t, idOf(tex)); };
+  GP.texParameteri = function(t, p, v){ g(this, O.TEX_PARAM_I, t, p, v); };
+  GP.texParameterf = function(t, p, v){ g(this, O.TEX_PARAM_F, t, p, +v); };
+  function isSource(x){ return x && typeof x === 'object' && (x.tagName === 'IMG' || x.tagName === 'CANVAS' || x.tagName === 'VIDEO'); }
+  GP.texImage2D = function(t, level, ifmt, a, b, c, d, e, f){
+    if (arguments.length === 6) {                    /* (target, level, internalformat, format, type, source) */
+      var src = c && c.canvas && c.data ? null : c;
+      if (c && c.data && c.width) { g(this, O.TEX_IMAGE, t, level, ifmt, c.width, c.height, a, b, bytesOf(this.__cv, c.data)); return; }   /* ImageData */
+      if (c && c.close && c.width && !isSource(c) && c.__src) src = c.__src;   /* ImageBitmap */
+      if (isSource(src)) g(this, X_TEX_EL, t, level, ifmt, a, b, src);
+      return;
+    }
+    g(this, O.TEX_IMAGE, t, level, ifmt, a, b, d, e, bytesOf(this.__cv, f));   /* (w, h, border, format, type, pixels) */
+  };
+  GP.texSubImage2D = function(t, level, x, y, a, b, c, d, e){
+    if (arguments.length === 7) {
+      if (c && c.data && c.width) { g(this, O.TEX_SUB_IMAGE, t, level, x, y, c.width, c.height, a, b, bytesOf(this.__cv, c.data)); return; }
+      if (isSource(c)) g(this, X_TEX_SUB_EL, t, level, x, y, a, b, c);
+      return;
+    }
+    g(this, O.TEX_SUB_IMAGE, t, level, x, y, a, b, c, d, bytesOf(this.__cv, e));
+  };
+  GP.copyTexImage2D = function(t, l, f, x, y, w, h){ g(this, O.COPY_TEX_IMAGE, t, l, f, x, y, w, h); };
+  GP.copyTexSubImage2D = function(t, l, xo, yo, x, y, w, h){ g(this, O.COPY_TEX_SUB_IMAGE, t, l, xo, yo, x, y, w, h); };
+  GP.compressedTexImage2D = GP.compressedTexSubImage2D = function(){ this.__err = C.INVALID_ENUM; };
+  GP.generateMipmap = function(t){ g(this, O.GEN_MIPMAP, t); };
+  GP.bindFramebuffer = function(t, fb){ g(this, O.BIND_FRAMEBUFFER, t, idOf(fb)); };
+  GP.framebufferTexture2D = function(t, a, tt, tex, l){ g(this, O.FB_TEXTURE, t, a, tt, idOf(tex), l); };
+  GP.framebufferRenderbuffer = function(t, a, rt, rb){ g(this, O.FB_RENDERBUFFER, t, a, rt, idOf(rb)); };
+  GP.checkFramebufferStatus = function(t){ return g(this, O.CHECK_FB, t); };
+  GP.bindRenderbuffer = function(t, rb){ g(this, O.BIND_RENDERBUFFER, t, idOf(rb)); };
+  GP.renderbufferStorage = function(t, f, w, h){ g(this, O.RB_STORAGE, t, f === C.DEPTH_STENCIL ? 0x88F0 : f, w, h); };   /* (DEPTH24_STENCIL8) */
+  GP.readPixels = function(x, y, w, h, fmt, type, out){
+    var s = g(this, O.READ_PIXELS, x, y, w, h, fmt, type), bin = atob(s || ''), u = new Uint8Array(out.buffer, out.byteOffset, out.byteLength);
+    for (var i = 0, n = Math.min(bin.length, u.length); i < n; i++) u[i] = bin.charCodeAt(i);
+  };
+  GP.getError = function(){ if (this.__err) { var e = this.__err; this.__err = 0; return e; } return g(this, O.GET_ERROR); };
+  var STR = {}; STR[C.VENDOR] = 1; STR[C.RENDERER] = 1; STR[C.VERSION] = 1; STR[C.SHADING_LANGUAGE_VERSION] = 1;
+  GP.getParameter = function(pn){
+    if (pn === C.VERSION) return 'WebGL 1.0 (OpenGL ES 2.0, Banana OS)';
+    if (pn === C.SHADING_LANGUAGE_VERSION) return 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0)';
+    if (pn === C.VENDOR) return 'Banana OS';
+    if (pn === C.RENDERER) return 'WebGL (' + (g(this, O.GET_STRING, C.RENDERER) || 'Mesa') + ')';
+    if (pn === C.CURRENT_PROGRAM) return this.__prog || null;
+    if (pn === C.UNPACK_FLIP_Y_WEBGL) return !!this.__flipY;
+    if (pn === C.UNPACK_PREMULTIPLY_ALPHA_WEBGL) return !!this.__premul;
+    var v = g(this, O.GET_PARAM, pn) || [0];
+    if (pn === C.VIEWPORT || pn === C.SCISSOR_BOX || pn === C.MAX_VIEWPORT_DIMS) return new Int32Array(v.length > 1 ? v : [v[0], v[0], 0, 0].slice(0, pn === C.MAX_VIEWPORT_DIMS ? 2 : 4));
+    if (pn === C.COLOR_CLEAR_VALUE || pn === C.BLEND_COLOR) { var a = new Float32Array(4); for (var i = 0; i < 4; i++) a[i] = v[i] || 0; return a; }
+    if (pn === C.DEPTH_RANGE || pn === C.ALIASED_LINE_WIDTH_RANGE || pn === C.ALIASED_POINT_SIZE_RANGE) return new Float32Array([v[0] || 0, v[1] || v[0] || 1]);
+    if (pn === C.COLOR_WRITEMASK) return [!!v[0], v.length > 1 ? !!v[1] : true, v.length > 2 ? !!v[2] : true, v.length > 3 ? !!v[3] : true];
+    if (pn === C.BLEND || pn === C.DEPTH_TEST || pn === C.CULL_FACE || pn === C.SCISSOR_TEST || pn === C.STENCIL_TEST || pn === C.DITHER || pn === C.DEPTH_WRITEMASK) return !!v[0];
+    if (pn === C.COMPRESSED_TEXTURE_FORMATS) return new Uint32Array(0);
+    return v[0];
+  };
+  GP.getBufferParameter = GP.getRenderbufferParameter = GP.getTexParameter = GP.getVertexAttrib = GP.getFramebufferAttachmentParameter = function(){ return null; };
+  GP.getVertexAttribOffset = function(){ return 0; };
+  GP.getUniform = function(){ return null; };
+  GP.getSupportedExtensions = function(){ return ['OES_element_index_uint', 'OES_standard_derivatives']; };
+  GP.getExtension = function(n){
+    if (n === 'OES_element_index_uint' || n === 'OES_standard_derivatives') return { FRAGMENT_SHADER_DERIVATIVE_HINT_OES: 35723 };
+    if (n === 'WEBGL_lose_context') { var gl = this; return { loseContext: function(){}, restoreContext: function(){} }; }
+    if (n === 'WEBGL_debug_renderer_info') return { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
+    return null;
+  };
+  GP.getContextAttributes = function(){ var o = this.__opts || {}; return { alpha: o.alpha !== false, depth: o.depth !== false, stencil: !!o.stencil,
+    antialias: false, premultipliedAlpha: o.premultipliedAlpha !== false, preserveDrawingBuffer: !!o.preserveDrawingBuffer,
+    powerPreference: 'default', failIfMajorPerformanceCaveat: false, desynchronized: false }; };
+  GP.isContextLost = function(){ return !!__gl(this.__cv, X_LOST); };
+  GP.finish = function(){ g(this, O.FINISH); __gl(this.__cv, X_PRESENT); };
+  GP.flush = function(){};
+  GP.makeXRCompatible = function(){ return Promise.reject(new Error('no WebXR')); };
+  W.WebGLRenderingContext = GL;
+  for (var kc in C) GL[kc] = C[kc];
+  W.WebGLBuffer = WebGLBuffer; W.WebGLTexture = WebGLTexture; W.WebGLProgram = WebGLProgram; W.WebGLShader = WebGLShader;
+  W.WebGLFramebuffer = WebGLFramebuffer; W.WebGLRenderbuffer = WebGLRenderbuffer; W.WebGLUniformLocation = WebGLUniformLocation;
+  W.WebGLActiveInfo = WebGLActiveInfo; W.WebGLShaderPrecisionFormat = WebGLShaderPrecisionFormat;
+  /* getContext('webgl') (the 2D part is in the canvas block) */
+  W.__webglContext = function(cv, type, opts){
+    if (type === 'webgl2') return null;              /* WebGL 2: not yet */
+    if (cv.__gl) return cv.__gl;
+    if (cv.__ctx2d) return null;                     /* (one kind of context a canvas) */
+    opts = opts || {};
+    if (!__gl(cv, X_OPEN, opts.premultipliedAlpha === false ? 0 : 1)) return null;
+    return cv.__gl = new GL(cv, opts);
+  };
 })();
 /* <audio> / <video> / new Audio(): sound through the system's media streams
  * (__media_*: kernel/media.c). The element's state lives in el.__ms; a timer

@@ -42,6 +42,10 @@ global app_webmedia, app_webmedia_end
 app_webmedia: incbin "apps/webmedia/webmedia-x86_64.bpk.z"
 app_webmedia_end:
 align 16
+global app_webgl, app_webgl_end
+app_webgl: incbin "apps/webgl/webgl-x86_64.bpk.z"
+app_webgl_end:
+align 16
 app_terminal: incbin "apps/terminal/terminal-x86_64.bpk.z"
 app_terminal_end:
 section .rodata                 ; (not .payload: that goes to the heap once released)

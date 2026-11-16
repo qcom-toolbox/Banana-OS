@@ -46,6 +46,7 @@ void app_pty_close(struct pty* t);
 /* Kernel-only restricted browser workers. Return app ID, never a capability
  * accepted from user space. Unsupported on the unprotected 32-bit kernel. */
 int app_spawn_web_worker(const char* path, char* err, int cap);
+int app_spawn_gpu_worker(const char* path, char* err, int cap);   /* + Mesa's files and the GPU */
 uint32_t app_web_generation(int id);
 uint32_t app_web_memory(int id, uint32_t generation);
 int app_web_stop_reason(int id, uint32_t generation); /* 1: CPU, 2: wall; 0: unknown */

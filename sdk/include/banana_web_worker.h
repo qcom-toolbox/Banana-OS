@@ -14,7 +14,14 @@ enum { WW_INIT=1, WW_LOAD, WW_UPDATE, WW_CLICK, WW_KEY, WW_LIVE, WW_TICK,
        WW_DECODE, WW_TEST,
        /* a worker started for one <audio> / <video> stream (kernel/media.c,
         * apps/webworker/media.c): the file, then sound and pictures */
-       WW_MEDIA_OPEN, WW_MEDIA_AUDIO, WW_MEDIA_VIDEO, WW_MEDIA_SEEK };
+       WW_MEDIA_OPEN, WW_MEDIA_AUDIO, WW_MEDIA_VIDEO, WW_MEDIA_SEEK,
+       /* a worker running one page's WebGL context on the GPU (apps/webgl):
+        * a[0] a[1] the drawing buffer's size; a command stream in, results out */
+       WW_GL_INIT, WW_GL_EXEC };
+/* WW_GL_EXEC: a[0] = 1 to have the drawing buffer read back after the
+ * commands (RGBA, top row first, width * height * 4 bytes after the result) */
+typedef struct { int result_bytes, width, height, gl_error; } ww_gl_reply_t;
+#define WW_GL_COMMANDS (32u << 20)    /* a context's queued commands, at most */
 #define WW_MEDIA_BYTES (96u << 20)    /* the largest media file a stream takes */
 #define WW_MEDIA_RATE 48000           /* sound comes as 16-bit stereo at this rate */
 /* WW_MEDIA_OPEN's result */
@@ -27,10 +34,14 @@ typedef struct { int start_ms, frames, eof; } ww_media_audio_t;
 typedef struct { int pts_ms, width, height, eof; } ww_media_picture_t;
 /* the page's media requests (WW_MEDIA resources, arg = op) */
 enum { WWM_OPEN = 1, WWM_CMD, WWM_STATUS, WWM_FRAME };
+/* the page's WebGL requests (WW_GL resources, arg = op): OPEN (body: w, h) -> id;
+ * APPEND (body: id, then command bytes); EXEC (body: id, read back?) -> the
+ * worker's reply; CLOSE (body: id) */
+enum { WWG_OPEN = 1, WWG_APPEND, WWG_EXEC, WWG_CLOSE };
 typedef struct { int state, playing, ended; unsigned int pos_ms, dur_ms, seq; char error[96]; } ww_media_status_t;
 typedef struct { unsigned int seq; int width, height; } ww_media_frame_t;
 enum { WW_RESULT=0, WW_NAVBODY=1 };
-enum { WW_FETCH=1, WW_REQUEST, WW_COOKIE_GET, WW_COOKIE_SET, WW_FILE, WW_MESSAGE, WW_FONT, WW_MEDIA };
+enum { WW_FETCH=1, WW_REQUEST, WW_COOKIE_GET, WW_COOKIE_SET, WW_FILE, WW_MESSAGE, WW_FONT, WW_MEDIA, WW_GL };
 typedef struct {
     unsigned int version, op, length;
     int a[12];

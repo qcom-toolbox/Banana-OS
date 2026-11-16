@@ -48,6 +48,11 @@ typedef struct page_env {
     /* optional: a <video> stream's latest picture, if newer than *seq: XRGB pixels
      * kmalloc'd (caller kfree()s), its size; 0 = a new one */
     int  (*media_frame)(void* ctx, int id, uint32_t* seq, uint32_t** px, int* w, int* h);
+    /* optional: WebGL (web/webgl.c) - a context on the GPU worker (-1: none);
+     * its queued commands run, the reply (ww_gl_reply_t ...) kmalloc'd; closed */
+    int  (*gl_open)(void* ctx, int w, int h);
+    int  (*gl_exec)(void* ctx, int id, const uint8_t* cmds, uint32_t n, int read_back, uint8_t** reply, uint32_t* len);
+    void (*gl_close)(void* ctx, int id);
     /* optional: a local file's bytes (uploads: <input type=file>), kmalloc'd; 0 = ok */
     int  (*read_file)(void* ctx, const char* path, char** data, uint32_t* len);
     void* ctx;
@@ -134,6 +139,7 @@ typedef struct page {
     uint32_t     media_seq[16];       /* ...the picture it shows */
     uint32_t     media_tick;          /* when the pictures were last asked for */
     struct canvas* canvases;          /* its <canvas> elements' 2D contexts (canvas.c) */
+    struct webgl* webgls;             /* ... and WebGL contexts (webgl.c) */
     int          canvas_dirty;        /* one was drawn on: show it again */
     /* CSS background images, fetched once per address */
     struct { const char* url; struct img_data* img; } bgcache[40];

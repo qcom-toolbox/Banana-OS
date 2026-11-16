@@ -236,3 +236,18 @@ is refreshed in both directions. CI compiles Mesa with Debian 13 and LLVM 17
 driver models, live ISO boot and software fallback, then BIOS/UEFI upgrades
 from builds 212 and 218 and the installed runtime after reboot. Both ISOs
 are published only after the boot/upgrade matrix passes.
+
+## WebGL in the browser
+
+A page's WebGL context runs in a GPU worker of its own (`apps/webgl`): the
+page's isolated renderer records the calls (`web/webgl.c`, the stream in
+`web/webgl_ops.h`) and the kernel's broker (`kernel/remote_page.c`, `WW_GL`)
+hands them over; the worker plays them with OpenGL ES 2.0 through the SDK's
+EGL (an off-screen pbuffer) and reads each shown frame back. The worker is a
+web worker with a second restriction level (`kernel/app.c`,
+`app_spawn_gpu_worker`): besides the web workers' calls it may open files
+read-only, only those whose own path is in Mesa's folders or `/dev/dri/`,
+and use the GPU calls (`gpu_call`, `drm_ioctl`, threads). The GPU objects it
+makes are its own, as for any app. A page gets up to eight contexts; they
+end with the page or when the worker fails (the context is then lost).
+

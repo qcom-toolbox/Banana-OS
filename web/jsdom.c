@@ -3128,6 +3128,7 @@ void jsdom_install(page_t* p) {
     script_def_global(I, "customElements", v_obj(ce));
 #ifdef BANANA_USER_WORKER
     canvas_install(I);                               /* <canvas> 2D (canvas.c): the prelude builds the context on it */
+    if (p->env && p->env->gl_open) webgl_install(I); /* WebGL (webgl.c): on the GPU worker */
 #endif
     if (p->env && p->env->media_open) {              /* sound: the prelude builds <audio> on these */
         script_def_global(I, "__media_open", v_native(I, "__media_open", w_media_open));

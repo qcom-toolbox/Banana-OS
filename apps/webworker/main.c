@@ -117,6 +117,28 @@ static int media_status(void* c,int id,page_media_status_t* out) {
     out->pos_ms=st.pos_ms;out->dur_ms=st.dur_ms;out->seq=st.seq;kstrlcpy(out->error,st.error,sizeof(out->error));
     return 0;
 }
+/* WebGL: contexts on the GPU worker (kernel/remote_page.c, apps/webgl) */
+static int gl_open(void* c,int w,int h) {
+    (void)c;int body[2]={w,h},id;
+    if(resource(WW_GL,"",NULL,body,sizeof(body),NULL,WWG_OPEN)||response.length!=sizeof(id))return -1;
+    memcpy(&id,response_data,sizeof(id));return id;
+}
+static int gl_exec(void* c,int id,const uint8_t* cmds,uint32_t n,int read,uint8_t** reply,uint32_t* len) {
+    (void)c;
+    unsigned char* chunk=malloc(WW_REQUEST_BODY);
+    if(!chunk)return -1;
+    for(uint32_t off=0;off<n;){                      /* the commands, a request body at a time */
+        uint32_t part=n-off<WW_REQUEST_BODY-4?n-off:WW_REQUEST_BODY-4;
+        memcpy(chunk,&id,4);memcpy(chunk+4,cmds+off,part);
+        if(resource(WW_GL,"",NULL,chunk,part+4,NULL,WWG_APPEND)){free(chunk);return -1;}
+        off+=part;
+    }
+    free(chunk);
+    int body[2]={id,read};
+    if(resource(WW_GL,"",NULL,body,sizeof(body),NULL,WWG_EXEC)||response.length<sizeof(ww_gl_reply_t))return -1;
+    *reply=response_data;response_data=NULL;*len=response.length;return 0;
+}
+static void gl_close(void* c,int id){(void)c;resource(WW_GL,"",NULL,&id,sizeof(id),NULL,WWG_CLOSE);}
 static int media_frame(void* c,int id,uint32_t* seq,uint32_t** px,int* w,int* h) {
     (void)c;int body[2]={id,(int)*seq};ww_media_frame_t f;
     if(resource(WW_MEDIA,"",NULL,body,sizeof(body),NULL,WWM_FRAME)||response.length<sizeof(f))return -1;
@@ -311,6 +333,7 @@ int main(int argc,char** argv) {
     env.decode_image=web_decode_image;env.now_ms=now_ms;env.yield=yield;
     env.cookie_get=cookie_get;env.cookie_set=cookie_set;env.read_file=read_file;env.message=message;
     env.media_open=media_open;env.media_cmd=media_cmd;env.media_status=media_status;env.media_frame=media_frame;
+    env.gl_open=gl_open;env.gl_exec=gl_exec;env.gl_close=gl_close;
     web_yield_hook=yield;script_clock=clock_now;
     for(;;){
         int n=ipc(WW_WAIT,NULL,0,&cmd,sizeof(cmd));

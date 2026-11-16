@@ -756,9 +756,25 @@ static int fd_std(app_proc_t* p) {
     return 0;
 }
 
+/* what a GPU worker may read: Mesa's libraries and the GPU's device - the
+ * file's own path (as the filesystem has it: no "..", no link), read-only */
+static int gpu_path_ok(const char* path, int flags) {
+    if (flags & (BANANA_O_WRITE | BANANA_O_CREATE | BANANA_O_TRUNC | BANANA_O_APPEND)) return 0;
+    if (!strncmp(path, "/dev/dri/", 9) && !strstr(path, "..")) return 1;
+    int f = fs_find_file(path);
+    if (f < 0) return 0;
+    char real[FS_PATH_LEN];
+    fs_file_path(f, real, sizeof(real));
+    static const char* const dirs[] = { "/lib/", "/usr/lib/", "/apps/mesa/", "/usr/java/lib/", "/usr/share/drirc.d/" };
+    for (unsigned i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++)
+        if (!strncmp(real, dirs[i], strlen(dirs[i]))) return 1;
+    return 0;
+}
+
 static int a_open(const char* path, int flags) {
     app_proc_t* p = cur();
     if (!p || !path || !*path) return -1;
+    if (p->web_restricted && (p->web_restricted != 2 || !gpu_path_ok(path, flags))) return -13;
     if (!strncmp(path, "/dev/", 5)) return dev_open(p, path, flags);   /* (-errno) */
     int didx = fs_find_dir(path);
     if (didx >= 0) {
@@ -1225,6 +1241,8 @@ static int a_rename(const char* a, const char* b) { return a && b && fs_move(a, 
 
 static int a_stat(const char* path, banana_stat_t* st) {
     if (!path || !st) return -1;
+    app_proc_t* sp = cur();
+    if (sp && sp->web_restricted && (sp->web_restricted != 2 || !gpu_path_ok(path, 0))) return -1;
     int f = fs_find_file(path);
     if (f >= 0) { st->size = fs_file_info(f)->size; st->is_dir = 0; return 0; }
     if (fs_find_dir(path) >= 0) { st->size = 0; st->is_dir = 1; return 0; }
@@ -3067,6 +3085,20 @@ static int gather_args(app_proc_t* p, const sysspec_t* sp, const sysframe_t* r, 
 }
 
 #define API_SLOT(f) (__builtin_offsetof(banana_api_t, f) / sizeof(void*))
+/* a GPU worker (web_restricted 2, apps/webgl) may also load Mesa and reach
+ * the GPU: open/read/seek/close/stat - read-only, and only in gpu_path_ok's
+ * folders (a_open, a_stat check) - the GPU calls, threads, cpu_count */
+static int gpu_syscall_allowed(uint64_t slot) {
+    switch (slot) {
+    case API_SLOT(open): case API_SLOT(read): case API_SLOT(seek): case API_SLOT(close):
+    case API_SLOT(stat): case API_SLOT(fd_info): case API_SLOT(gpu_call): case API_SLOT(drm_ioctl):
+    case API_SLOT(thread_create): case API_SLOT(thread_join): case API_SLOT(thread_exit):
+    case API_SLOT(thread_start): case API_SLOT(thread_detach): case API_SLOT(wait): case API_SLOT(wake):
+    case API_SLOT(cpu_count):
+        return 1;
+    default: return 0;
+    }
+}
 static int web_syscall_allowed(uint64_t slot) {
     switch (slot) {
     case API_SLOT(exit): case API_SLOT(malloc): case API_SLOT(free):
@@ -3167,7 +3199,8 @@ void app_syscall(sysframe_t* r) {
         return;
     }
     web_check_budget(p);
-    if (p->web_restricted && (slot != SYS_RETURN && !web_syscall_allowed(slot))) {
+    if (p->web_restricted && (slot != SYS_RETURN && !web_syscall_allowed(slot) &&
+                              !(p->web_restricted == 2 && gpu_syscall_allowed(slot)))) {
         r->rax = (uint64_t)-1;
         __asm__ volatile("cli");
         return;
@@ -4989,13 +5022,18 @@ void app_web_budget(int id, uint32_t generation, uint32_t wall_ms, uint32_t cpu_
     p->web_stop_reason=0;p->web_stop_cpu=0;
 }
 
-int app_spawn_web_worker(const char* path, char* err, int cap) {
+static int spawn_restricted(const char* path, int level, char* err, int cap);
+int app_spawn_web_worker(const char* path, char* err, int cap) { return spawn_restricted(path, 1, err, cap); }
+/* the browser's GPU process (apps/webgl): restricted as a web worker, but it
+ * may read Mesa's files and use the GPU (gpu_syscall_allowed, gpu_path_ok) */
+int app_spawn_gpu_worker(const char* path, char* err, int cap) { return spawn_restricted(path, 2, err, cap); }
+static int spawn_restricted(const char* path, int level, char* err, int cap) {
 #ifdef __x86_64__
     umem_web_pool_init();
     char* argv[] = { "web-worker" };
     app_proc_t* p = prepare(path, 1, argv, NULL, err, cap);
     if (!p) return -1;
-    p->web_restricted = 1;
+    p->web_restricted = level;
     p->web_window = timer_ms();
     p->web_deadline = timer_ms() + 90000u;
     p->web_cpu_limit = 30000u;
@@ -5012,7 +5050,7 @@ int app_spawn_web_worker(const char* path, char* err, int cap) {
     pid_set(pid, p->id, -1);
     return p->id;
 #else
-    (void)path;
+    (void)path; (void)level;
     kstrlcpy(err, "Isolated browsing requires the 64-bit kernel", (size_t)cap);
     return -1;
 #endif

@@ -17,6 +17,7 @@ extern const uint8_t app_mediaplayer[], app_mediaplayer_end[], app_music[], app_
 #ifdef __x86_64__
 extern const uint8_t app_libjsworker[], app_libjsworker_end[];
 extern const uint8_t app_webmedia[], app_webmedia_end[];
+extern const uint8_t app_webgl[], app_webgl_end[];
 /* the ports (the Makefile's PORTS64: build/ports64.h) */
 #define PORT(n) extern const uint8_t port_##n[], port_##n##_end[];
 #define OPTPORT PORT
@@ -41,6 +42,7 @@ static const struct { const char* name; const uint8_t* start; const uint8_t* end
     { "webworker", app_webworker, app_webworker_end, 0 },
     { "libjsworker", app_libjsworker, app_libjsworker_end, 0 },
     { "webmedia", app_webmedia, app_webmedia_end, 0 },     /* (page <audio> / <video> decoder) */
+    { "webgl", app_webgl, app_webgl_end, 0 },              /* (the browser's GPU worker: WebGL) */
     { "terminal", app_terminal, app_terminal_end, 0 }, /* (apps/terminal: bash in windows and tabs) */
 #define PORT(n) { #n, port_##n, port_##n##_end, 0 },
 #define OPTPORT(n) { #n, port_##n, port_##n##_end, 1 },  /* (the Makefile's OPTPORTS64: Neovim) */

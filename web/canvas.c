@@ -76,6 +76,7 @@ struct canvas {
 };
 
 static grad_t g_grads[CV_GRADS];
+static int source_of(page_t* p, dom_node_t* n, const uint32_t** px, const uint8_t** al, int* w, int* h);
 
 /* ── helpers ───────────────────────────────────────────────────────── */
 
@@ -176,6 +177,37 @@ canvas_t* canvas_of(page_t* p, dom_node_t* n, int create) {
         p->dirty = 1;
     }
     return c;
+}
+
+/* a WebGL frame (RGBA, top row first, premultiplied or not) as the canvas's pixels */
+void canvas_put_rgba(page_t* p, dom_node_t* n, int w, int h, const uint8_t* rgba, int premultiplied) {
+    canvas_t* c = canvas_of(p, n, 1);
+    if (!c || w <= 0 || h <= 0) return;
+    if (c->w != w || c->h != h) { resize(c, w, h); p->dirty = 1; }
+    if (!c->img.px) return;
+    size_t np = (size_t)w * (size_t)h;
+    for (size_t i = 0; i < np; i++) {
+        const uint8_t* q = rgba + i * 4;
+        int a = q[3], r = q[0], g = q[1], b = q[2];
+        if (premultiplied && a && a < 255) { r = r * 255 / a; g = g * 255 / a; b = b * 255 / a; if (r > 255) r = 255; if (g > 255) g = 255; if (b > 255) b = 255; }
+        c->img.px[i] = (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+        c->img.alpha[i] = (uint8_t)a;
+    }
+    p->canvas_dirty = 1;
+}
+
+/* an element's pixels (an <img>, <video> or <canvas>) as RGBA, kmalloc'd */
+uint8_t* canvas_element_rgba(page_t* p, dom_node_t* n, int* w, int* h) {
+    const uint32_t* px; const uint8_t* al; int sw, sh;
+    if (!source_of(p, n, &px, &al, &sw, &sh)) return NULL;
+    uint8_t* o = kmalloc((size_t)sw * sh * 4);
+    if (!o) return NULL;
+    for (size_t i = 0; i < (size_t)sw * sh; i++) {
+        o[i * 4] = (uint8_t)(px[i] >> 16); o[i * 4 + 1] = (uint8_t)(px[i] >> 8); o[i * 4 + 2] = (uint8_t)px[i];
+        o[i * 4 + 3] = al ? al[i] : 255;
+    }
+    *w = sw; *h = sh;
+    return o;
 }
 
 void canvas_attr_changed(page_t* p, dom_node_t* n) {
