@@ -38,6 +38,18 @@ int main(void){
  int src=mouse_source();CHECK(src>0);
  mouse_inject_abs_src(src,50000,20000,1);m=mouse_read();CHECK(m.abs&&m.ax==50000&&m.btn_left);
  mouse_inject_abs_src(src,50000,20000,0);m=mouse_read();CHECK(m.abs&&!m.btn_left);
+ /* a source repeating the same place (a parked pen, a keyboard's spare pointer
+  * interface) must not pull the pointer back from a relative mouse's motion */
+ integrate=0;
+ int rel=mouse_source();CHECK(rel>0&&rel!=src);
+ mouse_inject_src(rel,40,-25,0);m=mouse_read();CHECK(!m.abs&&m.dx==40&&m.dy==-25);
+ mouse_inject_abs_src(src,50000,20000,0);m=mouse_read();CHECK(!m.abs);
+ mouse_inject_src(rel,-5,5,0);mouse_inject_abs_src(src,50000,20000,0);m=mouse_read();CHECK(!m.abs&&m.dx==-5&&m.dy==5);
+ mouse_inject_abs_src(src,51000,20000,0);m=mouse_read();CHECK(m.abs&&m.ax==51000);  /* (it moved: it wins) */
+ mouse_inject_abs_src(src,51000,20000,1);m=mouse_read();CHECK(m.btn_left);          /* (its buttons still count) */
+ mouse_inject_abs_src(src,51000,20000,0);m=mouse_read();CHECK(!m.btn_left);
+ mouse_source_free(rel);
+ integrate=1;
  mouse_source_free(src);
  integrate=1;mouse_pkt_size=4;
  mouse_on_aux_byte(9);mouse_on_aux_byte(0);mouse_on_aux_byte(0);mouse_on_aux_byte(1);

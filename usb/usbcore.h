@@ -213,6 +213,7 @@ int usb_get_string(usb_device_t* d, uint8_t index, char* out, uint32_t cap);
 void* usb_dma_alloc(uint32_t size);
 
 void usb_list(void);                      /* lsusb */
+void usbhid_describe(usb_device_t* d, char* out, int cap);   /* (usb/usbhid.c: lsusb's lines for it) */
 /* one device, for Device Manager: slot i (0..USB_MAX_DEVICES-1); 1 if a device is there */
 typedef struct {
     int         bus;              /* its host controller, 0-based (usb_hc_desc) */

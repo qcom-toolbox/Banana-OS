@@ -82,12 +82,14 @@ typedef struct {
     hid_field_t* fields;
     int        nfields;
     int        uses_rid;
-    int        fx, fy, fwheel, ftip, fbtn[3];
+    int        fx, fy, fwheel, ftip, frange, fbtn[3];
     /* a game controller: its fields, its slot in gamepad.c */
     int        is_pad, pad;
     int        src;              /* a pointer: its own buttons (kernel/usb.h), 0 until first used */
     uint8_t    pad_rid;
     int        fp[9], fpb[13];
+    uint32_t   reports;          /* (lsusb: what it has sent) */
+    int        last_x, last_y;   /* an absolute pointer's last place (0 - 65535) */
 } hid_iface_t;
 
 enum { PF_X, PF_Y, PF_Z, PF_RX, PF_RY, PF_RZ, PF_HAT, PF_BRAKE, PF_ACCEL };
@@ -186,7 +188,7 @@ static int pointer_setup(usb_device_t* d, hid_iface_t* h, uint8_t iface, uint16_
             kfree(f);
             return -1;
         }
-    h->fx = h->fy = h->fwheel = h->ftip = -1;
+    h->fx = h->fy = h->fwheel = h->ftip = h->frange = -1;
     h->fbtn[0] = h->fbtn[1] = h->fbtn[2] = -1;
     for (int i = 0; i < n; i++) {
         if (f[i].type != HID_INPUT || (f[i].flags & 1)) continue;          /* inputs, not padding */
@@ -196,6 +198,7 @@ static int pointer_setup(usb_device_t* d, hid_iface_t* h, uint8_t iface, uint16_
         else if (u == HID_U(1, 0x31) && h->fy < 0) h->fy = i;
         else if (u == HID_U(1, 0x38) && h->fwheel < 0) h->fwheel = i;
         else if (u == HID_U(0x0D, 0x42) && h->ftip < 0) h->ftip = i;       /* a touchscreen's finger down */
+        else if (u == HID_U(0x0D, 0x32) && h->frange < 0) h->frange = i;   /* a pen / finger in range */
         else if (u >= HID_U(9, 1) && u <= HID_U(9, 3) && h->fbtn[u - HID_U(9, 1)] < 0) h->fbtn[u - HID_U(9, 1)] = i;
     }
     if (h->fx < 0 || h->fy < 0 || f[h->fx].rid != f[h->fy].rid) { kfree(f); return -1; }
@@ -220,11 +223,19 @@ static void pointer_report(hid_iface_t* h, const uint8_t* buf, int len) {
     for (int k = 0; k < 3; k++) if (field_val(h, h->fbtn[k], buf, len, rid)) b |= 1 << k;
     if (h->ftip >= 0 && h->fbtn[0] < 0 && field_val(h, h->ftip, buf, len, rid)) b |= 1;
     int x = field_val(h, h->fx, buf, len, rid), y = field_val(h, h->fy, buf, len, rid);
+    /* a digitizer out of range (no pen, no finger): its X / Y are not a
+     * place - often a parked corner. Its buttons are let go, nothing moves. */
+    if (h->absolute && h->frange >= 0 && h->fields[h->frange].rid == rid && !field_val(h, h->frange, buf, len, rid)) {
+        mouse_inject_src(mouse_src(&h->src), 0, 0, 0);
+        return;
+    }
     if (h->absolute) {
         const hid_field_t* fx = &h->fields[h->fx];
         const hid_field_t* fy = &h->fields[h->fy];
         int32_t wx = fx->lmax > fx->lmin ? fx->lmax - fx->lmin : 1, wy = fy->lmax > fy->lmin ? fy->lmax - fy->lmin : 1;
-        mouse_inject_abs_src(mouse_src(&h->src), (int)((int64_t)(x - fx->lmin) * 65535 / wx), (int)((int64_t)(y - fy->lmin) * 65535 / wy), b);
+        h->last_x = (int)((int64_t)(x - fx->lmin) * 65535 / wx);
+        h->last_y = (int)((int64_t)(y - fy->lmin) * 65535 / wy);
+        mouse_inject_abs_src(mouse_src(&h->src), h->last_x, h->last_y, b);
     } else mouse_inject_src(mouse_src(&h->src), x, -y, b);
     int wheel = field_val(h, h->fwheel, buf, len, rid);
     if (wheel) mouse_inject_wheel(-wheel);
@@ -375,6 +386,22 @@ static int hid_attach(usb_device_t* d) {
     return 0;
 }
 
+/* lsusb: each interface's role and what it has sent - which device moves
+ * the pointer (an absolute one says where it last put it) */
+void usbhid_describe(usb_device_t* d, char* out, int cap) {
+    hid_t* hid = (hid_t*)d->drvdata;
+    int n = 0;
+    if (cap > 0) out[0] = 0;
+    for (int i = 0; hid && i < hid->count && n < cap; i++) {
+        hid_iface_t* h = &hid->ifs[i];
+        const char* role = h->is_kbd ? "keyboard" : h->is_pad ? "game controller" :
+                           h->report_mode ? (h->absolute ? "absolute pointer (tablet / touch)" : "mouse (report protocol)") : "mouse (boot protocol)";
+        n += ksnprintf(out + n, (size_t)(cap - n), "%s    endpoint %02x: %s, %u reports", n ? "\n" : "", h->ep, role, h->reports);
+        if (h->report_mode && h->absolute && n < cap)
+            n += ksnprintf(out + n, (size_t)(cap - n), ", last at %d,%d of 65535", h->last_x, h->last_y);
+    }
+}
+
 static void hid_poll(usb_device_t* d) {
     hid_t* hid = (hid_t*)d->drvdata;
     if (!hid) return;
@@ -386,6 +413,7 @@ static void hid_poll(usb_device_t* d) {
         }
         if (h->xfer.status == USB_XFER_PENDING || h->xfer.status == USB_XFER_GONE) continue;
         if (h->xfer.status == USB_XFER_OK) {
+            h->reports++;
             if (h->is_kbd && h->xfer.actual >= 8) {
                 keyboard_report(h, h->xfer.buf);
             } else if (h->is_pad) {

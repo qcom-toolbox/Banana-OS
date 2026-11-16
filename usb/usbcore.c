@@ -376,6 +376,18 @@ void usb_list(void) {
                       speed_name(d->speed), d->driver ? ", driver: " : ", no driver",
                       d->driver ? d->driver->name : "");
             terminal_writeln(line);
+            if (d->driver && !strcmp(d->driver->name, "usbhid")) {
+                char more[400];
+                usbhid_describe(d, more, sizeof(more));
+                char* s = more;
+                while (*s) {                       /* (one line each) */
+                    char* nl = strchr(s, '\n');
+                    if (nl) *nl = 0;
+                    terminal_writeln(s);
+                    if (!nl) break;
+                    s = nl + 1;
+                }
+            }
             any = 1;
         }
         if (!any) terminal_writeln("  (no devices)");

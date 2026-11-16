@@ -655,12 +655,22 @@ static void buttons_changed(void) {
     }
 }
 
+/* each source's last absolute position: only a change of it moves the
+ * pointer. A device that keeps reporting the same place (a keyboard's or
+ * receiver's extra pointer interface, a parked pen, a board's virtual
+ * tablet) otherwise pulled the pointer back there on every report, away
+ * from wherever the mouse had moved it. (A click of its own still places
+ * the pointer where it is.) */
+static int g_src_ax[MSRC_MAX], g_src_ay[MSRC_MAX];
+static uint32_t g_src_abs_seen;
+
 void mouse_source_free(int src) {
     if (src <= 0 || src >= MSRC_MAX) return;
     uintptr_t f;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(f) :: "memory");
     g_src_btn[src] = 0;                     /* (unplugged with a button down: let go) */
     g_src_used &= ~(1u << src);
+    g_src_abs_seen &= ~(1u << src);
     buttons_changed();
     if (f & 0x200) __asm__ volatile("sti" ::: "memory");
 }
@@ -669,9 +679,16 @@ void mouse_inject_abs_src(int src, int x, int y, int buttons) {
     if (src < 0 || src >= MSRC_MAX) src = 0;
     uintptr_t f;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(f) :: "memory");
-    g_abs_x = x < 0 ? 0 : x > 65535 ? 65535 : x;
-    g_abs_y = y < 0 ? 0 : y > 65535 ? 65535 : y;
-    g_abs_new = 1;
+    x = x < 0 ? 0 : x > 65535 ? 65535 : x;
+    y = y < 0 ? 0 : y > 65535 ? 65535 : y;
+    if (!(g_src_abs_seen & (1u << src)) || g_src_ax[src] != x || g_src_ay[src] != y || g_src_btn[src] != (buttons & 7)) {
+        g_abs_x = x;
+        g_abs_y = y;
+        g_abs_new = 1;
+        g_src_ax[src] = x;
+        g_src_ay[src] = y;
+        g_src_abs_seen |= 1u << src;
+    }
     g_src_btn[src] = buttons & 7;
     buttons_changed();
     if (f & 0x200) __asm__ volatile("sti" ::: "memory");
