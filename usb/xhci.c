@@ -654,11 +654,16 @@ static void bios_handoff(xhci_t* x) {
 int xhci_init_controller(const pci_dev_t* pd) {
     if (g_xhci_count >= MAX_XHCI) return -1;
     int is_io = 0;
+    /* (registers above 4 GiB - UEFI with "Above 4G decoding" / Resizable BAR
+     *  puts them there - are mapped by pci_bar on the 64-bit kernel; 0 where
+     *  they are out of reach. Skipping such a controller left its keyboard
+     *  and mouse to the firmware's PS/2 emulation: a pointer stuck in a
+     *  corner, a keyboard that worked only once replugged.) */
     uintptr_t bar = pci_bar(pd, 0, &is_io);
-    uint32_t raw = pci_read32(pd->bus, pd->dev, pd->fn, 0x10);
-    if (is_io || !bar) return -1;
-    if ((raw & 6) == 4 && pci_read32(pd->bus, pd->dev, pd->fn, 0x14) != 0) {
-        klog("xhci: registers above 4 GiB, skipped\n");
+    if (is_io) return -1;
+    if (!bar) {
+        klog("xhci: %02x:%02x.%u registers out of reach (above 4 GiB on the 32-bit kernel), skipped\n",
+             pd->bus, pd->dev, pd->fn);
         return -1;
     }
     pci_enable(pd);
