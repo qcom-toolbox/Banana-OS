@@ -50,8 +50,8 @@ typedef struct page_env {
     int  (*media_frame)(void* ctx, int id, uint32_t* seq, uint32_t** px, int* w, int* h);
     /* optional: WebGL (web/webgl.c) - a context on the GPU worker (-1: none);
      * its queued commands run, the reply (ww_gl_reply_t ...) kmalloc'd; closed */
-    int  (*gl_open)(void* ctx, int w, int h);
-    int  (*gl_exec)(void* ctx, int id, const uint8_t* cmds, uint32_t n, int read_back, uint8_t** reply, uint32_t* len);
+    int  (*gl_open)(void* ctx, int w, int h, int* version);   /* version: 2 or 3 asked, then made */
+    int  (*gl_exec)(void* ctx, int id, const uint8_t* cmds, uint32_t n, int read_back, int w, int h, uint8_t** reply, uint32_t* len);
     void (*gl_close)(void* ctx, int id);
     /* optional: a local file's bytes (uploads: <input type=file>), kmalloc'd; 0 = ok */
     int  (*read_file)(void* ctx, const char* path, char** data, uint32_t* len);

@@ -67,11 +67,15 @@ static void execute(void) {
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
     if (!BANANA_HAS(__banana, web_ipc)) return 125;
+    unsigned int last = 0;
     for (;;) {
         int n = ipc(WW_WAIT, NULL, 0, &cmd, sizeof(cmd));
         if (n < 0) return 121;
-        if (!n) { __banana->sleep_ms(10); continue; }
+        /* (a page drawing frames sends the next soon: looked for every
+         *  millisecond for a second after each, else every 10) */
+        if (!n) { __banana->sleep_ms(banana_ticks() - last < 1000u ? 1 : 10); continue; }
         if (n != (int)sizeof(cmd) || cmd.version != WW_VERSION) return 121;
         execute();
+        last = banana_ticks();
     }
 }

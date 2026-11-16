@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* A page's WebGL context, played back with OpenGL ES 2.0 (EGL, Mesa: the GPU
+/* A page's WebGL context, played back with OpenGL ES 2.0 - or 3.0 for WebGL 2 - (EGL, Mesa: the GPU
  * where Mesa drives one - Intel crocus / iris, VirGL - else its software
  * renderer). The command stream (web/webgl_ops.h) comes from the page's
  * worker through the kernel; every argument is checked against the stream's
@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <EGL/egl.h>
-#include <GLES2/gl2.h>
+#include <GLES3/gl3.h>
 #include "../../web/webgl_ops.h"
 
 static EGLDisplay g_dpy;
@@ -55,24 +55,30 @@ static int surface(int w, int h) {
     return 0;
 }
 
-static int init(int w, int h) {
+/* the context: OpenGL ES 3.0 when WebGL 2 asks (version 3) and Mesa has it,
+ * else 2.0; the answer is the version made */
+static int init(int w, int h, int version) {
     g_dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (!eglInitialize(g_dpy, NULL, NULL)) return -1;
-    EGLint want[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-                      EGL_DEPTH_SIZE, 24, EGL_STENCIL_SIZE, 8, EGL_NONE };
-    EGLint n = 0;
-    if (!eglChooseConfig(g_dpy, want, &g_cfg, 1, &n) || n < 1) return -1;
     eglBindAPI(EGL_OPENGL_ES_API);
-    EGLint ca[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
-    g_ctx = eglCreateContext(g_dpy, g_cfg, EGL_NO_CONTEXT, ca);
-    if (g_ctx == EGL_NO_CONTEXT) return -1;
+    int made = 0;
+    for (int v = version == 3 ? 3 : 2; v >= 2 && !made; v--) {
+        EGLint want[] = { EGL_RENDERABLE_TYPE, v == 3 ? 0x40 /* EGL_OPENGL_ES3_BIT */ : EGL_OPENGL_ES2_BIT,
+                          EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_DEPTH_SIZE, 24, EGL_STENCIL_SIZE, 8, EGL_NONE };
+        EGLint n = 0;
+        if (!eglChooseConfig(g_dpy, want, &g_cfg, 1, &n) || n < 1) continue;
+        EGLint ca[] = { EGL_CONTEXT_CLIENT_VERSION, v, EGL_NONE };
+        g_ctx = eglCreateContext(g_dpy, g_cfg, EGL_NO_CONTEXT, ca);
+        if (g_ctx != EGL_NO_CONTEXT) made = v;
+    }
+    if (!made) return -1;
     for (int k = 0; k < GLK_KINDS; k++) {
         g_names[k] = calloc(GLC_MAX_IDS, sizeof(GLuint));
         if (!g_names[k]) return -1;
     }
     if (surface(w, h)) return -1;
     glViewport(0, 0, g_w, g_h);
-    return 0;
+    return made;
 }
 
 static GLuint name_of(int kind, unsigned int id) {
@@ -90,6 +96,10 @@ static void create(int kind, unsigned int id, unsigned int type) {
     case GLK_RENDERBUFFER: glGenRenderbuffers(1, &n); break;
     case GLK_PROGRAM: n = glCreateProgram(); break;
     case GLK_SHADER: if (type == GL_VERTEX_SHADER || type == GL_FRAGMENT_SHADER) n = glCreateShader(type); break;
+    case GLK_VAO: glGenVertexArrays(1, &n); break;
+    case GLK_QUERY: glGenQueries(1, &n); break;
+    case GLK_SAMPLER: glGenSamplers(1, &n); break;
+    case GLK_TF: glGenTransformFeedbacks(1, &n); break;
     }
     g_names[kind][id] = n;
 }
@@ -104,6 +114,10 @@ static void destroy(int kind, unsigned int id) {
     case GLK_RENDERBUFFER: glDeleteRenderbuffers(1, &n); break;
     case GLK_PROGRAM: glDeleteProgram(n); break;
     case GLK_SHADER: glDeleteShader(n); break;
+    case GLK_VAO: glDeleteVertexArrays(1, &n); break;
+    case GLK_QUERY: glDeleteQueries(1, &n); break;
+    case GLK_SAMPLER: glDeleteSamplers(1, &n); break;
+    case GLK_TF: glDeleteTransformFeedbacks(1, &n); break;
     }
     g_names[kind][id] = 0;
 }
@@ -303,7 +317,14 @@ static void run(rd_t* R) {
         case GLC_STENCIL_OP: { GLenum face = u(&r), a = u(&r), b = u(&r), c = u(&r); glStencilOpSeparate(face, a, b, c); break; }
         case GLC_STENCIL_MASK: { GLenum face = u(&r); unsigned m = u(&r); glStencilMaskSeparate(face, m); break; }
         case GLC_HINT: { GLenum a = u(&r), b = u(&r); glHint(a, b); break; }
-        case GLC_PIXEL_STORE: { GLenum a = u(&r); int b = si(&r); if (a == GL_PACK_ALIGNMENT || a == GL_UNPACK_ALIGNMENT) glPixelStorei(a, b); break; }
+        case GLC_PIXEL_STORE: {
+            GLenum a = u(&r);
+            int b = si(&r);
+            if (a == GL_PACK_ALIGNMENT || a == GL_UNPACK_ALIGNMENT || a == GL_UNPACK_ROW_LENGTH || a == GL_UNPACK_SKIP_ROWS ||
+                a == GL_UNPACK_SKIP_PIXELS || a == GL_UNPACK_IMAGE_HEIGHT || a == GL_UNPACK_SKIP_IMAGES ||
+                a == GL_PACK_ROW_LENGTH || a == GL_PACK_SKIP_ROWS || a == GL_PACK_SKIP_PIXELS) glPixelStorei(a, b);
+            break;
+        }
         case GLC_ACTIVE_TEXTURE: glActiveTexture(u(&r)); break;
         case GLC_BIND_TEXTURE: { GLenum t = u(&r); unsigned id = u(&r); glBindTexture(t, id ? name_of(GLK_TEXTURE, id) : 0); break; }
         case GLC_TEX_PARAM_I: { GLenum t = u(&r), p = u(&r); int v = si(&r); glTexParameteri(t, p, v); break; }
@@ -380,6 +401,199 @@ static void run(rd_t* R) {
             break;
         }
         case GLC_SAMPLE_COVERAGE: { float v = f(&r); int inv = si(&r); glSampleCoverage(v, inv ? GL_TRUE : GL_FALSE); break; }
+        case GLC_DRAW_ARRAYS_INST: { GLenum m = u(&r); int a = si(&r), c = si(&r), n = si(&r); glDrawArraysInstanced(m, a, c, n); break; }
+        case GLC_DRAW_ELEMENTS_INST: {
+            GLenum m = u(&r); int c = si(&r); GLenum t = u(&r); uintptr_t off = u(&r); int n = si(&r);
+            glDrawElementsInstanced(m, c, t, (const void*)off, n);
+            break;
+        }
+        case GLC_ATTRIB_DIVISOR: { unsigned i = u(&r), d = u(&r); glVertexAttribDivisor(i, d); break; }
+        /* ── WebGL 2 ── */
+        case GLC_BIND_VAO: { unsigned id = u(&r); glBindVertexArray(id ? name_of(GLK_VAO, id) : 0); break; }
+        case GLC_TEX_IMAGE3D: case GLC_TEX_SUB_IMAGE3D: {
+            int sub = op == GLC_TEX_SUB_IMAGE3D;
+            GLenum t = u(&r);
+            int level = si(&r), ifmt = sub ? 0 : si(&r);
+            int x = sub ? si(&r) : 0, y = sub ? si(&r) : 0, z = sub ? si(&r) : 0;
+            int w = si(&r), h = si(&r), d = si(&r);
+            GLenum fmt = u(&r), type = u(&r);
+            unsigned int n;
+            const unsigned char* px = bytes(&r, &n);
+            if (r.bad || w < 0 || h < 0 || d < 0 || w > 4096 || h > 4096 || d > 2048) break;
+            if (!sub) glTexImage3D(t, level, ifmt, w, h, d, 0, fmt, type, n ? px : NULL);
+            else if (n) glTexSubImage3D(t, level, x, y, z, w, h, d, fmt, type, px);
+            break;
+        }
+        case GLC_TEX_STORAGE2D: case GLC_TEX_STORAGE3D: {
+            GLenum t = u(&r);
+            int lv = si(&r);
+            GLenum ifmt = u(&r);
+            int w = si(&r), h = si(&r), d = op == GLC_TEX_STORAGE3D ? si(&r) : 1;
+            if (w < 1 || h < 1 || d < 1 || w > 8192 || h > 8192 || d > 2048) break;
+            if (op == GLC_TEX_STORAGE2D) glTexStorage2D(t, lv, ifmt, w, h);
+            else glTexStorage3D(t, lv, ifmt, w, h, d);
+            break;
+        }
+        case GLC_DRAW_BUFFERS: {
+            GLenum b[16];
+            int n = 0;
+            while (r.i < r.n && n < 16) b[n++] = u(&r);
+            glDrawBuffers(n, b);
+            break;
+        }
+        case GLC_READ_BUFFER: glReadBuffer(u(&r)); break;
+        case GLC_BLIT_FB: {
+            int v[8];
+            for (int i = 0; i < 8; i++) v[i] = si(&r);
+            GLbitfield mask = u(&r);
+            GLenum filter = u(&r);
+            glBlitFramebuffer(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], mask, filter);
+            break;
+        }
+        case GLC_RB_STORAGE_MS: {
+            GLenum t = u(&r); int smp = si(&r); GLenum fm = u(&r); int w = si(&r), h = si(&r);
+            if (w >= 0 && h >= 0 && w <= 8192 && h <= 8192) glRenderbufferStorageMultisample(t, smp, fm, w, h);
+            break;
+        }
+        case GLC_FB_TEX_LAYER: {
+            GLenum t = u(&r), a = u(&r); unsigned id = u(&r); int lv = si(&r), layer = si(&r);
+            glFramebufferTextureLayer(t, a, id ? name_of(GLK_TEXTURE, id) : 0, lv, layer);
+            break;
+        }
+        case GLC_BIND_BUFFER_BASE: { GLenum t = u(&r); unsigned i = u(&r), id = u(&r); glBindBufferBase(t, i, id ? name_of(GLK_BUFFER, id) : 0); break; }
+        case GLC_BIND_BUFFER_RANGE: {
+            GLenum t = u(&r); unsigned i = u(&r), id = u(&r), off = u(&r), size = u(&r);
+            glBindBufferRange(t, i, id ? name_of(GLK_BUFFER, id) : 0, off, size);
+            break;
+        }
+        case GLC_UNIFORM_BLOCK_INDEX: case GLC_FRAG_DATA_LOC: {
+            GLuint p = name_of(GLK_PROGRAM, u(&r));
+            char* nm = cstr(&r);
+            int v = op == GLC_UNIFORM_BLOCK_INDEX ? (int)GL_INVALID_INDEX : -1;
+            if (p && nm) v = op == GLC_UNIFORM_BLOCK_INDEX ? (int)glGetUniformBlockIndex(p, nm) : glGetFragDataLocation(p, nm);
+            free(nm);
+            res_int(v);
+            break;
+        }
+        case GLC_UNIFORM_BLOCK_BINDING: { GLuint p = name_of(GLK_PROGRAM, u(&r)); unsigned i = u(&r), b = u(&r); if (p) glUniformBlockBinding(p, i, b); break; }
+        case GLC_UNIFORM_BLOCK_PARAM: {
+            GLuint p = name_of(GLK_PROGRAM, u(&r));
+            unsigned i = u(&r);
+            GLenum pn = u(&r);
+            GLint v[64];
+            memset(v, 0, sizeof(v));
+            if (p && pn != GL_UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES) glGetActiveUniformBlockiv(p, i, pn, v);
+            res_int(v[0]);
+            break;
+        }
+        case GLC_UNIFORM_UI: {
+            int loc = si(&r), n = si(&r);
+            GLuint v[4] = { 0, 0, 0, 0 };
+            for (int i = 0; i < n && i < 4; i++) v[i] = u(&r);
+            if (n == 1) glUniform1ui(loc, v[0]); else if (n == 2) glUniform2ui(loc, v[0], v[1]);
+            else if (n == 3) glUniform3ui(loc, v[0], v[1], v[2]); else if (n == 4) glUniform4ui(loc, v[0], v[1], v[2], v[3]);
+            break;
+        }
+        case GLC_UNIFORM_UIV: {
+            int loc = si(&r), comp = si(&r), count = si(&r);
+            if (comp < 1 || comp > 4 || count < 0 || (unsigned)(comp * count) > r.n - r.i) break;
+            const GLuint* d = r.w + r.i;
+            if (comp == 1) glUniform1uiv(loc, count, d); else if (comp == 2) glUniform2uiv(loc, count, d);
+            else if (comp == 3) glUniform3uiv(loc, count, d); else glUniform4uiv(loc, count, d);
+            break;
+        }
+        case GLC_UNIFORM_MAT_NS: {
+            int loc = si(&r), cols = si(&r), rows = si(&r), count = si(&r);
+            if (cols < 2 || cols > 4 || rows < 2 || rows > 4 || count < 0 || (unsigned)(cols * rows * count) > r.n - r.i) break;
+            const GLfloat* d = (const GLfloat*)(r.w + r.i);
+            switch (cols * 10 + rows) {
+            case 23: glUniformMatrix2x3fv(loc, count, GL_FALSE, d); break;
+            case 24: glUniformMatrix2x4fv(loc, count, GL_FALSE, d); break;
+            case 32: glUniformMatrix3x2fv(loc, count, GL_FALSE, d); break;
+            case 34: glUniformMatrix3x4fv(loc, count, GL_FALSE, d); break;
+            case 42: glUniformMatrix4x2fv(loc, count, GL_FALSE, d); break;
+            case 43: glUniformMatrix4x3fv(loc, count, GL_FALSE, d); break;
+            case 22: glUniformMatrix2fv(loc, count, GL_FALSE, d); break;
+            case 33: glUniformMatrix3fv(loc, count, GL_FALSE, d); break;
+            case 44: glUniformMatrix4fv(loc, count, GL_FALSE, d); break;
+            }
+            break;
+        }
+        case GLC_ATTRIB_IPTR: {
+            unsigned idx = u(&r); int size = si(&r); GLenum type = u(&r); int stride = si(&r); uintptr_t off = u(&r);
+            glVertexAttribIPointer(idx, size, type, stride, (const void*)off);
+            break;
+        }
+        case GLC_ATTRIB_I: {
+            unsigned idx = u(&r); int uns = si(&r);
+            unsigned v[4];
+            for (int i = 0; i < 4; i++) v[i] = u(&r);
+            if (uns) glVertexAttribI4ui(idx, v[0], v[1], v[2], v[3]);
+            else glVertexAttribI4i(idx, (int)v[0], (int)v[1], (int)v[2], (int)v[3]);
+            break;
+        }
+        case GLC_CLEAR_BUFFER_FV: {
+            GLenum b = u(&r); int db = si(&r);
+            GLfloat v[4] = { 0, 0, 0, 0 };
+            for (int i = 0; i < 4 && r.i < r.n; i++) v[i] = f(&r);
+            glClearBufferfv(b, db, v);
+            break;
+        }
+        case GLC_CLEAR_BUFFER_IV: {
+            int uns = si(&r); GLenum b = u(&r); int db = si(&r);
+            GLuint v[4] = { 0, 0, 0, 0 };
+            for (int i = 0; i < 4 && r.i < r.n; i++) v[i] = u(&r);
+            if (uns) glClearBufferuiv(b, db, v); else glClearBufferiv(b, db, (const GLint*)v);
+            break;
+        }
+        case GLC_CLEAR_BUFFER_FI: { GLenum b = u(&r); int db = si(&r); float d = f(&r); int st = si(&r); glClearBufferfi(b, db, d, st); break; }
+        case GLC_DRAW_RANGE_ELEMENTS: {
+            GLenum m = u(&r); unsigned a = u(&r), e = u(&r); int c = si(&r); GLenum t = u(&r); uintptr_t off = u(&r);
+            glDrawRangeElements(m, a, e, c, t, (const void*)off);
+            break;
+        }
+        case GLC_BIND_SAMPLER: { unsigned unit = u(&r), id = u(&r); glBindSampler(unit, id ? name_of(GLK_SAMPLER, id) : 0); break; }
+        case GLC_SAMPLER_PARAM_I: { GLuint sm = name_of(GLK_SAMPLER, u(&r)); GLenum pn = u(&r); int v = si(&r); if (sm) glSamplerParameteri(sm, pn, v); break; }
+        case GLC_SAMPLER_PARAM_F: { GLuint sm = name_of(GLK_SAMPLER, u(&r)); GLenum pn = u(&r); float v = f(&r); if (sm) glSamplerParameterf(sm, pn, v); break; }
+        case GLC_COPY_BUFFER_SUB: {
+            GLenum rt = u(&r), wt = u(&r); unsigned ro = u(&r), wo = u(&r), size = u(&r);
+            glCopyBufferSubData(rt, wt, ro, wo, size);
+            break;
+        }
+        case GLC_GET_BUFFER_SUB: {
+            GLenum t = u(&r); unsigned off = u(&r), len = u(&r);
+            const void* m = len && len <= (64u << 20) ? glMapBufferRange(t, off, len, GL_MAP_READ_BIT) : NULL;
+            if (!m) { res_int(0); break; }
+            res_int((int)len);
+            res_put(m, len);
+            glUnmapBuffer(t);
+            break;
+        }
+        case GLC_BEGIN_QUERY: { GLenum t = u(&r); unsigned id = u(&r); GLuint q = name_of(GLK_QUERY, id); if (q) glBeginQuery(t, q); break; }
+        case GLC_END_QUERY: glEndQuery(u(&r)); break;
+        case GLC_QUERY_RESULT: {
+            GLuint q = name_of(GLK_QUERY, u(&r));
+            GLenum pn = u(&r);
+            GLuint v = 0;
+            if (q && (pn == GL_QUERY_RESULT || pn == GL_QUERY_RESULT_AVAILABLE)) glGetQueryObjectuiv(q, pn, &v);
+            res_int((int)v);
+            break;
+        }
+        case GLC_BIND_TF: { GLenum t = u(&r); unsigned id = u(&r); glBindTransformFeedback(t, id ? name_of(GLK_TF, id) : 0); break; }
+        case GLC_BEGIN_TF: glBeginTransformFeedback(u(&r)); break;
+        case GLC_END_TF: glEndTransformFeedback(); break;
+        case GLC_PAUSE_TF: glPauseTransformFeedback(); break;
+        case GLC_RESUME_TF: glResumeTransformFeedback(); break;
+        case GLC_TF_VARYINGS: {
+            GLuint p = name_of(GLK_PROGRAM, u(&r));
+            GLenum mode = u(&r);
+            char* names[32];
+            int n = 0;
+            while (r.i < r.n && n < 32 && !r.bad) { char* s1 = cstr(&r); if (!s1) break; names[n++] = s1; }
+            if (p) glTransformFeedbackVaryings(p, n, (const char* const*)names, mode);
+            for (int i = 0; i < n; i++) free(names[i]);
+            break;
+        }
         default: break;                                  /* (unknown: skipped, its words counted) */
         }
     }
@@ -387,7 +601,7 @@ static void run(rd_t* R) {
 
 int ww_gl_execute(unsigned int op, const int* a, const void* data, unsigned int n,
                   unsigned char** out, unsigned int* out_len) {
-    if (op == WW_GL_INIT) return init(a[0], a[1]);
+    if (op == WW_GL_INIT) return init(a[0], a[1], a[2]);
     if (op != WW_GL_EXEC || !g_ctx) return -1;
     g_res_n = 0;
     rd_t r = { data, n / 4, 0, 0 };

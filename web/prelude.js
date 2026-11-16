@@ -552,8 +552,11 @@ W.__banana_deliver = function(data){
   prop('textBaseline', function(v){ if (!(v in BASE)) return false; cv(this, 34, BASE[v]); });
   prop('lineDashOffset', function(v){ v = +v; if (!isFinite(v)) return false; cv(this, 44, v); });
   prop('imageSmoothingEnabled', function(v){ cv(this, 47, v ? 1 : 0); });
-  ['imageSmoothingQuality', 'shadowColor', 'shadowBlur', 'shadowOffsetX', 'shadowOffsetY', 'filter', 'direction',
-   'letterSpacing', 'fontKerning'].forEach(function(n){ prop(n, function(){}); });
+  prop('shadowColor', function(v){ return !!cv(this, 51, String(v)); });
+  prop('shadowBlur', function(v){ v = +v; if (!(v >= 0) || !isFinite(v)) return false; cv(this, 52, 0, v); });
+  prop('shadowOffsetX', function(v){ v = +v; if (!isFinite(v)) return false; cv(this, 52, 1, v); });
+  prop('shadowOffsetY', function(v){ v = +v; if (!isFinite(v)) return false; cv(this, 52, 2, v); });
+  ['imageSmoothingQuality', 'filter', 'direction', 'letterSpacing', 'fontKerning'].forEach(function(n){ prop(n, function(){}); });
   CP.fillRect = function(x, y, w, h){ cv(this, 1, +x, +y, +w, +h); };
   CP.strokeRect = function(x, y, w, h){ cv(this, 2, +x, +y, +w, +h); };
   CP.clearRect = function(x, y, w, h){ cv(this, 3, +x, +y, +w, +h); };
@@ -591,7 +594,7 @@ W.__banana_deliver = function(data){
   CP.getTransform = function(){ var m = cv(this, 48); if (typeof DOMMatrix === 'function') { try { return new DOMMatrix([m.a, m.b, m.c, m.d, m.e, m.f]); } catch (x) {} } m.is2D = true; return m; };
   CP.createLinearGradient = function(x0, y0, x1, y1){ return new CanvasGradient(__cv(null, 23, 0, +x0, +y0, +x1, +y1)); };
   CP.createRadialGradient = function(x0, y0, r0, x1, y1, r1){ return new CanvasGradient(__cv(null, 23, 1, +x0, +y0, +r0, +x1, +y1, +r1)); };
-  CP.createConicGradient = function(a, x, y){ return new CanvasGradient(__cv(null, 23, 0, x - 1, y, x + 1, y)); };
+  CP.createConicGradient = function(a, x, y){ return new CanvasGradient(__cv(null, 23, 2, +x, +y, +a)); };
   CP.createPattern = function(img, rep){
     rep = rep || 'repeat';
     var id = cv(this, 25, img, rep === 'repeat' || rep === 'repeat-x' ? 1 : 0, rep === 'repeat' || rep === 'repeat-y' ? 1 : 0);
@@ -657,7 +660,7 @@ W.__banana_deliver = function(data){
   var raf = W.requestAnimationFrame;
   if (raf) W.requestAnimationFrame = function(cb){ return raf(function(){ cb(P.now()); }); };
 })();
-/* WebGL 1 (getContext('webgl')): calls recorded by web/webgl.c through
+/* WebGL 1 and 2 (getContext('webgl' / 'webgl2')): calls recorded by web/webgl.c through
  * __gl(canvas, op, ...) and played on the GPU by the browser's GPU worker
  * (apps/webgl, Mesa). Frames are shown after the task that drew them. */
 (function(){
@@ -729,9 +732,16 @@ W.__banana_deliver = function(data){
    'PIXEL_STORE', 'ACTIVE_TEXTURE', 'BIND_TEXTURE', 'TEX_PARAM_I', 'TEX_PARAM_F', 'TEX_IMAGE', 'TEX_SUB_IMAGE',
    'GEN_MIPMAP', 'BIND_FRAMEBUFFER', 'FB_TEXTURE', 'FB_RENDERBUFFER', 'CHECK_FB', 'BIND_RENDERBUFFER',
    'RB_STORAGE', 'READ_PIXELS', 'GET_ERROR', 'GET_PARAM', 'IS_ENABLED', 'GET_STRING', 'FINISH', 'COPY_TEX_IMAGE',
-   'COPY_TEX_SUB_IMAGE', 'SAMPLE_COVERAGE'].forEach(function(n){ O[n] = ++N; });
+   'COPY_TEX_SUB_IMAGE', 'SAMPLE_COVERAGE', 'STENCIL_MASK_SEP_DUMMY', 'DRAW_ARRAYS_INST', 'DRAW_ELEMENTS_INST',
+   'ATTRIB_DIVISOR', 'BIND_VAO', 'TEX_IMAGE3D', 'TEX_SUB_IMAGE3D', 'TEX_STORAGE2D', 'TEX_STORAGE3D', 'DRAW_BUFFERS',
+   'READ_BUFFER', 'BLIT_FB', 'RB_STORAGE_MS', 'FB_TEX_LAYER', 'BIND_BUFFER_BASE', 'BIND_BUFFER_RANGE',
+   'UNIFORM_BLOCK_INDEX', 'UNIFORM_BLOCK_BINDING', 'UNIFORM_BLOCK_PARAM', 'UNIFORM_UI', 'UNIFORM_UIV', 'UNIFORM_MAT_NS',
+   'ATTRIB_IPTR', 'ATTRIB_I', 'CLEAR_BUFFER_FV', 'CLEAR_BUFFER_IV', 'CLEAR_BUFFER_FI', 'DRAW_RANGE_ELEMENTS',
+   'BIND_SAMPLER', 'SAMPLER_PARAM_I', 'SAMPLER_PARAM_F', 'FRAG_DATA_LOC', 'COPY_BUFFER_SUB', 'GET_BUFFER_SUB',
+   'BEGIN_QUERY', 'END_QUERY', 'QUERY_RESULT', 'BIND_TF', 'BEGIN_TF', 'END_TF', 'TF_VARYINGS', 'PAUSE_TF',
+   'RESUME_TF'].forEach(function(n){ O[n] = ++N; });
   var X_OPEN = 200, X_CREATE = 201, X_PRESENT = 202, X_TEX_EL = 203, X_TEX_SUB_EL = 204, X_UNPACK = 205, X_TYPED = 206, X_LOST = 207;
-  var K = { buffer: 0, texture: 1, framebuffer: 2, renderbuffer: 3, program: 4, shader: 5 };
+  var K = { buffer: 0, texture: 1, framebuffer: 2, renderbuffer: 3, program: 4, shader: 5, vao: 6, query: 7, sampler: 8, tf: 9 };
   var HEX = []; for (var hx = 0; hx < 256; hx++) HEX.push((hx < 16 ? '0' : '') + hx.toString(16));
   var direct = null;                                 /* can C read our typed arrays itself? */
   function bytesOf(cv, d){
@@ -751,8 +761,11 @@ W.__banana_deliver = function(data){
   function WebGLFramebuffer(){} function WebGLRenderbuffer(){} function WebGLUniformLocation(){}
   function WebGLActiveInfo(o){ this.size = o.size; this.type = o.type; this.name = o.name; }
   function WebGLShaderPrecisionFormat(r0, r1, p){ this.rangeMin = r0; this.rangeMax = r1; this.precision = p; }
+  function WebGLVertexArrayObject(){} function WebGLQuery(){} function WebGLSampler(){} function WebGLTransformFeedback(){}
+  function WebGLSync(){}
   var CTOR = { buffer: WebGLBuffer, texture: WebGLTexture, framebuffer: WebGLFramebuffer, renderbuffer: WebGLRenderbuffer,
-               program: WebGLProgram, shader: WebGLShader };
+               program: WebGLProgram, shader: WebGLShader, vao: WebGLVertexArrayObject, query: WebGLQuery,
+               sampler: WebGLSampler, tf: WebGLTransformFeedback };
   function idOf(o){ return o && !o.__dead && o.__id ? o.__id : 0; }
   function GL(cv, opts){
     this.canvas = cv; this.__cv = cv; this.__opts = opts; this.__err = 0; this.__flipY = 0; this.__premul = 0; this.__shown = false;
@@ -948,14 +961,219 @@ W.__banana_deliver = function(data){
   W.WebGLBuffer = WebGLBuffer; W.WebGLTexture = WebGLTexture; W.WebGLProgram = WebGLProgram; W.WebGLShader = WebGLShader;
   W.WebGLFramebuffer = WebGLFramebuffer; W.WebGLRenderbuffer = WebGLRenderbuffer; W.WebGLUniformLocation = WebGLUniformLocation;
   W.WebGLActiveInfo = WebGLActiveInfo; W.WebGLShaderPrecisionFormat = WebGLShaderPrecisionFormat;
-  /* getContext('webgl') (the 2D part is in the canvas block) */
+
+  /* WebGL 2 (OpenGL ES 3.0 in the GPU worker): WebGL 1's context and more */
+  var C2 = {};
+  ('READ_BUFFER=3074 UNPACK_ROW_LENGTH=3314 UNPACK_SKIP_ROWS=3315 UNPACK_SKIP_PIXELS=3316 PACK_ROW_LENGTH=3330 ' +
+   'PACK_SKIP_ROWS=3331 PACK_SKIP_PIXELS=3332 COLOR=6144 DEPTH=6145 STENCIL=6146 RED=6403 RGB8=32849 RGBA8=32856 ' +
+   'RGB10_A2=32857 TEXTURE_BINDING_3D=32874 UNPACK_SKIP_IMAGES=32877 UNPACK_IMAGE_HEIGHT=32878 TEXTURE_3D=32879 ' +
+   'TEXTURE_WRAP_R=32882 MAX_3D_TEXTURE_SIZE=32883 UNSIGNED_INT_2_10_10_10_REV=33640 MAX_ELEMENTS_VERTICES=33000 ' +
+   'MAX_ELEMENTS_INDICES=33001 TEXTURE_MIN_LOD=33082 TEXTURE_MAX_LOD=33083 TEXTURE_BASE_LEVEL=33084 ' +
+   'TEXTURE_MAX_LEVEL=33085 MIN=32775 MAX=32776 DEPTH_COMPONENT24=33190 MAX_TEXTURE_LOD_BIAS=34045 ' +
+   'TEXTURE_COMPARE_MODE=34892 TEXTURE_COMPARE_FUNC=34893 CURRENT_QUERY=34917 QUERY_RESULT=34918 ' +
+   'QUERY_RESULT_AVAILABLE=34919 STREAM_READ=35041 STREAM_COPY=35042 STATIC_READ=35045 STATIC_COPY=35046 ' +
+   'DYNAMIC_READ=35049 DYNAMIC_COPY=35050 MAX_DRAW_BUFFERS=34852 MAX_FRAGMENT_UNIFORM_COMPONENTS=35657 ' +
+   'MAX_VERTEX_UNIFORM_COMPONENTS=35658 SAMPLER_3D=35679 SAMPLER_2D_SHADOW=35682 FRAGMENT_SHADER_DERIVATIVE_HINT=35723 ' +
+   'PIXEL_PACK_BUFFER=35051 PIXEL_UNPACK_BUFFER=35052 PIXEL_PACK_BUFFER_BINDING=35053 PIXEL_UNPACK_BUFFER_BINDING=35055 ' +
+   'FLOAT_MAT2x3=35685 FLOAT_MAT2x4=35686 FLOAT_MAT3x2=35687 FLOAT_MAT3x4=35688 FLOAT_MAT4x2=35689 FLOAT_MAT4x3=35690 ' +
+   'SRGB=35904 SRGB8=35905 SRGB8_ALPHA8=35907 COMPARE_REF_TO_TEXTURE=34894 RGBA32F=34836 RGB32F=34837 RGBA16F=34842 ' +
+   'RGB16F=34843 VERTEX_ATTRIB_ARRAY_INTEGER=35069 MAX_ARRAY_TEXTURE_LAYERS=35071 MIN_PROGRAM_TEXEL_OFFSET=35076 ' +
+   'MAX_PROGRAM_TEXEL_OFFSET=35077 MAX_VARYING_COMPONENTS=35659 TEXTURE_2D_ARRAY=35866 TEXTURE_BINDING_2D_ARRAY=35869 ' +
+   'R11F_G11F_B10F=35898 UNSIGNED_INT_10F_11F_11F_REV=35899 RGB9_E5=35901 UNSIGNED_INT_5_9_9_9_REV=35902 ' +
+   'TRANSFORM_FEEDBACK_BUFFER_MODE=35967 MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS=35968 ' +
+   'TRANSFORM_FEEDBACK_VARYINGS=35971 TRANSFORM_FEEDBACK_BUFFER_START=35972 TRANSFORM_FEEDBACK_BUFFER_SIZE=35973 ' +
+   'TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN=35976 RASTERIZER_DISCARD=35977 ' +
+   'MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS=35978 MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS=35979 ' +
+   'INTERLEAVED_ATTRIBS=35980 SEPARATE_ATTRIBS=35981 TRANSFORM_FEEDBACK_BUFFER=35982 ' +
+   'TRANSFORM_FEEDBACK_BUFFER_BINDING=35983 RGBA32UI=36208 RGB32UI=36209 RGBA16UI=36214 RGB16UI=36215 RGBA8UI=36220 ' +
+   'RGB8UI=36221 RGBA32I=36226 RGB32I=36227 RGBA16I=36232 RGB16I=36233 RGBA8I=36238 RGB8I=36239 RED_INTEGER=36244 ' +
+   'RGB_INTEGER=36248 RGBA_INTEGER=36249 SAMPLER_2D_ARRAY=36289 SAMPLER_2D_ARRAY_SHADOW=36292 SAMPLER_CUBE_SHADOW=36293 ' +
+   'UNSIGNED_INT_VEC2=36294 UNSIGNED_INT_VEC3=36295 UNSIGNED_INT_VEC4=36296 INT_SAMPLER_2D=36298 INT_SAMPLER_3D=36299 ' +
+   'INT_SAMPLER_CUBE=36300 INT_SAMPLER_2D_ARRAY=36303 UNSIGNED_INT_SAMPLER_2D=36306 UNSIGNED_INT_SAMPLER_3D=36307 ' +
+   'UNSIGNED_INT_SAMPLER_CUBE=36308 UNSIGNED_INT_SAMPLER_2D_ARRAY=36311 DEPTH_COMPONENT32F=36012 DEPTH32F_STENCIL8=36013 ' +
+   'FLOAT_32_UNSIGNED_INT_24_8_REV=36269 FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING=33296 ' +
+   'FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE=33297 FRAMEBUFFER_ATTACHMENT_RED_SIZE=33298 ' +
+   'FRAMEBUFFER_ATTACHMENT_GREEN_SIZE=33299 FRAMEBUFFER_ATTACHMENT_BLUE_SIZE=33300 ' +
+   'FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE=33301 FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE=33302 ' +
+   'FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE=33303 FRAMEBUFFER_DEFAULT=33304 UNSIGNED_INT_24_8=34042 DEPTH24_STENCIL8=35056 ' +
+   'UNSIGNED_NORMALIZED=35863 DRAW_FRAMEBUFFER_BINDING=36006 READ_FRAMEBUFFER=36008 DRAW_FRAMEBUFFER=36009 ' +
+   'READ_FRAMEBUFFER_BINDING=36010 RENDERBUFFER_SAMPLES=36011 FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER=36052 ' +
+   'MAX_COLOR_ATTACHMENTS=36063 FRAMEBUFFER_INCOMPLETE_MULTISAMPLE=36182 MAX_SAMPLES=36183 HALF_FLOAT=5131 RG=33319 ' +
+   'RG_INTEGER=33320 R8=33321 RG8=33323 R16F=33325 R32F=33326 RG16F=33327 RG32F=33328 R8I=33329 R8UI=33330 R16I=33331 ' +
+   'R16UI=33332 R32I=33333 R32UI=33334 RG8I=33335 RG8UI=33336 RG16I=33337 RG16UI=33338 RG32I=33339 RG32UI=33340 ' +
+   'VERTEX_ARRAY_BINDING=34229 R8_SNORM=36756 RG8_SNORM=36757 RGB8_SNORM=36758 RGBA8_SNORM=36759 SIGNED_NORMALIZED=36764 ' +
+   'COPY_READ_BUFFER=36662 COPY_WRITE_BUFFER=36663 COPY_READ_BUFFER_BINDING=36662 COPY_WRITE_BUFFER_BINDING=36663 ' +
+   'UNIFORM_BUFFER=35345 UNIFORM_BUFFER_BINDING=35368 UNIFORM_BUFFER_START=35369 UNIFORM_BUFFER_SIZE=35370 ' +
+   'MAX_VERTEX_UNIFORM_BLOCKS=35371 MAX_FRAGMENT_UNIFORM_BLOCKS=35373 MAX_COMBINED_UNIFORM_BLOCKS=35374 ' +
+   'MAX_UNIFORM_BUFFER_BINDINGS=35375 MAX_UNIFORM_BLOCK_SIZE=35376 MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS=35377 ' +
+   'MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS=35379 UNIFORM_BUFFER_OFFSET_ALIGNMENT=35380 ACTIVE_UNIFORM_BLOCKS=35382 ' +
+   'UNIFORM_TYPE=35383 UNIFORM_SIZE=35384 UNIFORM_BLOCK_INDEX=35386 UNIFORM_OFFSET=35387 UNIFORM_ARRAY_STRIDE=35388 ' +
+   'UNIFORM_MATRIX_STRIDE=35389 UNIFORM_IS_ROW_MAJOR=35390 UNIFORM_BLOCK_BINDING=35391 UNIFORM_BLOCK_DATA_SIZE=35392 ' +
+   'UNIFORM_BLOCK_ACTIVE_UNIFORMS=35394 UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES=35395 ' +
+   'UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER=35396 UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER=35398 ' +
+   'INVALID_INDEX=4294967295 MAX_VERTEX_OUTPUT_COMPONENTS=37154 MAX_FRAGMENT_INPUT_COMPONENTS=37157 ' +
+   'MAX_SERVER_WAIT_TIMEOUT=37137 OBJECT_TYPE=37138 SYNC_CONDITION=37139 SYNC_STATUS=37140 SYNC_FLAGS=37141 ' +
+   'SYNC_FENCE=37142 SYNC_GPU_COMMANDS_COMPLETE=37143 UNSIGNALED=37144 SIGNALED=37145 ALREADY_SIGNALED=37146 ' +
+   'TIMEOUT_EXPIRED=37147 CONDITION_SATISFIED=37148 WAIT_FAILED=37149 SYNC_FLUSH_COMMANDS_BIT=1 ' +
+   'VERTEX_ATTRIB_ARRAY_DIVISOR=35070 ANY_SAMPLES_PASSED=35887 ANY_SAMPLES_PASSED_CONSERVATIVE=36202 ' +
+   'SAMPLER_BINDING=35097 RGB10_A2UI=36975 INT_2_10_10_10_REV=36255 TRANSFORM_FEEDBACK=36386 ' +
+   'TRANSFORM_FEEDBACK_PAUSED=36387 TRANSFORM_FEEDBACK_ACTIVE=36388 TRANSFORM_FEEDBACK_BINDING=36389 ' +
+   'TEXTURE_IMMUTABLE_FORMAT=37167 MAX_ELEMENT_INDEX=36203 TEXTURE_IMMUTABLE_LEVELS=33503 TIMEOUT_IGNORED=-1 ' +
+   'MAX_CLIENT_WAIT_TIMEOUT_WEBGL=37447').split(' ').forEach(function(kv){
+    var i = kv.indexOf('='); C2[kv.slice(0, i)] = +kv.slice(i + 1); });
+  for (var db = 0; db < 16; db++) { C2['DRAW_BUFFER' + db] = 34853 + db; C2['COLOR_ATTACHMENT' + db] = 36064 + db; }
+  function GL2(cv, opts){ GL.call(this, cv, opts); this.__v2 = true; }
+  var G2 = GL2.prototype = Object.create(GP);
+  G2.constructor = GL2;
+  for (var k1 in C) GL2[k1] = C[k1];
+  for (var k2 in C2) { GL2[k2] = C2[k2]; G2[k2] = C2[k2]; }
+  function part(v, off, len){                        /* (WebGL 2's srcOffset / srcLength) */
+    if (off === undefined || !v || typeof v.subarray !== 'function') return v;
+    return len ? v.subarray(off, off + len) : v.subarray(off);
+  }
+  G2.createVertexArray = function(){ return make(this, 'vao'); };
+  G2.deleteVertexArray = del('vao');
+  G2.bindVertexArray = function(v){ g(this, O.BIND_VAO, idOf(v)); };
+  G2.createQuery = function(){ return make(this, 'query'); };
+  G2.deleteQuery = del('query');
+  G2.beginQuery = function(t, q){ g(this, O.BEGIN_QUERY, t, idOf(q)); };
+  G2.endQuery = function(t){ g(this, O.END_QUERY, t); };
+  G2.getQuery = function(){ return null; };
+  G2.getQueryParameter = function(q, pn){ var v = g(this, O.QUERY_RESULT, idOf(q), pn); return pn === C2.QUERY_RESULT_AVAILABLE ? !!v : v >>> 0; };
+  G2.createSampler = function(){ return make(this, 'sampler'); };
+  G2.deleteSampler = del('sampler');
+  G2.bindSampler = function(u, s){ g(this, O.BIND_SAMPLER, u, idOf(s)); };
+  G2.samplerParameteri = function(s, p, v){ g(this, O.SAMPLER_PARAM_I, idOf(s), p, v); };
+  G2.samplerParameterf = function(s, p, v){ g(this, O.SAMPLER_PARAM_F, idOf(s), p, +v); };
+  G2.getSamplerParameter = function(){ return null; };
+  G2.createTransformFeedback = function(){ return make(this, 'tf'); };
+  G2.deleteTransformFeedback = del('tf');
+  G2.bindTransformFeedback = function(t, tf){ g(this, O.BIND_TF, t, idOf(tf)); };
+  G2.beginTransformFeedback = function(m){ g(this, O.BEGIN_TF, m); };
+  G2.endTransformFeedback = function(){ g(this, O.END_TF); };
+  G2.pauseTransformFeedback = function(){ g(this, O.PAUSE_TF); };
+  G2.resumeTransformFeedback = function(){ g(this, O.RESUME_TF); };
+  G2.transformFeedbackVaryings = function(p, names, mode){ g.apply(null, [this, O.TF_VARYINGS, idOf(p), mode].concat(Array.prototype.map.call(names, String))); };
+  G2.getTransformFeedbackVarying = function(){ return null; };
+  G2.isVertexArray = G2.isQuery = G2.isSampler = G2.isTransformFeedback = function(o){ return !!(o && !o.__dead && o.__id); };
+  G2.texImage2D = function(t, level, ifmt, w, h, border, fmt, type, src, off){
+    if (arguments.length <= 6) return GP.texImage2D.apply(this, arguments);
+    if (isSource(src)) { g(this, X_TEX_EL, t, level, ifmt, fmt, type, src); return; }
+    if (src && src.data && src.width) { g(this, O.TEX_IMAGE, t, level, ifmt, src.width, src.height, fmt, type, bytesOf(this.__cv, src.data)); return; }
+    g(this, O.TEX_IMAGE, t, level, ifmt, w, h, fmt, type, typeof src === 'number' ? null : bytesOf(this.__cv, part(src, off)));
+  };
+  G2.texSubImage2D = function(t, level, x, y, w, h, fmt, type, src, off){
+    if (arguments.length <= 7) return GP.texSubImage2D.apply(this, arguments);
+    if (isSource(src)) { g(this, X_TEX_SUB_EL, t, level, x, y, fmt, type, src); return; }
+    g(this, O.TEX_SUB_IMAGE, t, level, x, y, w, h, fmt, type, typeof src === 'number' ? null : bytesOf(this.__cv, part(src, off)));
+  };
+  G2.texImage3D = function(t, level, ifmt, w, h, d, border, fmt, type, src, off){
+    g(this, O.TEX_IMAGE3D, t, level, ifmt, w, h, d, fmt, type, src && typeof src === 'object' && !isSource(src) ? bytesOf(this.__cv, part(src, off)) : null);
+  };
+  G2.texSubImage3D = function(t, level, x, y, z, w, h, d, fmt, type, src, off){
+    g(this, O.TEX_SUB_IMAGE3D, t, level, x, y, z, w, h, d, fmt, type, src && typeof src === 'object' && !isSource(src) ? bytesOf(this.__cv, part(src, off)) : null);
+  };
+  G2.texStorage2D = function(t, lv, f, w, h){ g(this, O.TEX_STORAGE2D, t, lv, f, w, h); };
+  G2.texStorage3D = function(t, lv, f, w, h, d){ g(this, O.TEX_STORAGE3D, t, lv, f, w, h, d); };
+  G2.compressedTexImage3D = G2.compressedTexSubImage3D = function(){ this.__err = C.INVALID_ENUM; };
+  G2.copyTexSubImage3D = function(){ this.__err = C.INVALID_OPERATION; };
+  G2.drawBuffers = function(list){ g.apply(null, [this, O.DRAW_BUFFERS].concat(Array.prototype.slice.call(list))); };
+  G2.readBuffer = function(s){ g(this, O.READ_BUFFER, s); };
+  G2.blitFramebuffer = function(a, b, c, d, e, f, h, i, mask, filter){ g(this, O.BLIT_FB, a, b, c, d, e, f, h, i, mask, filter); drew(this); };
+  G2.renderbufferStorageMultisample = function(t, s, f, w, h){ g(this, O.RB_STORAGE_MS, t, s, f, w, h); };
+  G2.framebufferTextureLayer = function(t, a, tex, lv, layer){ g(this, O.FB_TEX_LAYER, t, a, idOf(tex), lv, layer); };
+  G2.invalidateFramebuffer = G2.invalidateSubFramebuffer = function(){};
+  G2.getInternalformatParameter = function(t, f, pn){
+    if (pn !== 32937) return null;                     /* SAMPLES */
+    var max = this.getParameter(C2.MAX_SAMPLES) || 0, out = [];
+    for (var s = max; s > 1; s >>= 1) out.push(s);
+    return new Int32Array(out);
+  };
+  G2.bindBufferBase = function(t, i, b){ g(this, O.BIND_BUFFER_BASE, t, i, idOf(b)); };
+  G2.bindBufferRange = function(t, i, b, off, size){ g(this, O.BIND_BUFFER_RANGE, t, i, idOf(b), off, size); };
+  G2.getUniformBlockIndex = function(p, n){ return g(this, O.UNIFORM_BLOCK_INDEX, idOf(p), String(n)) >>> 0; };
+  G2.uniformBlockBinding = function(p, i, b){ g(this, O.UNIFORM_BLOCK_BINDING, idOf(p), i, b); };
+  G2.getActiveUniformBlockParameter = function(p, i, pn){
+    if (pn === C2.UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES) return new Uint32Array(0);
+    var v = g(this, O.UNIFORM_BLOCK_PARAM, idOf(p), i, pn);
+    return pn === C2.UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER || pn === C2.UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER ? !!v : v;
+  };
+  G2.getActiveUniformBlockName = function(){ return null; };
+  G2.getUniformIndices = function(p, names){ return null; };
+  G2.getActiveUniforms = function(){ return null; };
+  G2.getFragDataLocation = function(p, n){ return g(this, O.FRAG_DATA_LOC, idOf(p), String(n)); };
+  function u32(cv, v){ return bytesOf(cv, v instanceof Uint32Array ? v : new Uint32Array(v)); }
+  [1, 2, 3, 4].forEach(function(n){
+    G2['uniform' + n + 'ui'] = function(l){ if (!l) return; var a = [this, O.UNIFORM_UI, loc(l), n]; for (var i = 1; i <= n; i++) a.push(arguments[i] >>> 0); g.apply(null, a); };
+    G2['uniform' + n + 'uiv'] = function(l, v, off, len){ if (!l || !v) return; v = part(v, off, len); g(this, O.UNIFORM_UIV, loc(l), n, (v.length / n) | 0, u32(this.__cv, v)); };
+    G2['uniform' + n + 'fv'] = function(l, v, off, len){ GP['uniform' + n + 'fv'].call(this, l, part(v, off, len)); };
+    G2['uniform' + n + 'iv'] = function(l, v, off, len){ GP['uniform' + n + 'iv'].call(this, l, part(v, off, len)); };
+    G2['vertexAttribI4' + (n === 1 ? 'i' : n === 2 ? 'ui' : n === 3 ? 'iv' : 'uiv')] = n < 3
+      ? function(i, a, b, c, d){ g(this, O.ATTRIB_I, i, n === 2 ? 1 : 0, a, b, c, d); }
+      : function(i, v){ g(this, O.ATTRIB_I, i, n === 4 ? 1 : 0, v[0], v[1], v[2], v[3]); };
+  });
+  [[2, 2], [3, 3], [4, 4], [2, 3], [2, 4], [3, 2], [3, 4], [4, 2], [4, 3]].forEach(function(cr){
+    var name = 'uniformMatrix' + cr[0] + (cr[0] === cr[1] ? '' : 'x' + cr[1]) + 'fv';
+    G2[name] = function(l, tr, v, off, len){
+      if (!l || !v) return;
+      v = part(v, off, len);
+      g(this, O.UNIFORM_MAT_NS, loc(l), cr[0], cr[1], (v.length / (cr[0] * cr[1])) | 0, f32(this.__cv, v));
+    };
+  });
+  G2.vertexAttribIPointer = function(i, size, type, stride, off){ g(this, O.ATTRIB_IPTR, i, size, type, stride, off); };
+  G2.vertexAttribDivisor = function(i, d){ g(this, O.ATTRIB_DIVISOR, i, d); };
+  G2.drawArraysInstanced = function(m, first, count, n){ g(this, O.DRAW_ARRAYS_INST, m, first, count, n); drew(this); };
+  G2.drawElementsInstanced = function(m, count, type, off, n){ g(this, O.DRAW_ELEMENTS_INST, m, count, type, off, n); drew(this); };
+  G2.drawRangeElements = function(m, s, e, count, type, off){ g(this, O.DRAW_RANGE_ELEMENTS, m, s, e, count, type, off); drew(this); };
+  G2.clearBufferfv = function(b, d, v, off){ v = part(v, off); g(this, O.CLEAR_BUFFER_FV, b, d, +v[0] || 0, +v[1] || 0, +v[2] || 0, +v[3] || 0); drew(this); };
+  G2.clearBufferiv = function(b, d, v, off){ v = part(v, off); g(this, O.CLEAR_BUFFER_IV, 0, b, d, v[0] | 0, v[1] | 0, v[2] | 0, v[3] | 0); drew(this); };
+  G2.clearBufferuiv = function(b, d, v, off){ v = part(v, off); g(this, O.CLEAR_BUFFER_IV, 1, b, d, v[0] >>> 0, v[1] >>> 0, v[2] >>> 0, v[3] >>> 0); drew(this); };
+  G2.clearBufferfi = function(b, d, depth, st){ g(this, O.CLEAR_BUFFER_FI, b, d, +depth, st | 0); drew(this); };
+  G2.copyBufferSubData = function(rt, wt, ro, wo, size){ g(this, O.COPY_BUFFER_SUB, rt, wt, ro, wo, size); };
+  G2.getBufferSubData = function(t, off, dst, dstOff, len){
+    var u = new Uint8Array(dst.buffer, dst.byteOffset, dst.byteLength), es = dst.BYTES_PER_ELEMENT || 1;
+    var start = (dstOff || 0) * es, n = len ? len * es : u.length - start;
+    var s = g(this, O.GET_BUFFER_SUB, t, off, n), bin = atob(s || '');
+    for (var i = 0; i < bin.length && start + i < u.length; i++) u[start + i] = bin.charCodeAt(i);
+  };
+  G2.bufferData = function(t, d, usage, off, len){
+    if (off !== undefined && d && typeof d.subarray === 'function') d = part(d, off, len);
+    GP.bufferData.call(this, t, d, usage);
+  };
+  G2.bufferSubData = function(t, dstOff, d, off, len){ GP.bufferSubData.call(this, t, dstOff, off !== undefined ? part(d, off, len) : d); };
+  G2.fenceSync = function(){ var s = new WebGLSync(); s.__sync = true; return s; };
+  G2.isSync = function(s){ return !!(s && s.__sync); };
+  G2.deleteSync = G2.waitSync = function(){};
+  G2.clientWaitSync = function(){ return C2.ALREADY_SIGNALED; };
+  G2.getSyncParameter = function(s, pn){
+    return pn === C2.SYNC_STATUS ? C2.SIGNALED : pn === C2.OBJECT_TYPE ? C2.SYNC_FENCE : pn === C2.SYNC_CONDITION ? C2.SYNC_GPU_COMMANDS_COMPLETE : 0;
+  };
+  G2.getIndexedParameter = function(){ return null; };
+  G2.getParameter = function(pn){
+    if (pn === C.VERSION) return 'WebGL 2.0 (OpenGL ES 3.0, Banana OS)';
+    if (pn === C.SHADING_LANGUAGE_VERSION) return 'WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0)';
+    if (pn === C2.VERTEX_ARRAY_BINDING || pn === C2.SAMPLER_BINDING || pn === C2.UNIFORM_BUFFER_BINDING ||
+        pn === C2.TRANSFORM_FEEDBACK_BINDING || pn === C2.READ_FRAMEBUFFER_BINDING) return null;
+    return GP.getParameter.call(this, pn);
+  };
+  G2.getSupportedExtensions = function(){ return ['EXT_color_buffer_float', 'OES_texture_float_linear', 'WEBGL_debug_renderer_info']; };
+  G2.getExtension = function(n){
+    if (n === 'EXT_color_buffer_float' || n === 'OES_texture_float_linear' || n === 'EXT_color_buffer_half_float') return {};
+    if (n === 'OES_element_index_uint' || n === 'OES_standard_derivatives') return null;   /* (core in WebGL 2) */
+    return GP.getExtension.call(this, n);
+  };
+  W.WebGL2RenderingContext = GL2;
+  W.WebGLVertexArrayObject = WebGLVertexArrayObject; W.WebGLQuery = WebGLQuery; W.WebGLSampler = WebGLSampler;
+  W.WebGLTransformFeedback = WebGLTransformFeedback; W.WebGLSync = WebGLSync;
+  /* getContext('webgl' / 'webgl2') (the 2D part is in the canvas block) */
   W.__webglContext = function(cv, type, opts){
-    if (type === 'webgl2') return null;              /* WebGL 2: not yet */
-    if (cv.__gl) return cv.__gl;
+    var two = type === 'webgl2';
+    if (cv.__gl) return !!cv.__gl.__v2 === two ? cv.__gl : null;
     if (cv.__ctx2d) return null;                     /* (one kind of context a canvas) */
     opts = opts || {};
-    if (!__gl(cv, X_OPEN, opts.premultipliedAlpha === false ? 0 : 1)) return null;
-    return cv.__gl = new GL(cv, opts);
+    var v = __gl(cv, X_OPEN, opts.premultipliedAlpha === false ? 0 : 1, two ? 3 : 2);
+    if (!v || (two && v !== 3)) return null;         /* (no OpenGL ES 3.0 here: no WebGL 2) */
+    return cv.__gl = two ? new GL2(cv, opts) : new GL(cv, opts);
   };
 })();
 /* <audio> / <video> / new Audio(): sound through the system's media streams

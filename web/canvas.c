@@ -73,6 +73,7 @@ struct canvas {
     int      nsubs, subcap;
     double   cx, cy;                           /* the current point (user space) */
     int      have_cur;                         /* 1: there is a current point; 2: just after closePath */
+    uint8_t* smask;                            /* a shadow's pass: what is drawn goes here, as coverage */
 };
 
 static grad_t g_grads[CV_GRADS];
@@ -436,7 +437,10 @@ static uint32_t paint_at(const painter_t* pp, double x, double y) {
         return px ? sample_img(px, al, g->pw, g->ph, sx, sy) : 0xFF000000u;
     }
     double t;
-    if (!g->radial) {
+    if (g->radial == 2) {                      /* conic: the angle around (x0, y0), from r0 */
+        t = (atan2_(uy - g->y0, ux - g->x0) - g->r0) / (2 * PI);
+        t -= floor_(t);
+    } else if (!g->radial) {
         double dx = g->x1 - g->x0, dy = g->y1 - g->y0, l2 = dx * dx + dy * dy;
         t = l2 > 0 ? ((ux - g->x0) * dx + (uy - g->y0) * dy) / l2 : 0;
     } else {
@@ -462,6 +466,10 @@ static uint32_t paint_at(const painter_t* pp, double x, double y) {
 static void blend(canvas_t* c, size_t i, uint32_t src, int cov, int op) {
     int sa = (255 - (int)(src >> 24)) * cov >> 8;
     sa = (int)(sa * c->st.alpha);
+    if (c->smask) {                            /* (the clip applies when the shadow is laid down) */
+        if (sa > 0) c->smask[i] = (uint8_t)(sa + c->smask[i] * (255 - sa) / 255);
+        return;
+    }
     if (c->st.clip) sa = sa * c->st.clip[i] / 255;
     if (sa <= 0 && op != 3) return;
     uint32_t d = c->img.px[i];
@@ -899,6 +907,58 @@ static void draw_text(canvas_t* c, const char* t, double x, double y, double max
     font_draw(buf, bw, 0, 0, bw, bh, face, px, 1, asc + 2, t, len, 0xFFFFFF, c->st.italic);
     painter_t pp;
     painter(c, paint, &pp);
+    const mat_t* m = &c->st.m;
+    if (m->b != 0 || m->c != 0 || m->a <= 0 || m->d <= 0 || fabs_(m->a - m->d) > 1e-6 * m->a) {
+        /* rotated, skewed, mirrored or stretched: each device pixel looks
+         * back into the glyphs through the transform. Glyph pixel (bx, by)
+         * is user point (ux + (bx - 1) sq / scale, uy + (by - asc - 2) / scale) */
+        double ux = x, uy = y, wu = w / scale;
+        if (c->st.align == 1) ux -= wu / 2;
+        else if (c->st.align == 2) ux -= wu;
+        if (c->st.baseline == 1) uy += asc / scale;
+        else if (c->st.baseline == 2) uy += (asc - desc) / 2.0 / scale;
+        else if (c->st.baseline == 3) uy -= desc / scale;
+        mat_t g;                                    /* glyph pixel -> device */
+        double kx = squeeze / scale, ky = 1 / scale;
+        double tx = ux - kx, ty = uy - (asc + 2) * ky;
+        g.a = m->a * kx; g.b = m->b * kx; g.c = m->c * ky; g.d = m->d * ky;
+        g.e = m->a * tx + m->c * ty + m->e; g.f = m->b * tx + m->d * ty + m->f;
+        mat_t gi;
+        if (!invert(&g, &gi)) { kfree(buf); return; }
+        double xs[4], ys[4];
+        pt(&g, 0, 0, &xs[0], &ys[0]); pt(&g, bw, 0, &xs[1], &ys[1]);
+        pt(&g, bw, bh, &xs[2], &ys[2]); pt(&g, 0, bh, &xs[3], &ys[3]);
+        double minx = xs[0], maxx = xs[0], miny = ys[0], maxy = ys[0];
+        for (int i = 1; i < 4; i++) {
+            if (xs[i] < minx) minx = xs[i];
+            if (xs[i] > maxx) maxx = xs[i];
+            if (ys[i] < miny) miny = ys[i];
+            if (ys[i] > maxy) maxy = ys[i];
+        }
+        int x0 = iclamp((int)floor_(minx), 0, c->w), x1 = iclamp((int)floor_(maxx) + 1, 0, c->w);
+        int y0 = iclamp((int)floor_(miny), 0, c->h), y1 = iclamp((int)floor_(maxy) + 1, 0, c->h);
+        for (int cy = y0; cy < y1; cy++)
+            for (int cx = x0; cx < x1; cx++) {
+                double bx, by;
+                pt(&gi, cx + 0.5, cy + 0.5, &bx, &by);
+                bx -= 0.5; by -= 0.5;                   /* (bilinear, between glyph pixel centres) */
+                int ix = (int)floor_(bx), iy = (int)floor_(by);
+                if (ix < -1 || iy < -1 || ix >= bw || iy >= bh) continue;
+                double fx = bx - ix, fy = by - iy, k = 0;
+                for (int j = 0; j < 4; j++) {
+                    int sx = ix + (j & 1), sy = iy + (j >> 1);
+                    if (sx < 0 || sy < 0 || sx >= bw || sy >= bh) continue;
+                    double wt = ((j & 1) ? fx : 1 - fx) * ((j >> 1) ? fy : 1 - fy);
+                    k += wt * (double)((buf[(size_t)sy * bw + sx] >> 8) & 255);
+                }
+                int ki = (int)(k + 0.5);
+                if (ki <= 0) continue;
+                blend(c, (size_t)cy * c->w + cx, paint->kind == PAINT_COLOR ? paint->color : paint_at(&pp, cx + 0.5, cy + 0.5),
+                      ki * 256 / 255, c->st.op);
+            }
+        kfree(buf);
+        return;
+    }
     int ox = (int)floor_(dx + 0.5) - 1, oy = (int)floor_(dy + 0.5) - (asc + 2);
     for (int yy = 0; yy < bh; yy++) {
         int cy = oy + yy;
@@ -980,6 +1040,78 @@ static void draw_image(canvas_t* c, const uint32_t* spx, const uint8_t* sal, int
             blend(c, (size_t)y * c->w + x, col, 256, c->st.op);
         }
     }
+}
+
+
+/* ── shadows ───────────────────────────────────────────────────────── */
+
+static int shadow_on(const canvas_t* c) {
+    return (c->st.shadow_color >> 24) != 255 &&
+           (c->st.shadow_blur > 0 || c->st.shadow_x != 0 || c->st.shadow_y != 0);
+}
+
+/* one pass of a box blur of radius r over the rows (step 1) or columns (step
+ * w) of the box x0..x1, y0..y1 */
+static void box_pass(uint8_t* m, uint8_t* tmp, int w, int x0, int y0, int x1, int y1, int r, int vertical) {
+    int n = vertical ? y1 - y0 : x1 - x0, lines = vertical ? x1 - x0 : y1 - y0;
+    int div = 2 * r + 1;
+    for (int l = 0; l < lines; l++) {
+        uint8_t* base = vertical ? m + (size_t)y0 * w + x0 + l : m + (size_t)(y0 + l) * w + x0;
+        size_t step = vertical ? (size_t)w : 1;
+        for (int k = 0; k < n; k++) tmp[k] = base[k * step];
+        int sum = 0;
+        for (int k = -r; k <= r; k++) sum += k >= 0 && k < n ? tmp[k] : 0;
+        for (int k = 0; k < n; k++) {
+            base[k * step] = (uint8_t)((sum + div / 2) / div);
+            int add = k + r + 1, sub = k - r;
+            sum += (add < n ? tmp[add] : 0) - (sub >= 0 ? tmp[sub] : 0);
+        }
+    }
+}
+
+/* the shadow of what the capture pass drew: blurred (three box blurs make
+ * about the Gaussian of sigma = blur / 2), moved by the offset (not
+ * transformed), and laid down in the shadow's colour under the clip and the
+ * compositing operation */
+static void shadow_draw(canvas_t* c, uint8_t* m) {
+    int w = c->w, h = c->h;
+    int x0 = w, y0 = h, x1 = 0, y1 = 0;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+            if (m[(size_t)y * w + x]) {
+                if (x < x0) x0 = x;
+                if (x >= x1) x1 = x + 1;
+                if (y < y0) y0 = y;
+                if (y >= y1) y1 = y + 1;
+            }
+    if (x0 >= x1) return;
+    double sigma = c->st.shadow_blur / 2;
+    int r = sigma > 0 ? (int)(sqrt_(sigma * sigma + 0.25) - 0.5 + 0.5) : 0;
+    if (r > 0) {
+        x0 = iclamp(x0 - 3 * r, 0, w); x1 = iclamp(x1 + 3 * r, 0, w);
+        y0 = iclamp(y0 - 3 * r, 0, h); y1 = iclamp(y1 + 3 * r, 0, h);
+        uint8_t* tmp = kmalloc((size_t)(w > h ? w : h));
+        if (tmp) {
+            for (int k = 0; k < 3; k++) {
+                box_pass(m, tmp, w, x0, y0, x1, y1, r, 0);
+                box_pass(m, tmp, w, x0, y0, x1, y1, r, 1);
+            }
+            kfree(tmp);
+        }
+    }
+    int ox = (int)floor_(c->st.shadow_x + 0.5), oy = (int)floor_(c->st.shadow_y + 0.5);
+    double alpha = c->st.alpha;
+    c->st.alpha = 1;                           /* (the capture held it already) */
+    for (int y = y0; y < y1; y++) {
+        int dy = y + oy;
+        if (dy < 0 || dy >= h) continue;
+        for (int x = x0; x < x1; x++) {
+            int dx = x + ox, k = m[(size_t)y * w + x];
+            if (!k || dx < 0 || dx >= w) continue;
+            blend(c, (size_t)dy * w + dx, c->st.shadow_color, k * 256 / 255, c->st.op);
+        }
+    }
+    c->st.alpha = alpha;
 }
 
 /* ── image data, PNG ───────────────────────────────────────────────── */
@@ -1075,7 +1207,8 @@ enum {
     OP_TRANSFORM, OP_SETTRANSFORM, OP_RESET_TRANSFORM, OP_STYLE, OP_GRAD_NEW, OP_GRAD_STOP, OP_PATTERN,
     OP_LINEWIDTH, OP_CAP, OP_JOIN, OP_MITER, OP_ALPHA, OP_COMPOSITE, OP_FONT, OP_ALIGN, OP_BASELINE,
     OP_FILLTEXT, OP_STROKETEXT, OP_MEASURE, OP_DRAWIMAGE, OP_GETDATA, OP_PUTDATA, OP_DATAURL, OP_SIZE,
-    OP_DASH, OP_DASHOFF, OP_INPATH, OP_ROUNDRECT, OP_SMOOTH, OP_GETTRANSFORM, OP_RESET, OP_INSTROKE
+    OP_DASH, OP_DASHOFF, OP_INPATH, OP_ROUNDRECT, OP_SMOOTH, OP_GETTRANSFORM, OP_RESET, OP_INSTROKE,
+    OP_SHADOW_COLOR, OP_SHADOW                 /* (color) / (0 blur, 1 offset x, 2 offset y; value) */
 };
 
 static page_t* host_page(interp_t* I) { return (page_t*)script_host(I); }
@@ -1103,7 +1236,8 @@ static value_t cv_call(interp_t* I, value_t self, int argc, value_t* argv) {
             g->used = 1;
             g->radial = (int)num(I, argc, argv, 2);
             g->x0 = num(I, argc, argv, 3); g->y0 = num(I, argc, argv, 4);
-            if (g->radial) {
+            if (g->radial == 2) g->r0 = num(I, argc, argv, 5);         /* conic: start angle */
+            else if (g->radial) {
                 g->r0 = num(I, argc, argv, 5); g->x1 = num(I, argc, argv, 6); g->y1 = num(I, argc, argv, 7); g->r1 = num(I, argc, argv, 8);
             } else { g->x1 = num(I, argc, argv, 5); g->y1 = num(I, argc, argv, 6); }
             return v_num(i);
@@ -1134,6 +1268,18 @@ static value_t cv_call(interp_t* I, value_t self, int argc, value_t* argv) {
     double a = num(I, argc, argv, 2), b = num(I, argc, argv, 3), cc = num(I, argc, argv, 4), d = num(I, argc, argv, 5);
     double e = num(I, argc, argv, 6), f = num(I, argc, argv, 7);
     int draws = 0;
+    if (!c->smask && shadow_on(c) && (op == OP_FILLRECT || op == OP_STROKERECT || op == OP_FILL || op == OP_STROKE ||
+                                    op == OP_FILLTEXT || op == OP_STROKETEXT || op == OP_DRAWIMAGE)) {
+        /* the shape once into a mask, for its shadow; then itself */
+        uint8_t* m = kzalloc((size_t)c->w * (size_t)c->h);
+        if (m) {
+            c->smask = m;
+            cv_call(I, self, argc, argv);
+            c->smask = NULL;
+            shadow_draw(c, m);
+            kfree(m);
+        }
+    }
     switch (op) {
     case OP_SIZE: {
         obj_t* o = obj_new(I, OBJ_PLAIN);
@@ -1296,6 +1442,19 @@ static value_t cv_call(interp_t* I, value_t self, int argc, value_t* argv) {
     case OP_ALIGN: c->st.align = (int)a; break;
     case OP_BASELINE: c->st.baseline = (int)a; break;
     case OP_SMOOTH: c->st.smooth = (int)a; break;
+    case OP_SHADOW_COLOR: {
+        int ok;
+        uint32_t col = css_color_blend(argc > 2 ? v_cstr(I, argv[2]) : "", &ok);
+        if (!ok) return v_bool(0);
+        c->st.shadow_color = ok == 2 ? 0xFF000000u : col;
+        return v_bool(1);
+    }
+    case OP_SHADOW:
+        if (!finite_(b)) break;
+        if ((int)a == 0) { if (b >= 0) c->st.shadow_blur = b; }
+        else if ((int)a == 1) c->st.shadow_x = b;
+        else c->st.shadow_y = b;
+        break;
     case OP_FILLTEXT: case OP_STROKETEXT:
         if (argc > 4) {
             const char* t = v_cstr(I, argv[2]);

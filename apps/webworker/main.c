@@ -62,8 +62,9 @@ static int resource(unsigned int kind,const char* url,const char* method,
     int ok=ipc(WW_RESOURCE,r,sizeof(*r),NULL,0);
     free(r);free(response_data);response_data=NULL;
     if(ok<0)return -1;
-    while((ok=ipc(WW_RESPONSE,NULL,0,&response,sizeof(response)))==0)__banana->sleep_ms(2);
-    if(ok<0 || response.length>WW_DOCUMENT || response.result<0)return -1;
+    /* (frames and sound wait less: they come again soon) */
+    while((ok=ipc(WW_RESPONSE,NULL,0,&response,sizeof(response)))==0)__banana->sleep_ms(kind==WW_GL||kind==WW_MEDIA?1:2);
+    if(ok<0 || response.length>(kind==WW_GL?WW_GL_REPLY:WW_DOCUMENT) || response.result<0)return -1;
     response_data=malloc((size_t)response.length+1);
     if(!response_data)__banana->exit(120);
     unsigned int off=0;
@@ -118,12 +119,12 @@ static int media_status(void* c,int id,page_media_status_t* out) {
     return 0;
 }
 /* WebGL: contexts on the GPU worker (kernel/remote_page.c, apps/webgl) */
-static int gl_open(void* c,int w,int h) {
-    (void)c;int body[2]={w,h},id;
-    if(resource(WW_GL,"",NULL,body,sizeof(body),NULL,WWG_OPEN)||response.length!=sizeof(id))return -1;
-    memcpy(&id,response_data,sizeof(id));return id;
+static int gl_open(void* c,int w,int h,int* version) {
+    (void)c;int body[3]={w,h,*version},got[2];
+    if(resource(WW_GL,"",NULL,body,sizeof(body),NULL,WWG_OPEN)||response.length!=sizeof(got))return -1;
+    memcpy(got,response_data,sizeof(got));*version=got[1];return got[0];
 }
-static int gl_exec(void* c,int id,const uint8_t* cmds,uint32_t n,int read,uint8_t** reply,uint32_t* len) {
+static int gl_exec(void* c,int id,const uint8_t* cmds,uint32_t n,int read,int w,int h,uint8_t** reply,uint32_t* len) {
     (void)c;
     unsigned char* chunk=malloc(WW_REQUEST_BODY);
     if(!chunk)return -1;
@@ -134,7 +135,7 @@ static int gl_exec(void* c,int id,const uint8_t* cmds,uint32_t n,int read,uint8_
         off+=part;
     }
     free(chunk);
-    int body[2]={id,read};
+    int body[4]={id,read,w,h};
     if(resource(WW_GL,"",NULL,body,sizeof(body),NULL,WWG_EXEC)||response.length<sizeof(ww_gl_reply_t))return -1;
     *reply=response_data;response_data=NULL;*len=response.length;return 0;
 }

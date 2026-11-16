@@ -21,6 +21,7 @@ typedef struct remote_page {
     layout_t layout;
     dom_node_t focus;
     int app,slot,dead,busy,network_enabled;
+    int self_paced;                 /* a GPU worker: WW_WAIT answers at once, it sleeps itself */
     uint32_t generation;
     volatile int stage,resource_ready;
     ww_command_t cmd;
@@ -51,7 +52,7 @@ int web_worker_ipc(int app,uint32_t generation,int op,const void* in,uint32_t le
     switch(op){
     case WW_WAIT:
         if(len||cap!=sizeof(ww_command_t))return -1;
-        if(r->stage!=1){task_sleep_ms(10);return 0;}
+        if(r->stage!=1){if(!r->self_paced)task_sleep_ms(10);return 0;}
         memcpy(out,&r->cmd,sizeof(r->cmd));r->stage=2;return sizeof(r->cmd);
     case WW_INPUT: {
         if(r->stage!=2||len!=sizeof(ww_io_t))return -1;
@@ -204,11 +205,14 @@ static void serve(remote_page_t* r) {
             glctx_t* g=&g_gl[id];
             memset(g,0,sizeof(*g));g->used=1;g->owner=r;g->w=w;g->h=h;
             g->worker=gpu_worker_start();
-            int args[10]={w,h};
-            if(!g->worker||media_worker_call(g->worker,WW_GL_INIT,args,NULL,0,NULL,0,NULL)!=0){
+            /* (the OpenGL ES version asked for, 3 for WebGL 2: the worker answers the one it made) */
+            int args[10]={w,h,b[2]==3?3:2};
+            int made=g->worker?media_worker_call(g->worker,WW_GL_INIT,args,NULL,0,NULL,0,NULL):-1;
+            if(made<0){
                 klog("webgl: no OpenGL ES context (is Mesa installed?)\n");gl_close(id);break;
             }
-            if((r->resource_data=kmalloc(sizeof(id)))){memcpy(r->resource_data,&id,sizeof(id));a->length=sizeof(id);a->result=0;}
+            int got[2]={id,made==3?3:2};
+            if((r->resource_data=kmalloc(sizeof(got)))){memcpy(r->resource_data,got,sizeof(got));a->length=sizeof(got);a->result=0;}
         }else if(q->arg==WWG_APPEND){
             glctx_t* g=gl_owned(b[0],r);
             if(!g||q->length<4)break;
@@ -222,7 +226,10 @@ static void serve(remote_page_t* r) {
         }else if(q->arg==WWG_EXEC){
             glctx_t* g=gl_owned(b[0],r);
             if(!g)break;
-            uint32_t cap=WW_DOCUMENT;
+            /* (room for the answers and, when shown, the frame: b[2] x b[3]) */
+            uint64_t pix=b[1]==1&&b[2]>0&&b[3]>0?(uint64_t)b[2]*(uint64_t)b[3]:0;
+            if(pix>WW_GL_PIXELS)pix=WW_GL_PIXELS;
+            uint32_t cap=WW_DOCUMENT+(uint32_t)pix*4u;
             uint8_t* out=kmalloc(cap);
             if(!out)break;
             int args[10]={b[1]==1};
@@ -247,7 +254,7 @@ static void serve(remote_page_t* r) {
     default:break;
     }
     int local=q->kind==WW_MEDIA||q->kind==WW_GL;             /* pictures and frames are not downloads */
-    if(a->length>WW_DOCUMENT||(!local&&a->length>TRANSFER_BUDGET-r->transferred)){
+    if(a->length>(q->kind==WW_GL?WW_GL_REPLY:WW_DOCUMENT)||(!local&&a->length>TRANSFER_BUDGET-r->transferred)){
         if(r->resource_data)kfree(r->resource_data);r->resource_data=NULL;a->length=0;a->result=-1;
     }else if(!local)r->transferred+=a->length;
 done:
@@ -282,7 +289,7 @@ static void apply(remote_page_t* r) {
 }
 static int call(remote_page_t* r,unsigned int op,const int* args,const char* url,const void* data,
                 uint32_t n,void* out,uint32_t cap) {
-    if(!r||r->dead||r->busy||n>(op==WW_MEDIA_OPEN?WW_MEDIA_BYTES:WW_DOCUMENT))return -1;
+    if(!r||r->dead||r->busy||n>(op==WW_MEDIA_OPEN?WW_MEDIA_BYTES:op==WW_GL_EXEC?WW_GL_COMMANDS:WW_DOCUMENT))return -1;
     r->busy=1;
     if(r->navbody)kfree(r->navbody);r->navbody=NULL;r->nav_used=0;r->p.nav_post=NULL;r->p.nav_post_len=0;
     memset(&r->cmd,0,sizeof(r->cmd));r->cmd.version=WW_VERSION;r->cmd.op=op;r->cmd.length=n;
@@ -357,6 +364,7 @@ static void* helper_start(const char* path,int gpu) {
     r->app=gpu?app_spawn_gpu_worker(path,err,sizeof(err)):app_spawn_web_worker(path,err,sizeof(err));
     if(r->app<0){klog("helper worker %s: %s\n",path,err);kfree(r);return NULL;}
     r->generation=app_web_generation(r->app);
+    r->self_paced=gpu;
     workers[slot]=r;
     return r;
 }

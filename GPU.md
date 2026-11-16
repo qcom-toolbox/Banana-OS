@@ -251,3 +251,21 @@ and use the GPU calls (`gpu_call`, `drm_ioctl`, threads). The GPU objects it
 makes are its own, as for any app. A page gets up to eight contexts; they
 end with the page or when the worker fails (the context is then lost).
 
+`getContext('webgl2')` asks the worker for OpenGL ES 3.0 (`WW_GL_INIT`'s
+third argument; the worker answers the version it could make, and a page
+gets no WebGL 2 context where Mesa has no ES 3.0). WebGL 2's calls are more
+commands of the same stream: vertex arrays, 3D and array textures, immutable
+storage, multiple draw buffers, `blitFramebuffer`, multisampled
+renderbuffers, uniform buffers and blocks, unsigned and non-square
+uniforms, integer attributes, `clearBuffer*`, samplers, queries, transform
+feedback, buffer copies and `getBufferSubData`, instanced and range draws.
+Sync objects are signalled at once (the stream runs in order).
+
+A frame comes back through the kernel as RGBA: the answer buffer is sized
+for the frame (`WW_GL_REPLY`), and a drawing buffer is at most `WW_GL_PIXELS`
+(4 Mi pixels, 16 MiB a frame; a larger canvas gets a smaller buffer of the
+same shape, as WebGL allows). The GPU worker looks for the next command every
+millisecond for a second after each one (the kernel no longer sleeps 10 ms in
+its wait), and the page's worker waits 1 ms between looks at a frame's
+answer, so an animation is not held back by polling.
+

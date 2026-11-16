@@ -27,6 +27,7 @@ typedef struct webgl {
     int      bw, bh;                             /* the drawing buffer */
     int      flip_y, premul;                     /* UNPACK_FLIP_Y_WEBGL, UNPACK_PREMULTIPLY_ALPHA_WEBGL */
     int      premultiplied;                      /* the context's premultipliedAlpha */
+    int      version;                            /* 2: WebGL 1 on OpenGL ES 2.0; 3: WebGL 2 on ES 3.0 */
 } webgl_t;
 
 enum { R_NONE = 0, R_INT, R_STR, R_FLOATS, R_ACTIVE, R_BYTES };
@@ -59,6 +60,21 @@ static const struct { const char* sig; int res; } SIG[GLC_COUNT] = {
     [GLC_GET_PARAM] = { "i", R_FLOATS }, [GLC_IS_ENABLED] = { "i", R_INT }, [GLC_GET_STRING] = { "i", R_STR },
     [GLC_FINISH] = { "", 0 }, [GLC_COPY_TEX_IMAGE] = { "iiiiiii", 0 }, [GLC_COPY_TEX_SUB_IMAGE] = { "iiiiiiii", 0 },
     [GLC_SAMPLE_COVERAGE] = { "fi", 0 },
+    [GLC_DRAW_ARRAYS_INST] = { "iiii", 0 }, [GLC_DRAW_ELEMENTS_INST] = { "iiiii", 0 }, [GLC_ATTRIB_DIVISOR] = { "ii", 0 },
+    /* WebGL 2 */
+    [GLC_BIND_VAO] = { "i", 0 }, [GLC_TEX_IMAGE3D] = { "iiiiiiiib", 0 }, [GLC_TEX_SUB_IMAGE3D] = { "iiiiiiiiiib", 0 },
+    [GLC_TEX_STORAGE2D] = { "iiiii", 0 }, [GLC_TEX_STORAGE3D] = { "iiiiii", 0 }, [GLC_DRAW_BUFFERS] = { "*i", 0 },
+    [GLC_READ_BUFFER] = { "i", 0 }, [GLC_BLIT_FB] = { "iiiiiiiiii", 0 }, [GLC_RB_STORAGE_MS] = { "iiiii", 0 },
+    [GLC_FB_TEX_LAYER] = { "iiiii", 0 }, [GLC_BIND_BUFFER_BASE] = { "iii", 0 }, [GLC_BIND_BUFFER_RANGE] = { "iiiii", 0 },
+    [GLC_UNIFORM_BLOCK_INDEX] = { "is", R_INT }, [GLC_UNIFORM_BLOCK_BINDING] = { "iii", 0 },
+    [GLC_UNIFORM_BLOCK_PARAM] = { "iii", R_INT }, [GLC_UNIFORM_UI] = { "ii*i", 0 }, [GLC_UNIFORM_UIV] = { "iiiw", 0 },
+    [GLC_UNIFORM_MAT_NS] = { "iiiiw", 0 }, [GLC_ATTRIB_IPTR] = { "iiiii", 0 }, [GLC_ATTRIB_I] = { "iiiiii", 0 },
+    [GLC_CLEAR_BUFFER_FV] = { "ii*f", 0 }, [GLC_CLEAR_BUFFER_IV] = { "iii*i", 0 }, [GLC_CLEAR_BUFFER_FI] = { "iifi", 0 },
+    [GLC_DRAW_RANGE_ELEMENTS] = { "iiiiii", 0 }, [GLC_BIND_SAMPLER] = { "ii", 0 }, [GLC_SAMPLER_PARAM_I] = { "iii", 0 },
+    [GLC_SAMPLER_PARAM_F] = { "iif", 0 }, [GLC_FRAG_DATA_LOC] = { "is", R_INT }, [GLC_COPY_BUFFER_SUB] = { "iiiii", 0 },
+    [GLC_GET_BUFFER_SUB] = { "iii", R_BYTES }, [GLC_BEGIN_QUERY] = { "ii", 0 }, [GLC_END_QUERY] = { "i", 0 },
+    [GLC_QUERY_RESULT] = { "ii", R_INT }, [GLC_BIND_TF] = { "ii", 0 }, [GLC_BEGIN_TF] = { "i", 0 }, [GLC_END_TF] = { "", 0 },
+    [GLC_TF_VARYINGS] = { "ii*s", 0 }, [GLC_PAUSE_TF] = { "", 0 }, [GLC_RESUME_TF] = { "", 0 },
 };
 
 /* the calls that are not commands */
@@ -142,15 +158,24 @@ static double num(interp_t* I, int argc, value_t* argv, int i) {
     return v != v ? 0 : (double)v;
 }
 
-/* the drawing buffer follows the canvas's width / height */
-static void follow_size(webgl_t* g) {
-    const char* aw = dom_attr(g->node, "width");
-    const char* ah = dom_attr(g->node, "height");
+/* the drawing buffer: the canvas's width / height, made smaller (the same
+ * shape) past 4096 a side or WW_GL_PIXELS in all, as WebGL allows */
+static void buffer_size(dom_node_t* n, int* bw, int* bh) {
+    const char* aw = dom_attr(n, "width");
+    const char* ah = dom_attr(n, "height");
     int w = aw ? (int)str_to_int_(aw) : 300, h = ah ? (int)str_to_int_(ah) : 150;
     if (w < 1) w = 1;
     if (h < 1) h = 1;
-    if (w > 4096) w = 4096;
-    if (h > 4096) h = 4096;
+    if (w > 4096) { h = (int)((int64_t)h * 4096 / w); w = 4096; }
+    if (h > 4096) { w = (int)((int64_t)w * 4096 / h); h = 4096; }
+    while ((uint64_t)w * (uint64_t)h > WW_GL_PIXELS) { w = w * 7 / 8; h = h * 7 / 8; }
+    *bw = w < 1 ? 1 : w;
+    *bh = h < 1 ? 1 : h;
+}
+
+static void follow_size(webgl_t* g) {
+    int w, h;
+    buffer_size(g->node, &w, &h);
     if (w != g->bw || h != g->bh) {
         g->bw = w; g->bh = h;
         put(g, GLC_RESIZE); put(g, 2); put(g, (uint32_t)w); put(g, (uint32_t)h);
@@ -161,7 +186,7 @@ static void follow_size(webgl_t* g) {
 static uint8_t* flush(page_t* p, webgl_t* g, int read, uint32_t* len) {
     if (g->id < 0 || !p->env || !p->env->gl_exec) { g->n = 0; return NULL; }
     uint8_t* reply = NULL;
-    if (p->env->gl_exec(p->env->ctx, g->id, (const uint8_t*)g->w, g->n * 4, read, &reply, len) != 0) {
+    if (p->env->gl_exec(p->env->ctx, g->id, (const uint8_t*)g->w, g->n * 4, read, g->bw, g->bh, &reply, len) != 0) {
         g->id = -1;                                  /* the context is lost */
         g->n = 0;
         return NULL;
@@ -254,24 +279,20 @@ static value_t gl_call(interp_t* I, value_t self, int argc, value_t* argv) {
     if (!n || n->type != DOM_ELEM || strcmp(n->tag, "canvas")) return v_undef();
     webgl_t* g = gl_of(p, n);
     if (op == GLX_TYPED_OK) { const uint8_t* d; uint32_t len; return v_bool(argc > 2 && typed_bytes(argv[2], &d, &len)); }
-    if (op == GLX_OPEN) {
-        if (g) return v_bool(g->id >= 0);
-        if (!p->env || !p->env->gl_open) return v_bool(0);
+    if (op == GLX_OPEN) {                            /* (premultiplied, version wanted) -> version made, 0 */
+        if (g) return v_num(g->id >= 0 ? g->version : 0);
+        if (!p->env || !p->env->gl_open) return v_num(0);
         g = kzalloc(sizeof(*g));
-        if (!g) return v_bool(0);
+        if (!g) return v_num(0);
         g->node = n;
         g->premultiplied = (int)num(I, argc, argv, 2);
-        const char* aw = dom_attr(n, "width");
-        const char* ah = dom_attr(n, "height");
-        g->bw = aw ? (int)str_to_int_(aw) : 300;
-        g->bh = ah ? (int)str_to_int_(ah) : 150;
-        if (g->bw < 1) g->bw = 1;
-        if (g->bh < 1) g->bh = 1;
-        g->id = p->env->gl_open(p->env->ctx, g->bw > 4096 ? 4096 : g->bw, g->bh > 4096 ? 4096 : g->bh);
-        if (g->id < 0) { kfree(g); return v_bool(0); }
+        g->version = (int)num(I, argc, argv, 3) == 3 ? 3 : 2;
+        buffer_size(n, &g->bw, &g->bh);
+        g->id = p->env->gl_open(p->env->ctx, g->bw, g->bh, &g->version);
+        if (g->id < 0) { kfree(g); return v_num(0); }
         g->next = p->webgls;
         p->webgls = g;
-        return v_bool(1);
+        return v_num(g->version);
     }
     if (!g || g->id < 0) return op == GLX_LOST ? v_bool(1) : v_undef();
     if (op == GLX_LOST) return v_bool(0);
@@ -348,7 +369,11 @@ static value_t gl_call(interp_t* I, value_t self, int argc, value_t* argv) {
         char k = *c;
         if (k == '*') {                              /* the rest, like the next letter */
             k = c[1];
-            for (; ai < argc; ai++) { if (k == 'f') put_f(g, num(I, argc, argv, ai)); else put(g, (uint32_t)(int64_t)num(I, argc, argv, ai)); }
+            for (; ai < argc; ai++) {
+                if (k == 'f') put_f(g, num(I, argc, argv, ai));
+                else if (k == 's') { const char* s = v_cstr(I, argv[ai]); put_bytes(g, (const uint8_t*)s, (uint32_t)strlen(s)); }
+                else put(g, (uint32_t)(int64_t)num(I, argc, argv, ai));
+            }
             break;
         }
         if (k == 'i') put(g, (uint32_t)(int64_t)num(I, argc, argv, ai++));

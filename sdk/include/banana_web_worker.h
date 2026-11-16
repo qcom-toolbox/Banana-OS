@@ -19,9 +19,14 @@ enum { WW_INIT=1, WW_LOAD, WW_UPDATE, WW_CLICK, WW_KEY, WW_LIVE, WW_TICK,
         * a[0] a[1] the drawing buffer's size; a command stream in, results out */
        WW_GL_INIT, WW_GL_EXEC };
 /* WW_GL_EXEC: a[0] = 1 to have the drawing buffer read back after the
- * commands (RGBA, top row first, width * height * 4 bytes after the result) */
+ * commands (RGBA, top row first, width * height * 4 bytes after the result).
+ * WW_GL_INIT: a[0], a[1] the size, a[2] the OpenGL ES version wanted (2, or 3
+ * for WebGL 2); the result is the version made. WWG_EXEC's body: id, read
+ * back, and the drawing buffer's width and height (what the frame needs) */
 typedef struct { int result_bytes, width, height, gl_error; } ww_gl_reply_t;
 #define WW_GL_COMMANDS (32u << 20)    /* a context's queued commands, at most */
+#define WW_GL_PIXELS (4u << 20)       /* a drawing buffer's pixels, at most (one frame: 16 MiB) */
+#define WW_GL_REPLY (WW_DOCUMENT + WW_GL_PIXELS * 4)   /* an answer and a frame */
 #define WW_MEDIA_BYTES (96u << 20)    /* the largest media file a stream takes */
 #define WW_MEDIA_RATE 48000           /* sound comes as 16-bit stereo at this rate */
 /* WW_MEDIA_OPEN's result */

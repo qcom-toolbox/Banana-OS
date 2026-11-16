@@ -5,7 +5,8 @@
  * the GPU worker (apps/webgl/gl.c) plays back with OpenGL ES 2.0. Each
  * command is two 32-bit words, op and n, then n words of arguments
  * (integers, floats as their bits, strings and data as a byte count then
- * the bytes, padded to 4). Objects are numbered by the page: the GPU
+ * the bytes, padded to 4). The commands after GLC_ATTRIB_DIVISOR are
+ * WebGL 2's (OpenGL ES 3.0). Objects are numbered by the page: the GPU
  * worker maps each number to its GL name. A command that answers is the
  * last of a flush: the reply holds its result only. */
 enum {
@@ -82,8 +83,47 @@ enum {
     GLC_DRAW_ARRAYS_INST,    /* mode, first, count, instances */
     GLC_DRAW_ELEMENTS_INST,  /* mode, count, type, offset, instances */
     GLC_ATTRIB_DIVISOR,      /* index, divisor */
+    GLC_BIND_VAO,            /* id */
+    GLC_TEX_IMAGE3D,         /* target, level, internal format, w, h, depth, format, type, data bytes */
+    GLC_TEX_SUB_IMAGE3D,     /* target, level, x, y, z, w, h, depth, format, type, data bytes */
+    GLC_TEX_STORAGE2D,       /* target, levels, internal format, w, h */
+    GLC_TEX_STORAGE3D,       /* target, levels, internal format, w, h, depth */
+    GLC_DRAW_BUFFERS,        /* buffers... */
+    GLC_READ_BUFFER,         /* source */
+    GLC_BLIT_FB,             /* src x0 y0 x1 y1, dst x0 y0 x1 y1, mask, filter */
+    GLC_RB_STORAGE_MS,       /* target, samples, format, w, h */
+    GLC_FB_TEX_LAYER,        /* target, attachment, texture id, level, layer */
+    GLC_BIND_BUFFER_BASE,    /* target, index, id */
+    GLC_BIND_BUFFER_RANGE,   /* target, index, id, offset, size */
+    GLC_UNIFORM_BLOCK_INDEX, /* program, string -> int */
+    GLC_UNIFORM_BLOCK_BINDING,   /* program, block index, binding */
+    GLC_UNIFORM_BLOCK_PARAM, /* program, block index, pname -> int */
+    GLC_UNIFORM_UI,          /* location, n, n uints */
+    GLC_UNIFORM_UIV,         /* location, components, count, uints */
+    GLC_UNIFORM_MAT_NS,      /* location, columns, rows, count, floats */
+    GLC_ATTRIB_IPTR,         /* index, size, type, stride, offset */
+    GLC_ATTRIB_I,            /* index, unsigned, 4 ints */
+    GLC_CLEAR_BUFFER_FV,     /* buffer, draw buffer, floats */
+    GLC_CLEAR_BUFFER_IV,     /* unsigned, buffer, draw buffer, ints */
+    GLC_CLEAR_BUFFER_FI,     /* buffer, draw buffer, depth, stencil */
+    GLC_DRAW_RANGE_ELEMENTS, /* mode, start, end, count, type, offset */
+    GLC_BIND_SAMPLER,        /* unit, id */
+    GLC_SAMPLER_PARAM_I,     /* id, pname, int */
+    GLC_SAMPLER_PARAM_F,     /* id, pname, float */
+    GLC_FRAG_DATA_LOC,       /* program, string -> int */
+    GLC_COPY_BUFFER_SUB,     /* read target, write target, read offset, write offset, size */
+    GLC_GET_BUFFER_SUB,      /* target, offset, length -> bytes */
+    GLC_BEGIN_QUERY,         /* target, id */
+    GLC_END_QUERY,           /* target */
+    GLC_QUERY_RESULT,        /* id, pname -> int */
+    GLC_BIND_TF,             /* target, id */
+    GLC_BEGIN_TF,            /* primitive mode */
+    GLC_END_TF,
+    GLC_TF_VARYINGS,         /* program, buffer mode, strings... */
+    GLC_PAUSE_TF, GLC_RESUME_TF,
     GLC_COUNT
 };
-enum { GLK_BUFFER = 0, GLK_TEXTURE, GLK_FRAMEBUFFER, GLK_RENDERBUFFER, GLK_PROGRAM, GLK_SHADER, GLK_KINDS };
+enum { GLK_BUFFER = 0, GLK_TEXTURE, GLK_FRAMEBUFFER, GLK_RENDERBUFFER, GLK_PROGRAM, GLK_SHADER,
+       GLK_VAO, GLK_QUERY, GLK_SAMPLER, GLK_TF, GLK_KINDS };
 #define GLC_MAX_IDS 65536    /* objects a context may number */
 #endif
