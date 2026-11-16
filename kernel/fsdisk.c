@@ -146,6 +146,106 @@ static int find_source(img_src_t* out) {
     return 0;
 }
 
+/* ── a file of the boot image, read while the system runs (the live CD) ─
+ * kernel/builtin_apps.c reads the built-in packages from the CD's
+ * /boot/kernel64.bin instead of keeping them in RAM. ISO 9660 keeps a file
+ * in one run of blocks: its first block and size are enough. */
+static img_src_t g_boot_src;
+static int       g_boot_src_ok = -1;           /* -1: not looked for yet */
+
+static int boot_src(void) {
+    if (g_boot_src_ok < 0) g_boot_src_ok = find_source(&g_boot_src);
+    return g_boot_src_ok;
+}
+
+/* the record of name (ISO 9660 level-1 name, ";1" ignored, any case) in the
+ * directory at lba (size bytes) */
+static int iso_find(uint32_t lba, uint32_t size, const char* name, uint32_t* out_lba, uint32_t* out_size, int* is_dir) {
+    if (!size || size > (1u << 20)) return -1;
+    uint8_t* d = (uint8_t*)kmalloc(size);
+    if (!d) return -1;
+    int found = -1;
+    if (src_read(&g_boot_src, lba, (size + 2047u) / 2048u, d) == 0) {
+        uint32_t nlen = (uint32_t)strlen(name);
+        for (uint32_t i = 0; i < size && found < 0;) {
+            uint32_t l = d[i];
+            if (!l) { i = (i / 2048u + 1u) * 2048u; continue; }
+            if (i + l > size || l < 34) break;
+            const uint8_t* r = d + i;
+            uint32_t rl = r[32];
+            const char* rn = (const char*)r + 33;
+            if (rl >= nlen && (rl == nlen || rn[nlen] == ';') && 33 + rl <= l) {
+                int same = 1;
+                for (uint32_t k = 0; k < nlen && same; k++) {
+                    char a = rn[k], b = name[k];
+                    if (a >= 'a' && a <= 'z') a = (char)(a - 32);
+                    if (b >= 'a' && b <= 'z') b = (char)(b - 32);
+                    same = a == b;
+                }
+                if (same) {
+                    *out_lba = (uint32_t)r[2] | (uint32_t)r[3] << 8 | (uint32_t)r[4] << 16 | (uint32_t)r[5] << 24;
+                    *out_size = (uint32_t)r[10] | (uint32_t)r[11] << 8 | (uint32_t)r[12] << 16 | (uint32_t)r[13] << 24;
+                    *is_dir = (r[25] & 2) != 0;
+                    found = 0;
+                }
+            }
+            i += l;
+        }
+    }
+    kfree(d);
+    return found;
+}
+
+int fsdisk_boot_file(const char* path, uint64_t* offset, uint32_t* size) {
+    if (!boot_src()) return -1;
+    uint8_t* pvd = (uint8_t*)kmalloc(2048);
+    if (!pvd) return -1;
+    int ok = src_read(&g_boot_src, 16, 1, pvd) == 0 && pvd[0] == 1 && memcmp(pvd + 1, "CD001", 5) == 0;
+    uint32_t lba = 0, sz = 0;
+    if (ok) {
+        const uint8_t* r = pvd + 156;                /* the root directory's record */
+        lba = (uint32_t)r[2] | (uint32_t)r[3] << 8 | (uint32_t)r[4] << 16 | (uint32_t)r[5] << 24;
+        sz = (uint32_t)r[10] | (uint32_t)r[11] << 8 | (uint32_t)r[12] << 16 | (uint32_t)r[13] << 24;
+    }
+    kfree(pvd);
+    if (!ok) return -1;
+    char part[40];
+    const char* p = path;
+    while (*p == '/') p++;
+    while (*p) {
+        int n = 0;
+        while (p[n] && p[n] != '/' && n < (int)sizeof(part) - 1) { part[n] = p[n]; n++; }
+        part[n] = 0;
+        p += n;
+        while (*p == '/') p++;
+        int dir = 0;
+        if (iso_find(lba, sz, part, &lba, &sz, &dir) != 0) return -1;
+        if (*p && !dir) return -1;
+    }
+    *offset = (uint64_t)lba * 2048u;
+    *size = sz;
+    return 0;
+}
+
+int fsdisk_boot_read(uint64_t offset, uint32_t len, void* buf) {
+    if (!boot_src() || !len) return len ? -1 : 0;
+    uint32_t first = (uint32_t)(offset / 2048u), last = (uint32_t)((offset + len - 1) / 2048u);
+    uint8_t* blk = (uint8_t*)kmalloc(64u * 2048u);
+    if (!blk) return -1;
+    uint8_t* out = (uint8_t*)buf;
+    int rc = 0;
+    for (uint32_t b = first; b <= last && !rc;) {
+        uint32_t n = last - b + 1u > 64u ? 64u : last - b + 1u;
+        if (src_read(&g_boot_src, b, n, blk) != 0) { rc = -1; break; }
+        uint64_t s = (uint64_t)b * 2048u, e = s + (uint64_t)n * 2048u;
+        uint64_t from = offset > s ? offset : s, to = offset + len < e ? offset + len : e;
+        memcpy(out + (from - offset), blk + (from - s), (size_t)(to - from));
+        b += n;
+    }
+    kfree(blk);
+    return rc;
+}
+
 /* ── the boot image on the disk: the CD's, with its own marker ─────────
  * The installed disk is a copy of the CD, so both would hold the file the
  * UEFI GRUB looks for ("search --file /.disk/<build>.uuid", embedded in

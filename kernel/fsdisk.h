@@ -64,6 +64,10 @@ int fsdisk_try_load(void);   /* (-1: a Banana OS disk, but no copy of it could b
 /* Whether this session has a remembered installed/loaded target disk
  * (used to decide whether shutdown/reboot/halt should auto-sync). */
 int fsdisk_is_installed(void);
+/* a file of the boot image (the CD, or the USB stick holding it) - where it
+ * is in the image and its size; bytes of the image read */
+int fsdisk_boot_file(const char* path, uint64_t* offset, uint32_t* size);
+int fsdisk_boot_read(uint64_t offset, uint32_t len, void* buf);
 
 /* Saves by itself: a background task writes the filesystem to the
  * installed disk ~2 s after the last change (files, folders, settings). */

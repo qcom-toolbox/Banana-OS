@@ -416,7 +416,10 @@ int kheap_check(char* err, int cap) {
         const char* why = NULL;
         if (b->used != 0 && b->used != HEAP_MAGIC) why = "a block header was overwritten";
         else if (b->prev != prev) why = "the list's back links are wrong";
-        else if (prev && (uintptr_t)b <= (uintptr_t)prev) why = "the blocks are not in address order";
+        /* (in address order, but for a region added later - kheap_add_region,
+         *  the given-back packages: it starts with a size-0 used block and may lie below) */
+        else if (prev && (uintptr_t)b <= (uintptr_t)prev && !(b->size == 0 && b->used == HEAP_MAGIC))
+            why = "the blocks are not in address order";
         else if (prev && !prev->used && !b->used) why = "two free blocks side by side";
         else if (!b->used) {
             nfree++;

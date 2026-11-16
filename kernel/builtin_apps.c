@@ -57,7 +57,9 @@ static const struct { const char* name; const uint8_t* start; const uint8_t* end
  * (systems from before build 161 have "name=version" lines) */
 #define MARKS "/etc/builtin-apps"
 
-static int g_released;                 /* the kernel's copies of the packages are given back (below) */
+static int g_released;                 /* the kernel's copies of the packages are given back (below):
+                                          1 kept on the installed disk, 2 read from the live CD */
+static char* blob_copy(int k, uint32_t* n);
 
 /* 1 if a line of MARKS starts with "name=version" followed by one of ends */
 static int marked_as(const char* name, const char* version, const char* key_end, const char* ends) {
@@ -213,6 +215,23 @@ void builtin_apps_install(void) {
 int builtin_app_reinstall(const char* name, char* msg, int mcap) {
     for (unsigned i = 0; i < sizeof(APPS) / sizeof(APPS[0]); i++) {
         if (strcmp(APPS[i].name, name)) continue;
+        if (g_released == 2) {                         /* (the live CD: the copy on the CD) */
+            uint32_t zn = 0;
+            char* z = blob_copy((int)i, &zn);
+            int ln = 0;
+            uint8_t* b = z ? (uint8_t*)stbi_zlib_decode_malloc(z, (int)zn, &ln) : NULL;
+            if (!b || ln <= 0) { kfree(z); kfree(b); kstrlcpy(msg, "the built-in package cannot be read from the CD", (size_t)mcap); return -2; }
+            int rc = pkg_install_mem(b, (uint32_t)ln, msg, mcap);
+            if (rc == 0) {
+                pkg_info_t mine;
+                char err[8];
+                if (pkg_inspect_mem(b, (uint32_t)ln, &mine, err, sizeof(err)) == 0)
+                    mark(mine.name, mine.version, crc32c(0, b, (uint32_t)ln), crc32c(0, z, zn));
+            }
+            kfree(b);
+            kfree(z);
+            return rc == 0 ? 0 : -2;
+        }
         if (g_released) {
             /* (the kernel's copy was given back after boot: at the next one) */
             char line[40];
@@ -280,11 +299,31 @@ static void blob_of(int k, char* name, int cap, const uint8_t** p, uint32_t* n) 
     }
 }
 
-/* package k's bytes: a kmalloc'd copy (from the kernel, or the file once released) */
+/* the live CD: where the kernel's .payload is on the CD, and each package's CRC */
+static uint64_t  g_cd_payload;
+static uint32_t* g_cd_crc;
+
+/* package k's bytes: a kmalloc'd copy (from the kernel, the CD, or the file once released) */
 static char* blob_copy(int k, uint32_t* n) {
     char name[48];
     const uint8_t* p;
     blob_of(k, name, sizeof(name), &p, n);
+    if (g_released == 2) {
+        uintptr_t lo = (uintptr_t)__payload_start, hi = (uintptr_t)__payload_end;
+        if ((uintptr_t)p < lo || (uintptr_t)p + *n > hi) {     /* (not in the given-back pages) */
+            char* d = (char*)kmalloc(*n ? *n : 1);
+            if (d) memcpy(d, p, *n);
+            return d;
+        }
+        char* d = (char*)kmalloc(*n ? *n : 1);
+        if (!d) return NULL;
+        if (fsdisk_boot_read(g_cd_payload + ((uintptr_t)p - lo), *n, d) != 0 || crc32c(0, d, *n) != g_cd_crc[k]) {
+            klog("builtin: %s could not be read from the CD (is it still in the drive?)\n", name);
+            kfree(d);
+            return NULL;
+        }
+        return d;
+    }
     if (!g_released) {
         char* d = (char*)kmalloc(*n ? *n : 1);
         if (d) memcpy(d, p, *n);
@@ -301,8 +340,66 @@ static char* blob_copy(int k, uint32_t* n) {
     return d;
 }
 
+/* The live CD: the packages are read from the CD's own kernel file when
+ * wanted (apt install, the App Store, a repair), and the kernel's copy of
+ * them goes to the heap - what the system holds in RAM drops by their size.
+ * Only when /boot/kernel64.bin on the boot image is this very kernel (its
+ * .payload found through its ELF program headers, the start and the end
+ * the same bytes); else they stay in RAM as before. */
+static void release_live(void) {
+#ifdef __x86_64__
+    uint32_t t0 = timer_ms();
+    uintptr_t lo = (uintptr_t)__payload_start, hi = (uintptr_t)__payload_end;
+    uint64_t foff;
+    uint32_t fsz;
+    if (hi <= lo || fsdisk_boot_file("/boot/kernel64.bin", &foff, &fsz) != 0) return;
+    uint8_t* h = (uint8_t*)kmalloc(4096);
+    if (!h) return;
+    uint64_t at = 0;
+    if (fsz >= 4096 && fsdisk_boot_read(foff, 4096, h) == 0 && !memcmp(h, "\x7f" "ELF", 4) && h[4] == 2) {
+        uint64_t phoff;
+        memcpy(&phoff, h + 0x20, 8);
+        uint16_t phent = (uint16_t)(h[0x36] | h[0x37] << 8), phnum = (uint16_t)(h[0x38] | h[0x39] << 8);
+        for (uint32_t i = 0; i < phnum && phoff + (uint64_t)(i + 1) * phent <= 4096 && phent >= 56; i++) {
+            const uint8_t* ph = h + phoff + (uint64_t)i * phent;
+            uint32_t type;
+            uint64_t off, va, filesz;
+            memcpy(&type, ph, 4); memcpy(&off, ph + 8, 8); memcpy(&va, ph + 16, 8); memcpy(&filesz, ph + 32, 8);
+            if (type == 1 && lo >= va && hi <= va + filesz && off + (hi - va) <= fsz) { at = off + (lo - va); break; }
+        }
+    }
+    int same = 0;
+    if (at) {
+        uint32_t span = hi - lo < 65536u ? (uint32_t)(hi - lo) : 65536u;
+        uint8_t* b = (uint8_t*)kmalloc(span);
+        same = b && fsdisk_boot_read(foff + at, span, b) == 0 && !memcmp(b, (const void*)lo, span) &&
+               fsdisk_boot_read(foff + at + (hi - lo) - span, span, b) == 0 && !memcmp(b, (const void*)(hi - span), span);
+        if (b) kfree(b);
+    }
+    kfree(h);
+    if (!same) { klog("builtin: the CD's kernel is not this one - the packages stay in RAM\n"); return; }
+    int count = builtin_package_count();
+    g_cd_crc = (uint32_t*)kmalloc((size_t)count * 4u);
+    if (!g_cd_crc) return;
+    for (int k = 0; k < count; k++) {
+        char name[48];
+        const uint8_t* p;
+        uint32_t n;
+        blob_of(k, name, sizeof(name), &p, &n);
+        g_cd_crc[k] = crc32c(0, p, n);
+    }
+    g_cd_payload = foff + at;
+    kheap_add_region(lo, hi);
+    g_released = 2;
+    g_released_bytes = (uint32_t)(hi - lo);
+    klog("builtin: %u KB of built-in packages read from the CD when wanted, their RAM given back (%u ms)\n",
+         g_released_bytes >> 10, timer_ms() - t0);
+#endif
+}
+
 void builtin_release(void) {
-    if (g_released || !fsdisk_is_installed()) return;
+    if (g_released) return;
+    if (!fsdisk_is_installed()) { release_live(); return; }
     uint32_t t0 = timer_ms();
     fs_mkdir_p(STORE);
     /* STORE/.index: "name crc" of each package saved there */
