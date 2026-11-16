@@ -43,6 +43,8 @@ int          ps2_controller_present(void);
 /* the 8042's status, 0 once it has gone away (three 0xFF reads: the
  * firmware's emulation ended) - every poll reads it through this */
 uint8_t      ps2_status(void);
+/* lsinput: every way into the pointer and what it has sent */
+void         input_list(void);
 mouse_state_t mouse_read(void);   /* non-blocking, returns last known state */
 mouse_state_t mouse_read_raw(void); /* games: same devices, no desktop speed scaling */
 /* timer interrupt only (kernel/gui.c): the motion of the waiting PS/2

@@ -265,6 +265,9 @@ static int mouse_pkt_size = 3;
  * the bottom-left corner whatever USB mouse moved it, and the keyboard
  * fed 0xFF scancodes. So every read of the status checks (ps2_status). */
 static int g_ps2_present = -1, g_ps2_ff;
+/* lsinput: what each way into the pointer has sent (to find the one moving it) */
+static uint32_t g_st_ps2_bytes, g_st_ps2_pkts, g_st_setabs;
+static int64_t  g_st_ps2_sx, g_st_ps2_sy;
 static int mouse_enabled = 0;
 
 int ps2_controller_present(void) {
@@ -510,6 +513,7 @@ static int     mouse_ring_head = 0, mouse_ring_len = 0;
 
 void mouse_on_aux_byte(uint8_t b) {
     if (!mouse_enabled) return;
+    g_st_ps2_bytes++;
 
     if (syn_detected) {
         /* Synaptics absolute packets: byte 0 is 10xx0xxx, byte 3 11xx0xxx
@@ -533,6 +537,11 @@ void mouse_on_aux_byte(uint8_t b) {
         for (int i = 0; i < 6; i++) mouse_ring[slot][i] = mouse_asm[i];
         mouse_ring_len++;
         mouse_asm_i = 0;
+        g_st_ps2_pkts++;
+        if (!syn_detected) {                        /* (a plain packet's motion; + y is up) */
+            g_st_ps2_sx += (int)mouse_asm[1] - ((mouse_asm[0] & 0x10) ? 256 : 0);
+            g_st_ps2_sy += (int)mouse_asm[2] - ((mouse_asm[0] & 0x20) ? 256 : 0);
+        }
     }
 }
 
@@ -638,6 +647,7 @@ void mouse_ps2_mute(int on) { g_ps2_muted = on; }
 /* VirtualBox's mouse integration: the position only (the buttons keep
  * coming through PS/2) */
 void mouse_set_abs(int x, int y) {
+    g_st_setabs++;
     uintptr_t f;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(f) :: "memory");
     g_abs_x = x < 0 ? 0 : x > 65535 ? 65535 : x;
@@ -684,6 +694,8 @@ static void buttons_changed(void) {
  * the pointer where it is.) */
 static int g_src_ax[MSRC_MAX], g_src_ay[MSRC_MAX];
 static uint32_t g_src_abs_seen;
+static uint32_t g_st_rel_n[MSRC_MAX], g_st_abs_used[MSRC_MAX], g_st_abs_same[MSRC_MAX];
+static int64_t  g_st_rel_sx[MSRC_MAX], g_st_rel_sy[MSRC_MAX];
 
 void mouse_source_free(int src) {
     if (src <= 0 || src >= MSRC_MAX) return;
@@ -703,13 +715,14 @@ void mouse_inject_abs_src(int src, int x, int y, int buttons) {
     x = x < 0 ? 0 : x > 65535 ? 65535 : x;
     y = y < 0 ? 0 : y > 65535 ? 65535 : y;
     if (!(g_src_abs_seen & (1u << src)) || g_src_ax[src] != x || g_src_ay[src] != y || g_src_btn[src] != (buttons & 7)) {
+        g_st_abs_used[src]++;
         g_abs_x = x;
         g_abs_y = y;
         g_abs_new = 1;
         g_src_ax[src] = x;
         g_src_ay[src] = y;
         g_src_abs_seen |= 1u << src;
-    }
+    } else g_st_abs_same[src]++;
     g_src_btn[src] = buttons & 7;
     buttons_changed();
     if (f & 0x200) __asm__ volatile("sti" ::: "memory");
@@ -717,6 +730,9 @@ void mouse_inject_abs_src(int src, int x, int y, int buttons) {
 
 void mouse_inject_src(int src, int dx, int dy, int buttons) {
     if (src < 0 || src >= MSRC_MAX) src = 0;
+    g_st_rel_n[src]++;
+    g_st_rel_sx[src] += dx;
+    g_st_rel_sy[src] += dy;
     uintptr_t f;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(f) :: "memory");
     g_usb_dx += dx;
@@ -724,6 +740,30 @@ void mouse_inject_src(int src, int dx, int dy, int buttons) {
     g_src_btn[src] = buttons & 7;
     buttons_changed();
     if (f & 0x200) __asm__ volatile("sti" ::: "memory");
+}
+
+/* `lsinput`: every way into the pointer and what it has sent since boot -
+ * the one dragging the pointer somewhere stands out (its totals grow) */
+void input_list(void) {
+    char l[160];
+    ksnprintf(l, sizeof(l), "PS/2 controller: %s; PS/2 mouse: %s%s", g_ps2_present < 0 ? "not checked" : g_ps2_present ? "present" : "none / gone",
+              mouse_enabled ? "on" : "off", syn_detected ? " (Synaptics touchpad)" : "");
+    terminal_writeln(l);
+    ksnprintf(l, sizeof(l), "  PS/2: %u bytes, %u packets, motion %lld, %lld (+ right, + up)", g_st_ps2_bytes, g_st_ps2_pkts,
+              (long long)g_st_ps2_sx, (long long)g_st_ps2_sy);
+    terminal_writeln(l);
+    ksnprintf(l, sizeof(l), "  VirtualBox / VMware position: %u samples", g_st_setabs);
+    terminal_writeln(l);
+    for (int s = 0; s < MSRC_MAX; s++) {
+        if (!g_st_rel_n[s] && !g_st_abs_used[s] && !g_st_abs_same[s]) continue;
+        int k = ksnprintf(l, sizeof(l), "  source %d%s: %u relative reports, motion %lld, %lld", s, s ? "" : " (shared)",
+                          g_st_rel_n[s], (long long)g_st_rel_sx[s], (long long)g_st_rel_sy[s]);
+        if (g_st_abs_used[s] || g_st_abs_same[s])
+            ksnprintf(l + k, sizeof(l) - (size_t)k, "; absolute: %u used, %u repeats dropped, last %d,%d",
+                      g_st_abs_used[s], g_st_abs_same[s], g_src_ax[s], g_src_ay[s]);
+        terminal_writeln(l);
+    }
+    terminal_writeln("(sources: lsusb shows each USB pointer's; run lsinput again after moving the mouse to see what grows)");
 }
 
 void mouse_inject_abs(int x, int y, int buttons) { mouse_inject_abs_src(0, x, y, buttons); }

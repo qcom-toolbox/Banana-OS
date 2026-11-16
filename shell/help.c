@@ -505,6 +505,10 @@ static const page_t PAGES[] = {
       "its memory and I/O regions and the Banana OS driver in use; -n prints the numbers only.",
       "-v|interrupt, regions, driver\n-n|numeric IDs", "lspci\nlspci -v", "devmgr, lsusb" },
     { "lsusb", "hardware", "lsusb", "USB controllers and devices", NULL, NULL, NULL, "usb" },
+    { "lsinput", "hardware", "lsinput", "what each pointing device has sent (motion totals)",
+      "Every way into the mouse pointer - the PS/2 port, each USB or I2C pointer (its source number is in lsusb), a virtual "
+      "machine's integration - with how many reports it has sent and the motion they add up to. Run it, move the mouse, run "
+      "it again: the device that moves the pointer by itself is the one whose totals grow.", NULL, NULL, "lsusb" },
     { "usb", "hardware", "usb rescan", "look for USB devices plugged in or out", NULL, NULL, NULL, "lsusb" },
     { "usbctl", "hardware", "usbctl", "USB legacy handoff state", NULL, NULL, NULL, NULL },
     { "lsgpu", "hardware", "lsgpu", "graphics cards: driver, mode, video memory", NULL, NULL, NULL, "resolution" },

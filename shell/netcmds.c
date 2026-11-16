@@ -4,6 +4,7 @@
 #include "netcmds.h"
 #include "../kernel/terminal.h"
 #include "../kernel/kstring.h"
+#include "../kernel/usb.h"
 #include "../kernel/timer.h"
 #include "../kernel/kheap.h"
 #include "../kernel/fs.h"
@@ -1037,6 +1038,7 @@ int netcmd_dispatch(const char* line) {
     if (strcmp(c, "cryptotest") == 0)                { cmd_cryptotest(); return 1; }
     if (strcmp(c, "wallpaper") == 0)                 { cmd_wallpaper(argc, argv); return 1; }
     if (strcmp(c, "lsusb") == 0)                     { usb_list(); return 1; }
+    if (strcmp(c, "lsinput") == 0)                   { input_list(); return 1; }
     if (strcmp(c, "usb") == 0) {
         if (argc >= 2 && strcmp(argv[1], "rescan") == 0) { usb_rescan(); usb_list(); }
         else terminal_writeln("usage: usb rescan     (lsusb lists devices)");

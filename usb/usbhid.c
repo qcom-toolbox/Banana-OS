@@ -89,6 +89,8 @@ typedef struct {
     uint8_t    pad_rid;
     int        fp[9], fpb[13];
     uint32_t   reports;          /* (lsusb: what it has sent) */
+    uint8_t    last[16];         /* ... its last report's first bytes */
+    uint8_t    last_len;
     int        last_x, last_y;   /* an absolute pointer's last place (0 - 65535) */
 } hid_iface_t;
 
@@ -399,6 +401,12 @@ void usbhid_describe(usb_device_t* d, char* out, int cap) {
         n += ksnprintf(out + n, (size_t)(cap - n), "%s    endpoint %02x: %s, %u reports", n ? "\n" : "", h->ep, role, h->reports);
         if (h->report_mode && h->absolute && n < cap)
             n += ksnprintf(out + n, (size_t)(cap - n), ", last at %d,%d of 65535", h->last_x, h->last_y);
+        if (!h->is_kbd && !h->is_pad && n < cap)
+            n += ksnprintf(out + n, (size_t)(cap - n), ", lsinput source %d", h->src);
+        if (!h->is_kbd && h->last_len && n < cap) {
+            n += ksnprintf(out + n, (size_t)(cap - n), "\n      last report:");
+            for (int k = 0; k < h->last_len && n < cap; k++) n += ksnprintf(out + n, (size_t)(cap - n), " %02x", h->last[k]);
+        }
     }
 }
 
@@ -414,6 +422,10 @@ static void hid_poll(usb_device_t* d) {
         if (h->xfer.status == USB_XFER_PENDING || h->xfer.status == USB_XFER_GONE) continue;
         if (h->xfer.status == USB_XFER_OK) {
             h->reports++;
+            if (!h->is_kbd) {
+                h->last_len = (uint8_t)(h->xfer.actual < sizeof(h->last) ? h->xfer.actual : sizeof(h->last));
+                for (int k = 0; k < h->last_len; k++) h->last[k] = h->xfer.buf[k];
+            }
             if (h->is_kbd && h->xfer.actual >= 8) {
                 keyboard_report(h, h->xfer.buf);
             } else if (h->is_pad) {
