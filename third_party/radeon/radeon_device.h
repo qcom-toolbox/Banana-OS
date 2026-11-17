@@ -144,6 +144,7 @@ void evergreen_rlc_start(struct radeon_device* rdev);
 int  evergreen_rlc_resume(struct radeon_device* rdev);
 void evergreen_fix_pci_max_read_req_size(struct radeon_device* rdev);
 int  ni_mc_load_microcode(struct radeon_device* rdev);
+void evergreen_init_golden_registers(struct radeon_device* rdev);
 
 /* small helpers the code uses */
 static inline u32 be32_to_cpup(const u32* p) { return __builtin_bswap32(*p); }

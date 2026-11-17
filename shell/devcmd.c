@@ -178,7 +178,7 @@ int devcmd_dispatch(int argc, char** argv) {
             return 1;
         }
         if (argc >= 3 && !strcmp(argv[1], "radeon") && !strcmp(argv[2], "3d")) {
-            char msg[160];
+            char msg[200];
             int r = gpu_radeon_3d(msg, sizeof(msg));
             terminal_write(r == 0 ? "gpu radeon 3d: " : "gpu radeon 3d: not started: ");
             say(msg);

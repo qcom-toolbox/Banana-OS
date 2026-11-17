@@ -78,7 +78,7 @@ static uint8_t* g_vram;                /* the video memory, as the CPU writes it
 static uint64_t* g_gart;               /* the page table (in video memory) */
 static uint8_t* g_dummy;               /* where pages not bound read and write */
 static int g_state;                    /* 0 not tried, 1 up, -1 failed */
-static char g_status[128] = "not started (gpu radeon 3d)";
+static char g_status[200] = "not started (gpu radeon 3d)";
 static uint32_t g_ring_us, g_fence_us, g_ib_us;
 static uint32_t g_seq;                 /* the last fence's sequence number */
 static uint32_t g_bios_mb, g_real_mb;  /* the video memory the BIOS says, and what is there */
@@ -363,7 +363,8 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, char* why, 
          (unsigned long long)rdev->mc.vram_start, (unsigned long long)rdev->mc.gtt_start, (unsigned long long)rdev->mc.gtt_end);
 
     int r;
-    /* (evergreen_startup's order) */
+    /* (evergreen_init: the golden registers first; then evergreen_startup's order) */
+    evergreen_init_golden_registers(rdev);
     if (ni && (r = ni_mc_load_microcode(rdev)) != 0) FAIL("memory controller microcode", r);
     /* the AGP aperture off: nothing of the GTT goes there */
     WREG32(MC_VM_AGP_BASE, 0);
@@ -373,7 +374,16 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, char* why, 
     evergreen_gpu_init(rdev);
     if ((r = evergreen_rlc_resume(rdev)) != 0) FAIL("run-list controller", r);
     if ((r = evergreen_cp_load_microcode(rdev)) != 0) FAIL("command processor microcode", r);
-    if ((r = evergreen_cp_resume(rdev)) != 0) FAIL("ring test: the command processor does not run", r);
+    if ((r = evergreen_cp_resume(rdev)) != 0) {
+        /* what the command processor did: whether it read the ring at all
+         * (RPTR), whether it is halted or busy, what the CPU wrote is there */
+        char d[96];
+        ksnprintf(d, sizeof(d), "ring test failed: RPTR %x WPTR %x ME_CNTL %08x GRBM %08x SRBM %08x ring[0] %08x",
+                  RREG32(CP_RB_RPTR), RREG32(CP_RB_WPTR), RREG32(CP_ME_CNTL), RREG32(GRBM_STATUS),
+                  RREG32(SRBM_STATUS), ring->ring[0]);
+        klog("radeon: %s\n", d);
+        FAIL(d, r);
+    }
 
     /* a fence: the engine writes the sequence number back when it gets there */
     volatile uint32_t* fence = rdev->fence_drv[0].cpu_addr;
