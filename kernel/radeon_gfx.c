@@ -31,7 +31,10 @@
 #define RAD_PHYS(p) ((uint64_t)(uintptr_t)(p))
 #endif
 
-#define GFX_OFF        (128ull << 20)
+/* where the 3D engine's area starts: the last MiB of the video memory the
+ * CPU can reach through the BAR (set in rad_gfx_init) */
+static uint64_t g_gfx_off = 128ull << 20;
+#define GFX_OFF        g_gfx_off
 #define GART_BYTES     (512u << 10)
 #define GTT_SIZE       (256ull << 20)            /* GART_BYTES / 8 pages of 4 KiB */
 #define RING_OFF       (GFX_OFF + GART_BYTES)
@@ -265,7 +268,7 @@ uint32_t rad_vram_mb(void) { return g_real_mb; }
 int rad_gfx_ready(void) { return g_state > 0; }
 const char* rad_gfx_status(void) { return g_status; }
 
-int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, char* why, int cap) {
+int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, uint64_t visible, char* why, int cap) {
     if (g_state > 0) { kstrlcpy(why, "already up", (size_t)cap); return 0; }
     struct radeon_device* rdev = &g_dev;
     if (rt->family != CHIP_CAICOS && rt->family != CHIP_CEDAR) {
@@ -290,14 +293,22 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, char* why, 
     rdev->mc.vram_end = ((uint64_t)(loc >> 16) << 24) | 0xFFFFFF;
     uint64_t mb = RREG32(CONFIG_MEMSIZE);
     rdev->mc.real_vram_size = rdev->mc.mc_vram_size = mb << 20;
-    rdev->mc.visible_vram_size = 256ull << 20;          /* (the BAR every Evergreen card has, at least) */
+    /* The area goes in the last MiB the CPU reaches through the BAR (the
+     * window into video memory). It was put 128 MiB in, on the assumption
+     * that every card shows at least 256 MiB: a card showing less got its
+     * ring written past the end of the window - the command processor
+     * read video memory the CPU never wrote ("ring[0] 0030cf95"). */
+    if (!visible) visible = 256ull << 20;
+    rdev->mc.visible_vram_size = visible;
+    g_gfx_off = ((visible > (1ull << 30) ? (1ull << 30) : visible) - (1ull << 20)) & ~0xFFFFFull;
     if (vram_mc != rdev->mc.vram_start || rdev->mc.vram_end < rdev->mc.vram_start) {
         ksnprintf(why, (size_t)cap, "the memory controller's map moved (FB_LOCATION %08x)", loc);
         kstrlcpy(g_status, why, sizeof(g_status));
         g_state = -1;
         return -1;
     }
-    if (mb < (GFX_OFF + GFX_BYTES) >> 20 || rdev->mc.vram_end - rdev->mc.vram_start + 1 < GFX_OFF + GFX_BYTES) {
+    if (g_gfx_off < (96ull << 20) || mb < (GFX_OFF + GFX_BYTES) >> 20 ||
+        rdev->mc.vram_end - rdev->mc.vram_start + 1 < GFX_OFF + GFX_BYTES) {
         ksnprintf(why, (size_t)cap, "%u MiB of video memory: too little", (unsigned)mb);
         kstrlcpy(g_status, why, sizeof(g_status));
         g_state = -1;
@@ -309,6 +320,25 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, char* why, 
 
     if (!mmio_map(vram_cpu + GFX_OFF, GFX_BYTES)) { kstrlcpy(why, "its video memory could not be mapped", (size_t)cap); g_state = -1; return -1; }
     g_vram = (uint8_t*)vram_cpu;
+    /* the CPU reaches it: what is written there reads back */
+    {
+        volatile uint32_t* t = (volatile uint32_t*)(g_vram + GFX_OFF);
+        uint32_t keep = t[0];
+        t[0] = 0x5A17C0DEu;
+        mb();
+        uint32_t got = t[0];
+        t[0] = ~0x5A17C0DEu;
+        mb();
+        uint32_t got2 = t[0];
+        t[0] = keep;
+        if (got != 0x5A17C0DEu || got2 != ~0x5A17C0DEu) {
+            ksnprintf(why, (size_t)cap, "video memory at %u MiB does not read back through the BAR (%08x; window %u MiB)",
+                      (unsigned)(GFX_OFF >> 20), got, (unsigned)(visible >> 20));
+            kstrlcpy(g_status, why, sizeof(g_status));
+            g_state = -1;
+            return -1;
+        }
+    }
     g_dummy = kmalloc_aligned(4096, 4096);
     if (!g_dummy) { kstrlcpy(why, "out of memory", (size_t)cap); g_state = -1; return -1; }
     memset(g_dummy, 0, 4096);

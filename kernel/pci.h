@@ -37,6 +37,11 @@ int pci_find(uint16_t vendor, uint16_t device, pci_dev_t* out);
  * I/O BARs return the port base; *is_io tells which. */
 uintptr_t pci_bar(const pci_dev_t* d, int bar, int* is_io);
 
+/* the size of memory BAR `bar` (bytes, 0 if none / not a memory BAR): the
+ * standard probe - all ones written, read back, the BAR restored - with the
+ * function's memory decoding off for those few cycles (nothing reaches it) */
+uint64_t pci_bar_size(const pci_dev_t* d, int bar);
+
 /* Enables I/O + memory decoding and bus mastering (needed for DMA). The
  * driver taking the device is remembered by its source file ("net/e1000.c"
  * -> "e1000"): Device Manager shows it. */

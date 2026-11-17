@@ -85,8 +85,9 @@ int      rad_kms_set(radeon_t* r, int crtc, int path, int digital, const edid_mo
 
 /* radeon_gfx.c: the 3D engine brought up and tested (0), or -1 (why).
  * vram_cpu: the video memory BAR (the CPU's address); vram_mc: the memory
- * controller's address of the video memory */
-int  rad_gfx_init(radeon_t* r, uintptr_t vram_cpu, uint64_t vram_mc, char* why, int cap);
+ * controller's address of the video memory; visible: the BAR's size (the
+ * engine's area goes in its last MiB) */
+int  rad_gfx_init(radeon_t* r, uintptr_t vram_cpu, uint64_t vram_mc, uint64_t visible, char* why, int cap);
 int  rad_gfx_ready(void);
 const char* rad_gfx_status(void);
 /* n pages of system memory (physical addresses phys[]) at GTT page first:

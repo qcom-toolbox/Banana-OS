@@ -94,6 +94,7 @@ static edid_mode_t g_modes[32];
 static int g_nmodes;
 static char g_monitor[24];
 static uintptr_t g_vb;                     /* the video memory BAR */
+static uint64_t g_vbar;                    /* ... its size: what of video memory the CPU reaches */
 static uint64_t g_vram_mc;                 /* ... where the memory controller puts it */
 static int g_cur_w, g_cur_h;
 #define NEW_FB_OFF (64ull << 20)
@@ -132,6 +133,7 @@ static int rad_set_mode(gpu_t* g, int w, int h) {
     uint64_t bytes = (uint64_t)pitch * (uint64_t)h * 4u;
     uint32_t vram_mb = rd(0x5428);                    /* (CONFIG_MEMSIZE: MiB on Evergreen) */
     if (bytes > (64ull << 20) || (vram_mb && NEW_FB_OFF + bytes > (uint64_t)vram_mb << 20)) return -1;
+    if (g_vbar && NEW_FB_OFF + bytes > g_vbar - (1ull << 20)) return -1;   /* (inside the window; its last MiB: the 3D engine's) */
     uintptr_t va = g_vb + (uintptr_t)NEW_FB_OFF;
     if (!mmio_map(va, bytes)) return -1;
     paging_set_wc(va, bytes);
@@ -230,7 +232,8 @@ static void rad_info(gpu_t* g, char* buf, int cap) {
                       g_dce, g_crtc_n, rd(CRTC_STATUS_FRAME_COUNT + g_crtc), fi ? fi->width : 0, fi ? fi->height : 0,
                       (unsigned long long)g_cur_mc);
     if (g_dce <= 5 && n < cap) {
-        n += ksnprintf(buf + n, (size_t)(cap - n), "mode setting: %s\n", g_kms ? "yes" : "no");
+        n += ksnprintf(buf + n, (size_t)(cap - n), "mode setting: %s; video memory the CPU reaches: %u MiB\n",
+                       g_kms ? "yes" : "no", (unsigned)(g_vbar >> 20));
         if (n < cap) n += ksnprintf(buf + n, (size_t)(cap - n), "  %s\n", g_kms_why);
         if (n < cap) n += ksnprintf(buf + n, (size_t)(cap - n), "3D engine: %s\n", rad_gfx_status());
         if (g_rad.atom && n < cap) { rad_atom_info(&g_rad, buf + n, cap - n); n += (int)strlen(buf + n); }
@@ -241,7 +244,7 @@ static void rad_info(gpu_t* g, char* buf, int cap) {
 /* `gpu radeon 3d`: the 3D engine started (and tested) */
 int gpu_radeon_3d(char* msg, int cap) {
     if (!g_reg || g_dce > 5) { kstrlcpy(msg, "no Radeon HD 5000-7000 driven (gpu experimental on, lsgpu)", (size_t)cap); return -1; }
-    return rad_gfx_init(&g_rad, g_vb, g_vram_mc, msg, cap);
+    return rad_gfx_init(&g_rad, g_vb, g_vram_mc, g_vbar, msg, cap);
 }
 
 /* `gpu radeon dump`: the video BIOS and the display registers, saved (a report) */
@@ -343,6 +346,11 @@ static int try_card(const pci_dev_t* d) {
     wr(CUR_UPDATE + g_crtc, rd(CUR_UPDATE + g_crtc) & ~CUR_UPDATE_LOCK);
     pci_claim(d, "radeon");
     g_vb = vb;
+    g_vbar = 0;
+    for (int b = 0; b < 6; b++) {
+        int bio = 0;
+        if (pci_bar(d, b, &bio) == vb && !bio) { g_vbar = pci_bar_size(d, b); break; }
+    }
     g_vram_mc = vram_mc;
     g_cur_w = (int)fi->width;
     g_cur_h = (int)fi->height;

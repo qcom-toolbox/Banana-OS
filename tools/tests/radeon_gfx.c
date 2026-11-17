@@ -74,6 +74,7 @@ const char* rad_family_name(int f) { return f == CHIP_CAICOS ? "Caicos" : f == C
 /* ---- the card ---- */
 static uint32_t VRAM_MB = 1024, REAL_MB = 1024;
 static uint32_t g_sink[2];
+#define VISIBLE (128ull << 20)                  /* (a card showing 128 MiB through its BAR: the area in its last MiB) */
 #define VRAM_HOST  (130u << 20)                  /* (what the driver touches: the first 129 MiB) */
 static uint32_t R[(128u << 10) / 4];
 static uint8_t* VR;
@@ -217,7 +218,7 @@ int main(int argc, char** argv) {
     rt.family = g_cedar ? CHIP_CEDAR : !strcmp(mode, "juniper") ? CHIP_JUNIPER : CHIP_CAICOS;
     rt.pci.device = 0x6779;
     char why[160] = "";
-    int r = rad_gfx_init(&rt, (uintptr_t)VR, 0, why, sizeof(why));
+    int r = rad_gfx_init(&rt, (uintptr_t)VR, 0, VISIBLE, why, sizeof(why));
     printf("%s: rad_gfx_init = %d: %s\n", mode, r, why);
 
     if (!strcmp(mode, "juniper")) {
@@ -237,7 +238,7 @@ int main(int argc, char** argv) {
         else if (g_gddr5) CHECK(g_bad_mc == 0 && g_mc_n == BTC_MC_UCODE_SIZE, "GDDR5, the sequencer not running: its microcode loaded (%u dwords)", g_mc_n);
         else CHECK(g_mc_n == 0, "DDR3: the memory controller's microcode left as the BIOS has it");
         CHECK(R[VM_CONTEXT0_CNTL / 4] & 1, "the GART on");
-        CHECK(((uint64_t)R[VM_CONTEXT0_PAGE_TABLE_BASE_ADDR / 4] << 12) == GFX_OFF, "its page table at 128 MiB into video memory");
+        CHECK(((uint64_t)R[VM_CONTEXT0_PAGE_TABLE_BASE_ADDR / 4] << 12) == VISIBLE - (1ull << 20), "its page table in the last MiB the CPU reaches (127 MiB of a 128 MiB window)");
         CHECK(((uint64_t)R[VM_CONTEXT0_PAGE_TABLE_START_ADDR / 4] << 12) == (uint64_t)VRAM_MB << 20, "the GTT right after video memory");
         CHECK(R[CP_RB_BASE / 4] == RING_OFF >> 8 && (2u << (R[CP_RB_CNTL / 4] & 0x3F)) == RING_BYTES / 4, "the ring: 64 KiB at its offset");
         CHECK(g_pkt_init == 1, "ME_INITIALIZE run");
@@ -261,7 +262,7 @@ int main(int argc, char** argv) {
         CHECK(mc(ga, 4) == NULL, "and unbound");
         g_quiet = 0;
         char again[64];
-        CHECK(rad_gfx_init(&rt, (uintptr_t)VR, 0, again, sizeof(again)) == 0 && g_pkt_init == 1, "a second start: left as it is");
+        CHECK(rad_gfx_init(&rt, (uintptr_t)VR, 0, VISIBLE, again, sizeof(again)) == 0 && g_pkt_init == 1, "a second start: left as it is");
         CHECK(strstr(rad_gfx_status(), "up:") != NULL, "status: %s", rad_gfx_status());
     }
     free(VR);

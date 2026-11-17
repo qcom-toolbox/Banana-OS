@@ -157,6 +157,33 @@ int pci_find(uint16_t vendor, uint16_t device, pci_dev_t* out) {
     return pci_scan(find_cb, &f) ? 1 : 0;
 }
 
+uint64_t pci_bar_size(const pci_dev_t* d, int bar) {
+    if (bar < 0 || bar > 5) return 0;
+    uint8_t off = (uint8_t)(0x10 + bar * 4);
+    uint32_t lo = pci_read32(d->bus, d->dev, d->fn, off);
+    if (lo & 1) return 0;                                   /* (an I/O BAR) */
+    int is64 = (lo & 6) == 4 && bar < 5;
+    uint32_t hi = is64 ? pci_read32(d->bus, d->dev, d->fn, (uint8_t)(off + 4)) : 0;
+    uintptr_t f;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(f) :: "memory");
+    uint16_t cmd = pci_read16(d->bus, d->dev, d->fn, 0x04);
+    pci_write16(d->bus, d->dev, d->fn, 0x04, (uint16_t)(cmd & ~2u));     /* memory decoding off */
+    pci_write32(d->bus, d->dev, d->fn, off, 0xFFFFFFFFu);
+    uint32_t mlo = pci_read32(d->bus, d->dev, d->fn, off);
+    uint32_t mhi = 0xFFFFFFFFu;
+    if (is64) {
+        pci_write32(d->bus, d->dev, d->fn, (uint8_t)(off + 4), 0xFFFFFFFFu);
+        mhi = pci_read32(d->bus, d->dev, d->fn, (uint8_t)(off + 4));
+        pci_write32(d->bus, d->dev, d->fn, (uint8_t)(off + 4), hi);
+    }
+    pci_write32(d->bus, d->dev, d->fn, off, lo);
+    pci_write16(d->bus, d->dev, d->fn, 0x04, cmd);
+    if (f & 0x200) __asm__ volatile("sti" ::: "memory");
+    uint64_t mask = ((uint64_t)mhi << 32) | (mlo & ~0xFull);
+    if (!is64) mask |= 0xFFFFFFFF00000000ull;
+    return (mlo & ~0xFull) ? ~mask + 1 : 0;
+}
+
 uintptr_t pci_bar(const pci_dev_t* d, int bar, int* is_io) {
     uint32_t v = pci_read32(d->bus, d->dev, d->fn, (uint8_t)(0x10 + bar * 4));
     if (v & 1) {
