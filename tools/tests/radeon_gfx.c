@@ -67,8 +67,9 @@ uint64_t timer_counter(void) { return g_ns += 1000; }
 uint32_t timer_ms(void) { return (uint32_t)(g_ns / 1000000u); }
 void timer_sleep_ms(uint32_t ms) { g_ns += (uint64_t)ms * 1000000u; }
 uint32_t pci_read32(uint8_t b, uint8_t d, uint8_t f, uint8_t o) { (void)b; (void)d; (void)f; (void)o; return 0; }
-uint16_t pci_read16(uint8_t b, uint8_t d, uint8_t f, uint8_t o) { (void)b; (void)d; (void)f; (void)o; return 0; }
-void pci_write16(uint8_t b, uint8_t d, uint8_t f, uint8_t o, uint16_t v) { (void)b; (void)d; (void)f; (void)o; (void)v; }
+static uint16_t g_pcicmd = 0x0003;                 /* (memory and I/O decoding on, bus mastering off: as UEFI leaves a GPU) */
+uint16_t pci_read16(uint8_t b, uint8_t d, uint8_t f, uint8_t o) { (void)b; (void)d; (void)f; return o == 4 ? g_pcicmd : 0; }
+void pci_write16(uint8_t b, uint8_t d, uint8_t f, uint8_t o, uint16_t v) { (void)b; (void)d; (void)f; if (o == 4) g_pcicmd = v; }
 int mmio_map(uint64_t p, uint64_t n) { (void)p; (void)n; return 1; }
 const char* rad_family_name(int f) { return f == CHIP_CAICOS ? "Caicos" : f == CHIP_CEDAR ? "Cedar" : f == CHIP_JUNIPER ? "Juniper" : "?"; }
 
@@ -104,6 +105,7 @@ static void* mc(uint64_t a, uint32_t bytes) {
     }
     uint64_t gs = (uint64_t)R[VM_CONTEXT0_PAGE_TABLE_START_ADDR / 4] << 12, ge = (uint64_t)R[VM_CONTEXT0_PAGE_TABLE_END_ADDR / 4] << 12;
     if (!(R[VM_CONTEXT0_CNTL / 4] & 1) || a < gs || a > ge + 0xFFF) { g_bad_addr++; return NULL; }
+    if (!(g_pcicmd & 4)) { g_bad_addr++; return NULL; }          /* (no bus mastering: the GPU cannot reach system memory) */
     uint64_t* pt = mc((uint64_t)R[VM_CONTEXT0_PAGE_TABLE_BASE_ADDR / 4] << 12, 8);
     if (!pt) return NULL;
     uint64_t pte = pt[(a - gs) >> 12];
@@ -275,6 +277,7 @@ int main(int argc, char** argv) {
         CHECK(rad_gfx_init(&rt, (uintptr_t)VR, 0, VISIBLE, again, sizeof(again)) == 0 && g_pkt_init == 1, "a second start: left as it is");
         CHECK(strstr(rad_gfx_status(), "up:") != NULL, "status: %s", rad_gfx_status());
         CHECK(R[MC_VM_SYSTEM_APERTURE_HIGH_ADDR / 4] == ((VRAM_MB << 20) - 1) >> 12, "the system aperture: exactly the video memory");
+        CHECK((g_pcicmd & 6) == 6, "bus mastering on (the firmware had it off)");
     }
     free(VR);
     printf(g_fails ? "%d FAILED\n" : "all passed\n", g_fails);

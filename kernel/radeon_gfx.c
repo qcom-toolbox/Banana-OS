@@ -411,6 +411,18 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, uint64_t vi
          (unsigned long long)rdev->mc.vram_start, (unsigned long long)rdev->mc.gtt_start, (unsigned long long)rdev->mc.gtt_end);
 
     int r;
+    /* Bus mastering on (as Linux's pci_set_master): the GPU reads and writes
+     * system memory - the ring, the writeback page, the GART's pages - only
+     * with it. The display driver had only claimed the card, and UEFI leaves
+     * it off for a graphics card (its screen needs no DMA): the command
+     * processor's first fetch from system memory then hung in the bus
+     * interface (SRBM BIF_BUSY, GRBM SRBM_RQ_PENDING, RPTR stuck at b8). */
+    {
+        const pci_dev_t* d = &rt->pci;
+        uint16_t cmd = pci_read16(d->bus, d->dev, d->fn, 0x04);
+        if (!(cmd & 0x4)) klog("radeon: bus mastering was off - on now\n");
+        pci_write16(d->bus, d->dev, d->fn, 0x04, (uint16_t)(cmd | 0x6));   /* (memory space and bus master) */
+    }
     /* (evergreen_init: the golden registers first; then evergreen_startup's order) */
     evergreen_init_golden_registers(rdev);
     if (ni && (r = ni_mc_load_microcode(rdev)) != 0) FAIL("memory controller microcode", r);
