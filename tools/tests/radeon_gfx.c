@@ -11,11 +11,13 @@
 #define RADEON_MODEL 1
 
 #include "../../kernel/types.h"
-static unsigned char g_arena[256 << 10] __attribute__((aligned(4096)));
+static unsigned char g_arena[8 << 20] __attribute__((aligned(4096)));
 static size_t g_arena_used;
 #define ARENA_PHYS 0x20000000ull
 #define RAD_PHYS(p) ((uint64_t)((uintptr_t)(p) - (uintptr_t)g_arena) + ARENA_PHYS)
 #include "../../kernel/radeon_gfx.c"
+#define RAD_VIRT(a) ((void*)(g_arena + ((uint64_t)(a) - ARENA_PHYS)))
+#include "../../kernel/radeon_drm.c"
 extern int printf(const char*, ...);
 extern int vprintf(const char*, __builtin_va_list);
 extern void* calloc(size_t, size_t);
@@ -71,6 +73,22 @@ static uint16_t g_pcicmd = 0x0003;                 /* (memory and I/O decoding o
 uint16_t pci_read16(uint8_t b, uint8_t d, uint8_t f, uint8_t o) { (void)b; (void)d; (void)f; return o == 4 ? g_pcicmd : 0; }
 void pci_write16(uint8_t b, uint8_t d, uint8_t f, uint8_t o, uint16_t v) { (void)b; (void)d; (void)f; if (o == 4) g_pcicmd = v; }
 int mmio_map(uint64_t p, uint64_t n) { (void)p; (void)n; return 1; }
+/* (kernel/radeon_drm.c's: the app's memory is the test's, pages from the arena) */
+int app_user_ok(const void* p, uint64_t n) { (void)p; (void)n; return 1; }
+uspace_t* app_user_space(void) { return (uspace_t*)1; }
+uintptr_t uvm_map_frames(uspace_t* us, const uint64_t* frames, uint32_t n, int prot, int wc) {
+    (void)us; (void)n; (void)prot; (void)wc;
+    if (frames[0] >= ARENA_PHYS && frames[0] < ARENA_PHYS + sizeof(g_arena)) return (uintptr_t)RAD_VIRT(frames[0]);
+    return (uintptr_t)frames[0];                       /* (video memory: the model's, through its "BAR") */
+}
+int uvm_unmap_frames(uspace_t* us, uintptr_t a, uint32_t n, uint64_t f0) { (void)us; (void)a; (void)n; (void)f0; return 0; }
+void* upage_alloc(void) { return kmalloc_aligned(4096, 4096); }
+void upage_free(void* p) { (void)p; }
+void task_yield(void) { g_ns += 100000; }
+static radeon_t rt;
+struct radeon* gpu_radeon_card(void) { return &rt; }
+uint64_t gpu_radeon_display_end(void) { return 64ull << 20; }
+int gpu_radeon_3d(char* msg, int cap) { kstrlcpy(msg, "model: not started", (size_t)cap); return -1; }
 const char* rad_family_name(int f) { return f == CHIP_CAICOS ? "Caicos" : f == CHIP_CEDAR ? "Cedar" : f == CHIP_JUNIPER ? "Juniper" : "?"; }
 
 /* ---- the card ---- */
@@ -225,7 +243,6 @@ int main(int argc, char** argv) {
     R[MC_VM_SYSTEM_APERTURE_HIGH_ADDR / 4] = !strcmp(mode, "wideap") ? 0x0FFFFFFFu : ((VRAM_MB << 20) - 1) >> 12;
     g_cp_alive = strcmp(mode, "dead") != 0;
     g_gddr5 = !strcmp(mode, "gddr5");
-    static radeon_t rt;
     rt.family = g_cedar ? CHIP_CEDAR : !strcmp(mode, "juniper") ? CHIP_JUNIPER : CHIP_CAICOS;
     rt.pci.device = 0x6779;
     char why[160] = "";
@@ -235,6 +252,83 @@ int main(int argc, char** argv) {
     if (!strcmp(mode, "juniper")) {
         CHECK(r == -1 && strstr(why, "Caicos"), "another family: refused, it has no microcode here");
         CHECK(R[CP_RB_BASE / 4] == 0 && g_pfp_n == 0, "and the card untouched");
+    } else if (!strcmp(mode, "drm")) {
+        CHECK(r == 0, "the engine up");
+        /* the version Mesa's radeon winsys asks for */
+        char name[16] = "";
+        struct drm_version_k v = { 0, 0, 0, sizeof(name) - 1, (uint64_t)(uintptr_t)name, 0, 0, 0, 0 };
+        #define IOC(dir, nr, sz) ((unsigned long)(dir) << 30 | (unsigned long)(sz) << 16 | 'd' << 8 | (nr))
+        CHECK(rad_drm_ioctl(1, IOC(3, NR_VERSION, sizeof(v)), &v) == 0 && v.version_major == 2 && v.version_minor >= 50 && !strcmp(name, "radeon"),
+              "DRM_IOCTL_VERSION: %s %d.%d", name, v.version_major, v.version_minor);
+        uint32_t val = 0;
+        struct info_k in = { INFO_DEVICE_ID, 0, (uint64_t)(uintptr_t)&val };
+        CHECK(rad_drm_ioctl(1, IOC(3, 0x40 + RD_INFO, sizeof(in)), &in) == 0 && val == 0x6779, "INFO device id %04x", val);
+        in.request = INFO_NUM_BACKENDS;
+        CHECK(rad_drm_ioctl(1, IOC(3, 0x40 + RD_INFO, sizeof(in)), &in) == 0 && val == 1, "INFO backends %u", val);
+        in.request = INFO_VA_START;
+        CHECK(rad_drm_ioctl(1, IOC(3, 0x40 + RD_INFO, sizeof(in)), &in) == -E_INVAL, "INFO VA_START refused (no virtual memory: relocations)");
+        struct gem_info_k gi = { 0, 0, 0 };
+        CHECK(rad_drm_ioctl(1, IOC(3, 0x40 + RD_GEM_INFO, sizeof(gi)), &gi) == 0 && gi.vram_size == 1024ull << 20 && gi.vram_visible == 63ull << 20,
+              "GEM_INFO: %llu MiB video memory, %llu MiB of it for apps' mapped buffers, GTT %llu MiB",
+              (unsigned long long)(gi.vram_size >> 20), (unsigned long long)(gi.vram_visible >> 20), (unsigned long long)(gi.gart_size >> 20));
+        /* a buffer in the GTT and one in video memory, mapped */
+        struct gem_create_k cg = { 4096, 4096, 0, DOMAIN_GTT, 0 }, cv = { 65536, 4096, 0, DOMAIN_VRAM, 0 };
+        CHECK(rad_drm_ioctl(1, IOC(3, 0x40 + RD_GEM_CREATE, sizeof(cg)), &cg) == 0 && cg.handle, "GEM_CREATE in the GTT: handle %u", cg.handle);
+        CHECK(rad_drm_ioctl(1, IOC(3, 0x40 + RD_GEM_CREATE, sizeof(cv)), &cv) == 0 && cv.handle, "GEM_CREATE in video memory: handle %u", cv.handle);
+        struct gem_mmap_k mg = { cg.handle, 0, 0, 4096, 0 }, mv = { cv.handle, 0, 0, 65536, 0 };
+        CHECK(rad_drm_ioctl(1, IOC(3, 0x40 + RD_GEM_MMAP, sizeof(mg)), &mg) == 0 && mg.addr_ptr, "GEM_MMAP of the GTT buffer");
+        CHECK(rad_drm_ioctl(1, IOC(3, 0x40 + RD_GEM_MMAP, sizeof(mv)), &mv) == 0 && mv.addr_ptr, "GEM_MMAP of the video memory buffer");
+        volatile uint32_t* pg = (volatile uint32_t*)(uintptr_t)mg.addr_ptr;
+        volatile uint32_t* pv = (volatile uint32_t*)(uintptr_t)mv.addr_ptr;
+        CHECK(pv == (volatile uint32_t*)(VR + (64ull << 20)) && pg[0] == 0 && pv[0] == 0, "video memory buffers above the display (64 MiB), cleared");
+        /* a command stream: MEM_WRITE into the GTT buffer, EVENT_WRITE_EOP into the video memory one,
+         * each followed by its relocation (a NOP naming the buffer) - the checker patches the addresses */
+        uint32_t ibd[] = {
+            PACKET3(PACKET3_MEM_WRITE, 3), 0, 1u << 18, 0x12345678, 0, PACKET3(PACKET3_NOP, 0), 0 * 4,
+            PACKET3(PACKET3_EVENT_WRITE_EOP, 4), 0x14 | 5u << 8, 8, 1u << 29, 0xCAFE0001, 0,
+            PACKET3(PACKET3_NOP, 0), 1 * 4,
+        };
+        struct cs_reloc_k rel[2] = { { cg.handle, 0, DOMAIN_GTT, 0 }, { cv.handle, 0, DOMAIN_VRAM, 0 } };
+        uint32_t fl[3] = { 0, CS_RING_GFX, 0 };
+        struct cs_chunk_k chk[3] = { { CHUNK_IB, sizeof(ibd) / 4, (uint64_t)(uintptr_t)ibd },
+                                     { CHUNK_RELOCS, 8, (uint64_t)(uintptr_t)rel }, { CHUNK_FLAGS, 3, (uint64_t)(uintptr_t)fl } };
+        uint64_t cp[3] = { (uint64_t)(uintptr_t)&chk[0], (uint64_t)(uintptr_t)&chk[1], (uint64_t)(uintptr_t)&chk[2] };
+        struct cs_k cs = { 3, 0, (uint64_t)(uintptr_t)cp, 0, 0 };
+        uint32_t ib_before = g_pkt_ib;
+        int cr = rad_drm_ioctl(1, IOC(3, 0x40 + RD_CS, sizeof(cs)), &cs);
+        CHECK(cr == 0 && g_pkt_ib == ib_before + 1, "CS accepted by the checker and run as an indirect buffer (%d)", cr);
+        struct gem_wait_idle_k wi = { cg.handle, 0 };
+        CHECK(rad_drm_ioctl(1, IOC(1, 0x40 + RD_GEM_WAIT_IDLE, sizeof(wi)), &wi) == 0, "GEM_WAIT_IDLE");
+        CHECK(pg[0] == 0x12345678, "MEM_WRITE landed in the GTT buffer, its address patched in (%08x)", pg[0]);
+        CHECK(pv[2] == 0xCAFE0001, "EVENT_WRITE_EOP landed 8 bytes into the video memory buffer (%08x)", pv[2]);
+        struct gem_busy_k gb = { cv.handle, 0 };
+        CHECK(rad_drm_ioctl(1, IOC(3, 0x40 + RD_GEM_BUSY, sizeof(gb)), &gb) == 0 && gb.domain == DOMAIN_VRAM, "GEM_BUSY: idle, in video memory");
+        /* refused: a write to the command processor's ring base (outside what apps may set) */
+        uint32_t bad[] = { PACKET3(PACKET3_SET_CONFIG_REG, 1), (0xC100 - PACKET3_SET_CONFIG_REG_START) >> 2, 0 };
+        chk[0].chunk_data = (uint64_t)(uintptr_t)bad; chk[0].length_dw = 3;
+        uint32_t base = R[CP_RB_BASE / 4], ib_now = g_pkt_ib;
+        g_quiet = 1;
+        cr = rad_drm_ioctl(1, IOC(3, 0x40 + RD_CS, sizeof(cs)), &cs);
+        g_quiet = 0;
+        CHECK(cr == -E_INVAL && g_pkt_ib == ib_now && R[CP_RB_BASE / 4] == base, "a CS writing CP_RB_BASE refused, nothing run");
+        /* a buffer past its end */
+        uint32_t past[] = { PACKET3(PACKET3_MEM_WRITE, 3), 4096, 1u << 18, 1, 0, PACKET3(PACKET3_NOP, 0), 0 };
+        chk[0].chunk_data = (uint64_t)(uintptr_t)past; chk[0].length_dw = 7;
+        g_quiet = 1;
+        cr = rad_drm_ioctl(1, IOC(3, 0x40 + RD_CS, sizeof(cs)), &cs);
+        g_quiet = 0;
+        CHECK(cr == -E_INVAL, "a CS writing past its buffer's end refused");
+        /* another app's handle does not exist for it */
+        struct gem_busy_k other = { cg.handle, 0 };
+        CHECK(rad_drm_ioctl(2, IOC(3, 0x40 + RD_GEM_BUSY, sizeof(other)), &other) == -E_NOENT, "another app's buffer: not there for it");
+        struct gem_close_k gc = { cv.handle, 0 };
+        uint64_t used = g_vram_used;
+        CHECK(rad_drm_ioctl(1, IOC(1, NR_GEM_CLOSE, sizeof(gc)), &gc) == 0 && g_vram_used == used - 65536, "GEM_CLOSE gives its video memory back");
+        rad_drm_release(1);
+        CHECK(g_gtt_used == 0 && g_vram_used == 0, "the app's end: everything given back");
+        char st[160];
+        rad_drm_stats(st, sizeof(st));
+        printf("  %s\n", st);
     } else if (!strcmp(mode, "dead")) {
         CHECK(r == -1 && strstr(why, "ring test"), "a command processor that does not run: the ring test fails");
         CHECK(R[CP_ME_CNTL / 4] == (CP_ME_HALT | CP_PFP_HALT), "the command processor halted again");

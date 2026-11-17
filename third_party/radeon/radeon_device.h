@@ -80,7 +80,7 @@ struct radeon_device {
     int      family;
     unsigned long flags;
     int      usec_timeout;
-    struct { struct evergreen_config evergreen; } config;
+    struct { struct evergreen_config evergreen; struct { unsigned tile_config; } cayman; } config;
     struct { bool ready; void* robj; u64 table_addr; u32* ptr; unsigned num_gpu_pages; } gart;
     struct { u64 vram_start, vram_end, real_vram_size, visible_vram_size, gtt_start, gtt_end, gtt_size, mc_vram_size; } mc;
     struct { u64 addr; } dummy_page;

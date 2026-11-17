@@ -130,6 +130,10 @@ int  gpu_radeon_dump(const char* dir, char* msg, int cap);
 const char* gpu_radeon_status(void);
 /* `gpu radeon 3d`: the 3D engine brought up and tested (Caicos): 0, or -1 (msg) */
 int  gpu_radeon_3d(char* msg, int cap);
+/* the Radeon the DRM interface drives (kernel/radeon_drm.c): its card
+ * (radeon_t, kernel/radeon.h) or NULL; where the display's video memory ends */
+struct radeon* gpu_radeon_card(void);
+uint64_t gpu_radeon_display_end(void);
 void gpu_radeon_boot(void);              /* settings_boot: when asked for */
 int  gpu_experimental(void);             /* the setting */
 void gpu_set_experimental(int on);

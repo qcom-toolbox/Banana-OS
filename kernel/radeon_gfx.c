@@ -26,6 +26,9 @@
 #include "paging.h"
 #include "pci.h"
 #include "serial.h"
+#include "spinlock.h"
+#include "task.h"
+#include "timer.h"
 
 #ifndef RAD_PHYS                       /* (the host test moves system memory elsewhere) */
 #define RAD_PHYS(p) ((uint64_t)(uintptr_t)(p))
@@ -530,5 +533,51 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, uint64_t vi
              g_bios_mb, g_real_mb);
     klog("radeon: 3D engine %s\n", g_status);
     kstrlcpy(why, g_status, (size_t)cap);
+    return 0;
+}
+
+/* ── for the radeon DRM interface (kernel/radeon_drm.c) ─────────────── */
+static spinlock_t g_ring_lock = SPINLOCK_INIT;      /* (one ring, every app and the kernel) */
+
+struct radeon_device* rad_gfx_rdev(void) { return g_state > 0 ? &g_dev : NULL; }
+uint8_t* rad_gfx_vram_cpu(void) { return g_vram; }
+uint64_t rad_gfx_area_off(void) { return GFX_OFF; }
+uint32_t rad_gfx_reserved_gtt_pages(void) { return IB_TEST_PAGE + 1; }
+
+/* the last fence the engine has written back */
+uint32_t rad_gfx_completed(void) {
+    return g_state > 0 ? *(volatile uint32_t*)g_dev.fence_drv[0].cpu_addr : 0;
+}
+int rad_gfx_seq_done(uint32_t seq) { return (int32_t)(rad_gfx_completed() - seq) >= 0; }
+
+/* the indirect buffer at gpu_addr (ndw dwords) run on the ring, a fence
+ * after it: the fence's number, or 0 (the ring did not take it) */
+uint32_t rad_gfx_submit_ib(uint64_t gpu_addr, uint32_t ndw) {
+    if (g_state <= 0 || !ndw) return 0;
+    struct radeon_device* rdev = &g_dev;
+    struct radeon_ring* ring = &rdev->ring[RADEON_RING_TYPE_GFX_INDEX];
+    spin_lock(&g_ring_lock);
+    uint32_t seq = 0;
+    if (radeon_ring_lock(rdev, ring, 64) == 0) {
+        struct radeon_ib ib = { RADEON_RING_TYPE_GFX_INDEX, gpu_addr, NULL, ndw, NULL, false, 0 };
+        evergreen_ring_ib_execute(rdev, &ib);
+        seq = ++g_seq;
+        if (!seq) seq = ++g_seq;                         /* (0: "none") */
+        struct radeon_fence f = { RADEON_RING_TYPE_GFX_INDEX, seq };
+        r600_fence_ring_emit(rdev, &f);
+        radeon_ring_unlock_commit(rdev, ring, false);
+    }
+    spin_unlock(&g_ring_lock);
+    return seq;
+}
+
+/* until fence seq is written back: 0, or -1 after timeout_ms (< 0: no limit) */
+int rad_gfx_wait(uint32_t seq, int timeout_ms) {
+    if (!seq) return 0;
+    uint32_t t0 = timer_ms();
+    while (!rad_gfx_seq_done(seq)) {
+        if (timeout_ms >= 0 && timer_ms() - t0 >= (uint32_t)timeout_ms) return -1;
+        task_yield();
+    }
     return 0;
 }

@@ -98,6 +98,21 @@ uint64_t rad_gtt_base(void);
 uint32_t rad_gtt_pages(void);
 /* the video memory really there (MiB: probed by the engine), 0 before it runs */
 uint32_t rad_vram_mb(void);
+/* for the radeon DRM interface (kernel/radeon_drm.c) */
+struct radeon_device* rad_gfx_rdev(void);         /* NULL until the engine is up */
+uint8_t* rad_gfx_vram_cpu(void);                  /* the video memory window, as the CPU writes it */
+uint64_t rad_gfx_area_off(void);                  /* the engine's own area (its last MiB) */
+uint32_t rad_gfx_reserved_gtt_pages(void);        /* GTT pages 0 .. n-1 are the kernel's */
+uint32_t rad_gfx_completed(void);                 /* the last fence written back */
+int      rad_gfx_seq_done(uint32_t seq);
+uint32_t rad_gfx_submit_ib(uint64_t gpu_addr, uint32_t ndw);   /* its fence, or 0 */
+int      rad_gfx_wait(uint32_t seq, int timeout_ms);
+/* kernel/radeon_drm.c: the radeon DRM interface for apps (gpu_gem.c hands
+ * /dev/dri/card0's requests over while a Radeon is driven) */
+int  rad_drm_active(void);
+int  rad_drm_ioctl(int owner, unsigned long req, void* arg);
+void rad_drm_release(int owner);
+void rad_drm_stats(char* buf, int cap);
 /* the microcode's licence (shown with the other notices) */
 const char* rad_fw_notice(uint32_t* len);
 

@@ -95,6 +95,7 @@ static int g_nmodes;
 static char g_monitor[24];
 static uintptr_t g_vb;                     /* the video memory BAR */
 static uint64_t g_vbar;                    /* ... its size: what of video memory the CPU reaches */
+static uint64_t g_cur_off;                 /* the cursor image's offset in video memory */
 static uint64_t g_vram_mc;                 /* ... where the memory controller puts it */
 static int g_cur_w, g_cur_h;
 #define NEW_FB_OFF (64ull << 20)
@@ -241,6 +242,16 @@ static void rad_info(gpu_t* g, char* buf, int cap) {
     if (n < cap) ksnprintf(buf + n, (size_t)(cap - n), "a report: gpu radeon dump; turn off: gpu experimental off (and restart)");
 }
 
+/* the card the DRM interface drives (kernel/radeon_drm.c), NULL if none */
+struct radeon* gpu_radeon_card(void) { return g_reg && g_dce <= 5 ? &g_rad : NULL; }
+/* where the display's video memory ends: the firmware's screen, the cursor,
+ * a mode's framebuffer (64 MiB in, up to 64 MiB) - apps' buffers above */
+uint64_t gpu_radeon_display_end(void) {
+    uint64_t end = NEW_FB_OFF + (64ull << 20);
+    if (g_cur_off + CUR_BYTES > end) end = (g_cur_off + CUR_BYTES + 0xFFFFF) & ~0xFFFFFull;
+    return end;
+}
+
 /* `gpu radeon 3d`: the 3D engine started (and tested) */
 int gpu_radeon_3d(char* msg, int cap) {
     if (!g_reg || g_dce > 5) { kstrlcpy(msg, "no Radeon HD 5000-7000 driven (gpu experimental on, lsgpu)", (size_t)cap); return -1; }
@@ -336,6 +347,7 @@ static int try_card(const pci_dev_t* d) {
     if (!mmio_map(vb + (uintptr_t)off, CUR_BYTES)) { kstrlcpy(g_why, "the cursor's memory could not be mapped", sizeof(g_why)); return -1; }
     g_cur = (volatile uint32_t*)(vb + (uintptr_t)off);
     g_cur_mc = vram_mc + off;
+    g_cur_off = off;
     for (uint32_t i = 0; i < CUR_BYTES / 4; i++) g_cur[i] = 0;
     /* set it up, hidden */
     wr(CUR_UPDATE + g_crtc, rd(CUR_UPDATE + g_crtc) | CUR_UPDATE_LOCK);

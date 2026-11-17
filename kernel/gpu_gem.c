@@ -32,6 +32,7 @@
 #include "upage.h"
 #include "uvm.h"
 #include "settings.h"
+#include "radeon.h"
 
 #ifdef __x86_64__
 
@@ -789,6 +790,7 @@ static int ioctl_i915(int owner, unsigned nr, unsigned size, void* arg, uspace_t
 }
 
 int gem_ioctl(int owner, unsigned long req, void* arg) {
+    if (rad_drm_active()) return rad_drm_ioctl(owner, req, arg);     /* (a Radeon: kernel/radeon_drm.c) */
     if (DRM_TYPE(req) != 'd') return -E_NOTTY;
     unsigned nr = DRM_NR(req), size = DRM_SIZE(req);
     if (size > 256 || (size && !u_ok((uint64_t)(uintptr_t)arg, size))) return -E_FAULT;
@@ -806,6 +808,7 @@ int gem_ioctl(int owner, unsigned long req, void* arg) {
 }
 
 void gem_release(int owner) {
+    rad_drm_release(owner);
     if (!g_obj) return;
     for (uint32_t i = 0; i < g_nobj; i++)
         if (g_obj[i].owner == owner) {
