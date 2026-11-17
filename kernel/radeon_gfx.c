@@ -414,6 +414,30 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, uint64_t vi
     /* (evergreen_init: the golden registers first; then evergreen_startup's order) */
     evergreen_init_golden_registers(rdev);
     if (ni && (r = ni_mc_load_microcode(rdev)) != 0) FAIL("memory controller microcode", r);
+    /* The memory controller's map, as Linux's evergreen_mc_program leaves
+     * it (the frame buffer's place itself is kept: the screen uses it): the
+     * system aperture - the addresses taken as video memory as they are,
+     * not through the GART - exactly the video memory (a firmware leaving
+     * it wider sends the GTT, where the ring is, to raw video memory); its
+     * default page ours; the CPU's path (HDP) covering all video memory. */
+    {
+        uint32_t lo = RREG32(MC_VM_SYSTEM_APERTURE_LOW_ADDR), hi = RREG32(MC_VM_SYSTEM_APERTURE_HIGH_ADDR);
+        uint32_t def = RREG32(MC_VM_SYSTEM_APERTURE_DEFAULT_ADDR);
+        uint32_t hb = RREG32(HDP_NONSURFACE_BASE), hinfo = RREG32(HDP_NONSURFACE_INFO), hs = RREG32(HDP_NONSURFACE_SIZE);
+        klog("radeon: firmware's map: system aperture %08x-%08x (default %08x), HDP base %08x info %08x size %08x; "
+             "video memory %08llx-%08llx\n", lo, hi, def, hb, hinfo, hs,
+             (unsigned long long)rdev->mc.vram_start, (unsigned long long)rdev->mc.vram_end);
+        WREG32(MC_VM_SYSTEM_APERTURE_LOW_ADDR, (u32)(rdev->mc.vram_start >> 12));
+        WREG32(MC_VM_SYSTEM_APERTURE_HIGH_ADDR, (u32)(rdev->mc.vram_end >> 12));
+        WREG32(MC_VM_SYSTEM_APERTURE_DEFAULT_ADDR, (u32)((rdev->mc.vram_start + PROBE_OFF) >> 12));
+        WREG32(HDP_NONSURFACE_BASE, (u32)(rdev->mc.vram_start >> 8));
+        WREG32(HDP_NONSURFACE_INFO, (2u << 7) | (1u << 30));
+        WREG32(HDP_NONSURFACE_SIZE, 0x3FFFFFFFu);
+        if ((lo << 12) > rdev->mc.vram_start || ((uint64_t)hi << 12) < (rdev->mc.vram_end & ~0xFFFull) ||
+            ((uint64_t)hi << 12) > rdev->mc.vram_end)
+            klog("radeon: the system aperture was not the video memory - set to it\n");
+        if (!vram_reads_back()) FAIL("video memory does not read back after the memory controller's map was set", -EIO);
+    }
     /* the AGP aperture off: nothing of the GTT goes there */
     WREG32(MC_VM_AGP_BASE, 0);
     WREG32(MC_VM_AGP_TOP, 0x0FFFFFFF);

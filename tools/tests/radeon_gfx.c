@@ -5,8 +5,9 @@
  * the ring holds - type 0 / 2 / 3 packets, SET_CONFIG_REG, MEM_WRITE,
  * EVENT_WRITE_EOP, INDIRECT_BUFFER fetched through the GART's page table
  * as the memory controller would walk it.
- *   radeon_gfx ok | dead | gddr5 | cedar | real2g | fake2g | juniper
- * fake2g: a BIOS that says 2 GiB on 1 GiB of memory, which repeats past its end */
+ *   radeon_gfx ok | dead | gddr5 | cedar | real2g | fake2g | juniper | wideap
+ * fake2g: a BIOS that says 2 GiB on 1 GiB of memory, which repeats past its end
+ * wideap: a firmware leaving the system aperture over everything (the GTT too) */
 #define RADEON_MODEL 1
 
 #include "../../kernel/types.h"
@@ -89,6 +90,12 @@ static uint32_t fw_dw(const uint8_t* fw, uint32_t i) { const uint8_t* p = fw + 4
 /* a memory controller address, as the card resolves it: video memory, or the GTT through the page table */
 static void* mc(uint64_t a, uint32_t bytes) {
     uint64_t vend = (uint64_t)((R[MC_VM_FB_LOCATION / 4] >> 16) + 1) << 24;
+    /* the system aperture: taken as video memory as it is (not through the GART) */
+    uint32_t aplo = R[MC_VM_SYSTEM_APERTURE_LOW_ADDR / 4], aphi = R[MC_VM_SYSTEM_APERTURE_HIGH_ADDR / 4];
+    if (aphi && a >= ((uint64_t)aplo << 12) && a <= (((uint64_t)aphi << 12) | 0xFFF) && a >= vend) {
+        g_bad_addr++;                                            /* (raw "video memory" past its end: junk) */
+        return NULL;
+    }
     if (a < vend) {
         a %= (uint64_t)REAL_MB << 20;                            /* (the chips there: past them it repeats) */
         if (a >= VRAM_HOST && bytes <= sizeof(g_sink)) return g_sink;   /* (beyond what the model keeps) */
@@ -212,6 +219,8 @@ int main(int argc, char** argv) {
     R[MC_VM_FB_LOCATION / 4] = ((VRAM_MB / 16 - 1) << 16) | 0;      /* (0 .. 1 GiB) */
     R[CONFIG_MEMSIZE / 4] = VRAM_MB;
     R[CP_ME_CNTL / 4] = CP_ME_HALT | CP_PFP_HALT;
+    R[MC_VM_SYSTEM_APERTURE_LOW_ADDR / 4] = 0;
+    R[MC_VM_SYSTEM_APERTURE_HIGH_ADDR / 4] = !strcmp(mode, "wideap") ? 0x0FFFFFFFu : ((VRAM_MB << 20) - 1) >> 12;
     g_cp_alive = strcmp(mode, "dead") != 0;
     g_gddr5 = !strcmp(mode, "gddr5");
     static radeon_t rt;
@@ -265,6 +274,7 @@ int main(int argc, char** argv) {
         char again[64];
         CHECK(rad_gfx_init(&rt, (uintptr_t)VR, 0, VISIBLE, again, sizeof(again)) == 0 && g_pkt_init == 1, "a second start: left as it is");
         CHECK(strstr(rad_gfx_status(), "up:") != NULL, "status: %s", rad_gfx_status());
+        CHECK(R[MC_VM_SYSTEM_APERTURE_HIGH_ADDR / 4] == ((VRAM_MB << 20) - 1) >> 12, "the system aperture: exactly the video memory");
     }
     free(VR);
     printf(g_fails ? "%d FAILED\n" : "all passed\n", g_fails);
