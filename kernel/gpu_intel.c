@@ -235,15 +235,11 @@ static uint32_t frame_count(void) {
     return (pr(FRMCOUNT_A) & 0xFFFF) << 8 | pr(FRAMEPIXEL_A) >> 24;
 }
 
+/* vsync: asleep for most of the frame (kernel/gpu.c), not spinning through it */
+static gpu_vblank_clock_t g_vclock;
 static void it_wait_vblank(gpu_t* g) {
     (void)g;
-    uint32_t f = frame_count();
-    uint64_t start = timer_counter();
-    for (uint32_t i = 0; i < 3000000u && frame_count() == f; i++) {
-        if (!(i & 255) && timer_counter() - start >= 20000000) break;
-        __asm__ volatile("pause");
-    }
-    gpu_note_vblank(frame_count() == f);
+    gpu_vblank_wait(&g_vclock, frame_count);
 }
 
 /* ── the hardware pointer ─────────────────────────────────────────── */

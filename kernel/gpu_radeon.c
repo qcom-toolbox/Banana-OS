@@ -186,15 +186,13 @@ static void kms_init(const pci_dev_t* d) {
     ksnprintf(g_kms_why, sizeof(g_kms_why), "%s, %d modes", g_monitor, g_nmodes);
 }
 
+/* vsync: asleep for most of the frame, not spinning through it (a window
+ * dragged kept a core at 100 % waiting) */
+static gpu_vblank_clock_t g_vclock;
+static uint32_t rad_frame(void) { return rd(CRTC_STATUS_FRAME_COUNT + g_crtc); }
 static void rad_wait_vblank(gpu_t* g) {
     (void)g;
-    uint32_t f = rd(CRTC_STATUS_FRAME_COUNT + g_crtc);
-    uint64_t start = timer_counter();
-    for (uint32_t i = 0; i < 3000000u && rd(CRTC_STATUS_FRAME_COUNT + g_crtc) == f; i++) {
-        if (!(i & 255) && timer_counter() - start >= 20000000) break;
-        __asm__ volatile("pause");
-    }
-    gpu_note_vblank(rd(CRTC_STATUS_FRAME_COUNT + g_crtc) == f);
+    gpu_vblank_wait(&g_vclock, rad_frame);
 }
 
 static int rad_cursor_image(gpu_t* g, const uint32_t* argb, int w, int h, int hx, int hy) {

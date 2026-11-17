@@ -408,6 +408,10 @@ jobs:
             cc -m"$bits" -O1 -I kernel tools/tests/test_gpu_drivers.c kernel/gpu_intel.c kernel/gpu_radeon.c -o "/tmp/display-$bits"
             "/tmp/display-$bits"
           done
+      - name: Test the vsync wait on a simulated display (sleeps, not spins)
+        run: |
+          cc -O1 -g -fsanitize=address,undefined -Wall -I kernel tools/tests/vblank_wait.c -o /tmp/vblank-wait
+          /tmp/vblank-wait
       - name: Test Radeon TeraScale 2 mode setting on a model video BIOS
         run: bash tools/tests/radeon_kms.sh
       - name: Test the Radeon HD 7450 3D engine bring-up on a model command processor

@@ -57,6 +57,7 @@ int pci_scan(int (*cb)(const pci_dev_t*, void*), void* ctx) { return cb(&g_dev, 
 static gpu_t* g_reg_gpu;
 int gpu_register(gpu_t* g) { g_reg_gpu = g; return 0; }
 void gpu_note_vblank(int t) { (void)t; }
+int gpu_vblank_wait(gpu_vblank_clock_t* c, uint32_t (*f)(void)) { (void)c; (void)f(); return 0; }
 /* TeraScale 2 mode setting (kernel/radeon_atom.c, radeon_kms.c, edid.c): out of this test's
  * reach - tools/tests/radeon_kms.sh runs it on a model BIOS; here the BIOS is never found */
 #include "radeon.h"

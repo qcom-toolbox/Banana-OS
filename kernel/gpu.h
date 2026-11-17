@@ -97,6 +97,14 @@ int gpu_present_begin(gpu_surface_t* target);
 void gpu_present_end(gpu_surface_t source, const gpu_rect_t* changed, int count);
 void gpu_note_flip(void);
 void gpu_note_vblank(int timeout);
+/* Waiting for the next vertical blank on a frame counter that steps once a
+ * frame, without spinning through the frame: the refresh period is learned
+ * from the counter's steps, the task sleeps until ~2.5 ms before the next
+ * one and spins only that last stretch (from task context; with interrupts
+ * off it spins as before). Notes the wait (gpu_note_vblank); 1 if it timed
+ * out (20 ms). */
+typedef struct { uint32_t frame; uint64_t at_ns, period_ns; int known; } gpu_vblank_clock_t;
+int  gpu_vblank_wait(gpu_vblank_clock_t* c, uint32_t (*frame_count)(void));
 void gpu_register_service(gpu_t* g, void (*service)(void),
                           void (*tests)(void (*report)(const char*, int, const char*)));
 void gpu_driver_tests(void (*report)(const char*, int, const char*));
