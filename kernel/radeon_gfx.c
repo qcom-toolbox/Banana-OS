@@ -37,10 +37,18 @@ static uint64_t g_gfx_off = 128ull << 20;
 #define GFX_OFF        g_gfx_off
 #define GART_BYTES     (512u << 10)
 #define GTT_SIZE       (256ull << 20)            /* GART_BYTES / 8 pages of 4 KiB */
-#define RING_OFF       (GFX_OFF + GART_BYTES)
+/* The ring and the writeback page are in system memory, bound at the start
+ * of the GTT, as Linux has them: written by the CPU through its caches,
+ * read by the GPU through the GART (snooped). In video memory, written
+ * through the BAR, the command processor read something else than the CPU
+ * had written there on a real HD 7450 ("ring[0] 0030cf95"). */
 #define RING_BYTES     (64u << 10)
-#define WB_OFF         (RING_OFF + RING_BYTES)
-#define GFX_BYTES      (GART_BYTES + RING_BYTES + 4096u)
+#define RING_PAGE      0u                        /* (GTT pages 0-15: the ring, 16: writeback) */
+#define WB_PAGE        (RING_BYTES / 4096u)
+#define SYS_PAGES      (WB_PAGE + 1u)
+#define IB_TEST_PAGE   (SYS_PAGES)               /* (the indirect buffer test's page) */
+/* in video memory: the GART's page table, then a page for the memory probe */
+#define GFX_BYTES      (GART_BYTES + 4096u)
 
 #define PTE_VALID      1ull
 #define PTE_SYSTEM     2ull
@@ -85,7 +93,8 @@ static char g_status[200] = "not started (gpu radeon 3d)";
 static uint32_t g_ring_us, g_fence_us, g_ib_us;
 static uint32_t g_seq;                 /* the last fence's sequence number */
 static uint32_t g_bios_mb, g_real_mb;  /* the video memory the BIOS says, and what is there */
-#define PROBE_OFF      (WB_OFF + 3584u)  /* (a writeback dword nothing else uses) */
+#define PROBE_OFF      (GFX_OFF + GART_BYTES)    /* (a video memory dword the CPU sees and nothing else uses) */
+static uint8_t* g_sys;                 /* the ring and the writeback page (system memory) */
 
 const char* rad_fw_notice(uint32_t* len) {
     *len = (uint32_t)(rad_fw_licence_end - rad_fw_licence);
@@ -265,6 +274,20 @@ static uint32_t probe_vram(struct radeon_device* rdev, uint32_t bios_mb) {
 }
 uint32_t rad_vram_mb(void) { return g_real_mb; }
 
+/* the CPU reaches the area through the BAR: a value written there reads back */
+static int vram_reads_back(void) {
+    volatile uint32_t* t = (volatile uint32_t*)(g_vram + PROBE_OFF);
+    uint32_t keep = t[0];
+    t[0] = 0x5A17C0DEu;
+    mb();
+    uint32_t got = t[0];
+    t[0] = ~0x5A17C0DEu;
+    mb();
+    uint32_t got2 = t[0];
+    t[0] = keep;
+    return got == 0x5A17C0DEu && got2 == ~0x5A17C0DEu;
+}
+
 int rad_gfx_ready(void) { return g_state > 0; }
 const char* rad_gfx_status(void) { return g_status; }
 
@@ -320,24 +343,12 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, uint64_t vi
 
     if (!mmio_map(vram_cpu + GFX_OFF, GFX_BYTES)) { kstrlcpy(why, "its video memory could not be mapped", (size_t)cap); g_state = -1; return -1; }
     g_vram = (uint8_t*)vram_cpu;
-    /* the CPU reaches it: what is written there reads back */
-    {
-        volatile uint32_t* t = (volatile uint32_t*)(g_vram + GFX_OFF);
-        uint32_t keep = t[0];
-        t[0] = 0x5A17C0DEu;
-        mb();
-        uint32_t got = t[0];
-        t[0] = ~0x5A17C0DEu;
-        mb();
-        uint32_t got2 = t[0];
-        t[0] = keep;
-        if (got != 0x5A17C0DEu || got2 != ~0x5A17C0DEu) {
-            ksnprintf(why, (size_t)cap, "video memory at %u MiB does not read back through the BAR (%08x; window %u MiB)",
-                      (unsigned)(GFX_OFF >> 20), got, (unsigned)(visible >> 20));
-            kstrlcpy(g_status, why, sizeof(g_status));
-            g_state = -1;
-            return -1;
-        }
+    if (!vram_reads_back()) {
+        ksnprintf(why, (size_t)cap, "video memory at %u MiB does not read back through the BAR (window %u MiB)",
+                  (unsigned)(GFX_OFF >> 20), (unsigned)(visible >> 20));
+        kstrlcpy(g_status, why, sizeof(g_status));
+        g_state = -1;
+        return -1;
     }
     g_dummy = kmalloc_aligned(4096, 4096);
     if (!g_dummy) { kstrlcpy(why, "out of memory", (size_t)cap); g_state = -1; return -1; }
@@ -372,15 +383,22 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, uint64_t vi
 
     /* the ring and the writeback page */
     struct radeon_ring* ring = &rdev->ring[RADEON_RING_TYPE_GFX_INDEX];
-    ring->ring = (u32*)(g_vram + RING_OFF);
-    ring->gpu_addr = rdev->mc.vram_start + RING_OFF;
+    if (!g_sys) g_sys = kmalloc_aligned(SYS_PAGES * 4096u, 4096);
+    if (!g_sys) { kstrlcpy(why, "out of memory", (size_t)cap); g_state = -1; return -1; }
+    memset(g_sys, 0, SYS_PAGES * 4096u);
+    for (uint32_t i = 0; i < SYS_PAGES; i++) {
+        uint64_t pa = RAD_PHYS(g_sys + i * 4096u);
+        g_gart[RING_PAGE + i] = (pa & 0xFFFFFFFFFF000ull) | PTE_VALID | PTE_SYSTEM | PTE_SNOOPED | PTE_READABLE | PTE_WRITEABLE;
+    }
+    ring->ring = (u32*)g_sys;
+    ring->gpu_addr = rdev->mc.gtt_start + (uint64_t)RING_PAGE * 4096u;
     ring->ring_size = RING_BYTES;
     ring->ptr_mask = RING_BYTES / 4 - 1;
     ring->align_mask = 15;
     ring->nop = RADEON_CP_PACKET2;
     ring->idx = RADEON_RING_TYPE_GFX_INDEX;
-    rdev->wb.wb = (u32*)(g_vram + WB_OFF);
-    rdev->wb.gpu_addr = rdev->mc.vram_start + WB_OFF;
+    rdev->wb.wb = (u32*)(g_sys + WB_PAGE * 4096u);
+    rdev->wb.gpu_addr = rdev->mc.gtt_start + (uint64_t)WB_PAGE * 4096u;
     memset(rdev->wb.wb, 0, 4096);
     rdev->wb.enabled = true;
     rdev->wb.use_event = true;
@@ -402,15 +420,16 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, uint64_t vi
     WREG32(MC_VM_AGP_BOT, 0x0FFFFFFF);
     if ((r = evergreen_pcie_gart_enable(rdev)) != 0) FAIL("GART", r);
     evergreen_gpu_init(rdev);
+    if (!vram_reads_back()) klog("radeon: after the engine's setup, video memory no longer reads back through the BAR\n");
     if ((r = evergreen_rlc_resume(rdev)) != 0) FAIL("run-list controller", r);
     if ((r = evergreen_cp_load_microcode(rdev)) != 0) FAIL("command processor microcode", r);
     if ((r = evergreen_cp_resume(rdev)) != 0) {
         /* what the command processor did: whether it read the ring at all
          * (RPTR), whether it is halted or busy, what the CPU wrote is there */
         char d[96];
-        ksnprintf(d, sizeof(d), "ring test failed: RPTR %x WPTR %x ME_CNTL %08x GRBM %08x SRBM %08x ring[0] %08x",
+        ksnprintf(d, sizeof(d), "ring test failed: RPTR %x WPTR %x ME_CNTL %08x GRBM %08x SRBM %08x PTE0 %08x%s",
                   RREG32(CP_RB_RPTR), RREG32(CP_RB_WPTR), RREG32(CP_ME_CNTL), RREG32(GRBM_STATUS),
-                  RREG32(SRBM_STATUS), ring->ring[0]);
+                  RREG32(SRBM_STATUS), (uint32_t)g_gart[RING_PAGE], vram_reads_back() ? "" : " (BAR read-back bad)");
         klog("radeon: %s\n", d);
         FAIL(d, r);
     }
@@ -435,7 +454,7 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, uint64_t vi
     ib[2] = 0xDEADBEEF;
     for (int i = 3; i < 16; i++) ib[i] = RADEON_CP_PACKET2;
     uint64_t pa = RAD_PHYS(ib);
-    uint32_t page = rdev->gart.num_gpu_pages - 1;           /* (the last page: the uAPI hands out the rest) */
+    uint32_t page = IB_TEST_PAGE;
     struct radeon_ib rib = { 0, rad_gart_bind(page, &pa, 1), ib, 3, NULL, false, 0 };
     f.seq = 2;
     uint64_t t0 = timer_counter();

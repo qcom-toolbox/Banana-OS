@@ -10,7 +10,7 @@
 #define RADEON_MODEL 1
 
 #include "../../kernel/types.h"
-static unsigned char g_arena[64 << 10] __attribute__((aligned(4096)));
+static unsigned char g_arena[256 << 10] __attribute__((aligned(4096)));
 static size_t g_arena_used;
 #define ARENA_PHYS 0x20000000ull
 #define RAD_PHYS(p) ((uint64_t)((uintptr_t)(p) - (uintptr_t)g_arena) + ARENA_PHYS)
@@ -240,7 +240,8 @@ int main(int argc, char** argv) {
         CHECK(R[VM_CONTEXT0_CNTL / 4] & 1, "the GART on");
         CHECK(((uint64_t)R[VM_CONTEXT0_PAGE_TABLE_BASE_ADDR / 4] << 12) == VISIBLE - (1ull << 20), "its page table in the last MiB the CPU reaches (127 MiB of a 128 MiB window)");
         CHECK(((uint64_t)R[VM_CONTEXT0_PAGE_TABLE_START_ADDR / 4] << 12) == (uint64_t)VRAM_MB << 20, "the GTT right after video memory");
-        CHECK(R[CP_RB_BASE / 4] == RING_OFF >> 8 && (2u << (R[CP_RB_CNTL / 4] & 0x3F)) == RING_BYTES / 4, "the ring: 64 KiB at its offset");
+        CHECK(((uint64_t)R[CP_RB_BASE / 4] << 8) == (uint64_t)VRAM_MB << 20 && (2u << (R[CP_RB_CNTL / 4] & 0x3F)) == RING_BYTES / 4,
+              "the ring: 64 KiB of system memory at the start of the GTT");
         CHECK(g_pkt_init == 1, "ME_INITIALIZE run");
         uint32_t probes = VRAM_MB == 2048 ? 3 : 2;             /* (256, 512 [, 1024] MiB past the probe dword) */
         CHECK(g_pkt_eop == 2 + probes && g_pkt_ib == 1 && g_pkt_mem == 1 + probes,
@@ -248,16 +249,16 @@ int main(int argc, char** argv) {
         if (VRAM_MB != REAL_MB) CHECK(rad_vram_mb() == REAL_MB && strstr(why, "BIOS says 2048"), "a BIOS saying 2 GiB on 1 GiB: %u MiB found and said", rad_vram_mb());
         else CHECK(rad_vram_mb() == VRAM_MB && !strstr(why, "BIOS says"), "all %u MiB there", rad_vram_mb());
         CHECK(g_bad_addr == 0 && g_bad_pkt == 0, "every address resolved, every packet understood (%u, %u)", g_bad_addr, g_bad_pkt);
-        CHECK(*(uint32_t*)(VR + WB_OFF + R600_WB_EVENT_OFFSET) == g_seq, "the last fence written back: %u", g_seq);
+        CHECK(g_dev.wb.wb[R600_WB_EVENT_OFFSET / 4] == g_seq, "the last fence written back to system memory: %u", g_seq);
         int cleared = 1;
-        for (uint32_t i = 0; i < 65536; i++) if ((((uint64_t*)(VR + GFX_OFF))[i] & 1)) cleared = 0;
+        for (uint32_t i = SYS_PAGES; i < 65536; i++) if ((((uint64_t*)(VR + GFX_OFF))[i] & 1)) cleared = 0;
         CHECK(cleared, "the test page unbound again");
         CHECK(R[SCRATCH_REG0 / 4] == 0xDEADBEEF && g_pkt_cfg == 2, "the ring test and the indirect buffer set the scratch register (%u SET_CONFIG_REGs)", g_pkt_cfg);
         uint64_t pa = ARENA_PHYS;
         CHECK(rad_gart_bind(65535, &pa, 2) == 0 && rad_gart_bind(70000, &pa, 1) == 0, "binding past the GTT refused");
-        uint64_t ga = rad_gart_bind(5, &pa, 1);
-        CHECK(ga == ((uint64_t)VRAM_MB << 20) + 5 * 4096 && mc(ga, 4) == (void*)g_arena, "a page bound: the card reads system memory there");
-        rad_gart_unbind(5, 1);
+        uint64_t ga = rad_gart_bind(100, &pa, 1);
+        CHECK(ga == ((uint64_t)VRAM_MB << 20) + 100 * 4096 && mc(ga, 4) == (void*)g_arena, "a page bound: the card reads system memory there");
+        rad_gart_unbind(100, 1);
         g_quiet = 1;
         CHECK(mc(ga, 4) == NULL, "and unbound");
         g_quiet = 0;
