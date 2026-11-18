@@ -42,8 +42,15 @@ POST_CXX = ["-fno-exceptions"]               # (nor a C++ unwinder)
 # (drmGetDevice2, drmGetVersion), which banana/drm_shim.c answers from the
 # kernel's i915 interface. Without HAVE_LIBDRM, util/libdrm.h gives them
 # stubs that always fail ("Failed to query drm device"): crocus and iris
-# then turned every real GPU down and apps drew on the processor.
-LIBDRM_USERS = re.compile(r"(^|/)src/(intel/|gallium/drivers/(crocus|iris)/|gallium/winsys/(crocus|iris)/)")
+# then turned every real GPU down and apps drew on the processor. (r600 and
+# the radeon winsys likewise: drmGetVersion, drmCommandWriteRead.)
+LIBDRM_USERS = re.compile(r"(^|/)src/(intel/|gallium/drivers/(crocus|iris|r600)/|gallium/winsys/(crocus|iris|radeon)/)")
+# r600's shader compiler (sfn) is C++ with iostreams: libstdc++'s headers with
+# the LLVM port's compatibility (glibc's C-locale layout, what the SDK's C
+# library lacks), and libstdc++.a linked in as ports/llvm/link.py links it
+CXX_STREAMS = re.compile(r"(^|/)src/gallium/drivers/r600/")
+LLVM_INC = os.path.normpath(HERE + "/../llvm/include")
+STREAMS_CXX = ["-isystem", LLVM_INC, "-include", LLVM_INC + "/cxx_compat.h"]
 EXTRA = os.environ.get("EXTRA", "").split()
 JOBS = int(os.environ.get("JOBS", os.cpu_count() or 2))
 KEEP = os.environ.get("KEEP") == "1"         # objects already there are kept
@@ -123,6 +130,8 @@ def rewrite(cmd, out, directory="", source=""):
     post = POST
     if LIBDRM_USERS.search(os.path.normpath(os.path.join(directory, source))):
         post = [x for x in POST if x != "-UHAVE_LIBDRM"] + ["-DHAVE_LIBDRM"]
+    if cxx and not LLVM_LIBRARY and CXX_STREAMS.search(os.path.normpath(os.path.join(directory, source))):
+        res = res[:1] + STREAMS_CXX + res[1:]
     return res + post + (POST_CXX if cxx else []) + EXTRA
 
 
@@ -221,8 +230,63 @@ libstdcxx = subprocess.run([cc, "-print-file-name=libstdc++.a"], capture_output=
 subprocess.run(["ar", "x", "--output=" + OUT + "/lib", libstdcxx, "hashtable_c++0x.o"], check=True)
 final = [newargs[0], "-nostdlib", crt[0]] + newargs[1:] + [OUT + "/lib/hashtable_c++0x.o", libgcc, crt[1]]
 if LLVM_LIBRARY: final += [os.path.abspath(LLVM_LIBRARY)]
+streams = not LLVM_LIBRARY and any(CXX_STREAMS.search(o) and o.endswith(".cpp.o") for o in wanted)
+if streams:
+    # libstdc++.a for r600's iostreams. The SDK's own symbols (malloc, operator
+    # new, __cxa_atexit...) come first from a link-only stand-in for it, so that
+    # nothing of a second runtime is pulled out of libstdc++.a for them; the
+    # stand-in is taken out of the library's needs afterwards (as link.py).
+    sdk_objs = [os.path.join(HERE, "gl3test/build/x86_64", f) for f in sorted(os.listdir(HERE + "/gl3test/build/x86_64"))
+                if f.endswith(".o") and f not in ("__exports.o", "gl3test.o", "gl3.o", "sdk_crt0.o")] \
+        if os.path.isdir(HERE + "/gl3test/build/x86_64") else []
+    if not sdk_objs:
+        sys.exit("rebuild.py: build ports/mesa/gl3test first (the SDK's symbols, for r600's C++ runtime)")
+    syms = {}
+    for f in sdk_objs:
+        for line in subprocess.check_output(["nm", "-g", "--defined-only", f], text=True).splitlines():
+            x = line.split()
+            if len(x) == 3 and not x[2].startswith("_ZTVN10__cxxabiv1"):
+                syms[x[2]] = x[1]
+    open(OUT + "/lib/imports.S", "w").write("".join(
+        ".globl %s\n.type %s,@function\n%s: ret\n" % (n, n, n) if t.upper() in ("T", "W") else
+        ".globl %s\n.type %s,@object\n.size %s,8\n%s: .quad 0\n" % (n, n, n, n) for n, t in sorted(syms.items()))
+        + '.section .note.GNU-stack,"",@progbits\n')
+    subprocess.run(["gcc", "-shared", "-nostdlib", "-Wl,-soname,libbanana-import.so", "-o", OUT + "/lib/libbanana-import.so",
+                    OUT + "/lib/imports.S"], check=True)
+    gccinc = subprocess.check_output(["gcc", "-print-file-name=include"], text=True).strip()
+    subprocess.run(["gcc", "-c", "-fPIC", "-O2", "-mno-red-zone", "-nostdinc", "-isystem", SDK + "/include", "-isystem", LLVM_INC,
+                    "-isystem", gccinc, HERE + "/../llvm/compat.c", "-o", OUT + "/lib/cxx_compat.o"], check=True)
+    subprocess.run(["gcc", "-c", "-fPIC", "-O2", "-mno-red-zone", "-nostdinc", "-isystem", SDK + "/include", "-isystem", LLVM_INC,
+                    "-isystem", gccinc, HERE + "/banana/cxx_streams.c", "-o", OUT + "/lib/cxx_streams.o"], check=True)
+    lib = lambda f: subprocess.check_output(["g++", "-print-file-name=" + f], text=True).strip()
+    final = final[:-2] + ["-Wl,--no-as-needed", OUT + "/lib/libbanana-import.so", OUT + "/lib/cxx_compat.o", OUT + "/lib/cxx_streams.o",
+                          "-Wl,--start-group", lib("libstdc++.a"), lib("libgcc_eh.a"), libgcc, "-Wl,--end-group"] + final[-1:]
 r = subprocess.run(final, cwd=REF, capture_output=True, text=True)
 if r.returncode:
     print(r.stderr[-4000:])
     sys.exit(1)
+if streams:
+    # take the stand-in out of DT_NEEDED: its symbols stay the app's (the SDK loader's) to give
+    import struct
+    p = OUT + "/libOSMesa.so"
+    b = bytearray(open(p, "rb").read())
+    phoff = struct.unpack_from("<Q", b, 32)[0]
+    phsize, phnum = struct.unpack_from("<HH", b, 54)
+    segs = [struct.unpack_from("<IIQQQQQQ", b, phoff + i * phsize) for i in range(phnum)]
+    dyn = next(ph for ph in segs if ph[0] == 2)
+    ents = [(j, *struct.unpack_from("<QQ", b, j)) for j in range(dyn[2], dyn[2] + dyn[5], 16)]
+    straddr = next(v for _, t, v in ents if t == 5)
+    load = next(ph for ph in segs if ph[0] == 1 and ph[3] <= straddr < ph[3] + ph[5])
+    strings = load[2] + straddr - load[3]
+    removed = 0
+    for off, tag, val in ents:
+        if tag == 1:
+            name = bytes(b[strings + val:]).split(b"\0", 1)[0]
+            if name != b"libbanana-import.so":
+                sys.exit("rebuild.py: libOSMesa.so needs " + name.decode())
+            struct.pack_into("<QQ", b, off, 21, 0)                 # (DT_DEBUG: nothing)
+            removed += 1
+    if removed != 1:
+        sys.exit("rebuild.py: the SDK stand-in was not linked")
+    open(p, "wb").write(b)
 print("linked " + OUT + "/libOSMesa.so")

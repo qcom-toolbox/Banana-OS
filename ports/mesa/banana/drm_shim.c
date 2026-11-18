@@ -1,11 +1,12 @@
 /* SPDX-License-Identifier: MIT
- * Banana OS: the part of libdrm (xf86drm.h) Mesa's Intel drivers call, on
- * the system's i915 interface - /dev/dri/card0 opened through the SDK, its
- * ioctl() going to the kernel (kernel/gpu_gem.c). There is one GPU, an
- * Intel one on the PCI bus at 00:02.0; its IDs come from I915_GETPARAM.
- * Sharing buffers between processes (PRIME, flink) is not there.
+ * Banana OS: the part of libdrm (xf86drm.h) Mesa's GPU drivers call, on the
+ * system's i915 interface (Intel: crocus, iris) or its radeon one (r600) -
+ * /dev/dri/card0 opened through the SDK, its ioctl() going to the kernel
+ * (kernel/gpu_gem.c, kernel/radeon_drm.c). There is one GPU; an Intel one
+ * is on the PCI bus at 00:02.0, its IDs from I915_GETPARAM. Sharing buffers
+ * between processes (PRIME, flink) is not there.
  */
-#if defined(__BANANA_OS__) && defined(GALLIUM_CROCUS)
+#if defined(__BANANA_OS__) && (defined(GALLIUM_CROCUS) || defined(GALLIUM_R600))
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -20,6 +21,20 @@ int drmIoctl(int fd, unsigned long request, void* arg) {
     do r = ioctl(fd, request, arg);
     while (r == -1 && (errno == EINTR || errno == EAGAIN));
     return r;
+}
+
+/* the driver's own requests (radeon: DRM_RADEON_INFO, _GEM_CREATE, _CS...) */
+int drmCommandNone(int fd, unsigned long index) {
+    return drmIoctl(fd, DRM_IO(DRM_COMMAND_BASE + index), NULL) ? -errno : 0;
+}
+int drmCommandRead(int fd, unsigned long index, void* data, unsigned long size) {
+    return drmIoctl(fd, _IOC(_IOC_READ, DRM_IOCTL_BASE, DRM_COMMAND_BASE + index, (unsigned)size), data) ? -errno : 0;
+}
+int drmCommandWrite(int fd, unsigned long index, void* data, unsigned long size) {
+    return drmIoctl(fd, _IOC(_IOC_WRITE, DRM_IOCTL_BASE, DRM_COMMAND_BASE + index, (unsigned)size), data) ? -errno : 0;
+}
+int drmCommandWriteRead(int fd, unsigned long index, void* data, unsigned long size) {
+    return drmIoctl(fd, _IOC(_IOC_READ | _IOC_WRITE, DRM_IOCTL_BASE, DRM_COMMAND_BASE + index, (unsigned)size), data) ? -errno : 0;
 }
 
 static char* copy_n(const char* s, int n) {

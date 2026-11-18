@@ -130,6 +130,12 @@ Mesa 24.3 (libOSMesa.so, built by ports/mesa/build.sh from Mesa's sources)
 Copyright (c) Brian Paul and the Mesa authors; Mesa's main library, its
 Gallium layer and the softpipe driver are under the MIT licence (the same
 text as libffi's below); see Mesa's docs/license.rst.
+The r600 driver (AMD Radeon HD 2000 - 6000) links in libdrm 2.4.125's
+radeon_surface.c and headers (ports/mesa/banana/radeon_surface.c,
+ports/mesa/include/radeon_*.h, r600_pci_ids.h): Copyright 2011 Red Hat,
+2000 Precision Insight and VA Linux Systems, MIT licence (the notice is in
+each file); and parts of GNU libstdc++ for its shader compiler's C++
+streams, under the GCC Runtime Library Exception.
 
 Khronos OpenGL headers (sdk/include/GL/glcorearb.h, sdk/include/KHR/khrplatform.h)
 Copyright (c) 2008-2020 The Khronos Group Inc. MIT licence (the same text as

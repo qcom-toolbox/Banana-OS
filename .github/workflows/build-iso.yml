@@ -366,10 +366,10 @@ jobs:
       sdk: true
 
   mesa:
-    name: Intel Mesa runtime (Crocus and Iris)
+    name: Mesa GPU runtime (Intel Crocus and Iris, AMD r600)
     runs-on: ubuntu-24.04
     container: debian:trixie
-    timeout-minutes: 120
+    timeout-minutes: 150
     permissions:
       contents: read
     steps:
@@ -385,16 +385,16 @@ jobs:
         with:
           path: |
             ports/mesa/src
-            ports/mesa/build-crocus-iris
+            ports/mesa/build-crocus-iris-r600
           key: mesa-intel-trixie-v1-${{ hashFiles('ports/mesa/**', '!ports/mesa/src/**', '!ports/mesa/build*/**', 'sdk/lib/**', 'sdk/include/**', 'sdk/banana.mk', 'sdk/tools/**') }}
-      - name: Build Intel drivers and runtime package
+      - name: Build the GPU drivers and runtime package
         run: |
-          CROCUS=1 IRIS=1 JOBS=2 sh ports/mesa/build.sh
+          CROCUS=1 IRIS=1 R600=1 JOBS=4 sh ports/mesa/build.sh
           make -C ports/mesa/runtime mesa-x86_64.bpk
           mkdir -p mesa-packages
           cp ports/mesa/runtime/mesa-x86_64.bpk mesa-packages/
           # (the same library goes into java.bpk: Java's OpenGL on the GPU)
-          cp ports/mesa/build-crocus-iris/libOSMesa.so mesa-packages/
+          cp ports/mesa/build-crocus-iris-r600/libOSMesa.so mesa-packages/
           (cd mesa-packages && sha256sum mesa-x86_64.bpk libOSMesa.so > MESA-SHA256SUMS)
       - name: Test pristine Mesa patching
         run: python3 tools/tests/mesa_patch.py
@@ -418,10 +418,15 @@ jobs:
         run: sh tools/tests/radeon_gfx.sh
       - name: Test both Mesa drivers on Intel models
         env:
-          MESA_REF: ${{ github.workspace }}/ports/mesa/build-crocus-iris/ref
+          MESA_REF: ${{ github.workspace }}/ports/mesa/build-crocus-iris-r600/ref
         run: |
           sh tools/tests/crocus_host/run.sh 30
           sh tools/tests/iris_host/run.sh 30
+      - name: Test Mesa's r600 on the Radeon HD 7450 model (Linux's command checker on every stream)
+        env:
+          MESA_REF: ${{ github.workspace }}/ports/mesa/build-crocus-iris-r600/ref
+          MODEL_QUIET: 1
+        run: sh tools/tests/radeon_host/run.sh 30
       - uses: actions/upload-artifact@v4
         with:
           name: mesa-intel-runtime
@@ -654,6 +659,6 @@ jobs:
             - **banana-sdk.tar.gz**: application SDK.
             - **banana-driver-sdk.tar.gz**: independent hardware Driver SDK (PCI, Ethernet/Wi-Fi, USB and laptop services).
 
-            Intel acceleration is experimental: crocus has run on a real Sandy Bridge (HD Graphics 2000); other generations are tested on models only. A supported GPU is used by default; `gpu3d test` checks it, `glinfo` shows the renderer, and `gpu3d off` restores software rendering.
+            Intel acceleration is experimental: crocus has run on a real Sandy Bridge (HD Graphics 2000); other generations are tested on models only. Radeon HD 5450 - 7450 (TeraScale 2) OpenGL through Mesa r600 is experimental too, tested on a model only (needs `gpu experimental on`). A supported GPU is used by default; `gpu3d test` checks it, `glinfo` shows the renderer, and `gpu3d off` restores software rendering.
 
             [Graphics setup and limits](https://github.com/qcom-toolbox/Banana-OS/blob/${{ github.sha }}/GPU.md#mesa-iso-in-prereleases)

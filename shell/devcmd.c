@@ -154,13 +154,13 @@ int devcmd_dispatch(int argc, char** argv) {
         }
         if (!strcmp(sub, "on") || !strcmp(sub, "off")) {
             gem_set_enabled(sub[1] == 'n');
-            say(sub[1] == 'n' ? "gpu3d: on - new OpenGL apps may use Intel acceleration; glinfo reports the actual renderer"
+            say(sub[1] == 'n' ? "gpu3d: on - new OpenGL apps may use the GPU (Intel, or a Radeon HD 5450 - 7450); glinfo reports the actual renderer"
                               : "gpu3d: off - OpenGL apps started from now on draw on the processor");
             if (sub[1] == 'n' && !i915_present()) { terminal_write("gpu3d: but "); say(i915_why()); }
             return 1;
         }
         if (sub[0] && strcmp(sub, "status")) { say("usage: gpu3d [status | on | off | test]   (Intel graphics, 1st - 10th generation Core)"); return 1; }
-        say(gem_enabled() ? "gpu3d: on (Intel acceleration allowed; glinfo reports the actual renderer)" : "gpu3d: off (OpenGL apps draw on the processor; gpu3d on to use the GPU again)");
+        say(gem_enabled() ? "gpu3d: on (GPU acceleration allowed; glinfo reports the actual renderer)" : "gpu3d: off (OpenGL apps draw on the processor; gpu3d on to use the GPU again)");
         if (!i915_present()) { terminal_write("gpu3d: "); say(i915_why()); return 1; }
         i915_info(buf, sizeof(buf));
         say(buf);

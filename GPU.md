@@ -250,21 +250,52 @@ engine of a Radeon HD 6450 / 7450 / 8450 (Caicos) - or of the HD 5450 /
 - `tools/tests/radeon_gfx.sh` runs all of it against a model command
   processor (ring, type 0 / 2 / 3 packets, writebacks, the page-table walk),
   checking the microcode uploaded word for word.
-- Next: a radeon DRM interface (buffer objects in video memory and the GTT,
-  command submission with relocations and the register checker - TeraScale 2
-  has no per-process GPU address space), interrupts, and Mesa's r600 driver.
+
+**OpenGL on it: Mesa's r600 (experimental, not yet run on the card).** With
+`gpu experimental on` (the Radeon driving the screen), OpenGL apps - Java and
+Minecraft too - draw on the Radeon:
+
+- `kernel/radeon_drm.c` gives apps Linux's radeon interface on
+  `/dev/dri/card0` (version 2.50): buffer objects in video memory (the
+  part of it the CPU can see when the app maps the buffer, the rest
+  otherwise) or in the GTT, mapped into the app; INFO about the chip; waits.
+  TeraScale 2 has no per-process GPU address space, so every command stream
+  goes through **Linux's own command checker** (`third_party/radeon/
+  radeon_cs_check.c`, from evergreen_cs.c, MIT; the register whitelists
+  generated from Linux's lists by `tools/radeon_regtable.py`): only the
+  registers an app may set, every buffer address patched in from its
+  relocation and checked against the buffer's size (surfaces, textures,
+  vertex buffers, streamout). Then it runs as an indirect buffer on the
+  3D ring, fenced per buffer. The 3D engine starts at the first app.
+- Mesa's r600 driver and radeon winsys are in `libOSMesa.so` (`R600=1
+  ports/mesa/build.sh`): `ports/mesa/banana/r600_screen.c` opens the
+  device, libdrm's `radeon_surface.c` (MIT) lays out surfaces, and the
+  winsys takes the address the kernel maps a buffer at; no DMA or video
+  rings. r600's shader compiler is C++ with streams: libstdc++ is linked in
+  as the LLVM port links it. OpenGL 4.5 core on Caicos / Cedar.
+- Order: r600 (only on a Radeon), then iris, crocus, VirGL, softpipe.
+  `gpu3d off` sends apps back to the processor here too; `glinfo` shows the
+  renderer ("AMD CAICOS").
+- `tools/tests/radeon_host/run.sh` (in CI) runs the Linux build of r600 on
+  the hosted kernel interface and the model card: an OpenGL 3.3 program
+  (shaders, a texture, an FBO, 30 frames, glReadPixels) gets its context,
+  and every one of its command streams is accepted by the checker and run,
+  with no GPU access outside a buffer (the model does not draw, so the
+  pixels are not checked). `tools/tests/radeon_gfx.sh drm` checks the
+  interface itself, refusals included.
 
 ## Java and LWJGL
 
-`java.bpk` carries the Intel Mesa runtime's `libOSMesa.so` in `/usr/java/lib`
+`java.bpk` carries the Mesa runtime's `libOSMesa.so` in `/usr/java/lib`
 (CI copies it from the `mesa` job), so Java apps that draw through LWJGL,
 such as Minecraft, use the same drivers as the Mesa ISO.
-Mesa tries Iris, then Crocus, then VirGL, then softpipe. On a 2nd
+Mesa tries r600 (a Radeon HD 5450 - 7450 with `gpu experimental on`), then
+Iris, then Crocus, then VirGL, then softpipe. On a 2nd
 generation Core (Sandy Bridge, gen6) Crocus gives OpenGL 3.3 core and
 compatibility, enough for Minecraft 1.7 to 1.20. If the Mesa runtime is also installed,
 `/lib/libOSMesa.so` is found first; it is the same build.
 
-Like every OpenGL app, Java uses a supported Intel GPU by default (`gpu3d off`
+Like every OpenGL app, Java uses a supported GPU by default (`gpu3d off`
 switches it off). Start Java again after switching. Run `glinfo` to see the renderer
 that apps will get. Minecraft also reports it in its log and F3 screen. Each
 frame is drawn on the GPU and copied back into the window, so the copy costs

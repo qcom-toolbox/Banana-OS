@@ -25,10 +25,14 @@ if "'banana_iris.c'" not in s: s=s.replace("'banana_crocus.c',", "'banana_crocus
 # A fresh tree may have driver_virgl between crocus and dep_ws2_32.
 # Match the dependency itself, not an assumed ordering of adjacent drivers.
 if 'driver_iris' not in s: s=s.replace('dep_ws2_32,', 'driver_iris, dep_ws2_32,')
+# r600 (AMD Radeon HD 2000 - 6000) beside them, with libdrm_radeon's surface code
+if "'banana_r600.c'" not in s: s=s.replace("'banana_crocus.c',", "'banana_crocus.c', 'banana_r600.c', 'banana_radeon_surface.c',")
+if 'driver_r600' not in s: s=s.replace('dep_ws2_32,', 'driver_r600, dep_ws2_32,')
 write(p, s)
 dst=p.parent/'banana_virgl.c'; source=(here/'banana/virgl_winsys.c').read_text()
 if not dst.exists() or dst.read_text() != source: dst.write_text(source)
-for name, src in (('banana_crocus.c', 'crocus_screen.c'), ('banana_iris.c', 'iris_screen.c'), ('banana_drm.c', 'drm_shim.c')):
+for name, src in (('banana_crocus.c', 'crocus_screen.c'), ('banana_iris.c', 'iris_screen.c'), ('banana_drm.c', 'drm_shim.c'),
+                  ('banana_r600.c', 'r600_screen.c'), ('banana_radeon_surface.c', 'radeon_surface.c')):
  dst=p.parent/name; source=(here/'banana'/src).read_text()
  if not dst.exists() or dst.read_text() != source: dst.write_text(source)
 p=root/'src/gallium/targets/osmesa/osmesa_target.c';s=p.read_text()
@@ -65,6 +69,75 @@ if 'banana_iris_create_screen' not in s:
    }
    if (!driver || !strcmp(driver, "crocus")) {""")
 write(root/'src/gallium/targets/osmesa/osmesa_target.c', s)
+# r600 first: it asks the kernel's interface its name, taking only a Radeon
+if 'banana_r600_create_screen' not in s:
+ s=s.replace('struct pipe_screen *banana_iris_create_screen(int asked);', 'struct pipe_screen *banana_iris_create_screen(int asked);\nstruct pipe_screen *banana_r600_create_screen(int asked);')
+ s=s.replace("""   if (!driver || !strcmp(driver, "iris")) {""", """   if (!driver || !strcmp(driver, "r600")) {
+      screen = banana_r600_create_screen(driver != NULL);
+      if (screen) return debug_screen_wrap(screen);
+      if (driver) return NULL;
+   }
+   if (!driver || !strcmp(driver, "iris")) {""")
+write(root/'src/gallium/targets/osmesa/osmesa_target.c', s)
+
+# Mesa's radeon winsys on Banana OS's radeon interface: GEM_MMAP gives the
+# buffer's address in the app itself (no mmap of the device; the kernel keeps
+# the mapping until the buffer is closed), and there is no DMA engine ring
+p=root/'src/gallium/winsys/radeon/drm/radeon_drm_bo.c';s=p.read_text()
+if 'Banana: GEM_MMAP maps' not in s:
+ s=s.replace("""   ptr = os_mmap(0, args.size, PROT_READ|PROT_WRITE, MAP_SHARED,
+                 bo->rws->fd, args.addr_ptr);
+   if (ptr == MAP_FAILED) {""", """#ifdef __BANANA_OS__ /* Banana: GEM_MMAP maps the buffer itself */
+   ptr = args.addr_ptr ? (void *)(uintptr_t)args.addr_ptr : MAP_FAILED;
+#else
+   ptr = os_mmap(0, args.size, PROT_READ|PROT_WRITE, MAP_SHARED,
+                 bo->rws->fd, args.addr_ptr);
+#endif
+   if (ptr == MAP_FAILED) {
+#ifdef __BANANA_OS__
+      mtx_unlock(&bo->u.real.map_mutex);
+      fprintf(stderr, "radeon: gem_mmap gave no address\\n");
+      return NULL;
+#endif""")
+ s=s.replace("""   if (bo->u.real.ptr)
+      os_munmap(bo->u.real.ptr, bo->base.size);
+""", """#ifndef __BANANA_OS__ /* (Banana: GEM_CLOSE unmaps it) */
+   if (bo->u.real.ptr)
+      os_munmap(bo->u.real.ptr, bo->base.size);
+#endif
+""")
+ s=s.replace("""   os_munmap(bo->u.real.ptr, bo->base.size);
+   bo->u.real.ptr = NULL;
+""", """#ifndef __BANANA_OS__ /* (Banana: kept, GEM_MMAP gives it again) */
+   os_munmap(bo->u.real.ptr, bo->base.size);
+#endif
+   bo->u.real.ptr = NULL;
+""")
+ assert s.count('__BANANA_OS__') >= 4, 'radeon_drm_bo.c: not patched'
+write(p, s)
+p=root/'src/gallium/winsys/radeon/drm/radeon_drm_winsys.c';s=p.read_text()
+if 'Banana: no DMA ring' not in s:
+ s=s.replace("""   if (ws->info.gfx_level >= EVERGREEN) {
+      ws->info.ip[AMD_IP_SDMA].num_queues = 1;
+   }""", """   if (ws->info.gfx_level >= EVERGREEN) {
+      ws->info.ip[AMD_IP_SDMA].num_queues = 1;
+   }
+#if defined(__BANANA_OS__) || defined(BANANA_MESA_OSMESA) /* Banana: no DMA ring (kernel/radeon_drm.c: the 3D one; the reference build too, for the host tests) */
+   ws->info.ip[AMD_IP_SDMA].num_queues = 0;
+#endif""")
+ assert 'Banana: no DMA ring' in s, 'radeon_drm_winsys.c: not patched'
+# (no video decoder ring either: the kernel says so, and that is no error to print)
+if 'Banana: no UVD' not in s:
+ s=s.replace("""   if (radeon_get_drm_value(ws->fd, RADEON_INFO_RING_WORKING,
+                            "UVD Ring working", &value)) {""", """#if defined(__BANANA_OS__) || defined(BANANA_MESA_OSMESA) /* Banana: no UVD */
+   if (radeon_get_drm_value(ws->fd, RADEON_INFO_RING_WORKING, NULL, &value)) {
+#else
+   if (radeon_get_drm_value(ws->fd, RADEON_INFO_RING_WORKING,
+                            "UVD Ring working", &value)) {
+#endif""")
+ assert 'Banana: no UVD' in s, 'radeon_drm_winsys.c: UVD not patched'
+write(p, s)
+
 p=root/'src/gallium/drivers/crocus/crocus_batch.c';s=p.read_text()
 # a source patched by an older version of this script (contexts on every GPU)
 s=s.replace('''#ifdef __BANANA_OS__

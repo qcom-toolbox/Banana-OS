@@ -34,6 +34,12 @@
 #include "settings.h"
 #include "radeon.h"
 
+/* (no Radeon interface linked - the i915 host tests: an Intel GPU only;
+ *  the kernel's are kernel/radeon_drm.c's) */
+__attribute__((weak)) int rad_drm_active(void) { return 0; }
+__attribute__((weak)) int rad_drm_ioctl(int owner, unsigned long req, void* arg) { (void)owner; (void)req; (void)arg; return -22;   /* (EINVAL) */ }
+__attribute__((weak)) void rad_drm_release(int owner) { (void)owner; }
+
 #ifdef __x86_64__
 
 /* kernel/app.c: the calling app's memory */
@@ -790,7 +796,8 @@ static int ioctl_i915(int owner, unsigned nr, unsigned size, void* arg, uspace_t
 }
 
 int gem_ioctl(int owner, unsigned long req, void* arg) {
-    if (rad_drm_active()) return rad_drm_ioctl(owner, req, arg);     /* (a Radeon: kernel/radeon_drm.c) */
+    if (rad_drm_active())                                           /* (a Radeon: kernel/radeon_drm.c; gpu3d off: none) */
+        return gem_enabled() ? rad_drm_ioctl(owner, req, arg) : -19;  /* (ENODEV: apps draw on the processor) */
     if (DRM_TYPE(req) != 'd') return -E_NOTTY;
     unsigned nr = DRM_NR(req), size = DRM_SIZE(req);
     if (size > 256 || (size && !u_ok((uint64_t)(uintptr_t)arg, size))) return -E_FAULT;

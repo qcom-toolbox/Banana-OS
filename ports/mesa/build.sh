@@ -13,7 +13,7 @@
 # build's compile_commands.json with the SDK's headers (rebuild.py) and
 # the library is linked without the system's C library.
 # Needs: gcc, meson, ninja, flex, bison, python3-mako, python3-yaml, mtools,
-# sfdisk (in /sbin); with CROCUS=1 or IRIS=1 also libdrm's headers (libdrm-dev);
+# sfdisk (in /sbin); with CROCUS=1, IRIS=1 or R600=1 also libdrm's headers (libdrm-dev);
 # with IRIS=1 also LLVM 17, clang, libclc and SPIRV-LLVM-Translator (llvm-17-dev,
 # libclang-17-dev, libclang-cpp17-dev, libclc-17-dev, libllvmspirvlib-17-dev,
 # spirv-tools, zlib1g-dev, cmake):
@@ -27,10 +27,12 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 LLVMPIPE=${LLVMPIPE:-0}
 CROCUS=${CROCUS:-0}                      # 1: Mesa's crocus too, for Intel GPUs (gen 4 - 7.5: gpu3d)
 IRIS=${IRIS:-0}                          # 1: Mesa's iris too, for Intel GPUs (gen 8 - 11: gpu3d)
+R600=${R600:-0}                          # 1: Mesa's r600 too, for AMD Radeon HD 2000 - 6000 (HD 5450 / 6450 / 7450)
 DEFAULT_OUT=$HERE/build
 [ "$LLVMPIPE" = 0 ] || DEFAULT_OUT=$HERE/build-llvmpipe
 [ "$CROCUS" = 0 ] || DEFAULT_OUT=$DEFAULT_OUT-crocus
 [ "$IRIS" = 0 ] || DEFAULT_OUT=$DEFAULT_OUT-iris
+[ "$R600" = 0 ] || DEFAULT_OUT=$DEFAULT_OUT-r600
 OUT=$(realpath -m "${1:-$DEFAULT_OUT}")
 VER=24.3.4
 SHA=e641ae27191d387599219694560d221b7feaa91c900bcec46bf444218ed66025
@@ -51,6 +53,7 @@ python3 "$HERE/patch.py" "$SRC"
 DRIVERS=softpipe,virgl
 [ "$CROCUS" = 0 ] || DRIVERS=$DRIVERS,crocus      # (needs libdrm's headers on the build machine)
 [ "$IRIS" = 0 ] || DRIVERS=$DRIVERS,iris
+[ "$R600" = 0 ] || DRIVERS=$DRIVERS,r600          # (needs libdrm_radeon's headers on the build machine)
 LLVM_MODE=disabled
 DRAW_LLVM=false
 if [ "$LLVMPIPE" != 0 ]; then
@@ -60,6 +63,7 @@ if [ "$LLVMPIPE" != 0 ]; then
     DRIVERS=softpipe,llvmpipe,virgl
     [ "$CROCUS" = 0 ] || DRIVERS=$DRIVERS,crocus
     [ "$IRIS" = 0 ] || DRIVERS=$DRIVERS,iris
+    # (no r600 here: with LLVM, Mesa wants LLVM's AMD back end for it)
     LLVM_MODE=enabled
     DRAW_LLVM=true
 fi
@@ -107,6 +111,8 @@ if [ "$LLVMPIPE" != 0 ]; then
 fi
 
 # ── libOSMesa.so for Banana OS ────────────────────────────────────────
+# (r600's C++ runtime is linked against the SDK's symbols: its objects first)
+[ "$R600" = 0 ] || make -C "$HERE/gl3test"
 KEEP=${KEEP:-1} JOBS=$JOBS python3 "$HERE/rebuild.py" "$REF" "$OUT/banana"
 cp "$OUT/banana/libOSMesa.so" "$OUT/libOSMesa.so"
 # the Intel drivers must ask banana/drm_shim.c which GPU this is, not
@@ -117,6 +123,13 @@ if [ "$CROCUS" != 0 ] || [ "$IRIS" != 0 ]; then
         { echo "intel_device_info.c was built with libdrm stubs: the Intel drivers would refuse every GPU"; exit 1; }
     nm -D "$OUT/libOSMesa.so" | grep -q ' U drmGetDevice2$' &&
         { echo "libOSMesa.so imports drmGetDevice2: banana/drm_shim.c was not linked in"; exit 1; }
+fi
+
+if [ "$R600" != 0 ]; then
+    nm -D "$OUT/libOSMesa.so" | grep -Eq ' U (drmCommandWriteRead|radeon_surface_manager_new)$' &&
+        { echo "libOSMesa.so imports libdrm's radeon functions: banana/drm_shim.c or radeon_surface.c was not linked in"; exit 1; }
+    nm "$OUT/libOSMesa.so" | grep -qi ' t banana_r600_create_screen$' ||
+        { echo "libOSMesa.so has no r600 screen"; exit 1; }
 fi
 
 # ── the test app and a test disk ──────────────────────────────────────

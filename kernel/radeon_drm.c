@@ -545,11 +545,19 @@ static int ioctl_radeon(int owner, unsigned nr, void* arg, uspace_t* us) {
         uint64_t off = m->offset, size = m->size ? m->size : (uint64_t)o->pages * PAGE - off;
         if ((off & (PAGE - 1)) || off + size > (uint64_t)o->pages * PAGE || !us) return -E_INVAL;
         uint32_t first = (uint32_t)(off / PAGE), pages = (uint32_t)((size + PAGE - 1) / PAGE);
+        /* (Mesa maps a buffer again each time it needs it after an unmap the
+         *  kernel never sees: the mapping there already is given back) */
+        for (int k = 0; k < MAPS; k++)
+            if (o->map[k].addr && o->map[k].frame0 == o->phys[first] && o->map[k].pages == pages) {
+                m->addr_ptr = (uint64_t)o->map[k].addr;
+                return 0;
+            }
         int slot = -1;
         for (int k = 0; k < MAPS && slot < 0; k++) if (!o->map[k].addr) slot = k;
+        if (slot < 0) return -E_NOMEM;                              /* (every mapping is kept: none lost) */
         uintptr_t a = uvm_map_frames(us, o->phys + first, pages, UVM_READ | UVM_WRITE, o->domain == DOMAIN_VRAM);
         if (!a) return -E_NOMEM;
-        if (slot >= 0) { o->map[slot].addr = a; o->map[slot].pages = pages; o->map[slot].frame0 = o->phys[first]; }
+        { o->map[slot].addr = a; o->map[slot].pages = pages; o->map[slot].frame0 = o->phys[first]; }
         m->addr_ptr = (uint64_t)a;
         return 0;
     }

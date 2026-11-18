@@ -11,7 +11,10 @@
 #define RADEON_MODEL 1
 
 #include "../../kernel/types.h"
-static unsigned char g_arena[8 << 20] __attribute__((aligned(4096)));
+#ifndef MODEL_ARENA
+#define MODEL_ARENA (8u << 20)                   /* (the kernel's pages: the IB pool, the GTT buffers) */
+#endif
+static unsigned char g_arena[MODEL_ARENA] __attribute__((aligned(4096)));
 static size_t g_arena_used;
 #define ARENA_PHYS 0x20000000ull
 #define RAD_PHYS(p) ((uint64_t)((uintptr_t)(p) - (uintptr_t)g_arena) + ARENA_PHYS)
@@ -227,8 +230,8 @@ void rad_wr(radeon_t* r, uint32_t reg, uint32_t v) { (void)r; reg_write(reg, v);
 static int g_fails;
 #define CHECK(c, ...) do { if (c) printf("ok   " __VA_ARGS__); else { printf("FAIL " __VA_ARGS__); g_fails++; } printf("\n"); } while (0)
 
-int main(int argc, char** argv) {
-    const char* mode = argc > 1 && argv[1] ? argv[1] : "ok";
+/* the card as the firmware leaves it (mode: as for main), and the kernel's bring-up */
+static int model_boot(const char* mode, char* why, int cap) {
     if (!strcmp(mode, "fake2g")) VRAM_MB = 2048;
     if (!strcmp(mode, "real2g")) VRAM_MB = REAL_MB = 2048;
     g_cedar = !strcmp(mode, "cedar");
@@ -245,8 +248,14 @@ int main(int argc, char** argv) {
     g_gddr5 = !strcmp(mode, "gddr5");
     rt.family = g_cedar ? CHIP_CEDAR : !strcmp(mode, "juniper") ? CHIP_JUNIPER : CHIP_CAICOS;
     rt.pci.device = 0x6779;
+    return rad_gfx_init(&rt, (uintptr_t)VR, 0, VISIBLE, why, cap);
+}
+
+#ifndef RADEON_PRELOAD                             /* (tools/tests/radeon_host: Mesa's r600 on the model) */
+int main(int argc, char** argv) {
+    const char* mode = argc > 1 && argv[1] ? argv[1] : "ok";
     char why[160] = "";
-    int r = rad_gfx_init(&rt, (uintptr_t)VR, 0, VISIBLE, why, sizeof(why));
+    int r = model_boot(mode, why, sizeof(why));
     printf("%s: rad_gfx_init = %d: %s\n", mode, r, why);
 
     if (!strcmp(mode, "juniper")) {
@@ -278,6 +287,8 @@ int main(int argc, char** argv) {
         struct gem_mmap_k mg = { cg.handle, 0, 0, 4096, 0 }, mv = { cv.handle, 0, 0, 65536, 0 };
         CHECK(rad_drm_ioctl(1, IOC(3, 0x40 + RD_GEM_MMAP, sizeof(mg)), &mg) == 0 && mg.addr_ptr, "GEM_MMAP of the GTT buffer");
         CHECK(rad_drm_ioctl(1, IOC(3, 0x40 + RD_GEM_MMAP, sizeof(mv)), &mv) == 0 && mv.addr_ptr, "GEM_MMAP of the video memory buffer");
+        struct gem_mmap_k mg2 = { cg.handle, 0, 0, 4096, 0 };
+        CHECK(rad_drm_ioctl(1, IOC(3, 0x40 + RD_GEM_MMAP, sizeof(mg2)), &mg2) == 0 && mg2.addr_ptr == mg.addr_ptr, "GEM_MMAP again: the same mapping");
         volatile uint32_t* pg = (volatile uint32_t*)(uintptr_t)mg.addr_ptr;
         volatile uint32_t* pv = (volatile uint32_t*)(uintptr_t)mv.addr_ptr;
         CHECK(pv == (volatile uint32_t*)(VR + (64ull << 20)) && pg[0] == 0 && pv[0] == 0, "video memory buffers above the display (64 MiB), cleared");
@@ -377,3 +388,4 @@ int main(int argc, char** argv) {
     printf(g_fails ? "%d FAILED\n" : "all passed\n", g_fails);
     return g_fails != 0;
 }
+#endif

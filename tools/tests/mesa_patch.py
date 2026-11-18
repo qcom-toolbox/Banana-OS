@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-"""Ensure a pristine pinned Mesa tree links both Intel drivers, idempotently."""
+"""Ensure a pristine pinned Mesa tree links the Intel drivers and r600, idempotently."""
 from pathlib import Path
 import hashlib
 import subprocess
@@ -21,8 +21,8 @@ with tempfile.TemporaryDirectory(prefix="banana-mesa-patch-") as tmp:
                 for p in tree.rglob("*") if p.is_file()}
     before = snapshot()
     dependencies = target.read_text().split("dependencies : [", 1)[1].split("]", 1)[0]
-    for driver in ("driver_crocus", "driver_iris", "driver_virgl"):
+    for driver in ("driver_crocus", "driver_iris", "driver_r600", "driver_virgl"):
         assert driver in dependencies, f"{driver} missing from fresh-tree OSMesa dependencies"
     subprocess.run(["python3", str(ROOT / "ports/mesa/patch.py"), str(tree)], check=True)
     assert snapshot() == before, "Mesa sources changed on the second patch"
-print("Mesa fresh-tree Intel linkage and patch idempotence: passed")
+print("Mesa fresh-tree Intel and r600 linkage and patch idempotence: passed")
