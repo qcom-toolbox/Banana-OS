@@ -38,6 +38,18 @@ jobs:
         with:
           path: ports/libjs/src
           key: libjs-sources-${{ hashFiles('ports/libjs/sources.json') }}
+      - name: The toolchain's versions (the build cache's key)
+        id: toolchain
+        run: echo "id=$(gcc -dumpfullversion)-$(cmake --version | head -1 | cut -d' ' -f3)" >> "$GITHUB_OUTPUT"
+      # The engine's build directory, kept between runs: ninja and the Banana
+      # rebuild's object signatures decide what to compile again (an older
+      # cache is a starting point, never taken as it is) - without it every
+      # push compiled all of LibJS twice, ~13 minutes before the ISO build.
+      - uses: actions/cache@v4
+        with:
+          path: ports/libjs/build
+          key: libjs-build-v1-${{ steps.toolchain.outputs.id }}-${{ inputs.sdk }}-${{ hashFiles('ports/libjs/**', '!ports/libjs/src/**', '!ports/libjs/build/**', 'sdk/**') }}
+          restore-keys: libjs-build-v1-${{ steps.toolchain.outputs.id }}-${{ inputs.sdk }}-
       - name: Build and run the semantic probes
         shell: bash
         env:
