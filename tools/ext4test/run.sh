@@ -50,5 +50,12 @@ echo "== ENOSPC condition: fill disk, verify anchor intact, free space, verify w
 "$T/crash" "$T/spc.img" 2
 "$E2FSCK" -fn "$T/spc.img"
 
+echo "== an installed disk after many updates: packages replaced, small files churned, remounts"
+gcc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie -no-pie -Wall -Wno-unused -I "$T" -o "$T/aging" aging.c "$T/ext4.c"
+for seed in 1 2; do
+    "$T/aging" "$T/age.img" 160 200 "$seed"
+    "$E2FSCK" -fn "$T/age.img"
+done
+
 rm -rf "$T"
 echo "ext4test: all passed"
