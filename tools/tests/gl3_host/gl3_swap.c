@@ -63,7 +63,7 @@ int main(void) {
               "swap %d: the app's framebuffer, pixel buffer and pack alignment kept, no GL error", f);
         if (!pixels) continue;
         if (f == 0) {
-            CHECK(px[10 * 64 + 30] == 0x55555555, "swap 0: nothing shown yet (its frame is read back during the next)");
+            CHECK(px[10 * 64 + 30] == 0, "swap 0: nothing drawn shown yet - black (its frame is copied during the next)");
         } else {
             unsigned mid = px[10 * 64 + 30], corner = px[47 * 64 + 2], top = px[2];
             CHECK(mid == want[f - 1], "swap %d: the frame before shown (%06x, want %06x)", f, mid, want[f - 1]);

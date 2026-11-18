@@ -224,6 +224,117 @@ OSMesaPixelStore(GLint pname, GLint value)
    { "OSMesaBananaSnapshot", (OSMESAproc) OSMesaBananaSnapshot },""", 1)
  assert s.count('banana_no_snapshot') == 3 and '(OSMESAproc) OSMesaBananaSnapshot }' in s, 'osmesa.c: snapshot switch not patched'
 write(p, s)
+# ...and mode 2: a frame behind, without the processor waiting for the GPU:
+# at each flush the GPU copies the frame into one of two staging textures
+# (linear, in system memory) and the one before - done by now - is copied
+# into the app's buffer. (glReadPixels into a pixel buffer cannot do this
+# on r600: Mesa maps the frame on the processor, waiting, there.)
+p=root/'src/gallium/frontends/osmesa/osmesa.c';s=p.read_text()
+if 'banana_behind' not in s:
+ s=s.replace("""   GLboolean banana_no_snapshot; /*< Banana: flushes leave the user's buffer alone */""", """   GLboolean banana_no_snapshot; /*< Banana: flushes leave the user's buffer alone */
+   GLboolean banana_behind;      /*< Banana: ...or fill it a frame behind */
+   struct pipe_resource *banana_stage[2];
+   unsigned banana_next, banana_pending;""", 1)
+ s=s.replace("""   osmesa_read_buffer(osmesa, res, osbuffer->map, dst_stride, osmesa->y_up);
+
+   /* If the user has requested the Z/S buffer, then snapshot that one too. */""", """   /* Banana: a frame behind (OSMesaBananaSnapshot 2) */
+   if (osmesa->banana_behind && !osmesa->zs &&
+       banana_snapshot_behind(osmesa, res, osbuffer->map, dst_stride))
+      return true;
+
+   osmesa_read_buffer(osmesa, res, osbuffer->map, dst_stride, osmesa->y_up);
+
+   /* If the user has requested the Z/S buffer, then snapshot that one too. */""", 1)
+ s=s.replace("""/**
+ * Called via glFlush/glFinish.  This is where we copy the contents
+ * of the driver's color buffer into the user-specified buffer.
+ */""", """static void
+banana_stage_free(OSMesaContext osmesa)
+{
+   for (unsigned i = 0; i < 2; i++)
+      pipe_resource_reference(&osmesa->banana_stage[i], NULL);
+   osmesa->banana_pending = 0;
+}
+
+/* Banana: this frame into a staging texture by the GPU, the one before
+ * (which the GPU finished meanwhile) into the user's buffer */
+static bool
+banana_snapshot_behind(OSMesaContext osmesa, struct pipe_resource *res,
+                       void *dst, int dst_stride)
+{
+   struct pipe_context *pipe = osmesa->st->pipe;
+   struct pipe_screen *screen = pipe->screen;
+   struct pipe_resource *s0 = osmesa->banana_stage[0];
+
+   if (s0 && (s0->width0 != res->width0 || s0->height0 != res->height0 ||
+              s0->format != res->format))
+      banana_stage_free(osmesa);
+   if (!osmesa->banana_stage[0]) {
+      struct pipe_resource t;
+      memset(&t, 0, sizeof(t));
+      t.target = PIPE_TEXTURE_2D;
+      t.format = res->format;
+      t.bind = PIPE_BIND_RENDER_TARGET;
+      t.usage = PIPE_USAGE_STAGING;
+      t.width0 = res->width0;
+      t.height0 = res->height0;
+      t.depth0 = 1;
+      t.array_size = 1;
+      for (unsigned i = 0; i < 2; i++) {
+         osmesa->banana_stage[i] = screen->resource_create(screen, &t);
+         if (!osmesa->banana_stage[i]) {
+            banana_stage_free(osmesa);
+            return false;
+         }
+      }
+      osmesa->banana_next = 0;
+      osmesa->banana_pending = 0;
+   }
+
+   struct pipe_blit_info b;
+   memset(&b, 0, sizeof(b));
+   b.src.resource = res;
+   b.src.format = res->format;
+   b.dst.resource = osmesa->banana_stage[osmesa->banana_next];
+   b.dst.format = res->format;
+   u_box_2d(0, 0, res->width0, res->height0, &b.src.box);
+   b.dst.box = b.src.box;
+   b.mask = PIPE_MASK_RGBA;
+   b.filter = PIPE_TEX_FILTER_NEAREST;
+   pipe->blit(pipe, &b);
+   pipe->flush(pipe, NULL, 0);
+
+   if (osmesa->banana_pending)
+      osmesa_read_buffer(osmesa, osmesa->banana_stage[osmesa->banana_next ^ 1],
+                         dst, dst_stride, osmesa->y_up);
+   osmesa->banana_pending = 1;
+   osmesa->banana_next ^= 1;
+   return true;
+}
+
+/**
+ * Called via glFlush/glFinish.  This is where we copy the contents
+ * of the driver's color buffer into the user-specified buffer.
+ */""", 1)
+ s=s.replace("""   OSMesaContext osmesa = OSMesaGetCurrentContext();
+   if (osmesa)
+      osmesa->banana_no_snapshot = !on;""", """   OSMesaContext osmesa = OSMesaGetCurrentContext();
+   if (osmesa) {
+      osmesa->banana_no_snapshot = !on;
+      osmesa->banana_behind = on == 2;   /* (2: a frame behind) */
+      if (on != 2)
+         banana_stage_free(osmesa);
+   }""", 1)
+ s=s.replace("""/* Banana: whether glFlush / glFinish copy the frame into the user's buffer
+ * (as OSMesa always does: on) or leave it to the app (off) */""", """/* Banana: whether glFlush / glFinish copy the frame into the user's buffer
+ * (as OSMesa always does: 1), leave it to the app (0), or copy the frame
+ * before, the GPU copying this one meanwhile (2) */""", 1)
+ s=s.replace("""   if (osmesa) {
+      pp_free(osmesa->pp);""", """   if (osmesa) {
+      banana_stage_free(osmesa);
+      pp_free(osmesa->pp);""", 1)
+ assert s.count('banana_behind') == 3 and s.count('banana_stage_free(osmesa)') == 4, 'osmesa.c: frame-behind mode not patched'
+write(p, s)
 # Banana's OSMesa has no Linux DRM modifier/udmabuf interface.
 p=root/'src/gallium/drivers/llvmpipe/lp_texture.c';s=p.read_text().replace('#ifndef _WIN32\n', '#if !defined(_WIN32) && !defined(__BANANA_OS__)\n');write(p,s)
 p=root/'src/gallium/drivers/llvmpipe/lp_scene.c';s=p.read_text()
