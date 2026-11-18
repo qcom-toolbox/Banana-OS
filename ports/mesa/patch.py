@@ -189,6 +189,41 @@ if 'Banana: validate the selected screen' not in s:
       }
       if (osmesa->depth_stencil_format == PIPE_FORMAT_NONE) { FREE(osmesa); return NULL; }''')
 write(p, s)
+# a context's frames not copied to the app's buffer at each flush (the SDK's
+# windows read them back themselves, a frame behind, through pixel buffers:
+# the processor and a GPU then work at the same time - OSMesaBananaSnapshot)
+p=root/'src/gallium/frontends/osmesa/osmesa.c';s=p.read_text()
+if 'banana_no_snapshot' not in s:
+ s=s.replace("""   GLboolean y_up;        /*< TRUE  -> Y increases upward */""", """   GLboolean y_up;        /*< TRUE  -> Y increases upward */
+   GLboolean banana_no_snapshot; /*< Banana: flushes leave the user's buffer alone */""", 1)
+ s=s.replace("""   /* Snapshot the color buffer to the user's buffer. */
+   bpp = util_format_get_blocksize(osbuffer->visual.color_format);""", """   /* Banana: the app reads the frames back itself (OSMesaBananaSnapshot) */
+   if (osmesa->banana_no_snapshot && !osmesa->zs)
+      return true;
+
+   /* Snapshot the color buffer to the user's buffer. */
+   bpp = util_format_get_blocksize(osbuffer->visual.color_format);""", 1)
+ s=s.replace("""GLAPI void GLAPIENTRY
+OSMesaPixelStore(GLint pname, GLint value)
+{""", """/* Banana: whether glFlush / glFinish copy the frame into the user's buffer
+ * (as OSMesa always does: on) or leave it to the app (off) */
+GLAPI void GLAPIENTRY
+OSMesaBananaSnapshot(GLboolean on);
+GLAPI void GLAPIENTRY
+OSMesaBananaSnapshot(GLboolean on)
+{
+   OSMesaContext osmesa = OSMesaGetCurrentContext();
+   if (osmesa)
+      osmesa->banana_no_snapshot = !on;
+}
+
+GLAPI void GLAPIENTRY
+OSMesaPixelStore(GLint pname, GLint value)
+{""", 1)
+ s=s.replace("""   { "OSMesaPixelStore", (OSMESAproc) OSMesaPixelStore },""", """   { "OSMesaPixelStore", (OSMESAproc) OSMesaPixelStore },
+   { "OSMesaBananaSnapshot", (OSMESAproc) OSMesaBananaSnapshot },""", 1)
+ assert s.count('banana_no_snapshot') == 3 and '(OSMESAproc) OSMesaBananaSnapshot }' in s, 'osmesa.c: snapshot switch not patched'
+write(p, s)
 # Banana's OSMesa has no Linux DRM modifier/udmabuf interface.
 p=root/'src/gallium/drivers/llvmpipe/lp_texture.c';s=p.read_text().replace('#ifndef _WIN32\n', '#if !defined(_WIN32) && !defined(__BANANA_OS__)\n');write(p,s)
 p=root/'src/gallium/drivers/llvmpipe/lp_scene.c';s=p.read_text()

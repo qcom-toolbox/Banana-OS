@@ -4,7 +4,11 @@
  * Mesa's OSMesa (libOSMesa.so, softpipe: drawing on the processor), loaded
  * with the SDK's dlopen the first time a context is made. Mesa draws into a
  * buffer of ours (rows top first, 0xAARRGGBB); bgl3_swap copies it into
- * the window. The GL functions are pointers (<GL/gl3procs.h>) filled from
+ * the window. On a GPU (r600, crocus, iris, VirGL) a window's frames are
+ * read back a frame behind instead, through two pixel buffers the GPU
+ * fills while the app draws the next frame: OSMesa's own copy at every
+ * glFinish made the processor wait for the GPU and the GPU for the
+ * processor (Minecraft on a Radeon HD 7450: the GPU 30 % busy). The GL functions are pointers (<GL/gl3procs.h>) filled from
  * OSMesaGetProcAddress.
  */
 #include "GL/gl3.h"
@@ -34,12 +38,16 @@ static void (*os_destroy)(OSMesaContext c);
 static GLboolean (*os_make_current)(OSMesaContext c, void* buf, GLenum type, GLsizei w, GLsizei h);
 static void (*os_pixel_store)(GLint pname, GLint value);
 static void* (*os_proc)(const char* name);
+static void (*os_snapshot)(GLboolean on);    /* (Banana's OSMesa: frames left to us, or copied at each flush) */
 
 struct bgl3_ctx {
     OSMesaContext os;
     bwin_t* win;
     int w, h;
     unsigned int* px;               /* Mesa's color buffer: w x h, top row first */
+    int async;                      /* a window on a GPU: frames read back a frame behind */
+    GLuint pbo[2];                  /* ...into these, in turn */
+    int pbo_w, pbo_h, next, pending;
 };
 
 static void* g_lib;
@@ -73,6 +81,7 @@ static int load(void) {
     *(void**)&os_make_current = dlsym(lib, "OSMesaMakeCurrent");
     *(void**)&os_pixel_store = dlsym(lib, "OSMesaPixelStore");
     *(void**)&os_proc = dlsym(lib, "OSMesaGetProcAddress");
+    *(void**)&os_snapshot = os_proc ? os_proc("OSMesaBananaSnapshot") : NULL;   /* (not in older libraries) */
     if (!os_create || !os_destroy || !os_make_current || !os_pixel_store || !os_proc) {
         snprintf(g_err, sizeof(g_err), "OpenGL 3.3: libOSMesa.so lacks the OSMesa functions");
         dlclose(lib);
@@ -153,6 +162,16 @@ static bgl3_ctx_t* create_v(bwin_t* win, int w, int h, int profile, int major, i
         if (!g_err[0]) snprintf(g_err, sizeof(g_err), "OpenGL 3.3: the context could not be made current");
         return NULL;
     }
+    /* a window drawn by a GPU: its frames read back a frame behind (BGL3_SYNC=1: as before;
+     * BGL3_ASYNC=1: on the processor's renderers too - the tests) */
+    const char* r = (const char*)bgl3_glGetString(GL_RENDERER);
+    const char* sync = getenv("BGL3_SYNC");
+    const char* force = getenv("BGL3_ASYNC");
+    int gpu = r && !strstr(r, "softpipe") && !strstr(r, "llvmpipe");
+    if (win && os_snapshot && (gpu || (force && *force == '1')) && !(sync && *sync == '1')) {
+        c->async = 1;
+        os_snapshot(0);
+    }
     return c;
 }
 
@@ -170,6 +189,7 @@ int bgl3_make_current_buffer(bgl3_ctx_t* c, unsigned int* px, int w, int h) {
     if (!c || !px) return bgl3_make_current(c);
     if (!os_make_current(c->os, px, GL_UNSIGNED_BYTE, w, h)) return -1;
     os_pixel_store(OSMESA_Y_UP, 0);
+    if (os_snapshot) os_snapshot(1);                   /* (the app's own buffer: OSMesa fills it) */
     g_cur = c;
     return 0;
 }
@@ -190,6 +210,7 @@ int bgl3_make_current(bgl3_ctx_t* c) {
     if (!c) { if (os_make_current) os_make_current(NULL, NULL, 0, 0, 0); g_cur = NULL; return 0; }
     if (!os_make_current(c->os, c->px, GL_UNSIGNED_BYTE, c->w, c->h)) return -1;
     os_pixel_store(OSMESA_Y_UP, 0);                    /* row 0 at the top, as windows */
+    if (os_snapshot) os_snapshot(!c->async);
     g_cur = c;
     return 0;
 }
@@ -202,8 +223,65 @@ void bgl3_resize(bgl3_ctx_t* c) {
     if (alloc_px(c, c->win->w, c->win->h) == 0 && g_cur == c) bgl3_make_current(c);
 }
 
+/* the frame read into one pixel buffer by the GPU, the one before copied
+ * from the other into the window - the app's GL state kept as it was */
+static void swap_async(bgl3_ctx_t* c) {
+    GLint pack = 0, fb = 0, rb = 0, al = 4, rl = 0, sp = 0, sr = 0;
+    bgl3_glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack);
+    bgl3_glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &fb);
+    bgl3_glGetIntegerv(GL_PACK_ALIGNMENT, &al);
+    bgl3_glGetIntegerv(GL_PACK_ROW_LENGTH, &rl);
+    bgl3_glGetIntegerv(GL_PACK_SKIP_PIXELS, &sp);
+    bgl3_glGetIntegerv(GL_PACK_SKIP_ROWS, &sr);
+    bgl3_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    bgl3_glGetIntegerv(GL_READ_BUFFER, &rb);
+    bgl3_glReadBuffer(GL_FRONT);
+    bgl3_glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    bgl3_glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    bgl3_glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    bgl3_glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+    GLsizeiptr bytes = (GLsizeiptr)c->w * c->h * 4;
+    if (!c->pbo[0] || c->pbo_w != c->w || c->pbo_h != c->h) {
+        if (!c->pbo[0]) bgl3_glGenBuffers(2, c->pbo);
+        for (int i = 0; i < 2; i++) {
+            bgl3_glBindBuffer(GL_PIXEL_PACK_BUFFER, c->pbo[i]);
+            bgl3_glBufferData(GL_PIXEL_PACK_BUFFER, bytes, NULL, GL_STREAM_READ);
+        }
+        c->pbo_w = c->w; c->pbo_h = c->h; c->next = 0; c->pending = 0;
+    }
+    /* this frame: into the GPU's queue */
+    bgl3_glBindBuffer(GL_PIXEL_PACK_BUFFER, c->pbo[c->next]);
+    bgl3_glReadPixels(0, 0, c->w, c->h, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 0);
+    bgl3_glFlush();
+    /* the one before: done by now (or nearly), into the window */
+    if (c->pending) {
+        bgl3_glBindBuffer(GL_PIXEL_PACK_BUFFER, c->pbo[c->next ^ 1]);
+        const unsigned int* p = (const unsigned int*)bgl3_glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, bytes, GL_MAP_READ_BIT);
+        if (p) {
+            int w = c->w < c->win->w ? c->w : c->win->w, h = c->h < c->win->h ? c->h : c->win->h;
+            for (int y = 0; y < h; y++) {
+                const unsigned int* s = p + (long)(c->h - 1 - y) * c->w;     /* (GL's rows: bottom first) */
+                unsigned int* d = c->win->px + (long)y * c->win->w;
+                for (int x = 0; x < w; x++) d[x] = s[x] & 0x00FFFFFFu;
+            }
+            bgl3_glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        }
+    }
+    c->pending = 1;
+    c->next ^= 1;
+    bgl3_glBindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)pack);
+    bgl3_glReadBuffer((GLenum)rb);
+    bgl3_glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)fb);
+    bgl3_glPixelStorei(GL_PACK_ALIGNMENT, al);
+    bgl3_glPixelStorei(GL_PACK_ROW_LENGTH, rl);
+    bgl3_glPixelStorei(GL_PACK_SKIP_PIXELS, sp);
+    bgl3_glPixelStorei(GL_PACK_SKIP_ROWS, sr);
+    bwin_update(c->win);
+}
+
 void bgl3_swap(bgl3_ctx_t* c) {
     if (!c) return;
+    if (c->async && c->win && c->win->px && bgl3_current() == c) { swap_async(c); return; }
     bgl3_glFinish();
     if (!c->win || !c->win->px) return;
     int w = c->w < c->win->w ? c->w : c->win->w, h = c->h < c->win->h ? c->h : c->win->h;
@@ -217,7 +295,8 @@ void bgl3_swap(bgl3_ctx_t* c) {
 
 const unsigned int* bgl3_pixels(bgl3_ctx_t* c, int* w, int* h) {
     if (!c) return NULL;
-    bgl3_glFinish();
+    if (c->async && os_snapshot && bgl3_current() == c) { os_snapshot(1); bgl3_glFinish(); os_snapshot(0); }   /* (this once: the frame as it is) */
+    else bgl3_glFinish();
     if (w) *w = c->w;
     if (h) *h = c->h;
     return c->px;

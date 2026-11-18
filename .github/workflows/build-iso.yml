@@ -427,6 +427,11 @@ jobs:
           MESA_REF: ${{ github.workspace }}/ports/mesa/build-crocus-iris-r600/ref
           MODEL_QUIET: 1
         run: sh tools/tests/radeon_host/run.sh 30
+      - name: Test pipelined OpenGL window swaps (softpipe, and r600 on the model)
+        env:
+          MESA_REF: ${{ github.workspace }}/ports/mesa/build-crocus-iris-r600/ref
+          MODEL_QUIET: 1
+        run: sh tools/tests/gl3_host/run.sh
       - uses: actions/upload-artifact@v4
         with:
           name: mesa-intel-runtime

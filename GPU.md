@@ -301,6 +301,11 @@ generation Core (Sandy Bridge, gen6) Crocus gives OpenGL 3.3 core and
 compatibility, enough for Minecraft 1.7 to 1.20. If the Mesa runtime is also installed,
 `/lib/libOSMesa.so` is found first; it is the same build.
 
+On a GPU, a window's frames are read back by the GPU into two pixel buffers
+in turn and shown a frame behind (`sdk/lib/gl3.c`), so the processor and
+the GPU work at the same time; `BGL3_SYNC=1` copies each frame at the swap as
+before (the processor waiting for the GPU).
+
 Like every OpenGL app, Java uses a supported GPU by default (`gpu3d off`
 switches it off). Start Java again after switching. Run `glinfo` to see the renderer
 that apps will get. Minecraft also reports it in its log and F3 screen. Each
