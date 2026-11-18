@@ -39,6 +39,8 @@ extern void exit(int);
 /* the microcode, as the kernel has it */
 __asm__(".section .rodata\n.balign 4\n"
         ".global rad_fw_caicos_pfp\nrad_fw_caicos_pfp:\n.incbin \"firmware/amd/CAICOS_pfp.bin\"\n.global rad_fw_caicos_pfp_end\nrad_fw_caicos_pfp_end:\n"
+        ".balign 4\n.global rad_fw_turks_pfp\nrad_fw_turks_pfp:\n.incbin \"firmware/amd/TURKS_pfp.bin\"\n.global rad_fw_turks_pfp_end\nrad_fw_turks_pfp_end:\n"
+        ".balign 4\n.global rad_fw_barts_pfp\nrad_fw_barts_pfp:\n.incbin \"firmware/amd/BARTS_pfp.bin\"\n.global rad_fw_barts_pfp_end\nrad_fw_barts_pfp_end:\n"
         ".balign 4\n.global rad_fw_caicos_me\nrad_fw_caicos_me:\n.incbin \"firmware/amd/CAICOS_me.bin\"\n.global rad_fw_caicos_me_end\nrad_fw_caicos_me_end:\n"
         ".balign 4\n.global rad_fw_btc_rlc\nrad_fw_btc_rlc:\n.incbin \"firmware/amd/BTC_rlc.bin\"\n.global rad_fw_btc_rlc_end\nrad_fw_btc_rlc_end:\n"
         ".balign 4\n.global rad_fw_caicos_mc\nrad_fw_caicos_mc:\n.incbin \"firmware/amd/CAICOS_mc.bin\"\n.global rad_fw_caicos_mc_end\nrad_fw_caicos_mc_end:\n"
@@ -92,7 +94,7 @@ static radeon_t rt;
 struct radeon* gpu_radeon_card(void) { return &rt; }
 uint64_t gpu_radeon_display_end(void) { return 64ull << 20; }
 int gpu_radeon_3d(char* msg, int cap) { kstrlcpy(msg, "model: not started", (size_t)cap); return -1; }
-const char* rad_family_name(int f) { return f == CHIP_CAICOS ? "Caicos" : f == CHIP_CEDAR ? "Cedar" : f == CHIP_JUNIPER ? "Juniper" : "?"; }
+const char* rad_family_name(int f) { return f == CHIP_CAICOS ? "Caicos" : f == CHIP_CEDAR ? "Cedar" : f == CHIP_JUNIPER ? "Juniper" : f == CHIP_TURKS ? "Turks" : f == CHIP_BARTS ? "Barts" : "?"; }
 
 /* ---- the card ---- */
 static uint32_t VRAM_MB = 1024, REAL_MB = 1024;
@@ -235,7 +237,8 @@ static int model_boot(const char* mode, char* why, int cap) {
     if (!strcmp(mode, "fake2g")) VRAM_MB = 2048;
     if (!strcmp(mode, "real2g")) VRAM_MB = REAL_MB = 2048;
     g_cedar = !strcmp(mode, "cedar");
-    FW_PFP = g_cedar ? rad_fw_cedar_pfp : rad_fw_caicos_pfp;
+    int turks = !strcmp(mode, "turks"), barts = !strcmp(mode, "barts");
+    FW_PFP = g_cedar ? rad_fw_cedar_pfp : turks ? rad_fw_turks_pfp : barts ? rad_fw_barts_pfp : rad_fw_caicos_pfp;
     FW_ME = g_cedar ? rad_fw_cedar_me : rad_fw_caicos_me;
     FW_RLC = g_cedar ? rad_fw_cedar_rlc : rad_fw_btc_rlc;
     VR = calloc(1, VRAM_HOST);
@@ -246,8 +249,8 @@ static int model_boot(const char* mode, char* why, int cap) {
     R[MC_VM_SYSTEM_APERTURE_HIGH_ADDR / 4] = !strcmp(mode, "wideap") ? 0x0FFFFFFFu : ((VRAM_MB << 20) - 1) >> 12;
     g_cp_alive = strcmp(mode, "dead") != 0;
     g_gddr5 = !strcmp(mode, "gddr5");
-    rt.family = g_cedar ? CHIP_CEDAR : !strcmp(mode, "juniper") ? CHIP_JUNIPER : CHIP_CAICOS;
-    rt.pci.device = 0x6779;
+    rt.family = g_cedar ? CHIP_CEDAR : !strcmp(mode, "juniper") ? CHIP_JUNIPER : turks ? CHIP_TURKS : barts ? CHIP_BARTS : CHIP_CAICOS;
+    rt.pci.device = turks ? 0x6758 : barts ? 0x6738 : 0x6779;    /* (HD 6670, HD 6870, HD 7450) */
     return rad_gfx_init(&rt, (uintptr_t)VR, 0, VISIBLE, why, cap);
 }
 

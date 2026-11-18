@@ -490,7 +490,7 @@ static int info(struct info_k* in) {
     case INFO_MAX_SE: v = rd->config.evergreen.num_ses; break;
     case INFO_MAX_SH_PER_SE: v = 1; break;
     case INFO_ACTIVE_CU_COUNT: v = rd->config.evergreen.active_simds; break;
-    case INFO_MAX_SCLK: v = 625000; break;                    /* (kHz: the HD 6450 / 7450's engine clock) */
+    case INFO_MAX_SCLK: v = g_card->clk.default_sclk ? g_card->clk.default_sclk * 10u : 625000; break;   /* (kHz: the video BIOS's) */
     case INFO_WANT_HYPERZ: case INFO_WANT_CMASK: v = 0; break; /* (r300's: not granted) */
     case INFO_FASTFB_WORKING: v = 0; break;
     case INFO_VRAM_USAGE: v = g_vram_used; wide = 1; break;

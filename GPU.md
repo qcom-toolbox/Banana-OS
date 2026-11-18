@@ -218,7 +218,7 @@ a Caicos) it also sets **modes**:
 what the driver found (`/home/banana/radeon-report` by default): with them,
 a problem on a real card can be replayed on the model.
 
-**The 3D engine (started; Caicos, Cedar).** `gpu radeon 3d` brings up the 3D
+**The 3D engine (started; Caicos, Turks, Barts, Cedar).** `gpu radeon 3d` brings up the 3D
 engine of a Radeon HD 6450 / 7450 / 8450 (Caicos) - or of the HD 5450 /
 6350 / 7350 (Cedar) that many cheap "HD 7450"s really are - as Linux's
 `evergreen_startup` does, with Linux's own code for it

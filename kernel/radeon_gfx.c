@@ -70,6 +70,8 @@ static uint64_t g_gfx_off = 128ull << 20;
     extern const uint8_t name[], name##_end[];
 #ifndef RADEON_MODEL
 FW(rad_fw_caicos_pfp, "CAICOS_pfp.bin")
+FW(rad_fw_turks_pfp,  "TURKS_pfp.bin")
+FW(rad_fw_barts_pfp,  "BARTS_pfp.bin")
 FW(rad_fw_caicos_me,  "CAICOS_me.bin")
 FW(rad_fw_btc_rlc,    "BTC_rlc.bin")
 FW(rad_fw_caicos_mc,  "CAICOS_mc.bin")
@@ -82,6 +84,7 @@ extern const uint8_t rad_fw_caicos_pfp[], rad_fw_caicos_pfp_end[], rad_fw_caicos
 extern const uint8_t rad_fw_btc_rlc[], rad_fw_btc_rlc_end[], rad_fw_caicos_mc[], rad_fw_caicos_mc_end[];
 extern const uint8_t rad_fw_cedar_pfp[], rad_fw_cedar_pfp_end[], rad_fw_cedar_me[], rad_fw_cedar_me_end[];
 extern const uint8_t rad_fw_cedar_rlc[], rad_fw_cedar_rlc_end[];
+extern const uint8_t rad_fw_turks_pfp[], rad_fw_turks_pfp_end[], rad_fw_barts_pfp[], rad_fw_barts_pfp_end[];
 extern const uint8_t rad_fw_licence[], rad_fw_licence_end[];
 #endif
 #define FWOF(n) (struct firmware){ n, (size_t)(n##_end - n) }
@@ -297,8 +300,9 @@ const char* rad_gfx_status(void) { return g_status; }
 int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, uint64_t visible, char* why, int cap) {
     if (g_state > 0) { kstrlcpy(why, "already up", (size_t)cap); return 0; }
     struct radeon_device* rdev = &g_dev;
-    if (rt->family != CHIP_CAICOS && rt->family != CHIP_CEDAR) {
-        ksnprintf(g_status, sizeof(g_status), "no microcode for %s (only Caicos: HD 6450 / 7450 / 8450; Cedar: HD 5450 / 6350 / 7350)",
+    if (rt->family != CHIP_CAICOS && rt->family != CHIP_TURKS && rt->family != CHIP_BARTS && rt->family != CHIP_CEDAR) {
+        ksnprintf(g_status, sizeof(g_status), "no microcode for %s (only Caicos: HD 6450 / 7450 / 8450; Turks: HD 6570 / 6670 / 7570 / 7670; "
+                  "Barts: HD 6790 / 6850 / 6870; Cedar: HD 5450 / 6350 / 7350)",
                   rad_family_name(rt->family));
         kstrlcpy(why, g_status, (size_t)cap);
         return -1;
@@ -358,9 +362,12 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, uint64_t vi
     memset(g_dummy, 0, 4096);
     rdev->dummy_page.addr = RAD_PHYS(g_dummy);
 
-    /* (Cedar is Evergreen: its memory controller needs no microcode) */
-    int ni = rt->family == CHIP_CAICOS;
-    g_pfp = ni ? FWOF(rad_fw_caicos_pfp) : FWOF(rad_fw_cedar_pfp);
+    /* (Cedar is Evergreen: its memory controller needs no microcode. Barts,
+     *  Turks and Caicos - Northern Islands - share linux-firmware's ME and MC
+     *  microcode byte for byte (firmware/amd/README.md); each has its PFP) */
+    int ni = rt->family == CHIP_CAICOS || rt->family == CHIP_TURKS || rt->family == CHIP_BARTS;
+    g_pfp = rt->family == CHIP_TURKS ? FWOF(rad_fw_turks_pfp) : rt->family == CHIP_BARTS ? FWOF(rad_fw_barts_pfp)
+          : ni ? FWOF(rad_fw_caicos_pfp) : FWOF(rad_fw_cedar_pfp);
     g_me  = ni ? FWOF(rad_fw_caicos_me) : FWOF(rad_fw_cedar_me);
     g_rlc = ni ? FWOF(rad_fw_btc_rlc) : FWOF(rad_fw_cedar_rlc);
     g_mc  = FWOF(rad_fw_caicos_mc);

@@ -46,8 +46,9 @@ static void boot(void) {
     real_munmap = dlsym(RTLD_NEXT, "munmap");
     g_quiet = getenv("MODEL_QUIET") != NULL;
     char why[160] = "";
-    int r = model_boot("ok", why, sizeof(why));
-    printf("preload: a Radeon HD 7450 model (Caicos, 1 GiB) on /dev/dri/card0: %s\n", why);
+    const char* chip = getenv("MODEL_CHIP");                 /* (turks, barts: those cards' models; else the HD 7450) */
+    int r = model_boot(chip ? chip : "ok", why, sizeof(why));
+    printf("preload: a Radeon model (%s, device %04x, 1 GiB) on /dev/dri/card0: %s\n", rad_family_name(rt.family), rt.pci.device, why);
     if (r) exit(2);
 }
 
