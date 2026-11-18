@@ -576,7 +576,17 @@ int rad_gfx_wait(uint32_t seq, int timeout_ms) {
     if (!seq) return 0;
     uint32_t t0 = timer_ms();
     while (!rad_gfx_seq_done(seq)) {
-        if (timeout_ms >= 0 && timer_ms() - t0 >= (uint32_t)timeout_ms) return -1;
+        if (timeout_ms >= 0 && timer_ms() - t0 >= (uint32_t)timeout_ms) {
+            /* (once per stuck submission: what the engine is doing, for dmesg) */
+            static uint32_t told;
+            if (told != seq) {
+                told = seq;
+                struct radeon_device* rdev = &g_dev;
+                klog("radeon: the GPU has not finished submission %u in %d ms (done: %u): RPTR %x WPTR %x GRBM %08x SRBM %08x - gpu3d off sends apps to the processor\n",
+                     seq, timeout_ms, rad_gfx_completed(), RREG32(CP_RB_RPTR), RREG32(CP_RB_WPTR), RREG32(GRBM_STATUS), RREG32(SRBM_STATUS));
+            }
+            return -1;
+        }
         task_yield();
     }
     return 0;
