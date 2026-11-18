@@ -28,6 +28,8 @@ size_t kstrlcpy(char* d, const char* s, size_t n) { size_t l = strlen(s); if (n)
 void klog(const char* f, ...) { char b[256]; __builtin_va_list a; __builtin_va_start(a, f); vsnprintf(b, sizeof(b), f, a); __builtin_va_end(a); printf("    klog: %s", b); }
 static uint64_t g_ns;
 uint64_t timer_counter(void) { return g_ns += 100000; }
+uint64_t timer_counter_per_ms(void) { return 1000000; }
+uint32_t klog_read(char* out, uint32_t cap) { (void)out; (void)cap; return 0; }
 int mmio_map(uint64_t phys, uint64_t size) { (void)phys; (void)size; return 1; }
 int paging_set_wc(uint64_t phys, uint64_t size) { (void)phys; (void)size; return 0; }
 static fb_info_t g_fb;

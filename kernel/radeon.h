@@ -34,6 +34,7 @@ typedef struct {
 typedef struct {
     uint32_t ref_freq, pll_out_min, pll_out_max, pll_in_min, pll_in_max;
     uint32_t max_pixel_clock, default_dispclk, dp_extclk;
+    uint32_t default_sclk, default_mclk;      /* the engine's and the memory's clocks (the display watermarks) */
 } rad_clocks_t;
 
 #define RAD_PATHS 8

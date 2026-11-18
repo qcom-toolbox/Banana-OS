@@ -12,3 +12,6 @@ gcc -O1 -g -fsanitize=address,undefined -fno-sanitize=shift --param asan-globals
 for mode in ok gddr5 dead cedar real2g fake2g juniper wideap drm; do
     ASAN_OPTIONS=detect_leaks=0 "$out/test" $mode
 done
+# the display's watermarks against the 3D engine's memory traffic (Linux's arithmetic)
+gcc -O1 -g -fsanitize=address,undefined -Wall -I kernel tools/tests/radeon_wm.c third_party/radeon/evergreen_wm.c -o "$out/wm"
+"$out/wm"

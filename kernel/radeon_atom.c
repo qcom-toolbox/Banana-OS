@@ -274,6 +274,8 @@ static void read_clocks(radeon_t* r) {
     const ATOM_FIRMWARE_INFO* f = (const ATOM_FIRMWARE_INFO*)fi;
     const ATOM_FIRMWARE_INFO_V2_1* f21 = (const ATOM_FIRMWARE_INFO_V2_1*)fi;
     c->ref_freq = f->usReferenceClock;
+    c->default_sclk = f->ulDefaultEngineClock;
+    c->default_mclk = f->ulDefaultMemoryClock;
     c->pll_out_min = (frev < 2 && crev < 2) ? f->usMinPixelClockPLL_Output
                                             : ((const ATOM_FIRMWARE_INFO_V1_2*)fi)->ulMinPixelClockPLL_Output;
     c->pll_out_max = f->ulMaxPixelClockPLL_Output;

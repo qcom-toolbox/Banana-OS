@@ -273,6 +273,12 @@ Minecraft too - draw on the Radeon:
   winsys takes the address the kernel maps a buffer at; no DMA or video
   rings. r600's shader compiler is C++ with streams: libstdc++ is linked in
   as the LLVM port links it. OpenGL 4.5 core on Caicos / Cedar.
+- The display's watermarks and priority marks (Linux's
+  `evergreen_program_watermarks`, `third_party/radeon/evergreen_wm.c`) are
+  programmed when the 3D engine starts and at each mode set, priority always
+  on: without them the 3D engine's memory traffic starved the screen (it slid
+  sideways and broke up into lines). The priority mark is computed in 64 bits
+  (Linux's 20.12 product wraps at this card's 17 us latency).
 - Order: r600 (only on a Radeon), then iris, crocus, VirGL, softpipe.
   `gpu3d off` sends apps back to the processor here too; `glinfo` shows the
   renderer ("AMD CAICOS").

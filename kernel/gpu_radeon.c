@@ -31,6 +31,7 @@
 #include "paging.h"
 #include "settings.h"
 #include "radeon.h"
+#include "../third_party/radeon/evergreen_wm.h"
 #include "edid.h"
 #include "fs.h"
 #include "kheap.h"
@@ -49,6 +50,18 @@
 #define CUR_UPDATE                 0x69B8
 #define CRTC_CONTROL               0x6E70
 #define CRTC_STATUS_FRAME_COUNT    0x6E98
+#define CRTC_H_TOTAL               0x6E00   /* (total - 1) */
+#define CRTC_V_TOTAL               0x6E1C
+#define VIEWPORT_SIZE              0x6D74   /* 29:16 width */
+#define DC_LB_MEMORY_SPLIT         0x6B0C
+#define PRIORITY_A_CNT             0x6B18
+#define PRIORITY_B_CNT             0x6B1C
+#define PRIORITY_MARK_MASK         0x7FFFu
+#define PRIORITY_ALWAYS_ON         (1u << 20)
+#define PIPE0_ARBITRATION_CONTROL3 0x0BF0   /* (+ 16 per pipe) */
+#define LATENCY_WATERMARK_MASK(x)  ((uint32_t)(x) << 16)
+#define PIPE0_LATENCY_CONTROL      0x0BF4
+#define MC_SHARED_CHMAP            0x2004
 
 #define CUR_EN            (1u << 0)
 #define CUR_MODE_ARGB     (3u << 8)         /* 24.8, not premultiplied */
@@ -99,6 +112,8 @@ static uint64_t g_cur_off;                 /* the cursor image's offset in video
 static uint64_t g_vram_mc;                 /* ... where the memory controller puts it */
 static int g_cur_w, g_cur_h;
 #define NEW_FB_OFF (64ull << 20)
+static uint32_t g_mode_khz;                   /* the pixel clock of a mode set here; 0: the firmware's */
+static void rad_display_watermarks(void);
 
 static uint32_t rd(uint32_t r) { return r + 4 <= g_reg_size ? *(volatile uint32_t*)(g_reg + r) : 0; }
 static void wr(uint32_t r, uint32_t v) { if (r + 4 <= g_reg_size) *(volatile uint32_t*)(g_reg + r) = v; }
@@ -147,6 +162,8 @@ static int rad_set_mode(gpu_t* g, int w, int h) {
     }
     g_cur_w = w;
     g_cur_h = h;
+    g_mode_khz = best->clock;
+    rad_display_watermarks();
     gpu_set_framebuffer(va, w, h, pitch * 4);
     return 0;
 }
@@ -252,9 +269,71 @@ uint64_t gpu_radeon_display_end(void) {
     return end;
 }
 
+/* the display's claim on video memory (Linux's evergreen_program_watermarks):
+ * the latency watermarks and priority marks of the pipe showing the screen,
+ * from its mode, the memory's and engine's clocks and the line buffer. The
+ * firmware leaves them for its own mode, not for a 3D engine taking the
+ * memory's bandwidth: then the display's fetches come too late, the picture
+ * slides sideways and breaks up into lines (seen on an HD 7450 running
+ * Minecraft). Priority is kept high, as Linux's radeon.disp_priority=2:
+ * one screen on a small card, the display first. */
+static void rad_display_watermarks(void) {
+    if (!g_reg || g_dce < 4 || g_dce > 5) return;
+    uint32_t o = g_crtc;
+    uint32_t htotal = (rd(CRTC_H_TOTAL + o) & 0x3FFF) + 1, vtotal = (rd(CRTC_V_TOTAL + o) & 0x3FFF) + 1;
+    uint32_t hdisp = (rd(VIEWPORT_SIZE + o) >> 16) & 0x3FFF;
+    if (!hdisp) hdisp = (uint32_t)g_cur_w;
+    uint32_t khz = g_mode_khz;
+    if (!khz) {
+        /* the firmware's mode: its refresh measured on the frame counter (or the vsync wait's) */
+        uint64_t period = g_vclock.known ? g_vclock.period_ns : 0;
+        if (!period) {
+            uint64_t per_ms = timer_counter_per_ms(), t0 = 0;
+            uint32_t f = rad_frame(), n = 0;
+            uint64_t start = timer_counter();
+            while (timer_counter() - start < 200 * per_ms && n < 6) {
+                uint32_t g = rad_frame();
+                if (g != f) { f = g; if (!n) t0 = timer_counter(); n++; }
+            }
+            if (n >= 6) period = (timer_counter() - t0) * 1000000ull / per_ms / 5;
+        }
+        if (!period) period = 16666667;                       /* (60 Hz) */
+        khz = (uint32_t)((uint64_t)htotal * vtotal * 1000000ull / period);
+    }
+    if (!khz || htotal <= hdisp) { klog("radeon: display watermarks: no mode to go by (%u kHz, %u/%u)\n", khz, hdisp, htotal); return; }
+    uint32_t split = rd(DC_LB_MEMORY_SPLIT + o) & 7;
+    static const uint32_t LB4[4] = { 3840, 5760, 7680, 1920 }, LB5[4] = { 4096, 6144, 8192, 2048 };
+    uint32_t lb = 2 * (g_dce == 5 ? LB5[split & 3] : LB4[split & 3]);
+    int heads = 0;
+    for (int c = 0; c < 6; c++) if (rd(CRTC_CONTROL + DCE4_CRTC[c]) & 1) heads++;
+    uint32_t chan = (rd(MC_SHARED_CHMAP) & 0x3000) >> 12;
+    struct evergreen_wm_in in = { khz, htotal, hdisp,
+                                  (g_rad.clk.default_mclk ? g_rad.clk.default_mclk : 40000) * 10,
+                                  (g_rad.clk.default_sclk ? g_rad.clk.default_sclk : 40000) * 10,
+                                  1u << chan, lb, (uint32_t)(heads ? heads : 1) };
+    struct evergreen_wm_out w;
+    evergreen_wm_compute(&in, &w);
+    uint32_t pipe = (uint32_t)g_crtc_n * 16;
+    uint32_t arb = rd(PIPE0_ARBITRATION_CONTROL3 + pipe);
+    for (uint32_t set = 1; set <= 2; set++) {                 /* (watermark sets A and B: the same, no clock changes here) */
+        wr(PIPE0_ARBITRATION_CONTROL3 + pipe, (arb & ~LATENCY_WATERMARK_MASK(3)) | LATENCY_WATERMARK_MASK(set));
+        wr(PIPE0_LATENCY_CONTROL + pipe, w.latency | w.line_time << 16);
+    }
+    wr(PIPE0_ARBITRATION_CONTROL3 + pipe, arb);
+    uint32_t before = rd(PRIORITY_A_CNT + o);
+    uint32_t cnt = PRIORITY_ALWAYS_ON | (w.priority_mark & PRIORITY_MARK_MASK);
+    wr(PRIORITY_A_CNT + o, cnt);
+    wr(PRIORITY_B_CNT + o, cnt);
+    klog("radeon: display watermarks (CRTC %d): %u kHz %ux%u total %u, memory %u MHz x %u channels, engine %u MHz, line buffer %u: "
+         "latency %u ns, line %u ns, priority mark %u, always on (was %08x)%s\n",
+         g_crtc_n, khz, hdisp, vtotal, htotal, in.mclk_khz / 1000, in.dram_channels, in.sclk_khz / 1000, lb,
+         w.latency, w.line_time, w.priority_mark, before, w.linux_forces_high ? "; Linux would force it high too" : "");
+}
+
 /* `gpu radeon 3d`: the 3D engine started (and tested) */
 int gpu_radeon_3d(char* msg, int cap) {
     if (!g_reg || g_dce > 5) { kstrlcpy(msg, "no Radeon HD 5000-7000 driven (gpu experimental on, lsgpu)", (size_t)cap); return -1; }
+    rad_display_watermarks();                 /* (before the engine competes for the memory) */
     return rad_gfx_init(&g_rad, g_vb, g_vram_mc, g_vbar, msg, cap);
 }
 
@@ -290,7 +369,15 @@ int gpu_radeon_dump(const char* dir, char* msg, int cap) {
         if (fs_write_path(path, info, (uint32_t)strlen(info)) >= 0) saved++;
         kfree(info);
     }
-    ksnprintf(msg, (size_t)cap, "%d files in %s (radeon-vbios.rom, radeon-regs.bin, radeon-info.txt)", saved, dir);
+    /* the kernel log: what happened, when the screen could not show it */
+    char* log = kmalloc(64u << 10);
+    if (log) {
+        uint32_t len = klog_read(log, 64u << 10);
+        ksnprintf(path, sizeof(path), "%s/radeon-dmesg.txt", dir);
+        if (fs_write_path(path, log, len) >= 0) saved++;
+        kfree(log);
+    }
+    ksnprintf(msg, (size_t)cap, "%d files in %s (radeon-vbios.rom, radeon-regs.bin, radeon-info.txt, radeon-dmesg.txt)", saved, dir);
     return saved ? 0 : -1;
 }
 

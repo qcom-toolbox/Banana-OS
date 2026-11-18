@@ -405,7 +405,7 @@ jobs:
       - name: Test display compatibility in both architectures
         run: |
           for bits in 32 64; do
-            cc -m"$bits" -O1 -I kernel tools/tests/test_gpu_drivers.c kernel/gpu_intel.c kernel/gpu_radeon.c -o "/tmp/display-$bits"
+            cc -m"$bits" -O1 -I kernel tools/tests/test_gpu_drivers.c kernel/gpu_intel.c kernel/gpu_radeon.c third_party/radeon/evergreen_wm.c -o "/tmp/display-$bits"
             "/tmp/display-$bits"
           done
       - name: Test the vsync wait on a simulated display (sleeps, not spins)
