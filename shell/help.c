@@ -235,6 +235,11 @@ static const page_t PAGES[] = {
       "built-in app (bash, Terminal, the App Store...) installed again from the kernel's copy at the next start "
       "from the disk. Your files, settings and password are kept. Only on the live system.",
       NULL, "repair", "update, pkg" },
+    { "checkmedium", "disks", "checkmedium", "check the Banana OS CD / USB stick",
+      "Reads the system on the CD or USB stick back whole and compares it with the checksums it was built "
+      "with (BANANA.SUM): a stick that is worn out or was written badly is found before update, install "
+      "or repair copy it onto a disk - they check it themselves and refuse a damaged one.",
+      NULL, "checkmedium", "update, repair, install" },
     /* ── system ── */
     { "uname", "system", "uname", "the system's name", NULL, NULL, NULL, "neofetch" },
     { "whoami", "system", "whoami", "the user", NULL, NULL, NULL, "passwd" },

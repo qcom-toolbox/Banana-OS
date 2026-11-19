@@ -51,6 +51,7 @@ fi
 python3 tools/serialtest.py --log "$logs/serial.log" \
     --boot-timeout 180 --timeout 180 \
     "${mesa_checks[@]}" \
+    --cmd 'checkmedium ## checkmedium: OK - 3 files as built' \
     --cmd 'laptop ## ACPI AML: ready' \
     --cmd 'usbc ## no ready ACPI UCSI interface' \
     --cmd 'wifi ## no supported radio detected' \

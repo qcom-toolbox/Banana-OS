@@ -11,6 +11,7 @@
 #include "terminal.h"
 #include "timer.h"
 #include "sysinfo.h"
+#include "fsdisk.h"
 #include "keyboard.h"
 #include "gfx.h"
 #include "fb.h"
@@ -3636,6 +3637,18 @@ void gui_set_enabled(int enabled) {
     if (!enabled) hw_cursor_hide();
     while (keyboard_take_fkey()) {}          /* (pressed while the desktop was off) */
     g_gui_enabled = enabled ? 1 : 0;
+    /* the live USB stick / CD started while Banana OS is installed on a disk:
+     * said plainly, once - its programs come from the stick, the installed
+     * system's files, settings and network are not used (pulling the stick
+     * out breaks the programs) */
+    static int told_live;
+    if (enabled && !told_live && sysinfo_live_boot() && fsdisk_find_install(NULL)) {
+        told_live = 1;
+        notify_post("desktop", _("Running the live USB stick / CD"),
+                    _("Banana OS is installed on a disk here, but this PC started the live stick: its programs come "
+                      "from the stick, and your installed files, settings and network are not used. To use the "
+                      "installed system, remove the stick and restart (or choose the disk in the PC's boot menu)."), 0);
+    }
     g_ptr_drawn_x = -1;              /* no pointer on the screen until the desktop draws one */
     g_menu_open = 0;
     g_force_redraw = 1;

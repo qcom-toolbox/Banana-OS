@@ -11,6 +11,8 @@
 #include "../crypto/sha256.h"
 #include "timer.h"
 #include "fsdisk.h"
+#include "ext4.h"
+#include "notification.h"
 
 extern const uint8_t app_webworker[],app_webworker_end[];
 extern const uint8_t app_mediaplayer[], app_mediaplayer_end[], app_music[], app_music_end[], app_amethyst[], app_amethyst_end[], app_photos[], app_photos_end[], app_code[], app_code_end[], app_store[], app_store_end[], app_terminal[], app_terminal_end[];
@@ -141,8 +143,51 @@ static int skipped(const char* name) {
     return 0;
 }
 
+/* ── what was just installed, read back from the disk itself ─────────
+ * After an update or a repair the built-in packages are unpacked onto the
+ * installed disk at this start. Then everything is written out, the RAM
+ * copies of the files and the disk cache are let go, and every program and
+ * library of those packages is read back from the disk and compared with
+ * the package (pkg verify's CRCs): a file the disk did not keep is
+ * installed again once, and if it is still wrong it is said - in dmesg and
+ * as a notification - instead of being found as "not an ELF program". */
+static char g_fresh[64][32];
+static int  g_nfresh;
+
+static void verify_fresh_on_disk(void) {
+    if (!g_nfresh || !fsdisk_is_installed()) return;
+    uint32_t t0 = timer_ms();
+    for (int pass = 0; pass < 2 && g_nfresh; pass++) {
+        if (fsdisk_sync_durable() != 0) { klog("apps: the disk could not be written out to check the apps\n"); return; }
+        fs_evict(0xFFFFFFFFu, 0);                     /* (the files' RAM copies: read from the disk again) */
+        ext4_cache_trim(0xFFFFFFFFu);                 /* (and the disk's block cache) */
+        int left = 0;
+        for (int i = 0; i < g_nfresh; i++) {
+            char first[64], msg[160];
+            int bad = pkg_verify(g_fresh[i], 1, first, sizeof(first));
+            if (bad <= 0) continue;
+            if (pass == 0) {
+                klog("apps: %s: %s (and %d more) did not read back from the disk as written - installing again\n",
+                     g_fresh[i], first, bad - 1);
+                if (builtin_app_reinstall(g_fresh[i], msg, sizeof(msg)) == 0) kstrlcpy(g_fresh[left++], g_fresh[i], sizeof(g_fresh[0]));
+                else klog("apps: %s: %s\n", g_fresh[i], msg);
+            } else {
+                char body[256];
+                ksnprintf(body, sizeof(body), "%s of %s still does not read back from the disk as it was written, after "
+                          "installing it twice: the disk or its controller is not keeping what is written. dmesg has more.",
+                          first, g_fresh[i]);
+                klog("apps: %s: %s STILL reads back wrong from the disk after a second install\n", g_fresh[i], first);
+                notify_post("system", "Disk check", body, 0);
+            }
+        }
+        g_nfresh = pass == 0 ? left : 0;
+    }
+    klog("apps: the apps just installed were read back from the disk and checked (%u ms)\n", timer_ms() - t0);
+}
+
 void builtin_apps_install(void) {
-    if (g_released) return;                       /* (the kernel's copies are gone: checked at boot) */
+    if (g_released) return;
+    g_nfresh = 0;                       /* (the kernel's copies are gone: checked at boot) */
     uint32_t t0 = timer_ms();
     int unpacked = 0;
     for (unsigned i = 0; i < sizeof(APPS) / sizeof(APPS[0]); i++) {
@@ -198,6 +243,7 @@ void builtin_apps_install(void) {
                 if (pkg_install_mem(bpk, (uint32_t)len, msg, sizeof(msg)) == 0) {
                     mark(mine.name, mine.version, crc, zcrc);
                     klog("apps: %s\n", msg);
+                    if (g_nfresh < 64) kstrlcpy(g_fresh[g_nfresh++], mine.name, sizeof(g_fresh[0]));
                 } else klog("apps: %s: %s\n", mine.name, msg);
             } else if (installed && !marked_z(mine.name, zcrc)) {
                 mark(mine.name, mine.version, crc, zcrc);        /* (known now: not unpacked at the next boots) */
@@ -207,6 +253,7 @@ void builtin_apps_install(void) {
     }
     if (fs_find_file(REPAIRS) >= 0) fs_delete(REPAIRS, 0);     /* (done) */
     if (unpacked) klog("apps: built-in apps checked in %u ms (%d unpacked)\n", timer_ms() - t0, unpacked);
+    verify_fresh_on_disk();
     repo_builtin_refresh();          /* the App Store can install them again (builtin: source) */
 }
 

@@ -24,6 +24,7 @@
 #define FSDISK_ERR_FULL        -7 /* the files are past what a slot on this disk holds */
 #define FSDISK_ERR_FROZEN      -9 /* durable sync cannot complete during a backup freeze */
 #define FSDISK_ERR_NO_INSTALL  -8 /* no disk holds an installed Banana OS */
+#define FSDISK_ERR_BAD_SOURCE -10 /* the CD / USB stick does not read back as built (fsdisk_medium_why) */
 
 /* Looks for exactly one non-ATAPI ATA disk attached (any bus/position).
  * Returns 1 and fills *out if exactly one was found, 0 if none, -1 if
@@ -125,5 +126,11 @@ int  fsdisk_swap_area(uint32_t want, uint32_t min, uint32_t* lba, uint32_t* sect
 int  fsdisk_swap_io(int write, uint32_t lba, uint32_t n, void* buf);
 /* the installed disk's filesystem: "ext4", or "bananafs" (layouts 3-5); "ramfs": none */
 const char* fsdisk_fs_type(void);
+
+/* the CD / USB stick update and install copy from, read back whole against
+ * its checksum list: 0 as built, 1 an older image without one, -1 damaged
+ * (why: which file), -2 none found */
+int fsdisk_check_medium(char* why, int cap);
+const char* fsdisk_medium_why(void);         /* what the last check found */
 
 #endif

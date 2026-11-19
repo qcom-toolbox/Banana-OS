@@ -1298,7 +1298,7 @@ static const char* const known_cmds[] = {
     "ls", "cd", "pwd", "mkdir", "rm", "touch", "cp", "mv", "edit", "cat", "run",
     "uptime", "boottime", "top", "exit", "start", "stop", "startx", "stopx",
     "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
-    "hw_info", "shutdown", "reboot", "halt", "sleep", "install", "sync", "drop_caches", "update", "repair", "installer", "disks", "history", "which", "type",
+    "hw_info", "shutdown", "reboot", "halt", "sleep", "install", "sync", "checkmedium", "drop_caches", "update", "repair", "installer", "disks", "history", "which", "type",
     "alias", "unalias", "export", "unset", "env", "chsh", "autologin",
     "grep", "wc", "head", "tail", "find", "time", "nice",
     /* shell/netcmds.c + shell/wpcmd.c */
@@ -2094,8 +2094,18 @@ static void cmd_update_mode(const char* args, int repair) {
     if (rc == FSDISK_OK) print_timing("update", "wrote");
     if (rc == FSDISK_OK) {
         terminal_write_color(
-            "update: done. Remove the CD (or boot from the disk) and restart to use the new version.\n",
+            "update: done - the new system on the disk was read back and checked.\n",
             VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        terminal_write_color(
+            "        NOW REMOVE THE USB STICK (or CD), then restart. With it still plugged in,\n"
+            "        the PC may start this live stick again instead of your installed system\n"
+            "        (its programs then come from the stick, your files and settings are not used).\n",
+            VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    } else if (rc == FSDISK_ERR_BAD_SOURCE) {
+        terminal_write_color("update: this USB stick / CD does not read back as it was built - nothing was\n"
+                             "        written to the disk. Write the ISO to the stick again (or use another\n"
+                             "        stick) and retry. What was found:\n        ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln(fsdisk_medium_why());
     } else if (rc == FSDISK_ERR_ISO_TOO_BIG) {
         terminal_write_color("update: this CD's system is too big for the disk's boot area.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     } else if (rc == FSDISK_ERR_TOO_SMALL || rc == FSDISK_ERR_FULL) {
@@ -2105,6 +2115,18 @@ static void cmd_update_mode(const char* args, int repair) {
         terminal_write_color("update: failed (disk I/O error). Your files are untouched; run 'update' again.\n",
                              VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     }
+}
+
+/* checkmedium: the CD / USB stick read back whole against its checksum list */
+static void cmd_checkmedium(void) {
+    char why[160];
+    terminal_writeln("checkmedium: reading the Banana OS CD / USB stick back...");
+    terminal_flush();
+    int r = fsdisk_check_medium(why, sizeof(why));
+    if (r == 0) terminal_write_color("checkmedium: OK - ", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    else if (r == 1) terminal_write_color("checkmedium: ", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    else terminal_write_color("checkmedium: DAMAGED - ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+    terminal_writeln(why);
 }
 
 static void cmd_sync(void) {
@@ -2732,6 +2754,7 @@ static void dispatch_plain(const char* line, int persona) {
     if (k_strcmp(line, "disks")    == 0) { cmd_disks();       return; }
     if (k_strcmp(line, "install")  == 0 || k_strncmp(line, "install ", 8) == 0) { cmd_install(line + 7); return; }
     if (k_strcmp(line, "sync")     == 0) { cmd_sync();        return; }
+    if (k_strcmp(line, "checkmedium") == 0) { cmd_checkmedium(); return; }
     if (k_strcmp(line, "update")   == 0 || k_strncmp(line, "update ", 7) == 0) { cmd_update(line + 6); return; }
     if (k_strcmp(line, "repair")   == 0 || k_strncmp(line, "repair ", 7) == 0) { cmd_update_mode(line + 6, 1); return; }
     if (k_strcmp(line, "nice") == 0 || k_strncmp(line, "nice ", 5) == 0) {

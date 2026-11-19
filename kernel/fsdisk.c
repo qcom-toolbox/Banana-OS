@@ -14,6 +14,7 @@
 #include "task.h"
 #include "blockdev.h"
 #include "crc32c.h"
+#include "deflate.h"
 
 #define FSDISK_MAGIC   0x414E4142u /* "BANA" */
 #define FSDISK_VERSION 3u   /* = FS_SNAPSHOT_V3; version 1 and 2 disks (Banana OS 0.4, 0.5) still load */
@@ -151,6 +152,8 @@ static int find_source(img_src_t* out) {
  * /boot/kernel64.bin instead of keeping them in RAM. ISO 9660 keeps a file
  * in one run of blocks: its first block and size are enough. */
 static img_src_t g_boot_src;
+static char      g_medium_why[160];             /* what the last check of the CD / USB stick found */
+const char* fsdisk_medium_why(void) { return g_medium_why; }
 static int       g_boot_src_ok = -1;           /* -1: not looked for yet */
 
 static int boot_src(void) {
@@ -160,12 +163,12 @@ static int boot_src(void) {
 
 /* the record of name (ISO 9660 level-1 name, ";1" ignored, any case) in the
  * directory at lba (size bytes) */
-static int iso_find(uint32_t lba, uint32_t size, const char* name, uint32_t* out_lba, uint32_t* out_size, int* is_dir) {
+static int iso_find(const img_src_t* src, uint32_t lba, uint32_t size, const char* name, uint32_t* out_lba, uint32_t* out_size, int* is_dir) {
     if (!size || size > (1u << 20)) return -1;
     uint8_t* d = (uint8_t*)kmalloc(size);
     if (!d) return -1;
     int found = -1;
-    if (src_read(&g_boot_src, lba, (size + 2047u) / 2048u, d) == 0) {
+    if (src_read(src, lba, (size + 2047u) / 2048u, d) == 0) {
         uint32_t nlen = (uint32_t)strlen(name);
         for (uint32_t i = 0; i < size && found < 0;) {
             uint32_t l = d[i];
@@ -196,11 +199,11 @@ static int iso_find(uint32_t lba, uint32_t size, const char* name, uint32_t* out
     return found;
 }
 
-int fsdisk_boot_file(const char* path, uint64_t* offset, uint32_t* size) {
-    if (!boot_src()) return -1;
+/* a file of the image on src by its path: where it starts (bytes) and its size */
+static int src_file(const img_src_t* src, const char* path, uint64_t* offset, uint32_t* size) {
     uint8_t* pvd = (uint8_t*)kmalloc(2048);
     if (!pvd) return -1;
-    int ok = src_read(&g_boot_src, 16, 1, pvd) == 0 && pvd[0] == 1 && memcmp(pvd + 1, "CD001", 5) == 0;
+    int ok = src_read(src, 16, 1, pvd) == 0 && pvd[0] == 1 && memcmp(pvd + 1, "CD001", 5) == 0;
     uint32_t lba = 0, sz = 0;
     if (ok) {
         const uint8_t* r = pvd + 156;                /* the root directory's record */
@@ -219,12 +222,91 @@ int fsdisk_boot_file(const char* path, uint64_t* offset, uint32_t* size) {
         p += n;
         while (*p == '/') p++;
         int dir = 0;
-        if (iso_find(lba, sz, part, &lba, &sz, &dir) != 0) return -1;
+        if (iso_find(src, lba, sz, part, &lba, &sz, &dir) != 0) return -1;
         if (*p && !dir) return -1;
     }
     *offset = (uint64_t)lba * 2048u;
     *size = sz;
     return 0;
+}
+
+int fsdisk_boot_file(const char* path, uint64_t* offset, uint32_t* size) {
+    return boot_src() ? src_file(&g_boot_src, path, offset, size) : -1;
+}
+
+/* ── the CD or USB stick checked before it is used ─────────────────────
+ * The image carries BANANA.SUM (tools/iso_sums.py): "crc32 size path" of
+ * its kernels and its EFI image - every built-in program is inside the
+ * kernels. Update and install read each one back from the medium and
+ * compare before writing anything to the disk: a stick that reads back
+ * wrong (worn out, written badly, pulled halfway) is refused rather than
+ * copied onto the installed system. 0: as built; 1: no list (an older
+ * image - not checked); -1: damaged or unreadable (why says which file) */
+static int check_medium(const img_src_t* src, char* why, int cap) {
+    uint64_t off;
+    uint32_t sz;
+    if (src_file(src, "BANANA.SUM", &off, &sz) != 0 || !sz || sz > 4096) {
+        if (why) kstrlcpy(why, "no checksum list on it (an older image) - not checked", (size_t)cap);
+        klog("fsdisk: the %s has no checksum list (an older image) - not checked\n", src->usb ? "USB stick" : "CD");
+        return 1;
+    }
+    char* list = (char*)kzalloc(sz + 1);
+    uint8_t* buf = (uint8_t*)kmalloc(64u * 2048u);
+    int rc = 0, files = 0;
+    if (!list || !buf || src_read(src, (uint32_t)(off / 2048u), (sz + 2047u) / 2048u, buf) != 0) {
+        if (why) kstrlcpy(why, "its checksum list could not be read", (size_t)cap);
+        rc = -1;
+    } else {
+        memcpy(list, buf, sz);
+    }
+    for (char* line = list; rc == 0 && line && *line; ) {
+        char* nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        uint32_t want = 0, size = 0;
+        char* p = line;
+        for (; *p && *p != ' '; p++) want = want << 4 | (uint32_t)(*p <= '9' ? *p - '0' : (*p | 32) - 'a' + 10);
+        while (*p == ' ') p++;
+        for (; *p >= '0' && *p <= '9'; p++) size = size * 10u + (uint32_t)(*p - '0');
+        while (*p == ' ') p++;
+        if (*p) {
+            uint64_t foff;
+            uint32_t fsz;
+            if (src_file(src, p, &foff, &fsz) != 0 || fsz != size) {
+                if (why) ksnprintf(why, (size_t)cap, "%s is missing or the wrong size", p);
+                rc = -1;
+                break;
+            }
+            uint32_t crc = 0;
+            for (uint32_t done = 0; done < fsz && rc == 0; ) {
+                uint32_t n = fsz - done < 64u * 2048u ? fsz - done : 64u * 2048u;
+                if (src_read(src, (uint32_t)(foff / 2048u) + done / 2048u, (n + 2047u) / 2048u, buf) != 0) {
+                    if (why) ksnprintf(why, (size_t)cap, "%s could not be read (at %u KB)", p, done >> 10);
+                    rc = -1;
+                    break;
+                }
+                crc = crc32_update(crc, buf, n);
+                done += n;
+                task_yield();
+            }
+            if (rc == 0 && crc != want) {
+                if (why) ksnprintf(why, (size_t)cap, "%s reads back wrong (CRC %08x, should be %08x)", p, crc, want);
+                rc = -1;
+            }
+            files++;
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+    kfree(list);
+    kfree(buf);
+    if (rc == 0 && why) ksnprintf(why, (size_t)cap, "%d files as built, read back whole", files);
+    klog("fsdisk: the %s checked: %s%s\n", src->usb ? "USB stick" : "CD", rc < 0 ? "DAMAGED - " : "", why ? why : "");
+    return rc;
+}
+
+int fsdisk_check_medium(char* why, int cap) {
+    img_src_t src;
+    if (!find_source(&src)) { if (why) kstrlcpy(why, "no Banana OS CD or USB stick found", (size_t)cap); return -2; }
+    return check_medium(&src, why, cap);
 }
 
 int fsdisk_boot_read(uint64_t offset, uint32_t len, void* buf) {
@@ -2151,6 +2233,7 @@ int fsdisk_install_to(const ata_disk_t* tp) {
 
     uint32_t iso_bytes;
     if (src_iso_size(&source, &iso_bytes) != 0) { klog("install: the image's size could not be read\n"); return FSDISK_ERR_NO_SOURCE; }
+    if (check_medium(&source, g_medium_why, sizeof(g_medium_why)) < 0) return FSDISK_ERR_BAD_SOURCE;
     klog("install: from the %s (%u MB) to %s, %llu MB\n", source.usb ? "USB stick" : "CD", iso_bytes >> 20,
          target.model, (unsigned long long)(target.sectors >> 11));
     uint32_t base = boot_install_base(iso_bytes);
@@ -2643,6 +2726,7 @@ int fsdisk_update_on(const ata_disk_t* dp) {
     dst = *dp;
     if (!fsdisk_holds_banana(&dst)) return FSDISK_ERR_NO_INSTALL;
     if (!find_source(&src) || src_iso_size(&src, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
+    if (check_medium(&src, g_medium_why, sizeof(g_medium_why)) < 0) return FSDISK_ERR_BAD_SOURCE;
     uint8_t partition[16];
     uint32_t base = boot_partition(&dst, partition);
     if (!base) return FSDISK_ERR_IO;

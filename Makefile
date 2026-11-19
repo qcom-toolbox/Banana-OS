@@ -192,9 +192,10 @@ isoroot/efi.img: tools/format_efi.py loader/BOOTX64.EFI loader/BOOTIA32.EFI kern
 
 # the image: an ISO9660 CD (El Torito: the BIOS loader, and the EFI
 # partition for UEFI) that tools/mkimage.py makes a disk too (MBR)
-Banana_OS.iso: kernel.bin kernel64.bin loader/mbr.bin loader/bios.bin isoroot/efi.img tools/mkimage.py
+Banana_OS.iso: kernel.bin kernel64.bin loader/mbr.bin loader/bios.bin isoroot/efi.img tools/mkimage.py tools/iso_sums.py
 	mkdir -p isoroot/boot
 	cp kernel.bin kernel64.bin loader/bios.bin isoroot/boot/
+	python3 tools/iso_sums.py isoroot boot/kernel.bin boot/kernel64.bin efi.img      # (not bios.bin: xorriso writes its boot info table into it)
 	xorriso -as mkisofs -quiet -o $@ -R -J -V BANANA_OS \
 	    -b boot/bios.bin -no-emul-boot -boot-load-size 4 -boot-info-table \
 	    -eltorito-alt-boot -e efi.img -no-emul-boot isoroot
