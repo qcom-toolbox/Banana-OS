@@ -9,6 +9,8 @@
 #include "gfx.h"
 #include "display.h"
 #include "gpu.h"
+#include "buildinfo.h"
+#include "../shell/shell.h"
 #include "kstring.h"
 #include "kheap.h"
 #include "timer.h"
@@ -65,8 +67,8 @@ void shell_power(int reboot);
 #define C_ACCENT TC(0x3A7BD5)
 #define C_SEL    TC(0x2C3E5C)
 
-enum { PG_DISPLAY = 0, PG_THEMES, PG_FONTS, PG_SCREEN, PG_TASKBAR, PG_SOUND, PG_KEYBOARD, PG_LANGUAGE, PG_MOUSE, PG_NETWORK, PG_TIME, PG_STARTUP, PG_APPS, PG_ABOUT, PG_WIFI, PG_POWER, PG_COUNT };
-static const char* const PAGE_NAMES[PG_COUNT] = { "Wallpaper", "Themes", "Fonts", "Screen", "Taskbar", "Sound", "Keyboard", "Language", "Mouse", "Network", "Date & time", "Startup", "Apps", "About", "Wi-Fi", "Power & USB-C" };
+enum { PG_DISPLAY = 0, PG_THEMES, PG_FONTS, PG_SCREEN, PG_TASKBAR, PG_SOUND, PG_KEYBOARD, PG_LANGUAGE, PG_MOUSE, PG_NETWORK, PG_TIME, PG_STARTUP, PG_APPS, PG_ABOUT, PG_WIFI, PG_POWER, PG_UPDATE, PG_COUNT };
+static const char* const PAGE_NAMES[PG_COUNT] = { "Wallpaper", "Themes", "Fonts", "Screen", "Taskbar", "Sound", "Keyboard", "Language", "Mouse", "Network", "Date & time", "Startup", "Apps", "About", "Wi-Fi", "Power & USB-C", "System update" };
 
 #define KB_ROW 20                           /* Keyboard: a row of the layout list (two columns) */
 
@@ -1558,6 +1560,161 @@ static void draw_about(void) {
         label(x, ly, _("Running: not installed - changes are lost at shutdown"), TC(0xFFB060));
 }
 
+/* ── System update: the installed system from a Banana OS USB stick / CD,
+ * or a Banana_OS.iso file (downloaded, or on a stick holding files) - the
+ * live stick updates the install too. Only the system's boot area is
+ * written, checked as it goes; the files, settings and password stay.
+ * The new system starts at the next restart, which updates the apps. */
+
+static char         g_up_where[120], g_up_build[48], g_up_msg[160];
+static int          g_up_found = -1;                /* -1: not looked yet */
+static volatile int g_up_busy;                      /* the worker task: 1 comparing / writing */
+static volatile int g_up_result = 1;                /* 1 none yet, 2 already the same, else an FSDISK_ code */
+static uint32_t     g_up_msg_color;
+
+static const char* const UP_FILES[] = { "/home/banana/Downloads/Banana_OS.iso", "/home/banana/Banana_OS.iso",
+                                        "/mnt/usb/Banana_OS.iso", "/mnt/usb1/Banana_OS.iso" };
+
+static void up_scan(void) {
+    if (g_up_busy) return;
+    g_up_found = fsdisk_source_info(g_up_where, sizeof(g_up_where), g_up_build, sizeof(g_up_build));
+    /* no stick / CD: a Banana_OS.iso where downloads go */
+    for (unsigned i = 0; !g_up_found && !fsdisk_update_file()[0] && i < sizeof(UP_FILES) / sizeof(UP_FILES[0]); i++)
+        if (fs_find_file(UP_FILES[i]) >= 0 && fsdisk_set_update_file(UP_FILES[i]) == FSDISK_OK)
+            g_up_found = fsdisk_source_info(g_up_where, sizeof(g_up_where), g_up_build, sizeof(g_up_build));
+    g_up_result = 1;
+    g_up_msg[0] = 0;
+    g_gen++;
+}
+
+static int is_iso(const char* n) {
+    uint32_t l = (uint32_t)strlen(n);
+    return l > 4 && (!strcmp(n + l - 4, ".iso") || !strcmp(n + l - 4, ".ISO"));
+}
+static void iso_chosen(const char* path) {
+    if (fsdisk_set_update_file(path) != FSDISK_OK) {
+        kstrlcpy(g_up_msg, "That file is not a Banana OS ISO (Banana_OS.iso).", sizeof(g_up_msg));
+        g_up_msg_color = TC(0xFF8A80);
+        g_up_found = 0;
+        g_gen++;
+        return;
+    }
+    g_up_found = fsdisk_source_info(g_up_where, sizeof(g_up_where), g_up_build, sizeof(g_up_build));
+    g_up_result = 1;
+    g_up_msg[0] = 0;
+    g_gen++;
+}
+
+static void up_task(void) {
+    ata_disk_t d;
+    int rc;
+    if (!fsdisk_find_install(&d)) rc = FSDISK_ERR_NO_INSTALL;
+    else {
+        int same = fsdisk_compare_boot();
+        rc = same == 1 ? 2 : same < 0 ? same : fsdisk_update_on(&d);
+    }
+    g_up_result = rc;
+    g_up_busy = 0;
+    g_gen++;
+}
+
+static void up_start(void) {
+    if (g_up_busy || g_up_found != 1) return;
+    g_up_busy = 1;
+    g_up_result = 1;
+    g_up_msg[0] = 0;
+    if (task_create("sysupdate", up_task) < 0) { g_up_busy = 0; g_up_result = FSDISK_ERR_IO; }
+    g_gen++;
+}
+
+static const char* up_result_text(int rc, uint32_t* color) {
+    *color = TC(0xFF8A80);
+    switch (rc) {
+    case FSDISK_OK: *color = TC(0x80E080);
+        return sysinfo_live_boot() ? "Done, checked. Remove the stick, then restart."
+                                   : "Done, checked. It starts at the next restart.";
+    case 2: *color = TC(0x80E080); return "Already this version - nothing to do.";
+    case FSDISK_ERR_NO_INSTALL:  return "Banana OS is not installed on a disk here.";
+    case FSDISK_ERR_NO_SOURCE:   return "The USB stick / ISO file is gone.";
+    case FSDISK_ERR_ISO_TOO_BIG: return "Too big for the disk's boot area: reinstall.";
+    case FSDISK_ERR_BAD_SOURCE:  return "It reads back damaged - nothing was written.";
+    case FSDISK_ERR_NEEDS_LIVE:  return "Old disk layout: update once from the live stick.";
+    case FSDISK_ERR_TOO_SMALL: case FSDISK_ERR_FULL: return "The disk is too small - nothing was changed.";
+    default:                     return "A disk error - your files are untouched; retry.";
+    }
+}
+
+static void draw_update(void) {
+    int x = cx0(), y = cy0();
+    if (g_up_found < 0) up_scan();
+    char line[200];
+    gfx_draw_text_scaled(x, y, 2, _("System update"), C_HEAD, C_PANEL);
+    ksnprintf(line, sizeof(line), "This system: build %s (commit %s)", banana_build(), banana_commit());
+    label(x, y + 32, line, C_TEXT);
+    int installed = fsdisk_find_install(NULL);
+    label(x, y + 50, sysinfo_live_boot() ? (installed ? "Running the live stick / CD: it updates the install."
+                                                      : "Running the live stick / CD: not installed here.")
+                                         : "Running the installed system.", C_DIM);
+    label(x, y + 80, _("The new version"), C_HEAD);
+    if (g_up_found == 1) {
+        ksnprintf(line, sizeof(line), "%s", g_up_where);
+        if ((int)strlen(line) * 8 > cw()) line[cw() / 8] = 0;
+        label(x, y + 100, line, C_TEXT);
+        char num[24];
+        int k = 0;
+        for (; g_up_build[k] && g_up_build[k] != ' ' && k < (int)sizeof(num) - 1; k++) num[k] = g_up_build[k];
+        num[k] = 0;
+        if (!g_up_build[0]) ksnprintf(line, sizeof(line), "Build: older (no number on it)");
+        else if (g_up_build[k] == ' ') ksnprintf(line, sizeof(line), "Build %s (commit %s)", num, g_up_build + k + 1);
+        else ksnprintf(line, sizeof(line), "Build %s", num);
+        label(x, y + 118, line, C_TEXT);
+    } else {
+        label(x, y + 100, _("No Banana OS USB stick, CD or ISO file found."), TC(0xFFB060));
+        label(x, y + 118, _("Plug in the stick with the new version, or choose Banana_OS.iso."), C_DIM);
+    }
+    kbnav_add(&g_nav, x, y + 144, 110, 20);
+    button(x, y + 144, 110, _("Look again"), 0);
+    kbnav_add(&g_nav, x + 120, y + 144, 150, 20);
+    button(x + 120, y + 144, 150, _("Choose ISO file..."), 0);
+    int can = g_up_found == 1 && installed && !g_up_busy;
+    kbnav_add(&g_nav, x, y + 184, 150, 24);
+    button(x, y + 184, 150, g_up_busy ? _("Updating...") : _("Update now"), can);
+    if (g_up_busy) {
+        uint32_t done = 0, total = 0;
+        fsdisk_progress(&done, &total);
+        int bw = cw() - 170, pct = total ? (int)((uint64_t)done * 100u / total) : 0;
+        bevel(x + 160, y + 186, bw, 20, TC(0x141920), TC(0x10141C), TC(0x404B5C));
+        gfx_fill_rect(x + 162, y + 188, (bw - 4) * pct / 100, 16, C_ACCENT);
+        ksnprintf(line, sizeof(line), "%d%%", pct);
+        label(x + 160 + bw / 2 - 12, y + 192, line, C_HEAD);
+        label(x, y + 220, _("Comparing, then writing - do not switch off."), TC(0xFFB060));
+    } else if (g_up_result != 1) {
+        uint32_t c = 0;
+        const char* t = up_result_text(g_up_result, &c);
+        label(x, y + 220, t, c);
+        if (g_up_result == FSDISK_OK && !sysinfo_live_boot()) {
+            kbnav_add(&g_nav, x, y + 244, 130, 20);
+            button(x, y + 244, 130, _("Restart now"), 1);
+        }
+    } else if (g_up_msg[0]) {
+        label(x, y + 220, g_up_msg, g_up_msg_color);
+    }
+    label(x, y + 280, _("Your files, settings and password are kept: only"), C_DIM);
+    label(x, y + 296, _("the system is replaced, and checked as it is written."), C_DIM);
+    label(x, y + 312, _("Terminal: 'update' or 'update FILE.iso'; 'build'."), C_DIM);
+}
+
+static void click_update(int mx, int my) {
+    int x = cx0(), y = cy0();
+    if (inside(mx, my, x, y + 144, 110, 20)) { fsdisk_set_update_file(NULL); up_scan(); return; }
+    if (inside(mx, my, x + 120, y + 144, 150, 20) && !g_up_busy) {
+        fc_open(_("Choose the Banana OS ISO file (Banana_OS.iso)"), "/home/banana/Downloads", is_iso, iso_chosen);
+        return;
+    }
+    if (inside(mx, my, x, y + 184, 150, 24)) { up_start(); return; }
+    if (g_up_result == FSDISK_OK && !sysinfo_live_boot() && inside(mx, my, x, y + 244, 130, 20)) shell_power(1);
+}
+
 /* ── Apps: the installed apps, with Open, Stop, Update and Uninstall ─ */
 
 #define APPS_MAX   64
@@ -1844,6 +2001,7 @@ void settings_draw(const fb_info_t* fi) {
     case PG_TIME:     draw_time(); break;
     case PG_STARTUP:  draw_startup(); break;
     case PG_APPS:     draw_apps(); break;
+    case PG_UPDATE:   draw_update(); break;
     default:         draw_about(); break;
     }
     if (g_status[0]) gfx_draw_text(x + 10, y + H - 18, g_status, C_DIM, C_PANEL);
@@ -1922,6 +2080,7 @@ void settings_click(int mx, int my) {
     if(g_page==PG_ABOUT && g_sleep_available && inside(mx,my,x+cw()-90,y+28,90,20)) {
         acpi_s3_suspend(0,g_status,sizeof(g_status));g_gen++;return;
     }
+    if (g_page == PG_UPDATE) { click_update(mx, my); g_gen++; return; }
     if (g_page == PG_THEMES) { click_themes(mx, my); g_gen++; return; }
     if (g_page == PG_FONTS) { click_fonts(mx, my); return; }
     if(g_page==PG_DISPLAY) {
@@ -2155,7 +2314,8 @@ uint32_t settings_signature(void) {
     if (!g_open) return 0;
     /* the clock, uptime and network status change by themselves */
     if (g_page == PG_APPS && timer_ms() - g_al_scanned > 2000) apps_scan();     /* installed or removed meanwhile */
-    if (g_page == PG_POWER || g_page == PG_WIFI || g_page == PG_TIME || g_page == PG_NETWORK || g_page == PG_ABOUT || g_page == PG_STARTUP || g_page == PG_APPS) {
+    if (g_page == PG_POWER || g_page == PG_WIFI || g_page == PG_TIME || g_page == PG_NETWORK || g_page == PG_ABOUT || g_page == PG_STARTUP || g_page == PG_APPS ||
+        (g_page == PG_UPDATE && g_up_busy)) {
         uint32_t s = timer_ms() / (g_page == PG_STARTUP || g_page == PG_ABOUT ? 500 : 1000);
         if (s != g_tick_s) { g_tick_s = s; g_gen++; }
     }

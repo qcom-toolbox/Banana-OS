@@ -69,6 +69,9 @@ typedef struct {
     int      skipped;              /* entries that did not fit the tree */
     int      io_err;
     iowait_t lock;                     /* one operation at a time: a disk command may let other tasks run */
+    /* read_at: where the last read ended (node, cluster number in its chain, that cluster) -
+     * a file read in order continues there instead of walking its chain from the start */
+    uint32_t ra_node, ra_index, ra_clus;
 } fvol_t;
 
 static fvol_t* g_vols[FS_MAX_MOUNTS + 1];
@@ -523,6 +526,54 @@ static int op_read_l(void* ctx, uint32_t node, uint8_t* buf, uint32_t size) {
     return read_chain(v, v->nodes[node].first, buf, size);
 }
 
+/* len bytes of a file at off, straight from the stick (a big file - an ISO,
+ * a video - is never read in whole): the bytes read, or -1 */
+static int op_read_at_l(void* ctx, uint32_t node, uint32_t off, uint8_t* out, uint32_t len) {
+    fvol_t* v = (fvol_t*)ctx;
+    if (node >= v->nnodes || !v->nodes[node].used || v->nodes[node].is_dir) return -1;
+    fnode_t* n = &v->nodes[node];
+    v->io_err = 0;
+    if (off >= n->size) return 0;
+    if (len > n->size - off) len = n->size - off;
+    if (!len) return 0;
+    uint32_t want = off / v->clus_bytes, idx = 0, c = n->first;
+    if (v->ra_node == node && v->ra_index <= want && valid_clus(v, v->ra_clus)) { idx = v->ra_index; c = v->ra_clus; }
+    for (; idx < want; idx++) {
+        if (!valid_clus(v, c)) return -1;
+        c = next_clus(v, c);
+    }
+    uint32_t done = 0, in = off % v->clus_bytes;
+    while (done < len) {
+        if (!valid_clus(v, c)) { v->ra_node = ~0u; return -1; }
+        uint32_t left = len - done;
+        if (in == 0 && left >= v->clus_bytes) {
+            /* a run of consecutive clusters, all wholly wanted: one read */
+            uint32_t run = 1, last = c;
+            while ((run + 1) * v->clus_bytes <= left && run < 256) {
+                uint32_t nx = next_clus(v, last);
+                if (nx != last + 1) break;
+                last = nx;
+                run++;
+            }
+            if (dev_read(v, clus_lba(v, c), run * v->spc, out + done) != 0) { v->ra_node = ~0u; return -1; }
+            done += run * v->clus_bytes;
+            idx += run - 1;
+            c = last;
+        } else {
+            uint32_t k = v->clus_bytes - in < left ? v->clus_bytes - in : left;
+            if (dev_read(v, clus_lba(v, c), v->spc, v->cbuf) != 0) { v->ra_node = ~0u; return -1; }
+            memcpy(out + done, v->cbuf + in, k);
+            done += k;
+            if (in + k < v->clus_bytes) break;     /* (ended inside this cluster) */
+        }
+        in = 0;
+        v->ra_node = node; v->ra_index = idx; v->ra_clus = c;
+        if (done < len) { c = next_clus(v, c); idx++; }
+    }
+    v->ra_node = node; v->ra_index = idx; v->ra_clus = c;
+    return (int)len;
+}
+
 static int op_write_l(void* ctx, uint32_t node, const void* data, uint32_t len) {
     fvol_t* v = (fvol_t*)ctx;
     if (node == 0 || node >= v->nnodes || !v->nodes[node].used) return -1;
@@ -694,17 +745,20 @@ static void op_unmount_l(void* ctx) {
 static int op_read(void* ctx, uint32_t node, uint8_t* buf, uint32_t size) {
     fvol_t* v = (fvol_t*)ctx; io_lock(&v->lock); int rc = op_read_l(ctx, node, buf, size); io_unlock(&v->lock); return rc;
 }
+static int op_read_at(void* ctx, uint32_t node, uint32_t off, void* buf, uint32_t len) {
+    fvol_t* v = (fvol_t*)ctx; io_lock(&v->lock); int rc = op_read_at_l(ctx, node, off, (uint8_t*)buf, len); io_unlock(&v->lock); return rc;
+}
 static int op_write(void* ctx, uint32_t node, const void* data, uint32_t len) {
-    fvol_t* v = (fvol_t*)ctx; io_lock(&v->lock); int rc = op_write_l(ctx, node, data, len); io_unlock(&v->lock); return rc;
+    fvol_t* v = (fvol_t*)ctx; io_lock(&v->lock); v->ra_node = ~0u; int rc = op_write_l(ctx, node, data, len); io_unlock(&v->lock); return rc;
 }
 static int op_append(void* ctx, uint32_t node, uint32_t old_size, const void* data, uint32_t len) {
-    fvol_t* v = (fvol_t*)ctx; io_lock(&v->lock); int rc = op_append_l(ctx, node, old_size, data, len); io_unlock(&v->lock); return rc;
+    fvol_t* v = (fvol_t*)ctx; io_lock(&v->lock); v->ra_node = ~0u; int rc = op_append_l(ctx, node, old_size, data, len); io_unlock(&v->lock); return rc;
 }
 static int op_create(void* ctx, uint32_t parent, const char* name, int is_dir, uint32_t* node) {
     fvol_t* v = (fvol_t*)ctx; io_lock(&v->lock); int rc = op_create_l(ctx, parent, name, is_dir, node); io_unlock(&v->lock); return rc;
 }
 static int op_remove(void* ctx, uint32_t node, int is_dir) {
-    fvol_t* v = (fvol_t*)ctx; io_lock(&v->lock); int rc = op_remove_l(ctx, node, is_dir); io_unlock(&v->lock); return rc;
+    fvol_t* v = (fvol_t*)ctx; io_lock(&v->lock); v->ra_node = ~0u; int rc = op_remove_l(ctx, node, is_dir); io_unlock(&v->lock); return rc;
 }
 static int op_rename(void* ctx, uint32_t node, int is_dir, uint32_t new_parent, const char* new_name) {
     fvol_t* v = (fvol_t*)ctx; io_lock(&v->lock); int rc = op_rename_l(ctx, node, is_dir, new_parent, new_name); io_unlock(&v->lock); return rc;
@@ -715,7 +769,7 @@ static void op_unmount(void* ctx) {
 
 static const fs_mount_ops_t g_ops = {
     op_read, op_write, op_append, op_create, op_remove, op_rename, op_unmount,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL,                    /* (FAT: no Unix calls) */
+    NULL, NULL, op_read_at, NULL, NULL, NULL, NULL, NULL,        /* (FAT: no Unix calls; big files read in parts) */
 };
 
 /* ── mounting ──────────────────────────────────────────────────────── */
@@ -836,6 +890,7 @@ static int is_fat1x_vbr(const uint8_t* b) {
 /* kernel/volume.c: the volume starting at sector base, if it is FAT32 */
 static int mount_at(blockdev_t* bd, uint32_t base, const char* where, char* err, int errcap) {
     fvol_t* v = (fvol_t*)kzalloc(sizeof(fvol_t));
+    if (v) v->ra_node = ~0u;                    /* (no read_at yet) */
     if (!v) { kstrlcpy(err, "out of memory", (size_t)errcap); return -1; }
     v->bd = bd;
     if (dev_read(v, base, 1, v->sec) != 0 || !is_fat32_vbr(v->sec)) {

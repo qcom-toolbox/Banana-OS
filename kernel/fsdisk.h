@@ -25,6 +25,7 @@
 #define FSDISK_ERR_FROZEN      -9 /* durable sync cannot complete during a backup freeze */
 #define FSDISK_ERR_NO_INSTALL  -8 /* no disk holds an installed Banana OS */
 #define FSDISK_ERR_BAD_SOURCE -10 /* the CD / USB stick does not read back as built (fsdisk_medium_why) */
+#define FSDISK_ERR_NEEDS_LIVE -11 /* the installed system cannot update itself (old layout): use the live stick */
 
 /* Looks for exactly one non-ATAPI ATA disk attached (any bus/position).
  * Returns 1 and fills *out if exactly one was found, 0 if none, -1 if
@@ -132,5 +133,13 @@ const char* fsdisk_fs_type(void);
  * (why: which file), -2 none found */
 int fsdisk_check_medium(char* why, int cap);
 const char* fsdisk_medium_why(void);         /* what the last check found */
+/* updating from an ISO file (Settings > Update, `update FILE.iso`), also on
+ * the installed system itself: path NULL / "" goes back to a CD / USB stick.
+ * 0 when the file holds a Banana OS image, else FSDISK_ERR_NO_SOURCE */
+int  fsdisk_set_update_file(const char* path);
+const char* fsdisk_update_file(void);
+/* what update would read (where) and its build (BUILD.TXT: "357 abc1234",
+ * "" from images before it): 1 found, 0 none */
+int  fsdisk_source_info(char* where, int wcap, char* build, int bcap);
 
 #endif

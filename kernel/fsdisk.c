@@ -84,23 +84,47 @@ int fsdisk_find_target(ata_disk_t* out) {
  * that holds one (512-byte sectors: one 2048-byte CD block is 4 of them). */
 typedef struct {
     ata_disk_t  cd;
-    blockdev_t* usb;                 /* NULL: the CD drive */
+    blockdev_t* usb;                 /* NULL: the CD drive (or the file) */
+    int         file;                /* 1: Banana_OS.iso as a file (g_src_path), the installed system updating itself */
 } img_src_t;
 
+/* an update from an ISO file (Settings > Update, `update FILE.iso`): its path, "" none */
+static char g_src_path[256];
+static int  g_cmp_ok;                            /* (the last comparison, below) */
+
+static const char* src_kind(const img_src_t* s) { return s->file ? "ISO file" : s->usb ? "USB stick" : "CD"; }
+
 static int src_read(const img_src_t* s, uint32_t blk, uint32_t n, void* buf) {
+    if (s->file) {
+        int idx = fs_find_file(g_src_path);
+        uint32_t want = n * 2048u, got = 0;
+        while (idx >= 0 && got < want) {
+            int r = fs_read(idx, blk * 2048u + got, (uint8_t*)buf + got, want - got);
+            if (r <= 0) break;
+            got += (uint32_t)r;
+        }
+        return got == want ? 0 : -1;
+    }
     if (s->usb) return s->usb->present ? s->usb->read(s->usb, blk * 4u, n * 4u, buf) : -1;
     return disk_cd_read(&s->cd, blk, n, buf);
 }
 
 /* the ISO9660 image's size, from its primary volume descriptor (block 16) */
 static int src_iso_size(const img_src_t* s, uint32_t* out_bytes) {
-    if (!s->usb) return disk_cd_iso_size(&s->cd, out_bytes);
+    if (!s->usb && !s->file) return disk_cd_iso_size(&s->cd, out_bytes);
     uint8_t* pvd = (uint8_t*)kmalloc(2048);
     if (!pvd) return -1;
     int ok = src_read(s, 16, 1, pvd) == 0 && pvd[0] == 1 && memcmp(pvd + 1, "CD001", 5) == 0;
     uint32_t blocks = ok ? ((uint32_t)pvd[80] | (uint32_t)pvd[81] << 8 | (uint32_t)pvd[82] << 16 | (uint32_t)pvd[83] << 24) : 0;
     kfree(pvd);
-    if (!ok || !blocks || (uint64_t)blocks * 4u > s->usb->sectors) return -1;
+    uint64_t cap = 0;
+    if (s->usb) cap = (uint64_t)s->usb->sectors * 512u;
+    else {
+        int idx = fs_find_file(g_src_path);
+        fs_file_t* f = idx >= 0 ? fs_file_info(idx) : NULL;     /* (its size only: nothing read in) */
+        cap = f ? f->size : 0;
+    }
+    if (!ok || !blocks || (uint64_t)blocks * 2048u > cap) return -1;
     *out_bytes = blocks * 2048u;
     return 0;
 }
@@ -126,17 +150,25 @@ static int src_is_banana(const img_src_t* s, uint32_t iso_bytes) {
     return found;
 }
 
-/* the CD/DVD drive holding the Banana OS boot image - or else a USB stick holding it */
-static int find_source(img_src_t* out) {
+/* the CD/DVD drive holding the Banana OS boot image - or else a USB stick
+ * holding it (never the system's own disk, installed on a USB drive). With
+ * an ISO file chosen (fsdisk_set_update_file), that file and nothing else. */
+static int find_source_from(img_src_t* out, int allow_file) {
     ata_disk_t all[DISK_MAX];
-    int n = disk_probe(all, DISK_MAX);
     uint32_t bytes;
     memset(out, 0, sizeof(*out));
+    if (allow_file && g_src_path[0]) {
+        out->file = 1;
+        if (src_iso_size(out, &bytes) == 0 && src_is_banana(out, bytes)) return 1;
+        out->file = 0;
+        return 0;
+    }
+    int n = disk_probe(all, DISK_MAX);
     for (int i = 0; i < n; i++)
         if (all[i].is_atapi && disk_cd_iso_size(&all[i], &bytes) == 0) { out->cd = all[i]; return 1; }
     for (int i = 0; i < BLOCKDEV_MAX; i++) {
         blockdev_t* bd = blockdev_get(i);
-        if (!bd || !bd->present || bd->sector_size != 512 || strcmp(bd->kind, "usb") != 0) continue;
+        if (!bd || !bd->present || bd->system || bd->sector_size != 512 || strcmp(bd->kind, "usb") != 0) continue;
         out->usb = bd;
         if (src_iso_size(out, &bytes) == 0 && src_is_banana(out, bytes)) {
             klog("fsdisk: the Banana OS image on the USB stick %s (%s)\n", bd->name, bd->model);
@@ -146,6 +178,7 @@ static int find_source(img_src_t* out) {
     out->usb = NULL;
     return 0;
 }
+static int find_source(img_src_t* out) { return find_source_from(out, 1); }
 
 /* ── a file of the boot image, read while the system runs (the live CD) ─
  * kernel/builtin_apps.c reads the built-in packages from the CD's
@@ -157,7 +190,7 @@ const char* fsdisk_medium_why(void) { return g_medium_why; }
 static int       g_boot_src_ok = -1;           /* -1: not looked for yet */
 
 static int boot_src(void) {
-    if (g_boot_src_ok < 0) g_boot_src_ok = find_source(&g_boot_src);
+    if (g_boot_src_ok < 0) g_boot_src_ok = find_source_from(&g_boot_src, 0);   /* (what was booted: never a file) */
     return g_boot_src_ok;
 }
 
@@ -247,7 +280,7 @@ static int check_medium(const img_src_t* src, char* why, int cap) {
     uint32_t sz;
     if (src_file(src, "BANANA.SUM", &off, &sz) != 0 || !sz || sz > 4096) {
         if (why) kstrlcpy(why, "no checksum list on it (an older image) - not checked", (size_t)cap);
-        klog("fsdisk: the %s has no checksum list (an older image) - not checked\n", src->usb ? "USB stick" : "CD");
+        klog("fsdisk: the %s has no checksum list (an older image) - not checked\n", src_kind(src));
         return 1;
     }
     char* list = (char*)kzalloc(sz + 1);
@@ -299,8 +332,47 @@ static int check_medium(const img_src_t* src, char* why, int cap) {
     kfree(list);
     kfree(buf);
     if (rc == 0 && why) ksnprintf(why, (size_t)cap, "%d files as built, read back whole", files);
-    klog("fsdisk: the %s checked: %s%s\n", src->usb ? "USB stick" : "CD", rc < 0 ? "DAMAGED - " : "", why ? why : "");
+    klog("fsdisk: the %s checked: %s%s\n", src_kind(src), rc < 0 ? "DAMAGED - " : "", why ? why : "");
     return rc;
+}
+
+/* the ISO file the next update reads (NULL or "": a CD / USB stick again) -
+ * 0 when it holds a Banana OS image, else FSDISK_ERR_NO_SOURCE (none chosen) */
+int fsdisk_set_update_file(const char* path) {
+    g_cmp_ok = 0;                                  /* (a comparison was against the other source) */
+    if (!path || !path[0]) { g_src_path[0] = 0; return FSDISK_OK; }
+    kstrlcpy(g_src_path, path, sizeof(g_src_path));
+    img_src_t src;
+    if (find_source(&src)) return FSDISK_OK;
+    g_src_path[0] = 0;
+    return FSDISK_ERR_NO_SOURCE;
+}
+const char* fsdisk_update_file(void) { return g_src_path; }
+
+/* what update would read: "USB stick usb0 (SanDisk ...)", "CD", "ISO file /home/x.iso";
+ * its build (BUILD.TXT: "357 abc1234", "" from images before) - 1 found, 0 none */
+int fsdisk_source_info(char* where, int wcap, char* build, int bcap) {
+    img_src_t src;
+    if (where && wcap) where[0] = 0;
+    if (build && bcap) build[0] = 0;
+    if (!find_source(&src)) return 0;
+    if (where) {
+        if (src.file) ksnprintf(where, (size_t)wcap, "ISO file %s", g_src_path);
+        else if (src.usb) ksnprintf(where, (size_t)wcap, "USB stick %s (%s)", src.usb->name, src.usb->model);
+        else ksnprintf(where, (size_t)wcap, src.cd.model[0] ? "CD / DVD (%s)" : "CD / DVD%s", src.cd.model);
+    }
+    uint64_t off;
+    uint32_t sz;
+    if (build && bcap > 1 && src_file(&src, "BUILD.TXT", &off, &sz) == 0 && sz && sz < 2048) {
+        uint8_t* b = (uint8_t*)kzalloc(2048);
+        if (b && src_read(&src, (uint32_t)(off / 2048u), 1, b) == 0) {
+            int k = 0;
+            for (; k < (int)sz && k < bcap - 1 && b[k] >= ' '; k++) build[k] = (char)b[k];
+            build[k] = 0;
+        }
+        kfree(b);
+    }
+    return 1;
 }
 
 int fsdisk_check_medium(char* why, int cap) {
@@ -530,11 +602,11 @@ static int stream_image(const img_src_t* src, uint32_t iso_bytes, image_sink_t s
         if (need && !need(done, n)) { done += n; g_prog_done = done; have_before = 0; continue; }
         uint32_t t0 = timer_ms();
         if (!have_before && src_read(src, done - 1u, 1, buf) != 0) {
-            klog("install: reading the %s failed at block %u\n", src->usb ? "USB stick" : "CD", done - 1u);
+            klog("install: reading the %s failed at block %u\n", src_kind(src), done - 1u);
             rc = -1; break;
         }
         if (src_read(src, done, n + after, buf + CARRY) != 0) {
-            klog("install: reading the %s failed at blocks %u-%u (of %u)\n", src->usb ? "USB stick" : "CD", done, done + n + after - 1u, total);
+            klog("install: reading the %s failed at blocks %u-%u (of %u)\n", src_kind(src), done, done + n + after - 1u, total);
             rc = -1; break;
         }
         g_tm.read_ms += timer_ms() - t0;
@@ -2480,6 +2552,10 @@ void fsdisk_describe(char* out, int cap) {
 static ata_disk_t g_fi_disk;
 
 int fsdisk_find_install(ata_disk_t* out) {
+    if (g_have_target) {                       /* the installed system: its own disk, never another one */
+        if (out) *out = g_target;
+        return 1;
+    }
     if (g_fi_state < 0) {
         g_fi_state = 0;
         ata_disk_t d;
@@ -2725,7 +2801,15 @@ int fsdisk_update_on(const ata_disk_t* dp) {
     uint32_t iso_bytes;
     dst = *dp;
     if (!fsdisk_holds_banana(&dst)) return FSDISK_ERR_NO_INSTALL;
+    /* the installed system updating itself: only its boot area is written -
+     * the files after it are in use, so a layout that moves them (the old
+     * 32 MB one) is the live stick's work. What runs stays in RAM until the
+     * restart, which starts the new system (and unpacks its apps). */
+    int self = g_have_target && disk_same(&dst, &g_target);
+    v5_mark_t vm;
+    if (self && !e4_detect(&dst) && !v5_detect(&dst, &vm)) return FSDISK_ERR_NEEDS_LIVE;
     if (!find_source(&src) || src_iso_size(&src, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
+    if (self && fsdisk_sync_durable() != FSDISK_OK) return FSDISK_ERR_IO;   /* (the files safe on the disk first) */
     if (check_medium(&src, g_medium_why, sizeof(g_medium_why)) < 0) return FSDISK_ERR_BAD_SOURCE;
     uint8_t partition[16];
     uint32_t base = boot_partition(&dst, partition);

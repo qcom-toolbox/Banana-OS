@@ -2015,7 +2015,8 @@ int fs_read(int idx, uint32_t off, void* buf, uint32_t len) {
     used_now(f);
     read_now(f);
     mount_t* m = f->loaded ? NULL : mount_of(f->mnt);
-    if (m && m->ops->read_at) {
+    /* (a stick's FAT - no write_at: only big files; small ones are read in whole and kept) */
+    if (m && m->ops->read_at && (m->ops->write_at || f->size > STREAM_MIN)) {
         /* straight from the disk, through its cache: nothing else of it read in */
         f->loading = 1;
         links_sync(idx);

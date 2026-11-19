@@ -23,6 +23,7 @@
 #include "../kernel/types.h"
 #include "../kernel/ata.h"
 #include "../kernel/fsdisk.h"
+#include "../kernel/buildinfo.h"
 #include "../kernel/zswap.h"
 #include "../kernel/disk.h"
 #include "../kernel/ahci.h"
@@ -373,11 +374,11 @@ static void cmd_sleep(const char* args) {
     acpi_s3_suspend(seconds,reason,sizeof(reason));terminal_writeln(reason);
 }
 
-/* Installing and updating are the live CD's (or USB stick's) work: on an
- * installed system these commands are not there at all. */
+/* Installing and repairing are the live CD's (or USB stick's) work: on an
+ * installed system these commands are not there at all. `update` is on
+ * both: the installed system updates itself from a stick or an ISO file. */
 static int live_only(const char* name) {
-    return k_strcmp(name, "install") == 0 || k_strcmp(name, "update") == 0 || k_strcmp(name, "installer") == 0 ||
-           k_strcmp(name, "repair") == 0;
+    return k_strcmp(name, "install") == 0 || k_strcmp(name, "installer") == 0 || k_strcmp(name, "repair") == 0;
 }
 static int cmd_hidden(const char* name) { return live_only(name) && !sysinfo_live_boot(); }
 
@@ -1298,7 +1299,7 @@ static const char* const known_cmds[] = {
     "ls", "cd", "pwd", "mkdir", "rm", "touch", "cp", "mv", "edit", "cat", "run",
     "uptime", "boottime", "top", "exit", "start", "stop", "startx", "stopx",
     "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
-    "hw_info", "shutdown", "reboot", "halt", "sleep", "install", "sync", "checkmedium", "drop_caches", "update", "repair", "installer", "disks", "history", "which", "type",
+    "hw_info", "shutdown", "reboot", "halt", "sleep", "install", "sync", "checkmedium", "build", "version", "drop_caches", "update", "repair", "installer", "disks", "history", "which", "type",
     "alias", "unalias", "export", "unset", "env", "chsh", "autologin",
     "grep", "wc", "head", "tail", "find", "time", "nice",
     /* shell/netcmds.c + shell/wpcmd.c */
@@ -1618,8 +1619,18 @@ static void cmd_uname(const char* args, int persona) {
     if (!strcmp(args, "-a") || !strcmp(args, "--all")) {
         terminal_write(hostname_get()); terminal_write(" ");
     }
-    if (persona == SHELL_KIND_BASH) terminal_writeln("Banana OS 0.6 " BANANA_ARCH " Banana Kernel 0.6 bash");
-    else                             terminal_writeln("Banana OS 0.6 " BANANA_ARCH " Banana Kernel 0.6 sh");
+    char b[96];
+    ksnprintf(b, sizeof(b), "Banana OS 0.6 " BANANA_ARCH " Banana Kernel 0.6 build %s %s", banana_build(),
+              persona == SHELL_KIND_BASH ? "bash" : "sh");
+    terminal_writeln(b);
+}
+
+/* build: which build of Banana OS this is (the release build-N), its commit */
+static void cmd_build(void) {
+    char b[128];
+    ksnprintf(b, sizeof(b), "Banana OS build %s (commit %s, %s%s)", banana_build(), banana_commit(), BANANA_ARCH,
+              sysinfo_live_boot() ? ", running the live USB stick / CD" : fsdisk_is_installed() ? ", installed" : "");
+    terminal_writeln(b);
 }
 
 static void cmd_whoami(void) { terminal_writeln("banana"); }
@@ -2006,8 +2017,38 @@ static void cmd_update_mode(const char* args, int repair);
 static void cmd_update(const char* args) { cmd_update_mode(args, 0); }
 static void cmd_update_mode(const char* args, int repair) {
     ata_disk_t all[DISK_MAX], inst[DISK_MAX];
-    int n = fsdisk_targets(all, DISK_MAX), ni = 0;
-    for (int i = 0; i < n; i++) if (fsdisk_holds_banana(&all[i])) inst[ni++] = all[i];
+    int self = fsdisk_is_installed() && !sysinfo_live_boot();     /* the installed system updating itself */
+    /* update FILE.iso: a Banana_OS.iso downloaded or copied anywhere */
+    args = k_skip_spaces(args);
+    char path[256];
+    path[0] = 0;
+    if (*args && (*args < '0' || *args > '9')) {
+        if (*args == '/') kstrlcpy(path, args, sizeof(path));
+        else { fs_cwd_path(path, sizeof(path)); kstrlcat(path, path[1] ? "/" : "", sizeof(path)); kstrlcat(path, args, sizeof(path)); }
+        for (int i = (int)k_strlen(path) - 1; i > 0 && path[i] == ' '; i--) path[i] = 0;
+        if (fsdisk_set_update_file(path) != FSDISK_OK) {
+            terminal_write_color("update: that file is not a Banana OS ISO (Banana_OS.iso from the releases).\n",
+                                 VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            return;
+        }
+        args = "";
+    } else {
+        fsdisk_set_update_file(NULL);
+    }
+    int n = 0, ni = 0;
+    if (self) ni = fsdisk_find_install(&inst[0]);
+    else {
+        n = fsdisk_targets(all, DISK_MAX);
+        for (int i = 0; i < n; i++) if (fsdisk_holds_banana(&all[i])) inst[ni++] = all[i];
+    }
+    {
+        char where[120], build[48], line[220];
+        if (fsdisk_source_info(where, sizeof(where), build, sizeof(build))) {
+            ksnprintf(line, sizeof(line), "update: from the %s - build %s; this system is build %s", where,
+                      build[0] ? build : "(older, no number)", banana_build());
+            terminal_writeln(line);
+        }
+    }
     if (!ni) {
         int broken = 0;
         for (int i = 0; i < n; i++) broken |= fsdisk_banana_unreadable(&all[i]);
@@ -2030,12 +2071,13 @@ static void cmd_update_mode(const char* args, int repair) {
     int k = pick_target("update", args, ni);
     if (k < 0) return;
     ata_disk_t d = inst[k];
-    terminal_writeln("update: comparing the installed system with this CD / USB stick...");
+    terminal_writeln("update: comparing the installed system with the new one...");
     terminal_flush();
     int same = k == 0 ? fsdisk_compare_boot() : 0;    /* (the comparison reads the first install) */
     if (k == 0 && same >= 0) print_timing("update", "compared");
     if (same == FSDISK_ERR_NO_SOURCE) {
-        terminal_write_color("update: no Banana OS CD or USB stick found - plug in the one with the new version.\n",
+        terminal_write_color("update: no Banana OS CD or USB stick found - plug in the one with the new version,\n"
+                             "        or give the ISO file: update ~/Downloads/Banana_OS.iso\n",
                              VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }
@@ -2066,7 +2108,7 @@ static void cmd_update_mode(const char* args, int repair) {
             VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     else
         terminal_write_color(
-            "Replace the Banana OS system on this disk with the one on the CD?\n"
+            "Replace the Banana OS system on this disk with the new one?\n"
             "Your files, settings and password are kept. [y/N] ",
             VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     if (!prompt_yes_no()) {
@@ -2092,7 +2134,13 @@ static void cmd_update_mode(const char* args, int repair) {
                                  VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     }
     if (rc == FSDISK_OK) print_timing("update", "wrote");
-    if (rc == FSDISK_OK) {
+    if (rc == FSDISK_OK && self) {
+        terminal_write_color(
+            "update: done - the new system on the disk was read back and checked. It starts\n"
+            "        at the next restart (the apps are updated then); until then this one runs.\n"
+            "        Unplug the USB stick before restarting, or the PC may start it instead.\n",
+            VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    } else if (rc == FSDISK_OK) {
         terminal_write_color(
             "update: done - the new system on the disk was read back and checked.\n",
             VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
@@ -2101,8 +2149,12 @@ static void cmd_update_mode(const char* args, int repair) {
             "        the PC may start this live stick again instead of your installed system\n"
             "        (its programs then come from the stick, your files and settings are not used).\n",
             VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    } else if (rc == FSDISK_ERR_NEEDS_LIVE) {
+        terminal_write_color("update: this install uses the old disk layout - start the live USB stick and run\n"
+                             "        'update' there once (it moves the files); after that it updates itself.\n",
+                             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     } else if (rc == FSDISK_ERR_BAD_SOURCE) {
-        terminal_write_color("update: this USB stick / CD does not read back as it was built - nothing was\n"
+        terminal_write_color("update: this USB stick / CD / ISO file does not read back as it was built - nothing was\n"
                              "        written to the disk. Write the ISO to the stick again (or use another\n"
                              "        stick) and retry. What was found:\n        ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         terminal_writeln(fsdisk_medium_why());
@@ -2754,6 +2806,7 @@ static void dispatch_plain(const char* line, int persona) {
     if (k_strcmp(line, "install")  == 0 || k_strncmp(line, "install ", 8) == 0) { cmd_install(line + 7); return; }
     if (k_strcmp(line, "sync")     == 0) { cmd_sync();        return; }
     if (k_strcmp(line, "checkmedium") == 0) { cmd_checkmedium(); return; }
+    if (k_strcmp(line, "build") == 0 || k_strcmp(line, "version") == 0) { cmd_build(); return; }
     if (k_strcmp(line, "update")   == 0 || k_strncmp(line, "update ", 7) == 0) { cmd_update(line + 6); return; }
     if (k_strcmp(line, "repair")   == 0 || k_strncmp(line, "repair ", 7) == 0) { cmd_update_mode(line + 6, 1); return; }
     if (k_strcmp(line, "nice") == 0 || k_strncmp(line, "nice ", 5) == 0) {

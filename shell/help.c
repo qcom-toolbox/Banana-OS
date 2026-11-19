@@ -224,11 +224,13 @@ static const page_t PAGES[] = {
       "install\ninstall --full      # the same as install alone\ninstall 2 --standard\ninstall --minimal",
       "installer, update, lsblk, apt" },
     { "installer", "disks", "installer", "the graphical installer (live CD)", NULL, NULL, NULL, "install" },
-    { "update", "disks", "update [number]", "update an installed system from a newer CD",
-      "Writes this CD's system over the installed one; your files, settings and password are kept. With "
-      "several disks holding Banana OS it asks which one (or give its number: update 2), then asks to "
-      "confirm, then updates. Only on the live system.",
-      NULL, NULL, "install, repair" },
+    { "update", "disks", "update [number | FILE.iso]", "update Banana OS from a newer USB stick, CD or ISO file",
+      "Writes the new system over the installed one; your files, settings and password are kept. From the "
+      "live stick: it updates the disk (with several disks holding Banana OS it asks which one, or give its "
+      "number: update 2). On the installed system: from a Banana OS USB stick or CD plugged in, or a "
+      "Banana_OS.iso file (update ~/Downloads/Banana_OS.iso) - the new system starts at the next restart. "
+      "Settings > System update does the same with buttons.",
+      NULL, "update ~/Downloads/Banana_OS.iso", "install, repair, build, checkmedium" },
     { "repair", "disks", "repair [number]", "repair an installed system from the CD",
       "For a system that no longer starts right (\"not an ELF program\", a broken bash or app): writes this "
       "CD's system over the installed one as update does - also when it is already the same - and has every "
@@ -242,6 +244,10 @@ static const page_t PAGES[] = {
       NULL, "checkmedium", "update, repair, install" },
     /* ── system ── */
     { "uname", "system", "uname", "the system's name", NULL, NULL, NULL, "neofetch" },
+    { "build", "system", "build", "which build of Banana OS this is",
+      "Prints the build number - the release it came from on GitHub (build-N) - and its commit; `version` "
+      "is the same. Settings > Update shows it too, with the build of an update found.",
+      NULL, "build", "uname, update" },
     { "whoami", "system", "whoami", "the user", NULL, NULL, NULL, "passwd" },
     { "hostname", "system", "hostname [NAME]", "show or change the computer's name",
       "Sets the PC name immediately and saves it in /etc/hostname. Use 1-63 letters, digits or hyphens, "

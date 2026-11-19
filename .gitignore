@@ -36,6 +36,7 @@ sdk/examples/posixtest/*.so
 build/builtin-meta-*.bin
 build/ports64.inc
 build/ports64.h
+build/build_info.h
 
 # Optional release variant
 Banana_OS-mesa.iso

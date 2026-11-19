@@ -399,8 +399,9 @@ int syscmd_dispatch(const char* line) {
                    argc > 1 && !strcmp(argv[1], "themes") ? SETTINGS_PAGE_THEMES :
                    argc > 1 && !strcmp(argv[1], "about") ? SETTINGS_PAGE_ABOUT :
                    argc > 1 && !strcmp(argv[1], "wifi") ? SETTINGS_PAGE_WIFI :
-                   argc > 1 && !strcmp(argv[1], "power") ? SETTINGS_PAGE_POWER : -1;
-        if (argc > 1 && !apps && page < 0) { terminal_writeln("usage: settings [apps [name] | time | keyboard | themes | about | wifi | power]"); return 1; }
+                   argc > 1 && !strcmp(argv[1], "power") ? SETTINGS_PAGE_POWER :
+                   argc > 1 && !strcmp(argv[1], "update") ? SETTINGS_PAGE_UPDATE : -1;
+        if (argc > 1 && !apps && page < 0) { terminal_writeln("usage: settings [apps [name] | time | keyboard | themes | about | wifi | power | update]"); return 1; }
         if (!(apps ? gui_open_settings_app(argc > 2 ? argv[2] : NULL) : gui_open_settings())) terminal_writeln("settings: Settings is part of the desktop - run `startx` first");
         else if (page >= 0) settings_open_page(page);
         return 1;

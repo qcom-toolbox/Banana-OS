@@ -192,9 +192,10 @@ isoroot/efi.img: tools/format_efi.py loader/BOOTX64.EFI loader/BOOTIA32.EFI kern
 
 # the image: an ISO9660 CD (El Torito: the BIOS loader, and the EFI
 # partition for UEFI) that tools/mkimage.py makes a disk too (MBR)
-Banana_OS.iso: kernel.bin kernel64.bin loader/mbr.bin loader/bios.bin isoroot/efi.img tools/mkimage.py tools/iso_sums.py
+Banana_OS.iso: kernel.bin kernel64.bin loader/mbr.bin loader/bios.bin isoroot/efi.img tools/mkimage.py tools/iso_sums.py build/build_info.h
 	mkdir -p isoroot/boot
 	cp kernel.bin kernel64.bin loader/bios.bin isoroot/boot/
+	printf '%s %s\n' '$(BANANA_BUILD)' '$(BANANA_COMMIT)' > isoroot/BUILD.TXT
 	python3 tools/iso_sums.py isoroot boot/kernel.bin boot/kernel64.bin efi.img      # (not bios.bin: xorriso writes its boot info table into it)
 	xorriso -as mkisofs -quiet -o $@ -R -J -V BANANA_OS \
 	    -b boot/bios.bin -no-emul-boot -boot-load-size 4 -boot-info-table \
@@ -320,6 +321,18 @@ $(foreach a,$(APPS64),$(eval $(call APP64_RULE,$(a))))
 apps/kcmd/kcmd-x86_64.bpk.z: shell/help.c
 kernel/appbin.o64: $(APPS64_BPKZ)
 build/builtin-meta-x86_64.bin: $(APPS64_BPKZ)
+# the build's number (CI: the run number, as the release tag build-N; else
+# "dev") and commit, for `build`, uname -a, Settings and the ISO's BUILD.TXT
+BANANA_BUILD  ?= $(or $(GITHUB_RUN_NUMBER),dev)
+BANANA_COMMIT := $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
+.PHONY: build-info-input
+build-info-input:
+build/build_info.h: build-info-input
+	mkdir -p build
+	printf '#define BANANA_BUILD "%s"\n#define BANANA_COMMIT "%s"\n' '$(BANANA_BUILD)' '$(BANANA_COMMIT)' > $@.tmp
+	cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
+kernel/buildinfo.o kernel/buildinfo.o64: build/build_info.h
+
 .PHONY: ports-config-input
 ports-config-input:
 build/ports64.inc: Makefile ports-config-input
