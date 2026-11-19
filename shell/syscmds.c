@@ -18,6 +18,7 @@
 #include "../kernel/builtin_apps.h"
 #include "../kernel/app.h"
 #include "../kernel/gui.h"
+#include "../kernel/taskmgr.h"
 #include "../kernel/audio.h"
 #include "../kernel/settings.h"
 #include "aptcmd.h"
@@ -413,7 +414,10 @@ int syscmd_dispatch(const char* line) {
         return 1;
     }
     if (strcmp(argv[0], "taskmgr") == 0) {
+        int what = argc > 1 && !strcmp(argv[1], "cores") ? 1 : argc > 1 && !strcmp(argv[1], "gpu") ? 2 : argc > 1 && !strcmp(argv[1], "cpu") ? 0 : -1;
+        if (argc > 1 && what < 0) { terminal_writeln("usage: taskmgr [cpu | cores | gpu]"); return 1; }
         if (!gui_open_taskmgr()) terminal_writeln("taskmgr: the Task Manager is part of the desktop (startx) - try `top` here");
+        else if (what >= 0) taskmgr_show_perf(what);
         return 1;
     }
     return 0;

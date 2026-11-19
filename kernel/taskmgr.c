@@ -414,6 +414,14 @@ void taskmgr_open(void) {
     g_gen++;
 }
 
+/* `taskmgr cores` / `taskmgr gpu`: Performance, at that graph */
+void taskmgr_show_perf(int what) {
+    g_page = P_PERF;
+    g_dev = what == 2 ? D_GPU : D_CPU;
+    g_cores_view = what == 1;
+    g_gen++;
+}
+
 void taskmgr_close(void) {
     g_open = 0;
     g_win.dragging = g_win.resizing = 0;
@@ -446,6 +454,19 @@ static int rows_y(void) { return table_y() + 34; }
 static int bottom_y(void) { return w10() ? g_win.y + g_win.h - 40 : g_win.y + g_win.h - 10; }   /* (Windows 10: its button bar) */
 static int rows_max(void) { int n = (bottom_y() - rows_y()) / ROW_H; return n < 1 ? 1 : n; }
 static int perf_top(void) { return w10() ? head_y() + 8 : head_y() + 40; }
+/* Performance: the chosen device's graph, and the CPU's "each core / overall" button under it */
+static void perf_graph_rect(int* x, int* y, int* w, int* h) {
+    int ty = perf_top();
+    *x = content_x() + 210; *w = content_w() - 210;
+    *y = ty + 36;
+    *h = (g_win.y + g_win.h - *y) * 2 / 5;
+    if (*h < 70) *h = 70;
+}
+static void cores_btn_rect(int* x, int* y) {
+    int gx, gy, gw, gh;
+    perf_graph_rect(&gx, &gy, &gw, &gh);
+    *x = gx + gw - 150; *y = gy + gh + 4;
+}
 /* the Processes page's End task / Switch to buttons */
 static void end_rect(int* x, int* y) {
     if (w10()) { *x = g_win.x + g_win.w - 106; *y = g_win.y + g_win.h - 32; }
@@ -611,8 +632,13 @@ void taskmgr_click(int mx, int my) {
         if (mx < cx + 200) {
             int d = (my - ty) / 62;
             if (my >= ty && d >= 0 && d < D_COUNT) g_dev = d;
-        } else if (g_dev == D_CPU && cpu_count() > 1 && my >= ty + 20 && my < ty + 220) {
-            g_cores_view = !g_cores_view;
+        } else if (g_dev == D_CPU && cpu_count() > 1) {
+            int bx, by, gx, gy, gw, gh;
+            cores_btn_rect(&bx, &by);
+            perf_graph_rect(&gx, &gy, &gw, &gh);
+            /* the button, or the graph itself */
+            if ((mx >= bx && mx < bx + 150 && my >= by && my < by + 24) ||
+                (mx >= gx && mx < gx + gw && my >= gy && my < gy + gh)) g_cores_view = !g_cores_view;
         }
     }
 }
@@ -955,13 +981,24 @@ static void draw_performance(void) {
             tm_text(px, gy - 14, _("Logical processors"), C_DIM, C_BG);
             int n = cores > MAX_CORE ? MAX_CORE : cores, per = n <= 4 ? n : (n + 1) / 2, rows = (n + per - 1) / per;
             int cw2 = (pw - (per - 1) * 6) / per, ch2 = (gh - (rows - 1) * 6) / rows;
-            for (int i = 0; i < n; i++) big_graph(px + (i % per) * (cw2 + 6), gy + (i / per) * (ch2 + 6), cw2, ch2, g_core_hist[i], NULL, 100, col);
+            for (int i = 0; i < n; i++) {
+                int x0 = px + (i % per) * (cw2 + 6), y0 = gy + (i / per) * (ch2 + 6);
+                big_graph(x0, y0, cw2, ch2, g_core_hist[i], NULL, 100, col);
+                char cl[24];
+                ksnprintf(cl, sizeof(cl), "CPU %d  %d%%", i, last(g_core_hist[i]));
+                tm_text(x0 + 4, y0 + 4, cl, C_TEXT, C_PANEL);
+            }
         } else {
             tm_text(px, gy - 14, "% Utilization", C_DIM, C_BG);
             tm_text(px + pw - 32, gy - 14, "100%", C_DIM, C_BG);
             big_graph(px, gy, pw, gh, g_cpu_hist, NULL, 100, col);
         }
-        if (cores > 1) tm_text(px, gy + gh + 2, g_cores_view ? "Click the graph: overall" : "Click the graph: each core", TC(0x707070), C_BG);
+        if (cores > 1) {
+            int bx, by;
+            cores_btn_rect(&bx, &by);
+            button(bx, by, 150, g_cores_view ? _("Show overall") : _("Show each core"), 1);
+            sy += 10;                                     /* (the button under the graph) */
+        }
         int threads = 0;
         snap_tasks();
         for (int i = 0; i < g_ntasks; i++) if (g_tasks[i].state != TASK_UNUSED) threads++;

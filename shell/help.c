@@ -442,7 +442,10 @@ static const page_t PAGES[] = {
     { "notify", "system", "notify TITLE [BODY]", "post a desktop notification",
       "Show a native toast; Win+N opens the last 16 notifications. Use quoted text for multi-word titles and bodies. "
       "The shell is limited to three alerts per two seconds.", "", "notify Test \"Hello world\"", "startx" },
-    { "taskmgr", "desktop", "taskmgr", "open the Task Manager", NULL, NULL, NULL, "htop" },
+    { "taskmgr", "desktop", "taskmgr [cpu | cores | gpu]", "open the Task Manager",
+      "Opens the Task Manager; with cpu, cores or gpu, at that graph of Performance (cores: a graph per core, "
+      "each with its number and %; the CPU page's Show each core / Show overall button switches).",
+      NULL, "taskmgr cores", "htop, gpu load" },
     { "settings", "desktop", "settings [apps [name] | time | keyboard | about]", "open Settings (or its Apps, Date & time or Keyboard page)",
       "Opens Settings. `settings apps` opens its Apps page: every installed app with its version, size and "
       "whether it is running or has an update; select one to open it, stop it, update it or uninstall it "

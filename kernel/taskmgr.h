@@ -16,6 +16,7 @@
  */
 
 void taskmgr_open(void);
+void taskmgr_show_perf(int what);        /* Performance: 0 CPU, 1 each core, 2 GPU */
 void taskmgr_close(void);
 int  taskmgr_is_open(void);
 void taskmgr_draw(const fb_info_t* fi);
