@@ -107,6 +107,15 @@ const char* rad_fw_notice(uint32_t* len) {
     return (const char*)rad_fw_licence;
 }
 
+/* Task Manager's GPU load: the 3D engine (GRBM_STATUS.GUI_ACTIVE) - one
+ * register read, from the timer interrupt, as radeontop samples it */
+static int rad_gfx_busy_now(void) {
+    return g_state > 0 && g_dev.rt && (rad_rd(g_dev.rt, GRBM_STATUS) & GUI_ACTIVE) != 0;
+}
+/* (the host tests build this file without gpu.c) */
+void gpu_register_load(int (*busy_now)(void), uint64_t (*vram_used)(void));
+__attribute__((weak)) void gpu_register_load(int (*busy_now)(void), uint64_t (*vram_used)(void)) { (void)busy_now; (void)vram_used; }
+
 /* ---- what the Linux code calls ---- */
 
 u32 radeon_rcu_rreg(struct radeon_device* rdev, u32 reg) {
@@ -529,6 +538,7 @@ int rad_gfx_init(radeon_t* rt, uintptr_t vram_cpu, uint64_t vram_mc, uint64_t vi
     uint32_t mtype = (RREG32(0x2a00) >> 28) & 0xF;           /* (MC_SEQ_MISC0) */
 
     g_state = 1;
+    gpu_register_load(rad_gfx_busy_now, rad_drm_vram_used);
     char mem[64];
     if (g_real_mb == g_bios_mb) ksnprintf(mem, sizeof(mem), "%u MiB %s", g_real_mb, mtype == 5 ? "GDDR5" : "DDR3");
     else ksnprintf(mem, sizeof(mem), "%u MiB %s (BIOS says %u!)", g_real_mb, mtype == 5 ? "GDDR5" : "DDR3", g_bios_mb);

@@ -80,6 +80,14 @@ typedef struct {
     uint64_t flips, vblank_waits, vblank_timeouts;
 } gpu_stats_t;
 void gpu_stats(gpu_stats_t* out);
+/* How busy the GPU's 3D engine is (Task Manager): a driver gives a check
+ * the timer interrupt may call (a register read: 1 busy now, 0 idle),
+ * sampled each millisecond while someone looks; and the video memory in
+ * use. gpu_load: the % busy since the last call (-1: not measured). */
+void gpu_register_load(int (*busy_now)(void), uint64_t (*vram_used)(void));
+void gpu_load_tick(uint32_t ms);                 /* (timer.c) */
+int  gpu_load(void);
+uint64_t gpu_vram_used(void);                    /* bytes, 0 unknown */
 void gpu_note_present(uint64_t bytes, uint64_t ns);
 void gpu_note_damage(uint64_t candidate, uint64_t copied);
 void gpu_note_command(uint64_t ns, int timeout);

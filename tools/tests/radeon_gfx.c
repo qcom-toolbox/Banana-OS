@@ -266,6 +266,13 @@ int main(int argc, char** argv) {
         CHECK(R[CP_RB_BASE / 4] == 0 && g_pfp_n == 0, "and the card untouched");
     } else if (!strcmp(mode, "drm")) {
         CHECK(r == 0, "the engine up");
+        /* Task Manager's load: the 3D engine's busy bit, read as it is */
+        R[GRBM_STATUS / 4] = 0;
+        int idle = rad_gfx_busy_now();
+        R[GRBM_STATUS / 4] = GUI_ACTIVE;
+        int busy = rad_gfx_busy_now();
+        R[GRBM_STATUS / 4] = 0;
+        CHECK(!idle && busy, "the GPU's load: GRBM_STATUS.GUI_ACTIVE read as idle %d, busy %d", idle, busy);
         /* the version Mesa's radeon winsys asks for */
         char name[16] = "";
         struct drm_version_k v = { 0, 0, 0, sizeof(name) - 1, (uint64_t)(uintptr_t)name, 0, 0, 0, 0 };

@@ -124,7 +124,8 @@ static char       g_status[96];
 static kbnav_t    g_nav;
 
 /* the history, one sample a second */
-static uint8_t  g_cpu_hist[HIST], g_mem_hist[HIST], g_disk_hist[HIST];
+static uint8_t  g_cpu_hist[HIST], g_mem_hist[HIST], g_disk_hist[HIST], g_gpu_hist[HIST];
+static int      g_gpu_measured;                       /* the driver tells its load (gpu_load) */
 static uint32_t g_net_hist[HIST];                     /* bytes a second, in + out */
 static uint8_t  g_core_hist[MAX_CORE][HIST];
 static int      g_hist_n;
@@ -282,6 +283,9 @@ static void sample(void) {
     push(g_cpu_hist, cpu_now());
     push(g_mem_hist, mem_pct());
     push(g_disk_hist, disk);
+    int gl = gpu_load();
+    g_gpu_measured = gl >= 0;
+    push(g_gpu_hist, gl > 0 ? (uint32_t)gl : 0);
     for (int c = 0; c < MAX_CORE; c++) push(g_core_hist[c], c < cpu_count() ? task_core_pct(c) : 0);
     if (g_hist_n == HIST) memmove(g_net_hist, g_net_hist + 1, (HIST - 1) * sizeof(uint32_t));
     g_net_hist[g_hist_n == HIST ? HIST - 1 : g_hist_n] = g_rx_rate + g_tx_rate;
@@ -850,7 +854,9 @@ static void dev_value(int d, char* out, int cap) {
         if (!net_dev()) { kstrlcpy(out, "Not connected", (size_t)cap); break; }
         bits(g_tx_rate+g_rx_rate,out,cap);
         break;
-    default: { gpu_t* g = gpu_active(); kstrlcpy(out, g ? g->driver : "framebuffer", (size_t)cap); }
+    default:
+        if (g_gpu_measured) { ksnprintf(out, (size_t)cap, "%d%%", last(g_gpu_hist)); break; }
+        { gpu_t* g = gpu_active(); kstrlcpy(out, g ? g->driver : "framebuffer", (size_t)cap); }
     }
 }
 
@@ -903,7 +909,8 @@ static void draw_performance(void) {
         gfx_fill_rect(cx, y, 196, 56, bg);
         if (on) gfx_fill_rect(cx, y + 14, 3, 28, C_ACCENT);
         uint32_t c = dev_color(d);
-        if (d == D_GPU) frame(cx + 8, y + 8, 64, 40, C_PANEL, C_LINE);
+        if (d == D_GPU && !g_gpu_measured) frame(cx + 8, y + 8, 64, 40, C_PANEL, C_LINE);
+        else if (d == D_GPU) big_graph(cx + 8, y + 8, 64, 40, g_gpu_hist, NULL, 100, c);
         else if (d == D_NET) big_graph(cx + 8, y + 8, 64, 40, NULL, g_net_hist, net_max(), c);
         else big_graph(cx + 8, y + 8, 64, 40, d == D_CPU ? g_cpu_hist : d == D_MEM ? g_mem_hist : g_disk_hist, NULL, 100, c);
         char n[24], v[48];
@@ -1077,11 +1084,27 @@ static void draw_performance(void) {
     } else {
         gpu_t* g = gpu_active();
         const fb_info_t* fi = fb_info();
-        frame(px, gy, pw, gh, C_PANEL, col);
-        tm_text(px + 16, gy + gh / 2 - 4, _("Its load is not measured."), C_DIM, C_PANEL);
-        layout_stats(px, pw, sy, 0);
-        g_kx = px; g_ky = sy;
         int k = 0;
+        if (g_gpu_measured) {
+            big_graph(px, gy, pw, gh, g_gpu_hist, NULL, 100, col);
+            tm_text(px, gy - 14, _("3D engine"), C_DIM, C_BG);
+            layout_stats(px, pw, sy, 1);
+            ksnprintf(a, sizeof(a), "%d%%", last(g_gpu_hist));
+            bigstat(0, 0, _("Utilization"), a);
+            uint64_t vu = gpu_vram_used();
+            if (vu || (g && g->vram)) {
+                human_kb((uint32_t)(vu >> 10), a, sizeof(a));
+                if (g && g->vram) { human_kb(g->vram >> 10, b, sizeof(b)); ksnprintf(line, sizeof(line), "%s / %s", a, b); }
+                else kstrlcpy(line, a, sizeof(line));
+                bigstat(1, 0, _("Video memory used by apps"), line);
+            }
+        } else {
+            frame(px, gy, pw, gh, C_PANEL, col);
+            tm_text(px + 16, gy + gh / 2 - 4, _("Its load is not measured."), C_DIM, C_PANEL);
+            tm_text(px + 16, gy + gh / 2 + 12, _("(the Radeon HD 5000-7000 3D driver measures it)"), C_DIM, C_PANEL);
+            layout_stats(px, pw, sy, 0);
+            g_kx = px; g_ky = sy;
+        }
         kvl(k++, _("Adapter:"), g ? g->name : "VBE / UEFI framebuffer");
         kvl(k++, _("Driver:"), g ? g->driver : "none (firmware's mode)");
         if (fi) {

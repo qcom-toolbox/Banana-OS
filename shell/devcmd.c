@@ -7,6 +7,7 @@
 #include "../kernel/kheap.h"
 #include "../kernel/gui.h"
 #include "../kernel/gpu.h"
+#include "../kernel/timer.h"
 #include "../kernel/gpu_i915.h"
 #include "../usb/usbcore.h"
 
@@ -184,7 +185,17 @@ int devcmd_dispatch(int argc, char** argv) {
             say(msg);
             return 1;
         }
-        if (argc < 2 || strcmp(argv[1], "experimental")) { say("usage: gpu experimental [on | off] | gpu radeon dump [folder] | gpu radeon 3d   (lsgpu: the graphics card)"); return 1; }
+        if (argc >= 2 && !strcmp(argv[1], "load")) {
+            /* the 3D engine's load over a second (as Task Manager shows it) and the video memory apps hold */
+            if (gpu_load() < 0) { say("gpu load: not measured with this driver (the Radeon HD 5000-7000 3D driver measures it)"); return 1; }
+            timer_sleep_ms(1000);
+            char b[120];
+            ksnprintf(b, sizeof(b), "gpu load: 3D engine %d%% busy over the last second, %u MB of video memory used by apps",
+                      gpu_load(), (unsigned)(gpu_vram_used() >> 20));
+            say(b);
+            return 1;
+        }
+        if (argc < 2 || strcmp(argv[1], "experimental")) { say("usage: gpu experimental [on | off] | gpu load | gpu radeon dump [folder] | gpu radeon 3d   (lsgpu: the graphics card)"); return 1; }
         if (!strcmp(w, "on")) {
             gpu_set_experimental(1);
             say("gpu: experimental drivers on (AMD Radeon HD 5000-7000: resolutions, hardware cursor, vsync; RX 400/500: cursor and vsync)");

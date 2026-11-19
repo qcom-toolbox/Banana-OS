@@ -56,6 +56,7 @@ typedef struct radeon {
 } radeon_t;
 
 uint32_t rad_rd(radeon_t* r, uint32_t reg);
+uint64_t rad_drm_vram_used(void) __attribute__((weak));   /* bytes of video memory apps hold (radeon_drm.c; NULL in the 32-bit kernel) */
 void     rad_wr(radeon_t* r, uint32_t reg, uint32_t v);
 
 /* the family of a TeraScale 2 device id (CHIP_*), -1 if not one */

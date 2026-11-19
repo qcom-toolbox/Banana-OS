@@ -32,6 +32,31 @@ static int g_booting;                    /* in gpu_init: the terminal is not up 
 
 static gpu_stats_t g_stats;
 static spinlock_t g_stats_lock = SPINLOCK_INIT;
+/* ── the GPU's load ── */
+static int (*volatile g_load_busy)(void);
+static uint64_t (*volatile g_load_vram)(void);
+static volatile uint32_t g_load_hits, g_load_all, g_load_wanted;
+void gpu_register_load(int (*busy_now)(void), uint64_t (*vram_used)(void)) {
+    g_load_vram = vram_used;
+    g_load_busy = busy_now;
+}
+void gpu_load_tick(uint32_t ms) {
+    int (*f)(void) = g_load_busy;
+    if (!f || ms - g_load_wanted > 5000u) return;      /* (nobody looking: no register reads) */
+    g_load_all++;
+    if (f()) g_load_hits++;
+}
+int gpu_load(void) {
+    if (!g_load_busy) return -1;
+    uint32_t now = timer_ms();
+    if (now - g_load_wanted > 5000u) { g_load_wanted = now; g_load_hits = g_load_all = 0; return 0; }
+    g_load_wanted = now;
+    uint32_t all = g_load_all, hits = g_load_hits;
+    g_load_hits = g_load_all = 0;                       /* (a tick in between is lost: no matter) */
+    return all ? (int)((uint64_t)hits * 100u / all) : 0;
+}
+uint64_t gpu_vram_used(void) { uint64_t (*f)(void) = g_load_vram; return f ? f() : 0; }
+
 void gpu_stats(gpu_stats_t* out) {
     uintptr_t f = spin_lock_irq(&g_stats_lock); *out = g_stats; spin_unlock_irq(&g_stats_lock, f);
 }

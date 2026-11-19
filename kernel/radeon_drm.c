@@ -162,6 +162,7 @@ static uint8_t*  g_vram_map;            /* a bit per 4 KiB page of video memory:
 static uint8_t*  g_gtt_map;             /* a bit per GART page: used */
 static uint32_t  g_gtt_first, g_gtt_pages;
 static uint64_t  g_vram_used, g_gtt_used;
+uint64_t rad_drm_vram_used(void) { return g_vram_used; }   /* (Task Manager) */
 static uint32_t  g_submits, g_rejected;
 
 /* the IB pool: a ring of pages bound in the GART; each IB's fence frees its part */
