@@ -278,7 +278,7 @@ static int check_medium(const img_src_t* src, char* why, int cap) {
             }
             uint32_t crc = 0;
             for (uint32_t done = 0; done < fsz && rc == 0; ) {
-                uint32_t n = fsz - done < 64u * 2048u ? fsz - done : 64u * 2048u;
+                uint32_t n = fsz - done < 16u * 2048u ? fsz - done : 16u * 2048u;   /* (32 KB a read: the others get turns) */
                 if (src_read(src, (uint32_t)(foff / 2048u) + done / 2048u, (n + 2047u) / 2048u, buf) != 0) {
                     if (why) ksnprintf(why, (size_t)cap, "%s could not be read (at %u KB)", p, done >> 10);
                     rc = -1;

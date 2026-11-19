@@ -2123,10 +2123,9 @@ static void cmd_checkmedium(void) {
     terminal_writeln("checkmedium: reading the Banana OS CD / USB stick back...");
     terminal_flush();
     int r = fsdisk_check_medium(why, sizeof(why));
-    if (r == 0) terminal_write_color("checkmedium: OK - ", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-    else if (r == 1) terminal_write_color("checkmedium: ", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    else terminal_write_color("checkmedium: DAMAGED - ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-    terminal_writeln(why);
+    char line[200];
+    ksnprintf(line, sizeof(line), "checkmedium: %s%s\n", r == 0 ? "OK - " : r == 1 ? "" : "DAMAGED - ", why);
+    terminal_write_color(line, r == 0 ? VGA_COLOR_LIGHT_GREEN : r == 1 ? VGA_COLOR_YELLOW : VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
 }
 
 static void cmd_sync(void) {
