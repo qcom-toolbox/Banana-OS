@@ -60,8 +60,20 @@ static void bc_write(bcm5720_t*c,unsigned a,uint32_t v){
 }
 static void bc_delay(unsigned us){now+=(us+999)/1000;}
 uint32_t timer_ms(void){return now;}
+/* Like the kernel heap the driver gets its rings from: a block never spans
+ * a 4 GiB line (bc_dma_range refuses one). The host's heap can place one
+ * there now and then (ASLR) - such a block is kept aside and another taken. */
 void*kmalloc_aligned(size_t n,size_t align){
- void*p=0;if(posix_memalign(&p,align,n))return 0;CHECK(allocn<16);allocs[allocn++]=p;return p;
+ void*held[8];unsigned nh=0;void*p=0;
+ for(;;){
+  if(posix_memalign(&p,align,n)){p=0;break;}
+  uint64_t a=(uintptr_t)p;
+  if((a>>32)==((a+n-1)>>32)||nh==8)break;
+  held[nh++]=p;
+ }
+ while(nh)free(held[--nh]);
+ if(!p)return 0;
+ CHECK(allocn<16);allocs[allocn++]=p;return p;
 }
 void klog(const char*f,...){(void)f;}
 void net_register_device(netdev_t*n){CHECK(commands[((bcm5720_t*)n->priv)->pci.dev&1]&0x400u);registered++;n->present=!register_full;}

@@ -38,9 +38,11 @@ jobs:
         with:
           path: ports/libjs/src
           key: libjs-sources-${{ hashFiles('ports/libjs/sources.json') }}
-      - name: The toolchain's versions (the build cache's key)
+      # (and the runner's CPU: objects built on one with newer instructions
+      # stopped the probe with "Illegal instruction" on another - run 359)
+      - name: The toolchain's versions and the CPU's features (the build cache's key)
         id: toolchain
-        run: echo "id=$(gcc -dumpfullversion)-$(cmake --version | head -1 | cut -d' ' -f3)" >> "$GITHUB_OUTPUT"
+        run: echo "id=$(gcc -dumpfullversion)-$(cmake --version | head -1 | cut -d' ' -f3)-cpu$(grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | sort | md5sum | cut -c1-10)" >> "$GITHUB_OUTPUT"
       # The engine's build directory, kept between runs: ninja and the Banana
       # rebuild's object signatures decide what to compile again (an older
       # cache is a starting point, never taken as it is) - without it every
