@@ -26,6 +26,7 @@
 #define FSDISK_ERR_NO_INSTALL  -8 /* no disk holds an installed Banana OS */
 #define FSDISK_ERR_BAD_SOURCE -10 /* the CD / USB stick does not read back as built (fsdisk_medium_why) */
 #define FSDISK_ERR_NEEDS_LIVE -11 /* the installed system cannot update itself (old layout): use the live stick */
+#define FSDISK_ERR_SOURCE_READ -12 /* the stick / CD / file stopped reading (unplugged?) before anything was written */
 
 /* Looks for exactly one non-ATAPI ATA disk attached (any bus/position).
  * Returns 1 and fills *out if exactly one was found, 0 if none, -1 if

@@ -229,6 +229,7 @@ static const char* result_text(int rc) {
     case FSDISK_ERR_ISO_TOO_BIG: return "This CD's system does not fit the disk's boot area.";
     case FSDISK_ERR_FULL:        return "The files are too big for this disk.";
     case FSDISK_ERR_NO_INSTALL:  return "There is no Banana OS on the disk to update.";
+    case FSDISK_ERR_SOURCE_READ: return "The USB stick / CD stopped reading (unplugged?) before anything was written - the disk is as it was. Plug it in again and retry.";
     case FSDISK_ERR_BAD_SOURCE:  return "The USB stick / CD does not read back as it was built (damaged) - nothing was written. Write the ISO to the stick again.";
     default:                     return "A disk read or write failed.";
     }

@@ -15,6 +15,7 @@
 #include "blockdev.h"
 #include "crc32c.h"
 #include "deflate.h"
+#include "meminfo.h"
 
 #define FSDISK_MAGIC   0x414E4142u /* "BANA" */
 #define FSDISK_VERSION 3u   /* = FS_SNAPSHOT_V3; version 1 and 2 disks (Banana OS 0.4, 0.5) still load */
@@ -86,7 +87,10 @@ typedef struct {
     ata_disk_t  cd;
     blockdev_t* usb;                 /* NULL: the CD drive (or the file) */
     int         file;                /* 1: Banana_OS.iso as a file (g_src_path), the installed system updating itself */
+    uint8_t**   ram;                 /* staged: the whole image read into RAM (1 MB pieces) - read from there */
+    uint32_t    ram_bytes;
 } img_src_t;
+#define RAM_PIECE (512u * 2048u)
 
 /* an update from an ISO file (Settings > Update, `update FILE.iso`): its path, "" none */
 static char g_src_path[256];
@@ -95,6 +99,17 @@ static int  g_cmp_ok;                            /* (the last comparison, below)
 static const char* src_kind(const img_src_t* s) { return s->file ? "ISO file" : s->usb ? "USB stick" : "CD"; }
 
 static int src_read(const img_src_t* s, uint32_t blk, uint32_t n, void* buf) {
+    if (s->ram) {
+        uint64_t off = (uint64_t)blk * 2048u, len = (uint64_t)n * 2048u;
+        if (off + len > s->ram_bytes) return -1;
+        for (uint8_t* out = (uint8_t*)buf; len; ) {
+            uint32_t piece = (uint32_t)(off / RAM_PIECE), at = (uint32_t)(off % RAM_PIECE);
+            uint32_t k = RAM_PIECE - at < len ? RAM_PIECE - at : (uint32_t)len;
+            memcpy(out, s->ram[piece] + at, k);
+            out += k; off += k; len -= k;
+        }
+        return 0;
+    }
     if (s->file) {
         int idx = fs_find_file(g_src_path);
         uint32_t want = n * 2048u, got = 0;
@@ -111,6 +126,7 @@ static int src_read(const img_src_t* s, uint32_t blk, uint32_t n, void* buf) {
 
 /* the ISO9660 image's size, from its primary volume descriptor (block 16) */
 static int src_iso_size(const img_src_t* s, uint32_t* out_bytes) {
+    if (s->ram) { *out_bytes = s->ram_bytes; return 0; }
     if (!s->usb && !s->file) return disk_cd_iso_size(&s->cd, out_bytes);
     uint8_t* pvd = (uint8_t*)kmalloc(2048);
     if (!pvd) return -1;
@@ -2793,6 +2809,61 @@ int fsdisk_update(void) {
     return fsdisk_update_on(&d);
 }
 
+/* Update hardening: the whole image is read into RAM first and checked
+ * there (check_medium, below), and the disk is written from that copy -
+ * a stick pulled out, or one that reads back wrong now and then, can no
+ * longer stop an update halfway (part old system, part new: a disk that
+ * does not start) or put a byte on the disk other than the one checked.
+ * 1 staged; 0 not enough free memory (streamed from the stick as before);
+ * -1 the stick / CD / file could not be read (nothing written) */
+static void unstage(img_src_t* s) {
+    if (!s->ram) return;
+    for (uint32_t i = 0; i < (s->ram_bytes + RAM_PIECE - 1u) / RAM_PIECE; i++) kfree(s->ram[i]);
+    kfree(s->ram);
+    s->ram = NULL;
+    s->ram_bytes = 0;
+}
+static int stage_source(img_src_t* s, uint32_t iso_bytes, char* why, int cap) {
+    meminfo_t m;
+    meminfo_get(&m);
+    uint32_t pieces = (iso_bytes + RAM_PIECE - 1u) / RAM_PIECE;
+    if ((uint64_t)m.free_kb * 1024u < (uint64_t)iso_bytes + (192ull << 20)) {     /* (192 MB kept for the rest) */
+        klog("fsdisk: %u MB free - the image is streamed from the %s, not staged in RAM\n", m.free_kb >> 10, src_kind(s));
+        return 0;
+    }
+    uint8_t** ram = (uint8_t**)kzalloc(pieces * sizeof(uint8_t*));
+    if (!ram) return 0;
+    for (uint32_t i = 0; i < pieces; i++)
+        if (!(ram[i] = (uint8_t*)kmalloc(RAM_PIECE))) {
+            for (uint32_t j = 0; j < i; j++) kfree(ram[j]);
+            kfree(ram);
+            return 0;
+        }
+    uint32_t total = iso_bytes / 2048u, t0 = timer_ms();
+    g_prog_done = 0;
+    g_prog_total = total + 1;
+    for (uint32_t done = 0; done < total; ) {
+        uint32_t n = total - done < 512u ? total - done : 512u;
+        if (src_read(s, done, n, ram[done / 512u]) != 0) {
+            if (why) ksnprintf(why, (size_t)cap, "the %s could not be read at %u MB (unplugged?) - nothing was written", src_kind(s), done >> 9);
+            klog("fsdisk: %s\n", why ? why : "staging failed");
+            for (uint32_t j = 0; j < pieces; j++) kfree(ram[j]);
+            kfree(ram);
+            return -1;
+        }
+        done += n;
+        g_prog_done = done;
+        task_yield();
+    }
+    g_tm.read_ms += timer_ms() - t0;
+    s->ram = ram;
+    s->ram_bytes = iso_bytes;
+    klog("fsdisk: the %s read into RAM (%u MB in %u ms): it is checked and written from there\n",
+         src_kind(s), iso_bytes >> 20, timer_ms() - t0);
+    return 1;
+}
+
+static int update_from(img_src_t* sp, const ata_disk_t* dp, uint32_t iso_bytes, uint32_t t_start);
 int fsdisk_update_on(const ata_disk_t* dp) {
     memset(&g_tm, 0, sizeof(g_tm));
     uint32_t t_start = timer_ms();
@@ -2810,6 +2881,15 @@ int fsdisk_update_on(const ata_disk_t* dp) {
     if (self && !e4_detect(&dst) && !v5_detect(&dst, &vm)) return FSDISK_ERR_NEEDS_LIVE;
     if (!find_source(&src) || src_iso_size(&src, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
     if (self && fsdisk_sync_durable() != FSDISK_OK) return FSDISK_ERR_IO;   /* (the files safe on the disk first) */
+    if (stage_source(&src, iso_bytes, g_medium_why, sizeof(g_medium_why)) < 0) return FSDISK_ERR_SOURCE_READ;
+    int rc = update_from(&src, &dst, iso_bytes, t_start);
+    unstage(&src);
+    return rc;
+}
+
+static int update_from(img_src_t* sp, const ata_disk_t* dp, uint32_t iso_bytes, uint32_t t_start) {
+    img_src_t src = *sp;
+    ata_disk_t dst = *dp;
     if (check_medium(&src, g_medium_why, sizeof(g_medium_why)) < 0) return FSDISK_ERR_BAD_SOURCE;
     uint8_t partition[16];
     uint32_t base = boot_partition(&dst, partition);

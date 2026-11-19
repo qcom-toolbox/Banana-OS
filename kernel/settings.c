@@ -1639,6 +1639,7 @@ static const char* up_result_text(int rc, uint32_t* color) {
     case FSDISK_ERR_ISO_TOO_BIG: return "Too big for the disk's boot area: reinstall.";
     case FSDISK_ERR_BAD_SOURCE:  return "It reads back damaged - nothing was written.";
     case FSDISK_ERR_NEEDS_LIVE:  return "Old disk layout: update once from the live stick.";
+    case FSDISK_ERR_SOURCE_READ: return "The stick stopped reading - nothing was written.";
     case FSDISK_ERR_TOO_SMALL: case FSDISK_ERR_FULL: return "The disk is too small - nothing was changed.";
     default:                     return "A disk error - your files are untouched; retry.";
     }

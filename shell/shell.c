@@ -2149,6 +2149,11 @@ static void cmd_update_mode(const char* args, int repair) {
             "        the PC may start this live stick again instead of your installed system\n"
             "        (its programs then come from the stick, your files and settings are not used).\n",
             VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    } else if (rc == FSDISK_ERR_SOURCE_READ) {
+        terminal_write_color("update: the USB stick / CD / ISO file stopped reading before anything was written -\n"
+                             "        the disk is as it was. Plug it in again (and leave it in) and retry:\n        ",
+                             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln(fsdisk_medium_why());
     } else if (rc == FSDISK_ERR_NEEDS_LIVE) {
         terminal_write_color("update: this install uses the old disk layout - start the live USB stick and run\n"
                              "        'update' there once (it moves the files); after that it updates itself.\n",
