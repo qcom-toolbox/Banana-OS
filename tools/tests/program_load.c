@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdint.h>
 typedef struct { int used,loaded,pins; char* content; uint32_t size; } fs_file_t;
-typedef struct { int used,id,seq,pgid,sid; void* us; void* mem; char name[64]; } app_proc_t;
+typedef struct { int used,id,seq,pgid,sid; void* us; void* mem; char name[64]; char exe[128]; } app_proc_t;
 #define APP_MAX 2
 static app_proc_t g_procs[APP_MAX];
 static int g_seq,checks,fail_at,allocations,io_error,missing,load_calls;
@@ -14,6 +14,7 @@ static char bytes[]="\177ELF-native-program";
 #define CHECK(c) do { checks++; if(!(c)){fprintf(stderr,"FAIL %d: %s\n",__LINE__,#c);exit(1);} }while(0)
 static void api_init(void) {}
 static int fs_find_file(const char* p) { CHECK(!strcmp(p,"/bin/probe"));return missing?-1:0; }
+static void fs_file_path(int i,char* b,int n) { CHECK(i==0);snprintf(b,(size_t)n,"/bin/probe"); }
 static void fs_pin(int i) { if(i==0)file.pins++; }
 static void fs_unpin(int i) { if(i==0){CHECK(file.pins>0);file.pins--;} }
 static fs_file_t* fs_get_file(int i) {
