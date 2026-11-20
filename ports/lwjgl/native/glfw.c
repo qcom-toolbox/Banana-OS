@@ -766,6 +766,25 @@ API void glfwMakeContextCurrent(GLFWwindow* w) {
 }
 API GLFWwindow* glfwGetCurrentContext(void) { return t_current; }
 
+/* glfwSwapInterval(n): a frame shown every n refreshes of the screen
+ * (60 Hz). Banana OS gives apps no vertical blank to wait on, so the swap
+ * keeps its own clock: after each frame it sleeps until the next one is due
+ * (a deadline that advances by the period, so the rate stays even; a frame
+ * late by more than a period starts the clock again). Without it a game
+ * with VSync on - Minecraft's default - drew frames as fast as the CPU could
+ * make them, in its menus too: every core busy for frames never shown. */
+static int    g_swap_interval;
+static double g_next_frame;
+
+static void pace_frame(void) {
+    if (g_swap_interval <= 0) return;
+    double period = (double)g_swap_interval / 60.0, t = now();
+    if (g_next_frame == 0 || t - g_next_frame > period) g_next_frame = t;
+    g_next_frame += period;
+    double left = g_next_frame - now();
+    if (left >= 0.001) banana_sleep((unsigned)(left * 1000.0));
+}
+
 API void glfwSwapBuffers(GLFWwindow* w) {
     if (!w) return;
     if (!w->gl) { error(GLFW_NO_WINDOW_CONTEXT, "The window has no OpenGL context%s", NULL); return; }
@@ -773,9 +792,11 @@ API void glfwSwapBuffers(GLFWwindow* w) {
     if (cur != w->gl) bgl3_make_current(w->gl);
     bgl3_swap(w->gl);
     if (cur != w->gl) bgl3_make_current(cur);
+    pace_frame();
 }
 
-API void glfwSwapInterval(int n) { (void)n; }
+/* (negative: adaptive sync - here the same as 1) */
+API void glfwSwapInterval(int n) { g_swap_interval = n < 0 ? 1 : n; g_next_frame = 0; }
 
 API int glfwExtensionSupported(const char* name) {
     if (!t_current) { error(GLFW_NO_CURRENT_CONTEXT, "No current context%s", NULL); return 0; }
