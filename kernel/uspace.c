@@ -719,6 +719,25 @@ static uint64_t walk(uspace_t* us, uint64_t va) {
     return 0;
 }
 
+/* n bytes of us's memory at va into out, through its page tables, from
+ * another task (prof): only pages that are there - nothing is faulted in;
+ * 0, or -1 */
+int uvm_peek(uspace_t* us, uintptr_t va, void* out, uint32_t n) {
+    if (!us) return -1;
+    uint8_t* o = (uint8_t*)out;
+    while (n) {
+        uint64_t e = walk(us, va);
+        if (!(e & P_PRESENT) || !(e & P_USER)) return -1;            /* (the app's own memory only) */
+        uint64_t page = (e & P_LARGE) ? 0x200000ull : 4096ull;      /* (a 2 MiB page: the identity map's) */
+        uint64_t base = (e & ADDR_MASK) & ~(page - 1);
+        uint64_t in = (uint64_t)va & (page - 1);
+        uint32_t k = (uint32_t)(page - in < n ? page - in : n);
+        memcpy(o, (const void*)(uintptr_t)(base + in), k);
+        o += k; va += k; n -= k;
+    }
+    return 0;
+}
+
 int uvm_user_writable(uspace_t* us, umem_t* m, uintptr_t a, uint64_t n) {
     if (!us || !n) return 0;
     const uint64_t need = P_PRESENT | P_USER | P_WRITE;
@@ -954,6 +973,7 @@ int       uspace_fault_is_stale(uintptr_t addr, uint32_t err) { (void)addr; (voi
 uint32_t  uspace_stale_faults(void) { return 0; }
 /* (no mmap region: kernel/app.c maps app memory directly) */
 int       uvm_owns(uspace_t* us, const void* p, uint64_t n) { (void)us; (void)p; (void)n; return 0; }
+int       uvm_peek(uspace_t* us, uintptr_t va, void* out, uint32_t n) { (void)us; memcpy(out, (const void*)va, n); return 0; }
 int       uvm_owns_str(uspace_t* us, const char* s) { (void)us; (void)s; return 0; }
 int       uvm_fault(uspace_t* us, umem_t* m, uintptr_t addr, uint32_t err, uint32_t* on_disk) { (void)us; (void)m; (void)addr; (void)err; (void)on_disk; return 0; }
 uint64_t  uvm_resident(uspace_t* us) { (void)us; return 0; }

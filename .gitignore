@@ -37,6 +37,7 @@ build/builtin-meta-*.bin
 build/ports64.inc
 build/ports64.h
 build/build_info.h
+build/ksyms64.*
 
 # Optional release variant
 Banana_OS-mesa.iso

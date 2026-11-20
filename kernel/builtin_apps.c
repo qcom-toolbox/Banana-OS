@@ -11,6 +11,7 @@
 #include "../crypto/sha256.h"
 #include "timer.h"
 #include "fsdisk.h"
+#include "sysinfo.h"
 #include "ext4.h"
 #include "notification.h"
 
@@ -446,7 +447,12 @@ static void release_live(void) {
 
 void builtin_release(void) {
     if (g_released) return;
-    if (!fsdisk_is_installed()) { release_live(); return; }
+    /* Only the live system reads its apps from the stick / CD it started
+     * from. A system started from the disk never does - even when its files
+     * could not be loaded (then the packages simply stay in RAM): pulling a
+     * stick out must never break a program of the installed system. */
+    if (sysinfo_live_boot()) { release_live(); return; }
+    if (!fsdisk_is_installed()) return;
     uint32_t t0 = timer_ms();
     fs_mkdir_p(STORE);
     /* STORE/.index: "name crc" of each package saved there */

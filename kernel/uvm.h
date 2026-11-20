@@ -42,6 +42,8 @@ int       uvm_protect(uspace_t* us, uintptr_t addr, uint64_t len, int prot);
 /* 1 if [p, p + n) is mapped and readable (a system call may use it) */
 int       uvm_owns(uspace_t* us, const void* p, uint64_t n);
 int       uvm_owns_str(uspace_t* us, const char* s);
+/* n bytes of its memory at va, read from another task (prof): 0, or -1 if a page is not there */
+int       uvm_peek(uspace_t* us, uintptr_t va, void* out, uint32_t n);
 /* a page fault at addr (err: the CPU's error code): 1 if a page was put
  * there (or it was a stale translation) and the access can go on; 2 if the
  * page is in the swap area on the disk (*on_disk: its kernel/zswap.c entry,

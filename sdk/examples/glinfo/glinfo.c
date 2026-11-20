@@ -6,11 +6,16 @@
  * extensions, and a frame drawn in each to check it works.
  *     glinfo        the summary
  *     glinfo -e     ... and every extension
+ *     glinfo -loop N   frames drawn for N seconds (OpenGL ES 2.0, 854x480:
+ *                      cleared, a triangle, finished): frames a second -
+ *                      something steady to measure, or to run prof against
  */
 #include <EGL/egl.h>
 #include <GLES/gl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <banana.h>
 
 static int g_fail, g_ext;
 
@@ -94,8 +99,57 @@ static int es_context(EGLDisplay d, EGLConfig cfg, int major, EGLSurface* s, EGL
     return eglMakeCurrent(d, *s, *s, *c);
 }
 
+static int loop(int seconds) {
+    EGLDisplay d = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    EGLint maj = 0, min = 0, n = 0;
+    if (!eglInitialize(d, &maj, &min)) { printf("glinfo: EGL could not start (0x%x)\n", eglGetError()); return 1; }
+    EGLConfig cfg;
+    EGLint want[] = { EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE };
+    eglChooseConfig(d, want, &cfg, 1, &n);
+    EGLint pb[] = { EGL_WIDTH, 854, EGL_HEIGHT, 480, EGL_NONE };
+    EGLSurface s = eglCreatePbufferSurface(d, cfg, pb);
+    EGLContext c;
+    if (!es_context(d, cfg, 2, &s, &c)) { printf("glinfo: no OpenGL ES 2.0 context (0x%x)\n", eglGetError()); return 1; }
+    describe("OpenGL ES 2.0 (EGL), 854x480");
+    GLuint v = shader(GL_VERTEX_SHADER, "attribute vec2 pos; void main() { gl_Position = vec4(pos, 0.0, 1.0); }");
+    GLuint f = shader(GL_FRAGMENT_SHADER, "precision mediump float; uniform float t; void main() { gl_FragColor = vec4(1.0, t, 0.0, 1.0); }");
+    GLuint p = glCreateProgram();
+    glAttachShader(p, v);
+    glAttachShader(p, f);
+    glBindAttribLocation(p, 0, "pos");
+    glLinkProgram(p);
+    glUseProgram(p);
+    GLint ut = glGetUniformLocation(p, "t");
+    static const float tri[] = { -1, -1, 3, -1, -1, 3 };
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, tri);
+    glEnableVertexAttribArray(0);
+    unsigned start = banana_ticks(), last = start, frames = 0, total = 0;
+    while (banana_ticks() - start < (unsigned)seconds * 1000u) {
+        float t = (float)(total % 60) / 60.0f;
+        glClearColor(t, 0.2f, 1.0f - t, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUniform1f(ut, t);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glFinish();
+        frames++; total++;
+        unsigned now = banana_ticks();
+        if (now - last >= 1000) {
+            printf("glinfo: %u frames a second\n", frames * 1000u / (now - last));
+            frames = 0;
+            last = now;
+        }
+    }
+    printf("glinfo: %u frames in %d s\n", total, seconds);
+    eglDestroyContext(d, c);
+    eglDestroySurface(d, s);
+    eglTerminate(d);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     g_ext = argc > 1 && !strcmp(argv[1], "-e");
+    if (argc > 2 && !strcmp(argv[1], "-loop")) return loop(atoi(argv[2]) > 0 ? atoi(argv[2]) : 10);
 
     /* desktop OpenGL */
     bgl3_ctx_t* core = bgl3_create_version(NULL, 32, 32, BGL3_CORE, 0, 0, NULL);

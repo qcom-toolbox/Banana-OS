@@ -2,6 +2,7 @@
 #include "latency.h"
 #include "kheap.h"
 #include "idt.h"
+#include "prof.h"
 #include "crash.h"
 #include "types.h"
 #include "fb.h"
@@ -302,6 +303,7 @@ void irq_handler(registers_t* regs) {
         }
     }
 
+    if (irq == 0) prof_hit((uintptr_t)REG_IP(regs), (regs->cs & 3) == 3);   /* (prof: the PIT's tick) */
     uint64_t service_start = latency_stamp();
     for (int i = 0; i < IRQ_CHAIN && irq_handlers[irq][i]; i++) irq_handlers[irq][i]();
 
@@ -547,6 +549,8 @@ extern void lapic_timer_stub(void);
 /* local-APIC interrupts: kernel/isr64.asm */
 void ipi_handler(registers_t* regs) {
     crash_stop_secondary();
+    if (regs->int_no == SMP_VEC_TIMER || regs->int_no == SMP_VEC_KICK)
+        prof_hit((uintptr_t)REG_IP(regs), (regs->cs & 3) == 3);          /* (prof: where this core was) */
     if (regs->int_no == SMP_VEC_TIMER) {
         uint64_t service_start = latency_stamp();
         /* the boot core's local APIC timer, standing in for the PIT (IRQ 0) */

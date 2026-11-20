@@ -156,6 +156,7 @@ typedef struct {
     void*     fork_frame;      /* a fork's child: the registers it goes on with (sysframe_t) */
     uintptr_t fork_fs;         /* ... and its thread pointer */
     int       exec_next;       /* execve: the new program is ready - run() starts it */
+    char      exe[128];        /* the program's file (prof: its symbols) */
     uspace_t* old_us;          /* ... the old one's space and memory, freed then */
     umem_t*   old_mem;
     /* terminals and job control (version 27): its controlling terminal (a
@@ -3684,6 +3685,7 @@ static int a_proc_exec(const char* path, char* const* argv, char* const* envp) {
     p->clip = NULL;
     const char* base = strrchr(argc ? kargv[0] : file, '/');
     kstrlcpy(p->name, base ? base + 1 : (argc ? kargv[0] : file), sizeof(p->name));
+    fs_file_path(fi, p->exe, sizeof(p->exe));
     kfree(kargv);
     p->old_us = old.us;
     p->old_mem = old.mem;
@@ -4892,6 +4894,7 @@ static app_proc_t* prepare(const char* path, int argc, char** argv, char** envp,
     p->id = id;
     p->seq = ++g_seq;
     p->pgid = p->sid = p->seq;                          /* (its own group and session; no parent) */
+    fs_file_path(fi, p->exe, sizeof(p->exe));
     fs_file_t* f = pin_program(fi);
     if (!f) { kstrlcpy(err, "cannot read it", (size_t)ecap); return NULL; }
 #ifdef __x86_64__
@@ -5181,3 +5184,200 @@ int app_console_focused(void) {
         if (g_procs[i].used && !g_procs[i].zombie && focused(&g_procs[i])) return 1;
     return 0;
 }
+
+#ifdef __x86_64__
+/* ── the profiler (kernel/prof.c): what an app's task is doing ── */
+
+/* the system call task pid is in (its name), or NULL */
+const char* app_prof_syscall(int pid) {
+    if (pid < 0 || pid >= TASK_MAX) return NULL;
+    int sys = g_insys[pid];
+    return sys && g_spec[sys - 1].name ? g_spec[sys - 1].name : NULL;
+}
+
+/* (in the timer interrupt: which system call task pid is in, 0 none) */
+int app_prof_insys(int pid) { return pid >= 0 && pid < TASK_MAX ? g_insys[pid] : 0; }
+const char* app_prof_sysname(int code) { return code > 0 && code <= (int)API_SLOTS && g_spec[code - 1].name ? g_spec[code - 1].name : "?"; }
+
+/* the app name task pid belongs to ("java"), NULL if none */
+const char* app_prof_name(int pid) {
+    if (pid < 0 || pid >= TASK_MAX || !g_pid_app[pid]) return NULL;
+    app_proc_t* p = &g_procs[g_pid_app[pid] - 1];
+    return p->used ? p->name : NULL;
+}
+
+static uint64_t g_elf_span;
+static uintptr_t g_elf_page;
+/* (an app's memory read from another task: its own blocks, or what it mapped) */
+static int prof_rd(app_proc_t* p, uintptr_t a, void* b, uint32_t n) { return uvm_peek(p->us, a, b, n); }
+static int prof_str(app_proc_t* p, uintptr_t a, char* out, int cap) {
+    for (int i = 0; i < cap - 1; i++) {
+        if (prof_rd(p, a + (uintptr_t)i, out + i, 1)) return -1;
+        if (!out[i]) return 0;
+    }
+    out[cap - 1] = 0;
+    return 0;
+}
+
+/* a library loaded into p at or under ip: its ELF header found by going down
+ * page by page (the SDK's dlopen copies each library whole, header first);
+ * its name (DT_SONAME), the span of its segments and its exported symbols */
+static int prof_elf_at(app_proc_t* p, uintptr_t ip, uintptr_t* base_out, char* name, int ncap,
+                       char* sym, int scap, uint32_t* symoff) {
+    uintptr_t page = ip & ~(uintptr_t)0xFFF;
+    for (int k = 0; k < 65536; k++, page -= 0x1000) {          /* (256 MB down at most) */
+        uint8_t h[64];
+        if (prof_rd(p, page, h, 64)) return 0;                    /* (the start of its memory) */
+        if (memcmp(h, "\x7f" "ELF", 4) != 0 || h[4] != 2) continue;
+        uint64_t phoff; uint16_t phnum, phentsize;
+        memcpy(&phoff, h + 32, 8); memcpy(&phentsize, h + 54, 2); memcpy(&phnum, h + 56, 2);
+        if (phentsize != 56 || phnum > 64) return 0;
+        uint64_t span = 0, dynv = 0;
+        for (int i = 0; i < phnum; i++) {
+            uint8_t ph[56];
+            if (prof_rd(p, page + phoff + (uintptr_t)i * 56, ph, 56)) return 0;
+            uint32_t type; uint64_t vaddr, memsz;
+            memcpy(&type, ph, 4); memcpy(&vaddr, ph + 16, 8); memcpy(&memsz, ph + 40, 8);
+            if (type == 1 && vaddr + memsz > span) span = vaddr + memsz;
+            if (type == 2) dynv = vaddr;
+        }
+        g_elf_span = span;
+        g_elf_page = page;
+        if (ip >= page + span) return 0;                       /* past its end: memory of its own (JIT code) */
+        *base_out = page;
+        ksnprintf(name, (size_t)ncap, "lib@%lx", (unsigned long)page);
+        if (sym) sym[0] = 0;
+        if (!dynv) return 1;
+        uint64_t strtab = 0, symtab = 0, soname = 0, have_so = 0;
+        for (int i = 0; i < 256; i++) {
+            int64_t d[2];
+            if (prof_rd(p, page + dynv + (uintptr_t)i * 16, d, 16) || !d[0]) break;
+            if (d[0] == 5) strtab = (uint64_t)d[1];
+            else if (d[0] == 6) symtab = (uint64_t)d[1];
+            else if (d[0] == 14) { soname = (uint64_t)d[1]; have_so = 1; }
+        }
+        /* (dlopen relocates the dynamic section: an address, or still an offset) */
+        if (strtab && strtab < page) strtab += page;
+        if (symtab && symtab < page) symtab += page;
+        if (strtab && have_so) {
+            char so[64];
+            if (!prof_str(p, strtab + soname, so, sizeof(so)) && so[0]) kstrlcpy(name, so, (size_t)ncap);
+        }
+        if (!sym || !strtab || !symtab || strtab <= symtab) return 1;
+        uint64_t nsym = (strtab - symtab) / 24, off = ip - page, best = 0, bestsize = 0;
+        uint32_t bestname = 0;
+        for (uint64_t i = 1; i < nsym && i < 200000; i++) {
+            uint8_t e[24];
+            if (prof_rd(p, symtab + i * 24, e, 24)) break;
+            uint32_t nm; uint64_t val, size;
+            memcpy(&nm, e, 4); memcpy(&val, e + 8, 8); memcpy(&size, e + 16, 8);
+            if ((e[4] & 0xF) != 2 || !val || val > off || val < best) continue;   /* (functions only) */
+            best = val; bestsize = size; bestname = nm;
+        }
+        char fn[80];
+        if (best && !prof_str(p, strtab + bestname, fn, sizeof(fn))) {
+            ksnprintf(sym, (size_t)scap, "%s%s", off < best + bestsize ? "" : "~", fn);
+            *symoff = (uint32_t)(off - best);
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* the library at or under ip: 1 found ([*base, *base + *span), its name);
+ * 2 the nearest one under ip ends below it (*base: its end); 0 none */
+static int prof_elf_span(app_proc_t* p, uintptr_t ip, uintptr_t* base, char* name, int cap, uint64_t* span) {
+    uint32_t so = 0;
+    g_elf_span = 0; g_elf_page = 0;
+    if (prof_elf_at(p, ip, base, name, cap, NULL, 0, &so)) { *span = g_elf_span; return 1; }
+    if (g_elf_page && g_elf_span) { *base = g_elf_page + g_elf_span; return 2; }
+    return 0;
+}
+
+/* what was found where (prof): one look-up a library or a stretch of JIT
+ * code, not one a sample - each walks the app's page tables */
+typedef struct { uint32_t seq; uintptr_t lo, hi, base; int kind; char name[64]; } prof_range_t;
+#define PROF_RANGES 256
+static prof_range_t g_pr[PROF_RANGES];
+static int g_npr, g_pr_next;
+void app_prof_reset(void) { g_npr = 0; g_pr_next = 0; }
+static prof_range_t* pr_find(app_proc_t* p, uintptr_t ip) {
+    for (int i = 0; i < g_npr; i++)
+        if (g_pr[i].seq == (uint32_t)p->seq && ip >= g_pr[i].lo && ip < g_pr[i].hi) return &g_pr[i];
+    return NULL;
+}
+static prof_range_t* pr_add(app_proc_t* p, uintptr_t lo, uintptr_t hi, uintptr_t base, int kind, const char* name) {
+    prof_range_t* r = &g_pr[g_npr < PROF_RANGES ? g_npr++ : (g_pr_next++ % PROF_RANGES)];
+    r->seq = (uint32_t)p->seq; r->lo = lo; r->hi = hi; r->base = base; r->kind = kind;
+    kstrlcpy(r->name, name, sizeof(r->name));
+    return r;
+}
+/* the range ip is in: a library (2: [base, end)), or no library (3), 0 unknown */
+static prof_range_t* pr_lookup(app_proc_t* p, uintptr_t ip) {
+    prof_range_t* r = pr_find(p, ip);
+    if (r) return r;
+    uintptr_t base = 0;
+    uint32_t so = 0;
+    char name[64];
+    uint64_t span = 0;
+    int k = prof_elf_span(p, ip, &base, name, sizeof(name), &span);
+    if (k == 1) return pr_add(p, base, base + span, base, 2, name);
+    uint8_t one;
+    if (prof_rd(p, ip, &one, 1)) return NULL;
+    (void)so;
+    /* no library under it: this 1 MB of it is generated code (JIT) - a
+     * library starting inside it would have been found going down */
+    uintptr_t lo = ip & ~(uintptr_t)0xFFFFF;
+    if (k == 2 && base > lo) lo = base;            /* (just past a library's end) */
+    return pr_add(p, lo, (ip | 0xFFFFF) + 1, 0, 3, "JIT / generated code (no library)");
+}
+
+/* where ip is in the app task pid runs: "libOSMesa.so+0x1234 (fn+0x10)",
+ * "java+0x99", "JIT / generated code"; a group key (one line a function) */
+uint64_t app_prof_where(int pid, uintptr_t ip, char* out, int cap) {
+    if (pid < 0 || pid >= TASK_MAX || !g_pid_app[pid]) { kstrlcpy(out, "?", (size_t)cap); return 0; }
+    app_proc_t* p = &g_procs[g_pid_app[pid] - 1];
+    if (!p->used || !p->mem || !p->us) { kstrlcpy(out, "(ended)", (size_t)cap); return 1; }
+    if (ip >= p->code_lo && ip < p->code_hi) {
+        ksnprintf(out, (size_t)cap, "%s+0x%lx", p->name, (unsigned long)(ip - p->base));
+        return 0x1000000000000ull | ((ip - p->base) & ~(uintptr_t)0xFF);
+    }
+    uintptr_t base = 0;
+    char name[64], sym[96];
+    uint32_t so = 0;
+    if (prof_elf_at(p, ip, &base, name, sizeof(name), sym, sizeof(sym), &so)) {
+        if (sym[0]) ksnprintf(out, (size_t)cap, "%s (%s+0x%x)", name, sym, so);
+        else ksnprintf(out, (size_t)cap, "%s+0x%lx", name, (unsigned long)(ip - base));
+        return sym[0] ? (uint64_t)(ip - so) : (uint64_t)(ip & ~(uintptr_t)0xFF);
+    }
+    uint8_t one;
+    kstrlcpy(out, !prof_rd(p, ip, &one, 1) ? "JIT / generated code (no library)" : "?", (size_t)cap);
+    return 2;
+}
+/* which code ip is (prof): 1 the app's own binary (name = the app, *off from
+ * its load address), 2 a library (name = its DT_SONAME), 3 code of no
+ * library (JIT), 0 unknown */
+int app_prof_lib(int pid, uintptr_t ip, char* name, int cap, uint64_t* off) {
+    if (pid < 0 || pid >= TASK_MAX || !g_pid_app[pid]) return 0;
+    app_proc_t* p = &g_procs[g_pid_app[pid] - 1];
+    if (!p->used || !p->mem || !p->us) return 0;
+    if (ip >= p->code_lo && ip < p->code_hi) {
+        kstrlcpy(name, p->exe[0] ? p->exe : p->name, (size_t)cap);    /* (a path: prof reads its symbols there) */
+        *off = ip - p->base;
+        return 1;
+    }
+    prof_range_t* r = pr_lookup(p, ip);
+    if (!r) return 0;
+    if (r->kind == 2) { kstrlcpy(name, r->name, (size_t)cap); *off = ip - r->base; return 2; }
+    return 3;
+}
+#else
+/* (the 32-bit kernel: apps in ring 0 without the system call table) */
+int app_prof_lib(int pid, uintptr_t ip, char* name, int cap, uint64_t* off) { (void)pid; (void)ip; (void)name; (void)cap; (void)off; return 0; }
+int app_prof_insys(int pid) { (void)pid; return 0; }
+void app_prof_reset(void) {}
+const char* app_prof_sysname(int code) { (void)code; return "?"; }
+const char* app_prof_syscall(int pid) { (void)pid; return NULL; }
+const char* app_prof_name(int pid) { (void)pid; return NULL; }
+uint64_t app_prof_where(int pid, uintptr_t ip, char* out, int cap) { (void)pid; (void)ip; kstrlcpy(out, "app", (size_t)cap); return 0; }
+#endif

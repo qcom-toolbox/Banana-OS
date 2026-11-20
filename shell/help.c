@@ -244,6 +244,12 @@ static const page_t PAGES[] = {
       NULL, "checkmedium", "update, repair, install" },
     /* ── system ── */
     { "uname", "system", "uname", "the system's name", NULL, NULL, NULL, "neofetch" },
+    { "prof", "system", "prof [-q] [seconds]", "what the processor cores spend their time on",
+      "Looks at every core once a millisecond for 10 s (or the seconds given): how busy each was, the tasks, "
+      "the system calls, and the hottest functions in apps (library and function) and in the kernel. Start "
+      "the slow program first, then run it (from another terminal or Alt+F2). The report is also saved in "
+      "/home/banana/prof.txt (-q: only there, nothing on the screen - e.g. (sleep 5; prof -q 10) &).",
+      NULL, "prof 15", "top, taskmgr" },
     { "build", "system", "build", "which build of Banana OS this is",
       "Prints the build number - the release it came from on GitHub (build-N) - and its commit; `version` "
       "is the same. Settings > Update shows it too, with the build of an update found.",

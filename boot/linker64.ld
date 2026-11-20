@@ -21,6 +21,7 @@ SECTIONS {
     .rodata BLOCK(4K) : ALIGN(4K) {
         *(.rodata .rodata.*)
         *(.eh_frame*)
+        *(.ksyms)          /* (the symbol table, last: prof - the second link pass) */
     }
 
     .data BLOCK(4K) : ALIGN(4K) {

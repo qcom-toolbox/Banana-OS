@@ -11,6 +11,7 @@
 #include "audio.h"
 #include "splash.h"
 #include "gpu.h"
+#include "prof.h"
 #include "smp.h"
 #include "kstring.h"
 #include "timer_math.h"
@@ -127,6 +128,7 @@ static void timer_irq(void) {
     gui_cursor_tick();  /* the mouse pointer moves even while the desktop's task is busy */
     audio_tick();       /* the sound card's ring stays fed, whatever the tasks do */
     gpu_load_tick(g_ms);/* the GPU's busy bit sampled (only while Task Manager looks) */
+    prof_tick(g_ms);    /* prof: the other cores looked at on this tick too */
     splash_tick();      /* the boot screen's dots */
 }
 

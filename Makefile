@@ -104,8 +104,17 @@ $(patsubst %.c,%.o64,$(wildcard third_party/radeon/*.c)): CFLAGS64 += $(RADEON_A
 kernel.bin: $(OBJS)
 	ld $(LDFLAGS) -o $@ $^ $(LIBGCC)
 
-kernel64.bin: $(OBJS64)
-	ld $(LDFLAGS64) -o $@ $^ $(LIBGCC64)
+# two passes: the second links in the kernel's symbol table (prof: function
+# names), after all the code - which mkksyms.py --same checks did not move
+kernel64.bin: $(OBJS64) tools/mkksyms.py
+	ld $(LDFLAGS64) -o $@.pass1 $(OBJS64) $(LIBGCC64)
+	mkdir -p build
+	python3 tools/mkksyms.py $@.pass1 build/ksyms64.bin
+	printf '.section .ksyms,"a"\n.globl g_ksyms\n.balign 4\ng_ksyms:\n.incbin "build/ksyms64.bin"\n' > build/ksyms64.S
+	as --64 -o build/ksyms64.o build/ksyms64.S
+	ld $(LDFLAGS64) -o $@ $(OBJS64) build/ksyms64.o $(LIBGCC64)
+	python3 tools/mkksyms.py --same $@.pass1 $@
+	rm -f $@.pass1
 
 # grub-mkrescue adds a UEFI boot image when the x86_64-efi GRUB modules
 # are installed (grub-efi-amd64-bin) - the ISO then boots BIOS and UEFI

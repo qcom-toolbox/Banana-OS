@@ -16,6 +16,7 @@
 #include "crc32c.h"
 #include "deflate.h"
 #include "meminfo.h"
+#include "sysinfo.h"
 
 #define FSDISK_MAGIC   0x414E4142u /* "BANA" */
 #define FSDISK_VERSION 3u   /* = FS_SNAPSHOT_V3; version 1 and 2 disks (Banana OS 0.4, 0.5) still load */
@@ -279,7 +280,10 @@ static int src_file(const img_src_t* src, const char* path, uint64_t* offset, ui
     return 0;
 }
 
+/* (the live system's own medium only: a system started from the disk never
+ * reads programs from a stick or CD - see builtin_release) */
 int fsdisk_boot_file(const char* path, uint64_t* offset, uint32_t* size) {
+    if (!sysinfo_live_boot()) return -1;
     return boot_src() ? src_file(&g_boot_src, path, offset, size) : -1;
 }
 
@@ -398,6 +402,7 @@ int fsdisk_check_medium(char* why, int cap) {
 }
 
 int fsdisk_boot_read(uint64_t offset, uint32_t len, void* buf) {
+    if (!sysinfo_live_boot()) return -1;
     if (!boot_src() || !len) return len ? -1 : 0;
     uint32_t first = (uint32_t)(offset / 2048u), last = (uint32_t)((offset + len - 1) / 2048u);
     uint8_t* blk = (uint8_t*)kmalloc(64u * 2048u);

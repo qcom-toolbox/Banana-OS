@@ -24,6 +24,7 @@
 #include "../kernel/ata.h"
 #include "../kernel/fsdisk.h"
 #include "../kernel/buildinfo.h"
+#include "../kernel/prof.h"
 #include "../kernel/zswap.h"
 #include "../kernel/disk.h"
 #include "../kernel/ahci.h"
@@ -1299,7 +1300,7 @@ static const char* const known_cmds[] = {
     "ls", "cd", "pwd", "mkdir", "rm", "touch", "cp", "mv", "edit", "cat", "run",
     "uptime", "boottime", "top", "exit", "start", "stop", "startx", "stopx",
     "keyboardctl", "loadctl", "usbctl", "proc_info", "ram_info", "gpu_info",
-    "hw_info", "shutdown", "reboot", "halt", "sleep", "install", "sync", "checkmedium", "build", "version", "drop_caches", "update", "repair", "installer", "disks", "history", "which", "type",
+    "hw_info", "shutdown", "reboot", "halt", "sleep", "install", "sync", "checkmedium", "build", "version", "prof", "drop_caches", "update", "repair", "installer", "disks", "history", "which", "type",
     "alias", "unalias", "export", "unset", "env", "chsh", "autologin",
     "grep", "wc", "head", "tail", "find", "time", "nice",
     /* shell/netcmds.c + shell/wpcmd.c */
@@ -1623,6 +1624,37 @@ static void cmd_uname(const char* args, int persona) {
     ksnprintf(b, sizeof(b), "Banana OS 0.6 " BANANA_ARCH " Banana Kernel 0.6 build %s %s", banana_build(),
               persona == SHELL_KIND_BASH ? "bash" : "sh");
     terminal_writeln(b);
+}
+
+/* prof [seconds]: what every core spends its time on (kernel/prof.c) - on
+ * the screen, and in /home/banana/prof.txt to pass on */
+typedef struct { char* buf; uint32_t n, cap; int quiet; } prof_sink_t;
+static void prof_line(void* ctx, const char* line) {
+    prof_sink_t* s = (prof_sink_t*)ctx;
+    if (!s->quiet) terminal_writeln(line);
+    uint32_t l = (uint32_t)k_strlen(line);
+    if (s->buf && s->n + l + 2 < s->cap) { memcpy(s->buf + s->n, line, l); s->n += l; s->buf[s->n++] = '\n'; }
+}
+static void cmd_prof(const char* args) {
+    args = k_skip_spaces(args);
+    int quiet = 0;
+    if (args[0] == '-' && args[1] == 'q' && (args[2] == ' ' || !args[2])) { quiet = 1; args = k_skip_spaces(args + 2); }
+    uint32_t sec = 10;
+    if (*args && (!k_parse_u32(args, &sec) || sec < 1 || sec > 60)) { terminal_writeln("usage: prof [-q] [seconds 1..60]   (10 by default; -q: only the file)"); return; }
+    char b[96];
+    ksnprintf(b, sizeof(b), "prof: looking at every core for %u s - use the system as usual (start the game first)...", sec);
+    if (!quiet) { terminal_writeln(b); terminal_flush(); }
+    prof_sink_t s = { (char*)kmalloc(64 * 1024), 0, 64 * 1024, quiet };
+    char head[160];
+    ksnprintf(head, sizeof(head), "Banana OS build %s (commit %s)", banana_build(), banana_commit());
+    prof_line(&s, head);
+    if (prof_run(sec, prof_line, &s) == 0 && s.buf) {
+        const char* path = "/home/banana/prof.txt";
+        int fi = fs_find_file(path);
+        if (fi < 0) fi = fs_create(path);
+        if (fi >= 0 && fs_write(fi, s.buf, s.n) == 0 && !quiet) terminal_writeln("prof: saved in /home/banana/prof.txt");
+    }
+    kfree(s.buf);
 }
 
 /* build: which build of Banana OS this is (the release build-N), its commit */
@@ -2812,6 +2844,7 @@ static void dispatch_plain(const char* line, int persona) {
     if (k_strcmp(line, "sync")     == 0) { cmd_sync();        return; }
     if (k_strcmp(line, "checkmedium") == 0) { cmd_checkmedium(); return; }
     if (k_strcmp(line, "build") == 0 || k_strcmp(line, "version") == 0) { cmd_build(); return; }
+    if (k_strcmp(line, "prof") == 0 || k_strncmp(line, "prof ", 5) == 0) { cmd_prof(line + 4); return; }
     if (k_strcmp(line, "update")   == 0 || k_strncmp(line, "update ", 7) == 0) { cmd_update(line + 6); return; }
     if (k_strcmp(line, "repair")   == 0 || k_strncmp(line, "repair ", 7) == 0) { cmd_update_mode(line + 6, 1); return; }
     if (k_strcmp(line, "nice") == 0 || k_strncmp(line, "nice ", 5) == 0) {
