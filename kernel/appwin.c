@@ -33,6 +33,7 @@ typedef struct {
     int       min;                 /* minimized (taskbar) */
     int       last_mx, last_my, last_left, inside_down;
     uint32_t  gen;
+    uint32_t  drawn_gen;           /* gen as the desktop last drew it (appwin_fast_frame) */
     /* resizing (only for apps that asked: win_set_resizable) */
     int       resizable, min_w, min_h;
     int       resizing, rdx, rdy;
@@ -53,7 +54,9 @@ static awin_t   g_w[APPWIN_MAX];
 static int      g_order[APPWIN_MAX];  /* back to front: window ids */
 static int      g_norder;
 static int      g_focused;            /* the app windows are the desktop's front window */
-static uint32_t g_gen;
+static uint32_t g_gen;                  /* the windows' layout: added, moved, resized, titles, focus */
+static uint32_t g_drawn_gen;            /* g_gen as the desktop last drew everything */
+static int      g_drawn_focused;
 static int      g_killed[64];         /* owners whose app must stop (index: owner % 64) */
 static int      g_esc;                /* ESC [ sequence state for the keyboard */
 static mouse_capture_t g_capture = {.win=-1,.owner=-1};
@@ -255,8 +258,7 @@ void appwin_update(int id, int owner) {
     awin_t* w = get(id, owner);
     if (!w) return;
     if (w->shown) memcpy(w->shown, w->px, (size_t)w->cw * (size_t)w->ch * 4);
-    w->gen++;
-    g_gen++;
+    w->gen++;                       /* (its pixels only: g_gen is the layout - appwin_fast_frame) */
 }
 
 /* the pending size takes effect: a new pixel buffer, the old picture
@@ -441,8 +443,29 @@ static void blit(const awin_t* w, int x0, int y0) {
     }
 }
 
+/* A game's frame on its own: when only the front window's pixels changed
+ * since the desktop last drew, they go into the desktop's picture where its
+ * client area is - nothing else is drawn again (kernel/gui.c then draws what
+ * is over it and shows that rectangle). 1 and the rectangle, or 0: the
+ * whole desktop has to be drawn. Before, every frame of a game redrew the
+ * wallpaper, the icons, every window and the taskbar, and compared the
+ * whole screen with the last one: the desktop took ~30% of the CPU. */
+int appwin_fast_frame(int* x, int* y, int* w, int* h) {
+    awin_t* f = front();
+    if (!f || g_gen != g_drawn_gen || g_focused != g_drawn_focused || f->gen == f->drawn_gen || f->resizing || f->pending || f->dragging) return 0;
+    for (int i = 0; i < APPWIN_MAX; i++)
+        if (g_w[i].used && &g_w[i] != f && g_w[i].gen != g_w[i].drawn_gen) return 0;   /* (another one changed too) */
+    blit(f, client_x(f), client_y(f));
+    f->drawn_gen = f->gen;
+    *x = client_x(f); *y = client_y(f); *w = f->cw; *h = f->ch;
+    return 1;
+}
+
 void appwin_draw(const fb_info_t* fi) {
     (void)fi;
+    g_drawn_gen = g_gen;
+    g_drawn_focused = g_focused;
+    for (int i = 0; i < APPWIN_MAX; i++) g_w[i].drawn_gen = g_w[i].gen;
     for (int i = 0; i < g_norder; i++) {
         awin_t* w = &g_w[g_order[i]];
         if (w->min || w->hidden) continue;

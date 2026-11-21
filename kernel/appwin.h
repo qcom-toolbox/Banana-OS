@@ -45,6 +45,8 @@ int       appwin_kill_requested(int owner);
 /* ── desktop side ── */
 int      appwin_is_open(void);
 void     appwin_draw(const fb_info_t* fi);
+/* only the front window's pixels changed: drawn alone, its client rectangle (1), or 0 */
+int  appwin_fast_frame(int* x, int* y, int* w, int* h);
 int      appwin_contains(int mx, int my);
 /* files let go over an app window: it gets BANANA_EV_DROP (1 if one was there) */
 int      appwin_drop(int mx, int my, const char (*paths)[FS_PATH_LEN], int n);

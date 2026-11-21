@@ -2569,6 +2569,7 @@ static void draw_volume_osd(const fb_info_t* fi) {
     gfx_fill_rect(x + 14, y + 30, (w - 28) * v / 100, 10, TC(0x68A8F0));
 }
 
+static void render_overlays(const fb_info_t* fi, int mx, int my);
 static void render_desktop(const fb_info_t* fi, int mx, int my) {
     refresh_wallpaper_cache(fi);
     blit_wallpaper_cache();
@@ -2614,6 +2615,20 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
         }
     }
 
+    render_overlays(fi, mx, my);
+
+    /* The software pointer is outside the shadow image. Erase its previous
+     * location even when the desktop pixels underneath did not change. */
+    if (g_hw_shape < 0 && g_ptr_drawn_x >= 0)
+        fb_present_rect(g_ptr_drawn_x + CURSOR_X0, g_ptr_drawn_y + CURSOR_Y0, CURSOR_W, CURSOR_H);
+    fb_present_damage();
+    draw_cursor(mx, my);
+    static int shown;
+    if (!shown) { shown = 1; boottime_mark("the desktop's first frame"); }
+}
+
+/* what is drawn over the windows: the taskbar, panels, menus, notes */
+static void render_overlays(const fb_info_t* fi, int mx, int my) {
     if(!fullscreen_active())draw_taskbar_fb(fi);
     nettray_draw();                                 /* the network panel, over the windows */
     cal_draw();                                     /* the calendar (a click on the clock) */
@@ -2637,15 +2652,31 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
     kb_draw_overlays(fi);
     ctxmenu_draw();
     ask_draw(fi);                                   /* a dialog (New shortcut...) over everything */
+}
 
-    /* The software pointer is outside the shadow image. Erase its previous
-     * location even when the desktop pixels underneath did not change. */
+/* A game's frame: only the front app window's pixels changed (and it is
+ * over every other window) - its client area into the desktop's picture,
+ * what is over it drawn again, that rectangle shown. Not the wallpaper, the
+ * icons, the other windows or a whole-screen comparison (kernel/appwin.c,
+ * appwin_fast_frame). 1 if done this way. */
+static int fast_app_frame(const gui_view_t* v, const fb_info_t* fi, int mx, int my) {
+    if (g_menu_open || g_screenshot_requested || g_desk_osd) return 0;
+    gui_view_t a = *v, b = g_last_view;
+    a.app_sig[APP_APPWIN] = b.app_sig[APP_APPWIN] = 0;
+    if (memcmp(&a, &b, sizeof(a)) != 0) return 0;              /* (something else changed too) */
+    int top = -1;                                              /* the window drawn last */
+    for (int pass = 0; pass < 2; pass++)
+        for (int j = 0; j < g_nz; j++) if (z_ontop(g_z[j]) == pass && z_shown(g_z[j])) top = g_z[j];
+    if (top < 0 || (top >> 8) == WK_TERM || (top & 0xFF) != APP_APPWIN) return 0;
+    int x, y, w, h;
+    if (!appwin_fast_frame(&x, &y, &w, &h)) return 0;
+    render_overlays(fi, mx, my);
     if (g_hw_shape < 0 && g_ptr_drawn_x >= 0)
         fb_present_rect(g_ptr_drawn_x + CURSOR_X0, g_ptr_drawn_y + CURSOR_Y0, CURSOR_W, CURSOR_H);
-    fb_present_damage();
+    fb_present_rect(x, y, w, h);
+    fb_invalidate_damage();                                    /* (the next whole frame: compared afresh) */
     draw_cursor(mx, my);
-    static int shown;
-    if (!shown) { shown = 1; boottime_mark("the desktop's first frame"); }
+    return 1;
 }
 
 /* ── right-click menus ─────────────────────────────────────────────── */
@@ -3604,6 +3635,12 @@ static void gui_poll_body(void) {
         if (!g_force_redraw && (uint32_t)(now - last_frame_ms) < 16) return;
         last_frame_ms = now;
 
+        if (!g_force_redraw && fast_app_frame(&view, fi, mx, my)) {
+            g_ptr_drawn_x = mx;
+            g_ptr_drawn_y = my;
+            g_last_view = view;
+            return;
+        }
         render_desktop(fi, mx, my);
         if (g_screenshot_requested) {
             g_screenshot_requested = 0;

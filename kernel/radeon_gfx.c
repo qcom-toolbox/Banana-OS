@@ -589,9 +589,15 @@ uint32_t rad_gfx_submit_ib(uint64_t gpu_addr, uint32_t ndw) {
 }
 
 /* until fence seq is written back: 0, or -1 after timeout_ms (< 0: no limit) */
+/* Waits sleep: after a short spin (a fence due within ~0.2 ms costs no
+ * sleep), the task sleeps 1 ms between looks. It used task_yield(), which
+ * returns at once when nothing else wants the core - a frame waiting for
+ * the GPU then spun at 100% CPU for the whole wait. */
 int rad_gfx_wait(uint32_t seq, int timeout_ms) {
     if (!seq) return 0;
     uint32_t t0 = timer_ms();
+    uint64_t spin_until = timer_counter() + 200000u;          /* (200 us) */
+    while (!rad_gfx_seq_done(seq) && timer_counter() < spin_until) __asm__ volatile("pause");
     while (!rad_gfx_seq_done(seq)) {
         if (timeout_ms >= 0 && timer_ms() - t0 >= (uint32_t)timeout_ms) {
             /* (once per stuck submission: what the engine is doing, for dmesg) */
@@ -604,7 +610,7 @@ int rad_gfx_wait(uint32_t seq, int timeout_ms) {
             }
             return -1;
         }
-        task_yield();
+        task_sleep_ms(1);
     }
     return 0;
 }
