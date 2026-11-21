@@ -21,6 +21,9 @@
  * -1 (the 32-bit kernel, no /bin/bash: the kernel's shell stays) */
 int  vcons_start(void);
 int  vcons_running(void);
+/* bash cannot run on the first console (why): the kernel's shell takes it */
+int  vcons_broken(const char** why);
+void vcons_stop(void);
 /* the environment the consoles' shells get (TERM...) */
 char** vcons_env(void);
 /* output to the screen, input from the serial line, shells started again:

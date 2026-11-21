@@ -379,7 +379,7 @@ static void cmd_sleep(const char* args) {
  * installed system these commands are not there at all. `update` is on
  * both: the installed system updates itself from a stick or an ISO file. */
 static int live_only(const char* name) {
-    return k_strcmp(name, "install") == 0 || k_strcmp(name, "installer") == 0 || k_strcmp(name, "repair") == 0;
+    return k_strcmp(name, "install") == 0 || k_strcmp(name, "installer") == 0;
 }
 static int cmd_hidden(const char* name) { return live_only(name) && !sysinfo_live_boot(); }
 
@@ -2050,6 +2050,20 @@ static void cmd_update(const char* args) { cmd_update_mode(args, 0); }
 static void cmd_update_mode(const char* args, int repair) {
     ata_disk_t all[DISK_MAX], inst[DISK_MAX];
     int self = fsdisk_is_installed() && !sysinfo_live_boot();     /* the installed system updating itself */
+    if (repair && self) {
+        /* the installed system repairing itself: every built-in app is
+         * installed again at the next start, from the kernel's own copy -
+         * no stick needed (the system on the disk is kept as it is) */
+        if (fs_write_path("/etc/builtin-apps-repair", "*\n", 2) < 0 || fsdisk_sync_durable() != 0) {
+            terminal_write_color("repair: could not write the request onto the disk.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            return;
+        }
+        terminal_write_color("repair: every built-in app (bash, Terminal, the App Store...) will be installed again\n"
+                             "        at the next start, from this system's own copy, and read back from the disk.\n"
+                             "        Your files, settings and password are kept. Restart now: reboot\n",
+                             VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        return;
+    }
     /* update FILE.iso: a Banana_OS.iso downloaded or copied anywhere */
     args = k_skip_spaces(args);
     char path[256];
@@ -3072,6 +3086,7 @@ static int console_esc_key(char c3) {
 
 static void console_loop(void) {
     for (;;) {
+        if (vcons_broken(NULL)) return;                 /* (bash cannot run: this shell takes the console) */
         poll_deferred_actions();
         int busy = vcons_pump();
         daemon_poll(1);
@@ -3185,7 +3200,21 @@ void shell_run(void) {
 
     run_init_file(persona);
 
-    if (vcons_start() == 0) console_loop();   /* (64-bit, with bash: never returns) */
+    if (vcons_start() == 0) console_loop();   /* (64-bit, with bash: returns only if bash cannot run) */
+    const char* why = NULL;
+    if (vcons_broken(&why)) {
+        vcons_stop();
+        terminal_clear();
+        terminal_write_color("Banana OS - the built-in shell\n", VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+        terminal_write_color("  ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_write_color(why, VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_write_color(".\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln("  This shell is part of the kernel: nothing on the disk can break it.");
+        terminal_writeln("  To put bash and every other built-in app back from this system's own copy");
+        terminal_writeln("  (your files, settings and password are kept):");
+        terminal_write_color("      repair      then restart (Ctrl+Alt+Del, or: restart)\n\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        persona = SHELL_KIND_SH;
+    }
 
     while (1) {
         buf[0] = '\0';

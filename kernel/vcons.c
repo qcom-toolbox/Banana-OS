@@ -30,6 +30,7 @@ typedef struct {
     int      wanted;            /* a shell runs here (tty1, the serial line: from the start; the others once shown) */
     uint32_t started, next;     /* when it started; when it may start again */
     int      quick;             /* shells that ended right after starting, in a row */
+    int      fails;                /* bash could not be started (the first console: the built-in shell after 2) */
 } vc_t;
 
 static vc_t g_vc[VC_ALL];
@@ -154,6 +155,19 @@ static vt_t* screen_vt(int i) {
     return v->vt;
 }
 
+/* bash cannot run on the first console or the serial line (damaged on the disk, it will not
+ * start, or it ends at once again and again): the console goes back to the
+ * kernel's own shell (shell/shell.c), which nothing on the disk can break */
+static int  g_broken;
+static char g_broken_why[96];
+int vcons_broken(const char** why) { if (why) *why = g_broken_why; return g_broken; }
+static void give_up(const char* why) {
+    if (g_broken) return;
+    kstrlcpy(g_broken_why, why, sizeof(g_broken_why));
+    klog("console: %s - the built-in shell takes over\n", why);
+    g_broken = 1;
+}
+
 static void spawn(int i) {
     vc_t* v = &g_vc[i];
     char* argv[] = { "-bash", NULL };                  /* (a login shell: /etc/profile, ~/.bash_profile) */
@@ -166,6 +180,11 @@ static void spawn(int i) {
         if (i == VC_SERIAL) serial_write(m);
         else if (v->vt) vt_write(v->vt, m, strlen(m));
         v->next = now + 5000;
+        if ((i == 0 || i == VC_SERIAL) && ++v->fails >= 2) {
+            char why[96];
+            ksnprintf(why, sizeof(why), "bash cannot start (%s)", err);
+            give_up(why);
+        }
         return;
     }
     v->pid = pid;
@@ -186,6 +205,7 @@ static int respawn(void) {
             v->quick = now - v->started < 2000 ? v->quick + 1 : 0;
             v->next = now + (v->quick >= 3 ? 10000 : 0);
             pty_flush(v->pty, 2);
+            if (v->quick >= 3 && (i == 0 || i == VC_SERIAL)) give_up("bash ends as soon as it starts");
             if (v->quick >= 3) {
                 const char* m = "\r\nconsole: the shell keeps ending - starting it again in 10 seconds\r\n";
                 if (i == VC_SERIAL) serial_write(m);
@@ -285,7 +305,16 @@ static const char PROFILE[] =
 
 int vcons_start(void) {
     if (g_on) return 0;
-    if (fs_find_file(SHELL_PATH) < 0) return -1;
+    if (fs_find_file(SHELL_PATH) < 0) { give_up("bash is not installed"); return -1; }
+    /* (the programs' contents, as pkg verify checks them: a bash that is the
+     * right size but damaged - "exec format error" - is not started) */
+    char first[64];
+    if (pkg_verify("bash", 2, first, sizeof(first)) > 0) {
+        char why[96];
+        ksnprintf(why, sizeof(why), "bash is damaged on the disk (%s)", first);
+        give_up(why);
+        return -1;
+    }
     pkg_bin_sync();                                     /* (the apps installed: commands in /bin) */
     if (fs_find_file("/etc/profile") < 0) {
         fs_mkdir_p("/etc");
@@ -421,7 +450,18 @@ void vcons_fkey(int code) {
     vcons_key(VT_KEY_F1 + i, mods);
 }
 
+/* the consoles off: the screen, the keyboard and the serial line back to
+ * the kernel's shell (bash broken: vcons_broken) */
+void vcons_stop(void) {
+    if (!g_on) return;
+    g_on = 0;
+    terminal_console_sink(NULL, NULL, 0, 0);
+    keyboard_serial_input(1);
+}
+
 #else   /* the 32-bit kernel: its own shell on the console */
+int  vcons_broken(const char** why) { if (why) *why = ""; return 0; }
+void vcons_stop(void) {}
 
 int  vcons_start(void) { return -1; }
 int  vcons_running(void) { return 0; }

@@ -231,11 +231,13 @@ static const page_t PAGES[] = {
       "Banana_OS.iso file (update ~/Downloads/Banana_OS.iso) - the new system starts at the next restart. "
       "Settings > System update does the same with buttons.",
       NULL, "update ~/Downloads/Banana_OS.iso", "install, repair, build, checkmedium" },
-    { "repair", "disks", "repair [number]", "repair an installed system from the CD",
+    { "repair", "disks", "repair [number]", "install every built-in app again (bash, Terminal...)",
       "For a system that no longer starts right (\"not an ELF program\", a broken bash or app): writes this "
       "CD's system over the installed one as update does - also when it is already the same - and has every "
       "built-in app (bash, Terminal, the App Store...) installed again from the kernel's copy at the next start "
-      "from the disk. Your files, settings and password are kept. Only on the live system.",
+      "from the disk. Your files, settings and password are kept. On the installed system itself (also from "
+      "the built-in shell when bash cannot run): every built-in app installed again at the next start, from "
+      "the system's own copy - no CD or stick needed.",
       NULL, "repair", "update, pkg" },
     { "checkmedium", "disks", "checkmedium", "check the Banana OS CD / USB stick",
       "Reads the system on the CD or USB stick back whole and compares it with the checksums it was built "

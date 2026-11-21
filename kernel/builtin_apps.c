@@ -228,7 +228,10 @@ void builtin_apps_install(void) {
             int installed = pkg_get(mine.name, &have) == 0;
             uint32_t crc = crc32c(0, bpk, (uint32_t)len);
             int want;
-            if (installed && damaged)
+            if (installed && damaged == 1)
+                want = 1;            /* (damaged: this copy, also over a newer one from a repository - a broken
+                                      *  bash must never stay broken; the App Store can update it again) */
+            else if (installed && damaged)
                 want = repo_vercmp(have.version, mine.version) <= 0;   /* (not one from a repository that is newer) */
             else if (installed)
                 /* left as it is when a newer version came from a repository, or it
