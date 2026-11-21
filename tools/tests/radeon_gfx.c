@@ -90,6 +90,7 @@ int uvm_unmap_frames(uspace_t* us, uintptr_t a, uint32_t n, uint64_t f0) { (void
 void* upage_alloc(void) { return kmalloc_aligned(4096, 4096); }
 void upage_free(void* p) { (void)p; }
 void task_yield(void) { g_ns += 100000; }
+void task_sleep_ms(uint32_t ms) { g_ns += (uint64_t)ms * 1000000u; }
 static radeon_t rt;
 struct radeon* gpu_radeon_card(void) { return &rt; }
 uint64_t gpu_radeon_display_end(void) { return 64ull << 20; }
