@@ -2048,11 +2048,25 @@ static int e4_attach(void) {
 }
 
 /* 1 the disk's ext4 was loaded, 0 not ext4, -1 ext4 that would not mount */
+static uint32_t g_scrub_xlinks, g_scrub_freed;
+static void scrub_log(const char* line) { klog("fsdisk: %s\n", line); }
+/* what the start's check of the free-space map found (fixed / cross-linked blocks) */
+void fsdisk_scrub_result(uint32_t* freed, uint32_t* xlinks) { *freed = g_scrub_freed; *xlinks = g_scrub_xlinks; }
+
 static int e4_try_load(const ata_disk_t* d) {
     if (!e4_detect(d)) return 0;
     g_target = *d;
     e4_geometry(d, &g_e4dev, &g_e4_base);
     if (ext4_mount(&g_e4dev) != 0) { klog("fsdisk: the ext4 filesystem could not be mounted\n"); return -1; }
+    /* before anything is written: every file's blocks marked used in the
+     * bitmaps (a file's block marked free is where the next file would be
+     * written - an update or a repair then broke programs) */
+    uint32_t t0 = timer_ms(), xl = 0, fr = 0;
+    int pr = ext4_scrub(1, scrub_log, &xl, &fr);
+    klog("fsdisk: the files' blocks checked against the free-space map in %u ms%s\n", timer_ms() - t0,
+         pr > 0 ? " - PROBLEMS (above)" : pr < 0 ? " - not run (no memory)" : ": all as they should be");
+    g_scrub_xlinks = xl;
+    g_scrub_freed = fr;
     return e4_attach();
 }
 
@@ -2989,7 +3003,11 @@ int fsdisk_check(int full, void (*out)(const char* line)) {
     char line[160];
     int problems = 0;
     if (!g_have_target) { out("disk: none installed - the files live in RAM only"); return 0; }
-    if (g_e4) return ext4_check(out);
+    if (g_e4) {
+        int p = ext4_check(out);
+        int s = ext4_scrub(1, out, NULL, NULL);              /* (files' blocks marked free: marked used) */
+        return p + (s > 0 ? s : 0);
+    }
     if (!g_v5) {
         ksnprintf(line, sizeof(line), "disk: layout %u (older) - its copies were checked when loaded", g_layout.version);
         out(line);

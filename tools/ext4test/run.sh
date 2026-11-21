@@ -52,6 +52,10 @@ echo "== ENOSPC condition: fill disk, verify anchor intact, free space, verify w
 
 echo "== an installed disk after many updates: packages replaced, small files churned, remounts"
 gcc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie -no-pie -Wall -Wno-unused -I "$T" -o "$T/aging" aging.c "$T/ext4.c"
+echo "== a file's blocks marked free in the bitmap: found and marked used (ext4_scrub)"
+gcc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie -no-pie -Wall -Wno-unused -I "$T" -o "$T/scrub" scrub.c "$T/ext4.c"
+"$T/scrub" "$T/scrub.img" 64
+"$E2FSCK" -fn "$T/scrub.img"
 for seed in 1 2; do
     "$T/aging" "$T/age.img" 160 200 "$seed"
     "$E2FSCK" -fn "$T/age.img"

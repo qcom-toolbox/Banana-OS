@@ -134,6 +134,8 @@ const char* fsdisk_fs_type(void);
  * (why: which file), -2 none found */
 int fsdisk_check_medium(char* why, int cap);
 const char* fsdisk_medium_why(void);         /* what the last check found */
+/* the installed system's start: its files' blocks found marked free (marked used now) and cross-linked */
+void fsdisk_scrub_result(uint32_t* freed, uint32_t* xlinks);
 /* updating from an ISO file (Settings > Update, `update FILE.iso`), also on
  * the installed system itself: path NULL / "" goes back to a CD / USB stick.
  * 0 when the file holds a Banana OS image, else FSDISK_ERR_NO_SOURCE */

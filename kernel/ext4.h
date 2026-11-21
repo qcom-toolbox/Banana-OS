@@ -125,5 +125,10 @@ void ext4_statfs(uint64_t* blocks, uint64_t* free_blocks, uint32_t* inodes, uint
 /* fsck: the groups' counts against the bitmaps, the folders' links; lines
  * through out(): the number of problems */
 int  ext4_check(void (*out)(const char* line));
+/* every file's blocks against the block bitmaps: a file's block marked free
+ * (the next write would go over it) is marked used again with fix; blocks
+ * in two files (cross-linked: damaged) are counted. The number of problems,
+ * -1 if it could not run */
+int  ext4_scrub(int fix, void (*out)(const char* line), uint32_t* xlinks, uint32_t* freed);
 
 #endif

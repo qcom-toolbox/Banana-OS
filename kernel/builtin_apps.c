@@ -188,6 +188,19 @@ static void verify_fresh_on_disk(void) {
 
 void builtin_apps_install(void) {
     if (g_released) return;
+    {
+        /* the start's check of the disk's free-space map (kernel/fsdisk.c) */
+        uint32_t fr = 0, xl = 0;
+        if (fsdisk_is_installed()) fsdisk_scrub_result(&fr, &xl);
+        if (fr || xl) {
+            char body[256];
+            ksnprintf(body, sizeof(body), "The disk's free-space map had %u blocks of files marked free (the next files "
+                      "written would have gone over them) - fixed. %u blocks were in two files at once: those files "
+                      "are damaged; the built-in apps among them are put back now. dmesg | grep fsdisk has the details.",
+                      fr, xl);
+            notify_post("system", "Disk check", body, 0);
+        }
+    }
     g_nfresh = 0;                       /* (the kernel's copies are gone: checked at boot) */
     uint32_t t0 = timer_ms();
     int unpacked = 0;

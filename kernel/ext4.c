@@ -2166,6 +2166,105 @@ int ext4_check(void (*out)(const char* line)) {
     return problems;
 }
 
+/* Who owns every block (fsck, and each start of the installed system before
+ * it writes anything): the block bitmaps say which blocks are free - if one
+ * says free a block a file still has, the next file written goes over that
+ * file's data (an update or a repair, which write many files, then broke
+ * programs that were fine: bash "not an ELF program"). Every file's extents
+ * and tree blocks are walked: a block that is in two files, or in a file
+ * and in the groups' own bitmaps or inode tables, is a cross-link (those
+ * files are damaged: reported); a file's block marked free is marked used
+ * again (fix). The number of problems; *xlinks: the cross-linked blocks. */
+static void bmark_used(uint32_t blk) {
+    uint32_t g = blk / BPG, i = blk % BPG;
+    cblk_t* c = cmeta(bb_of(g), 0);
+    if (!c) return;
+    if (!(c->data[i >> 3] & (1u << (i & 7)))) {
+        c->data[i >> 3] |= (uint8_t)(1u << (i & 7));
+        cdirty(c);
+        add16(desc(g) + 0x0C, -1);
+        desc_changed(g);
+    }
+    cput(c);
+}
+
+int ext4_scrub(int fix, void (*out)(const char* line), uint32_t* xlinks_out, uint32_t* freed_out) {
+    if (!g_mounted) return -1;
+    char line[160];
+    uint8_t* own = (uint8_t*)kzalloc((g_nblocks + 7u) / 8u);
+    if (!own) return -1;
+    lock();
+    flush_locked();
+    uint32_t problems = 0, xlinks = 0, marked_free = 0, files = 0, bad_trees = 0, reported = 0;
+    /* the groups' own blocks: bitmaps, inode tables */
+    for (uint32_t g = 0; g < g_groups; g++) {
+        uint32_t m[2] = { bb_of(g), ib_of(g) };
+        for (int k = 0; k < 2; k++) if (m[k] < g_nblocks) own[m[k] >> 3] |= (uint8_t)(1u << (m[k] & 7));
+        for (uint32_t b = it_of(g); b < it_of(g) + g_itb && b < g_nblocks; b++) own[b >> 3] |= (uint8_t)(1u << (b & 7));
+    }
+    for (uint32_t g = 0; g < g_groups; g++) {
+        if (g16(desc(g) + 0x12) & BG_INODE_UNINIT) continue;
+        cblk_t* ib = cmeta(ib_of(g), 0);
+        if (!ib) { problems++; continue; }
+        static uint8_t ibits[BS];
+        memcpy(ibits, ib->data, BS);
+        cput(ib);
+        for (uint32_t j = 0; j < g_ipg; j++) {
+            if (!(ibits[j >> 3] & (1u << (j & 7)))) continue;
+            uint32_t ino = g * g_ipg + j + 1;
+            raw_inode_t in;
+            if (iread(ino, &in) != 0 || !i_mode(&in) || !(g32(in.r + 0x20) & EXT4_EXTENTS_FL)) continue;
+            emap_t m;
+            if (emap_load(&in, &m) != 0) {
+                bad_trees++;
+                if (reported++ < 20) { ksnprintf(line, sizeof(line), "inode %u: its extent tree does not read", ino); out(line); }
+                continue;
+            }
+            files++;
+            for (uint32_t t = 0; t <= m.n + m.ntree; t++) {
+                uint32_t b0, n;
+                if (t < m.n) { b0 = m.e[t].pblk; n = m.e[t].len; }
+                else if (t < m.n + m.ntree) { b0 = m.tree[t - m.n]; n = 1; }
+                else break;
+                for (uint32_t b = b0; b < b0 + n && b < g_nblocks; b++) {
+                    if (own[b >> 3] & (1u << (b & 7))) {
+                        if (xlinks++ < 8 && reported++ < 20) {
+                            ksnprintf(line, sizeof(line), "inode %u: block %u is also another file's (or the group's own) - cross-linked", ino, b);
+                            out(line);
+                        }
+                        continue;
+                    }
+                    own[b >> 3] |= (uint8_t)(1u << (b & 7));
+                    uint32_t gg = b / BPG, i = b % BPG;
+                    cblk_t* c = cmeta(bb_of(gg), 0);
+                    int used = c && (c->data[i >> 3] & (1u << (i & 7)));
+                    cput(c);
+                    if (!used) {
+                        if (marked_free++ < 4 && reported++ < 20) {
+                            ksnprintf(line, sizeof(line), "inode %u: block %u is the file's but marked free%s", ino, b,
+                                      fix ? " - marked used" : "");
+                            out(line);
+                        }
+                        if (fix) bmark_used(b);
+                    }
+                }
+            }
+            emap_free(&m);
+            if ((files & 255) == 0) { unlock(); task_yield(); lock(); }
+        }
+    }
+    problems += xlinks + marked_free + bad_trees;
+    if (fix && marked_free) flush_locked();
+    ksnprintf(line, sizeof(line), "ext4 blocks: %u files walked - %u blocks marked free although a file has them%s, %u cross-linked, %u unreadable trees",
+              files, marked_free, fix && marked_free ? " (marked used now)" : "", xlinks, bad_trees);
+    out(line);
+    unlock();
+    kfree(own);
+    if (xlinks_out) *xlinks_out = xlinks;
+    if (freed_out) *freed_out = marked_free;
+    return (int)problems;
+}
+
 void ext4_set_hidden(int on) { g_hidden = on; }
 
 int ext4_activate(void) {
