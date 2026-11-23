@@ -333,7 +333,7 @@ const i18n_pair_t I18N_IT[] = {
     { "Get apps...", "Ottieni app..." },
     { "No apps installed yet.", "Nessuna app installata." },
     { "Get apps... opens the App Store; or double-click a .bpk", "Ottieni app... apre l'App Store; o doppio clic su un .bpk" },
-    { "(try ~/Examples, a USB stick in /mnt/usb, or a", "(prova ~/Examples, una chiavetta USB in /mnt/usb, o un" },
+    { "(try /usr/share/extras, a USB stick in /mnt/usb, or a", "(prova /usr/share/extras, una chiavetta USB in /mnt/usb, o un" },
     { "download), or type: pkg install <file.bpk>", "download), o digita: pkg install <file.bpk>" },
     { "Build your own with the Linux SDK (sdk/).", "Crea le tue con l'SDK Linux (sdk/)." },
     { "Puts Banana OS on this computer's hard disk, so it starts", "Installa Banana OS sul disco di questo computer: si avvia" },

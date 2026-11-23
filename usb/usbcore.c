@@ -28,11 +28,12 @@ extern const usb_driver_t cdc_ecm_driver;
 extern const usb_driver_t hid_driver;
 extern const usb_driver_t xpad_driver;
 extern const usb_driver_t uaudio_driver;
+extern const usb_driver_t uvc_driver;
 extern const usb_driver_t adb_driver;
 extern const usb_driver_t usb_storage_driver;
 extern const usb_driver_t hub_driver;
 static const usb_driver_t* const g_drivers[] = {
-    &hub_driver, &mt7601u_driver, &rtl8188eu_driver, &rtl8811cu_driver, &r8152_driver, &r8153_driver, &cdc_ncm_driver, &ax88179_driver, &ax88179a_driver, &cdc_ecm_driver, &xpad_driver, &uaudio_driver, &adb_driver, &hid_driver, &usb_storage_driver,
+    &hub_driver, &mt7601u_driver, &rtl8188eu_driver, &rtl8811cu_driver, &r8152_driver, &r8153_driver, &cdc_ncm_driver, &ax88179_driver, &ax88179a_driver, &cdc_ecm_driver, &xpad_driver, &uvc_driver, &uaudio_driver, &adb_driver, &hid_driver, &usb_storage_driver,
 };
 #define DRIVER_COUNT ((int)(sizeof(g_drivers) / sizeof(g_drivers[0])))
 

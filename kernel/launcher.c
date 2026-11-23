@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "launcher.h"
+#include "examples.h"
 #include "i18n.h"
 #include "theme.h"
 #include "gfx.h"
@@ -183,7 +184,7 @@ void launcher_click(int mx, int my) {
         if (lx >= 8 && lx < 120) {
             char err[96];
             if (pkg_run("store", 0, NULL, 1, err, sizeof(err)) >= 0) set_status(_("Opening the App Store..."));
-            else { explorer_open("/home/banana/Examples"); gui_raise_files(); set_status(_("Double-click a .bpk to install it")); }
+            else { explorer_open(EXAMPLES_DIR); gui_raise_files(); set_status(_("Double-click a .bpk to install it")); }
         }
         else if (lx >= 126 && lx < 206) { rescan(); set_status(_("Refreshed")); }
         return;
@@ -223,7 +224,7 @@ void launcher_draw(const fb_info_t* fi) {
     if (g_napps == 0) {
         gfx_draw_text(x + 16, y + GRID_Y + 10, _("No apps installed yet."), C_TEXT, C_PANEL);
         gfx_draw_text(x + 16, y + GRID_Y + 30, _("Get apps... opens the App Store; or double-click a .bpk"), C_DIM, C_PANEL);
-        gfx_draw_text(x + 16, y + GRID_Y + 44, _("(try ~/Examples, a USB stick in /mnt/usb, or a"), C_DIM, C_PANEL);
+        gfx_draw_text(x + 16, y + GRID_Y + 44, _("(try /usr/share/extras, a USB stick in /mnt/usb, or a"), C_DIM, C_PANEL);
         gfx_draw_text(x + 16, y + GRID_Y + 58, _("download), or type: pkg install <file.bpk>"), C_DIM, C_PANEL);
         gfx_draw_text(x + 16, y + GRID_Y + 82, _("Build your own with the Linux SDK (sdk/)."), C_DIM, C_PANEL);
     }

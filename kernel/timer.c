@@ -9,6 +9,7 @@
 #include "task.h"
 #include "gui.h"
 #include "audio.h"
+#include "../usb/uvc.h"
 #include "splash.h"
 #include "gpu.h"
 #include "prof.h"
@@ -127,6 +128,7 @@ static void timer_irq(void) {
     task_smp_tick();    /* app code on the other cores takes turns (kernel/task.c) */
     gui_cursor_tick();  /* the mouse pointer moves even while the desktop's task is busy */
     audio_tick();       /* the sound card's ring stays fed, whatever the tasks do */
+    uvc_tick();         /* a webcam's packets taken and queued again (usb/uvc.c) */
     gpu_load_tick(g_ms);/* the GPU's busy bit sampled (only while Task Manager looks) */
     prof_tick(g_ms);    /* prof: the other cores looked at on this tick too */
     splash_tick();      /* the boot screen's dots */

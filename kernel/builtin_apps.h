@@ -43,7 +43,7 @@ uint32_t    builtin_released_bytes(void);
 #define PROFILE_COUNT    3
 const char* builtin_profile_name(int profile);        /* "Full", "Standard", "Minimal" */
 const char* builtin_profile_apps(int profile);        /* what it installs, in a line */
-/* removes from this system what the profile leaves out (apps and ~/Examples):
+/* removes from this system what the profile leaves out (apps, and an old ~/Examples):
  * they stay out at the next boots, and installable from the App Store;
  * how many apps were removed */
 int         builtin_profile_apply(int profile);

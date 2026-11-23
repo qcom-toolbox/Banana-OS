@@ -415,7 +415,7 @@ static const page_t PAGES[] = {
       "checksums (/apps/<app>/.files); pkg verify checks every file against them and puts a damaged built-in app "
       "back (now on the live system, at the next start on an installed one). At every start the built-in apps' "
       "files are checked by size and put back if one is missing or cut short.", NULL,
-      "pkg install ~/Examples/gears.bpk\npkg list\npkg verify\npkg verify mesa java", "apt, apps, update" },
+      "pkg install /usr/share/extras/gears.bpk\npkg list\npkg verify\npkg verify mesa java", "apt, apps, update" },
     { "apt", "apps", "apt update | search <words> | show <app> | install <app>... | remove <app>... | upgrade | list | sources",
       "packages from repositories",
       "Like Debian's apt: package lists from signed repositories, search, install with what an app needs, "
@@ -557,7 +557,18 @@ static const page_t PAGES[] = {
     { "play", "sound", "play <file.wav> | play -s", "play a sound (-s stops)", NULL, NULL, NULL, "volume" },
     { "beep", "sound", "beep [hz] [ms]", "a tone", NULL, NULL, "beep 880 200", NULL },
     { "volume", "sound", "volume [0-100]", "the sound volume", NULL, NULL, NULL, NULL },
-    { "lsaudio", "sound", "lsaudio", "the sound card in use", NULL, NULL, NULL, NULL },
+    { "lsaudio", "sound", "lsaudio", "the sound card and microphone in use", NULL, NULL, NULL, NULL },
+    { "mic", "sound", "mic | mic level [seconds] | mic record <seconds> <file.wav>", "the microphone: test it, its level, record it",
+      "mic alone listens for a second and says how loud it was. mic level shows a level meter (5 seconds unless given). "
+      "mic record writes a 48 kHz 16-bit mono .wav (60 seconds at most). The microphone is the computer's own "
+      "(HD Audio mic or line in, AC'97 mic) or a USB one - a headset, a webcam's - while it is plugged in.",
+      NULL, "mic record 5 /home/user/memo.wav", "lsaudio" },
+    { "lscam", "hardware", "lscam", "the webcam: its sizes and formats", NULL, NULL, NULL, "webcam" },
+    { "webcam", "hardware", "webcam | webcam snap <file.bmp|file.jpg>", "the webcam: test it, take a picture",
+      "webcam alone streams for 3 seconds and says how many pictures came. webcam snap saves the first picture: a "
+      ".bmp from a YUY2 camera, the JPEG itself from an MJPEG one. USB webcams (USB Video Class) on an xHCI port, "
+      "640x480 at most; the Camera app shows it live.",
+      NULL, "webcam snap /home/user/me.bmp", "lscam" },
     /* ── shell ── */
     { "help", "shell", "help [command|topic] | help -k <word> | help -a", "this help",
       "help alone lists the commands by topic. help <command> shows a command's page; help <topic> lists "

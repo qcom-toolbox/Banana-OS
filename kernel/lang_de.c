@@ -298,7 +298,7 @@ const i18n_pair_t I18N_DE[] = {
     { "Get apps...", "Apps holen..." },
     { "No apps installed yet.", "Noch keine Apps installiert." },
     { "Get apps... opens the App Store; or double-click a .bpk", "Apps holen... öffnet den App Store; oder Doppelklick auf eine .bpk" },
-    { "(try ~/Examples, a USB stick in /mnt/usb, or a", "(versuchen Sie ~/Examples, einen USB-Stick in /mnt/usb, oder einen" },
+    { "(try /usr/share/extras, a USB stick in /mnt/usb, or a", "(versuchen Sie /usr/share/extras, einen USB-Stick in /mnt/usb, oder einen" },
     { "download), or type: pkg install <file.bpk>", "Download), oder tippen Sie: pkg install <datei.bpk>" },
     { "Build your own with the Linux SDK (sdk/).", "Eigene mit dem Linux-SDK (sdk/) erstellen." },
     /* the installer */

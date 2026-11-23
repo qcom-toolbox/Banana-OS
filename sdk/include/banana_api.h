@@ -18,7 +18,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 33u
+#define BANANA_API_VERSION 34u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -213,6 +213,14 @@ typedef struct {
     char          content_type[96];
     char          err[128];      /* why it failed (-1) */
 } banana_http_resp_t;
+
+/* a camera picture (version 34: camera) */
+typedef struct {
+    int          width, height;
+    int          format;               /* BANANA_CAM_XRGB or BANANA_CAM_JPEG */
+    unsigned int seq;                  /* its number: 1, 2, ... */
+    unsigned int bytes;                /* what is in the buffer (OPEN: what a picture can need) */
+} banana_camframe_t;
 
 typedef struct banana_api {
     unsigned int magic;       /* BANANA_API_MAGIC */
@@ -641,6 +649,27 @@ typedef struct banana_api {
      * The SDK's clock_gettime and gettimeofday use it: before, they had
      * whole milliseconds only */
     int (*uptime_ns)(unsigned long long* out);
+    /* version 34: the microphone and the camera (BANANA_HAS(api, mic)).
+     * mic: BANANA_MIC_OPEN starts recording for this app: 48000 (the rate:
+     * always 48 kHz), -19 (ENODEV) without a microphone, -5 if it does not
+     * start. BANANA_MIC_READ / BANANA_MIC_READ_MONO: what was recorded since
+     * the open or the last read - 16-bit samples, 2 channels / both mixed
+     * into 1 - into buf (len bytes): how many frames, 0 if nothing came
+     * yet (it never waits); about 1.3 s are kept for a reader that falls
+     * behind. BANANA_MIC_LEVEL: the loudest sample of the last ~100 ms
+     * (0..32767). BANANA_MIC_NAME: its name into buf. BANANA_MIC_CLOSE (or
+     * the app's end) stops it. Webcams' and headsets' microphones (USB) are
+     * the one used while they are plugged in. */
+    int (*mic)(int op, void* buf, unsigned int len);
+    /* camera: BANANA_CAM_OPEN starts a USB webcam (UVC) - info: its size,
+     * and in info->bytes the buffer a picture needs; 0, or -19 (ENODEV),
+     * -5. BANANA_CAM_FRAME: the newest picture not taken yet, into buf
+     * (len bytes): 1 (info: BANANA_CAM_XRGB - width x height 0x00RRGGBB
+     * pixels - or BANANA_CAM_JPEG, a JPEG file of info->bytes to decode),
+     * 0 if none came since the last one, -22 if buf is too small, -5.
+     * BANANA_CAM_NAME: its name into buf. BANANA_CAM_CLOSE (or the app's
+     * end) stops it. */
+    int (*camera)(int op, void* buf, unsigned int len, banana_camframe_t* info);
 } banana_api_t;
 
 #define BANANA_SIG_DEFAULT 0
@@ -685,6 +714,20 @@ typedef struct banana_ucontext {
     unsigned long long      uc_sigmask[16];    /* (the first word: signals 1-64) */
     unsigned char           fpregs_mem[512] __attribute__((aligned(16)));
 } banana_ucontext_t;
+
+/* mic / camera (version 34) */
+#define BANANA_MIC_OPEN      0
+#define BANANA_MIC_READ      1
+#define BANANA_MIC_CLOSE     2
+#define BANANA_MIC_NAME      3
+#define BANANA_MIC_READ_MONO 4
+#define BANANA_MIC_LEVEL     5
+#define BANANA_CAM_OPEN      0
+#define BANANA_CAM_FRAME     1
+#define BANANA_CAM_CLOSE     2
+#define BANANA_CAM_NAME      3
+#define BANANA_CAM_XRGB      1
+#define BANANA_CAM_JPEG      2
 
 /* 1 if the running system's table has the call `field` (newer than the app?) */
 #define BANANA_HAS(api, field) \

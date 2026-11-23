@@ -333,7 +333,7 @@ const i18n_pair_t I18N_RM[] = {
     { "Get apps...", "Survegnir apps..." },
     { "No apps installed yet.", "Anc naginas apps installadas." },
     { "Get apps... opens the App Store; or double-click a .bpk", "Survegnir apps... avra l'App Store; u clic dubel sin in .bpk" },
-    { "(try ~/Examples, a USB stick in /mnt/usb, or a", "(emprova ~/Examples, in stick USB en /mnt/usb, u ina" },
+    { "(try /usr/share/extras, a USB stick in /mnt/usb, or a", "(emprova /usr/share/extras, in stick USB en /mnt/usb, u ina" },
     { "download), or type: pkg install <file.bpk>", "telechargiada), u tippa: pkg install <datoteca.bpk>" },
     { "Build your own with the Linux SDK (sdk/).", "Fa las tias cun il SDK Linux (sdk/)." },
     { "Puts Banana OS on this computer's hard disk, so it starts", "Installescha Banana OS sin il disc dir da quest computer: el s'avia" },

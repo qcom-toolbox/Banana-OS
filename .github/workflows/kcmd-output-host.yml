@@ -3,7 +3,7 @@ on:
   push:
     branches: ['upstream/kcmd-drain']
   pull_request:
-    paths: ['assets/wallpapers/**', 'kernel/**', 'net/**', 'sdk/**', 'shell/**', 'tools/**', '.github/workflows/kcmd-output-host.yml']
+    paths: ['assets/wallpapers/**', 'kernel/**', 'net/**', 'sdk/**', 'shell/**', 'tools/**', 'usb/**', '.github/workflows/kcmd-output-host.yml']
   workflow_dispatch: {}
   workflow_call: {}
 permissions:
@@ -17,7 +17,7 @@ jobs:
       - run: |
           sudo python3 tools/ci_apt_mirrors.py
           sudo apt-get update -qq
-          sudo apt-get install -y gcc-multilib nasm
+          sudo apt-get install -y gcc-multilib nasm python3-pil
       - name: Run regressions
         run: |
           python3 tools/test_kcmd_output.py --sanitize
@@ -45,6 +45,10 @@ jobs:
           python3 tools/test_text_load.py --32 --sanitize
           python3 tools/test_ksnprintf.py --sanitize
           python3 tools/test_ksnprintf.py --32 --sanitize
+          python3 tools/test_uvc.py --sanitize
+          python3 tools/test_uvc.py --32 --sanitize
+          python3 tools/test_uaudio_in.py --sanitize
+          python3 tools/test_uaudio_in.py --32 --sanitize
           python3 tools/test_config.py --sanitize
           python3 tools/test_config.py --32
           python3 tools/test_desktop_layout.py --sanitize

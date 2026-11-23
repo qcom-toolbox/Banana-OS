@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "audio.h"
+#include "audioin.h"
 #include "pci.h"
 #include "io.h"
 #include "kheap.h"
@@ -166,6 +167,7 @@ static void feed(void) {
 /* the timer interrupt, every millisecond (kernel/timer.c) */
 void audio_tick(void) {
     static uint32_t n;
+    audio_in_tick();                        /* (recording: audioin.c) */
     if (!g_running || ++n % 2) return;
     feed();
 }
@@ -239,6 +241,59 @@ static void ac97_stop(void) { outb(g_nabm + 0x1B, 0x00); }
 
 static const card_t g_ac97 = { "AC'97", ac97_start, ac97_position, ac97_tick, ac97_stop };
 
+/* ── AC'97 recording: the PCM in box (bus master registers 0x00-0x0B),
+ * from the microphone input, into audioin.c's ring ── */
+
+static uint32_t* g_ac_in_bdl;
+#define AC_IN_SEG (256u * 1024u / 32u)          /* (audio_in_ring_bytes() / 32) */
+
+static uint32_t ac97_in_position(void) {
+    uint8_t civ = inb(g_nabm + 0x04) & 31;
+    uint32_t left = (uint32_t)inw(g_nabm + 0x08) * 2;
+    if (left > AC_IN_SEG) left = AC_IN_SEG;
+    return civ * AC_IN_SEG + (AC_IN_SEG - left);
+}
+
+static void ac97_in_tick(void) {
+    uint8_t civ = inb(g_nabm + 0x04) & 31;
+    outb(g_nabm + 0x05, (uint8_t)((civ + 30) & 31));    /* (the last valid buffer stays ahead) */
+    uint16_t sr = inw(g_nabm + 0x06);
+    if (sr & 0x1C) outw(g_nabm + 0x06, sr & 0x1C);
+    if (sr & 1) outb(g_nabm + 0x0B, 0x01);              /* halted: run again */
+}
+
+static int ac97_in_start(void) {
+    uint8_t* ring = audio_in_ring();
+    if (!ring || !g_ac_in_bdl) return -1;
+    outb(g_nabm + 0x0B, 0x02);                           /* reset the PCM in registers */
+    for (int i = 0; i < 100 && (inb(g_nabm + 0x0B) & 0x02); i++) timer_sleep_ms(1);
+    for (int i = 0; i < 32; i++) {
+        g_ac_in_bdl[i * 2] = (uint32_t)(uintptr_t)(ring + i * AC_IN_SEG);
+        g_ac_in_bdl[i * 2 + 1] = AC_IN_SEG / 2;          /* samples; no interrupts (the timer reads it) */
+    }
+    flush((const uint8_t*)g_ac_in_bdl, 32 * 8);
+    outl(g_nabm + 0x00, (uint32_t)(uintptr_t)g_ac_in_bdl);
+    outb(g_nabm + 0x05, 30);
+    outb(g_nabm + 0x0B, 0x01);                           /* run */
+    return 0;
+}
+
+static void ac97_in_stop(void) { outb(g_nabm + 0x0B, 0x00); }
+
+static const audio_in_t g_ac97_in = { "AC'97 mic", ac97_in_start, ac97_in_position, ac97_in_tick, ac97_in_stop };
+
+static void ac97_in_init(void) {
+    if (audio_in_ring_bytes() != 32 * AC_IN_SEG) return;
+    g_ac_in_bdl = (uint32_t*)dma_alloc(32 * 8, 4096);
+    if (!g_ac_in_bdl || !audio_in_ring()) return;
+    outw(g_nam + 0x0E, 0x8008);                          /* mic: not into the speakers, 0 dB, no boost */
+    outw(g_nam + 0x1A, 0x0000);                          /* record select: the mic, both channels */
+    /* record gain +12 dB, unmuted: a codec's own reset value - and what
+     * QEMU's AC'97 needs, where 0 (0 dB on a real codec) is silence */
+    outw(g_nam + 0x1C, 0x0808);
+    if (inw(g_nam + 0x28) & 1) outw(g_nam + 0x32, RATE); /* (variable rate: the ADC at 48 kHz) */
+}
+
 static int ac97_init(const pci_dev_t* pd) {
     int io0, io1;
     uintptr_t b0 = pci_bar(pd, 0, &io0), b1 = pci_bar(pd, 1, &io1);
@@ -263,6 +318,7 @@ static int ac97_init(const pci_dev_t* pd) {
     if (!g_ac_bdl) return -1;
     ksnprintf(g_card_name, sizeof(g_card_name), "Intel AC'97 (%04x:%04x)", pd->vendor, pd->device);
     g_card = &g_ac97;
+    ac97_in_init();
     if (pd->irq_line > 0 && pd->irq_line < 16) irq_install(pd->irq_line, ac97_irq);
     return 0;
 }
@@ -465,6 +521,118 @@ static void add_output(const char* role) {
     kstrlcat(g_outputs, role, sizeof(g_outputs));
 }
 
+/* ── HDA recording ───────────────────────────────────────────────────
+ * An ADC (an "audio input" widget) listens to stream 2 on the first input
+ * stream descriptor; the path to it from a microphone pin - a line-in pin
+ * if no pin says it is a mic - is switched and unmuted the way outputs
+ * are (find_dac's other direction), the pin's input on with its mic bias
+ * (VRef), its boost amplifier at about +20 dB. */
+
+static uint32_t  g_sd_in;               /* the input stream descriptor's offset (0: none) */
+static uint64_t* g_hda_in_bdl;
+static int       g_in_cad = -1;         /* the codec recording */
+static char      g_in_role[16];
+
+/* Depth-first from widget nid towards an input pin of device type want
+ * (0xA mic, 0x8 line in; -1: any input pin with something there) */
+static int find_pin(int nid, int want, int* path, int* sel, int depth) {
+    if (depth >= 8) return 0;
+    path[depth] = nid;
+    sel[depth] = -1;
+    uint32_t caps = hda_param(nid, 0x09);
+    int t = (int)((caps >> 20) & 0xF);
+    if (t == 4) {                                /* a pin: one that takes sound in */
+        if (caps & (1u << 9)) return 0;          /* (digital) */
+        if (!(hda_param(nid, 0x0C) & (1u << 5))) return 0;
+        uint32_t cfg = verb12(nid, 0xF1C, 0);
+        int conn = (int)(cfg >> 30), dev = (int)((cfg >> 20) & 0xF);
+        if (conn == 1) return 0;                 /* nothing there, ever */
+        if (want >= 0 ? dev != want : (dev != 0x8 && dev != 0xA && dev != 0xB && dev != 0xF)) return 0;
+        return depth + 1;
+    }
+    if (depth > 0 && t != 2 && t != 3) return 0; /* through mixers and selectors only */
+    if (depth == 0 && t != 1) return 0;          /* (it starts at the ADC) */
+    int conn[16];
+    int n = connections(nid, conn, 16);
+    for (int i = 0; i < n; i++) {
+        int got = find_pin(conn[i], want, path, sel, depth + 1);
+        if (got) {
+            sel[depth] = i;
+            if (n > 1 && t != 2) verb12(nid, 0x701, (uint32_t)i);   /* the ADC's / selector's input */
+            return got;
+        }
+    }
+    return 0;
+}
+
+static int setup_input(int w0, int nw, const char* name, int cad) {
+    static const int wants[] = { 0xA, 0x8, -1 };
+    for (int w = 0; w < 3; w++) {
+        for (int nid = w0; nid < w0 + nw; nid++) {
+            uint32_t caps = hda_param(nid, 0x09);
+            if (((caps >> 20) & 0xF) != 1 || (caps & (1u << 9))) continue;   /* analog ADCs */
+            int path[8], sel[8];
+            int len = find_pin(nid, wants[w], path, sel, 0);
+            if (!len) continue;
+            for (int i = 0; i < len; i++) {
+                verb12(path[i], 0x705, 0);                                  /* D0 */
+                amp_on(path[i], sel[i]);
+            }
+            int pin = path[len - 1];
+            uint32_t pcap = hda_param(pin, 0x0C);
+            uint32_t ctl = 0x20;                                            /* input on */
+            if (wants[w] == 0xA) ctl |= (pcap & (1u << 12)) ? 4 : (pcap & (1u << 9)) ? 1 : 0;   /* VRef 80% / 50% */
+            verb12(pin, 0x707, ctl);
+            uint32_t pc = hda_param(pin, 0x09);
+            if (pc & (1u << 1)) {                                           /* the pin's input amp: a boost */
+                uint32_t ac = amp_caps(pin, pc, 0);
+                uint32_t off = ac & 0x7F, steps = (ac >> 8) & 0x7F, size = ((ac >> 16) & 0x7F) + 1;
+                uint32_t g = off + (wants[w] == 0xA ? 80u / size : 0);     /* (size: 0.25 dB units) */
+                if (g > steps) g = steps;
+                verb4(pin, 0x3, 0x7000 | g);
+            }
+            verb12(nid, 0x706, 0x20);                                       /* stream tag 2, channel 0 */
+            verb4(nid, 0x2, 0x0011);                                        /* 48 kHz, 16-bit, stereo */
+            const char* role = wants[w] == 0xA ? "mic" : wants[w] == 0x8 ? "line in" : "input";
+            klog("hda: %s (codec %d): %s pin %d -> ADC %d (%d widgets)\n", name, cad, role, pin, nid, len);
+            kstrlcpy(g_in_role, role, sizeof(g_in_role));
+            g_in_cad = cad;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static uint32_t hda_in_position(void) { return hr32(g_sd_in + 0x04) % audio_in_ring_bytes(); }
+
+static int hda_in_start(void) {
+    uint8_t* ring = audio_in_ring();
+    if (!ring || !g_sd_in || !g_hda_in_bdl) return -1;
+    uint32_t rb = audio_in_ring_bytes();
+    hw8(g_sd_in + 0x00, hr8(g_sd_in) | 1);              /* stream reset */
+    for (int i = 0; i < 100 && !(hr8(g_sd_in) & 1); i++) timer_sleep_ms(1);
+    hw8(g_sd_in + 0x00, hr8(g_sd_in) & ~1);
+    for (int i = 0; i < 100 && (hr8(g_sd_in) & 1); i++) timer_sleep_ms(1);
+    for (int i = 0; i < HDA_BUFS; i++) {
+        g_hda_in_bdl[i * 2] = (uint64_t)(uintptr_t)(ring + i * (rb / HDA_BUFS));
+        g_hda_in_bdl[i * 2 + 1] = (uint64_t)(rb / HDA_BUFS);          /* no interrupts: the timer reads it */
+    }
+    flush((const uint8_t*)g_hda_in_bdl, HDA_BUFS * 16);
+    hw32(g_sd_in + 0x18, (uint32_t)(uintptr_t)g_hda_in_bdl);
+    hw32(g_sd_in + 0x1C, 0);
+    hw32(g_sd_in + 0x08, rb);
+    hw16(g_sd_in + 0x0C, HDA_BUFS - 1);
+    hw16(g_sd_in + 0x12, 0x0011);                       /* 48 kHz, 16-bit, 2 channels */
+    hw8(g_sd_in + 0x02, 2 << 4);                        /* stream tag 2 */
+    hw8(g_sd_in + 0x03, 0x1C);
+    hw8(g_sd_in + 0x00, (hr8(g_sd_in) & ~4) | 2);       /* run */
+    return 0;
+}
+
+static void hda_in_stop(void) { if (g_sd_in) hw8(g_sd_in + 0x00, hr8(g_sd_in) & ~(2 | 4)); }
+
+static const audio_in_t g_hda_in = { "HDA input", hda_in_start, hda_in_position, NULL, hda_in_stop };
+
 /* the analog outputs of the codec at address cad turned on; how many */
 static int setup_codec(int cad) {
     g_cad = cad;
@@ -529,6 +697,7 @@ static int setup_codec(int cad) {
         }
     }
     if (n && !g_codec_name[0]) kstrlcpy(g_codec_name, name, sizeof(g_codec_name));
+    if (g_sd_in && g_in_cad < 0) setup_input(w0, nw, name, cad);
     return n;
 }
 
@@ -590,6 +759,8 @@ static int hda_init(const pci_dev_t* pd) {
     if (!oss) { klog("hda: no output stream\n"); return -1; }
     g_sd = 0x80 + (uint32_t)iss * 0x20;
     g_sidx = iss;                                     /* (input streams come first) */
+    /* the first input stream records, if there is one (and its buffers) */
+    if (iss && audio_in_ring() && (g_hda_in_bdl = (uint64_t*)dma_alloc(HDA_BUFS * 16, 128)) != NULL) g_sd_in = 0x80;
 
     /* CORB / RIRB: the biggest size the controller offers (256 entries on most) */
     g_corb = (uint32_t*)dma_alloc(1024, 128);
@@ -635,6 +806,11 @@ static int hda_init(const pci_dev_t* pd) {
               g_codec_name, g_outputs);
     g_card = &g_hdac;
     if (pd->irq_line > 0 && pd->irq_line < 16) { irq_install(pd->irq_line, hda_irq); g_hda_irq = 1; }
+    if (g_in_cad >= 0) {
+        char in[112];
+        ksnprintf(in, sizeof(in), "HD Audio %04x:%04x, %s", pd->vendor, pd->device, g_in_role);
+        audio_in_register(&g_hda_in, in);
+    }
     return 0;
 }
 
@@ -660,6 +836,7 @@ void audio_init(void) {
     if (p.have_hda && hda_init(&p.hda) != 0) g_card = NULL;
     if (!g_card && p.have_ac97 && ac97_init(&p.ac97) != 0) g_card = NULL;
     if (!g_card) { kstrlcpy(g_card_name, "none (PC speaker only)", sizeof(g_card_name)); return; }
+    if (g_card == &g_ac97 && g_ac_in_bdl) audio_in_register(&g_ac97_in, "Intel AC'97, mic");
     flush(g_ring, RING);                    /* the silence it starts with, in RAM */
     g_card->start();
     g_last_hw = g_card->position();
@@ -896,4 +1073,5 @@ void audio_list(void) {
         terminal_writeln(line);
     }
     terminal_writeln("PC speaker: yes (beep)");
+    audio_in_list();
 }

@@ -466,7 +466,7 @@ subtest stops the run.
 Inside a 64-bit live session, run:
 
 ```sh
-pkg install /home/banana/Examples/shelltest.bpk
+pkg install /usr/share/extras/shelltest.bpk
 apt install neovim
 shelltest -e
 ```

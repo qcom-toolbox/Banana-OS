@@ -5,7 +5,7 @@ VERSION     = 1.0
 TYPE        = console
 DESCRIPTION = Checks the POSIX layer for ported programs: mmap, threads, sockets, signals, dlopen
 AUTHOR      = Banana OS SDK
-CATEGORY    = Developer Tools
+CATEGORY    = Extras
 SRCS        = posixtest.c
 # shared libraries for its dlopen checks (libdemo2 needs libdemo), per CPU
 DATA        = libdemo64.so libdemo2_64.so libdemo32.so libdemo2_32.so

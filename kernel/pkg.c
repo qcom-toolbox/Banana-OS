@@ -226,7 +226,7 @@ static void bin_remove(const char* app, const char* link) {
 }
 
 /* a console app with no bin=: its own name in /bin (pkg install
- * ~/Examples/posixtest.bpk, then posixtest in bash) - unless /bin has that
+ * /usr/share/extras/posixtest.bpk, then posixtest in bash) - unless /bin has that
  * name already */
 static void bin_default(const char* mf, uint32_t len, const pkg_info_t* info, int add) {
     if (strcmp(info->type, "console") != 0 || !bin_name_ok(info->name, (int)strlen(info->name))) return;

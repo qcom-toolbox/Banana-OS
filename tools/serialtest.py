@@ -17,9 +17,9 @@ import argparse, re, socket, subprocess, sys, time
 
 DEFAULT_CMDS = [
     "selftest ## 0 failed",                 # (shell/selftest.c: what the OS checks itself)
-    "pkg install ~/Examples/threads.bpk",
+    "pkg install /usr/share/extras/threads.bpk",
     "threads 4 200000",
-    "pkg install ~/Examples/cltest.bpk",
+    "pkg install /usr/share/extras/cltest.bpk",
     "cltest",
     "free",
 ]

@@ -5,7 +5,7 @@ VERSION     = 1.0
 TYPE        = gui
 DESCRIPTION = An analog and digital clock
 AUTHOR      = Banana OS SDK
-CATEGORY    = Utilities
+CATEGORY    = Extras
 SRCS        = clock.c
 
 include ../../banana.mk

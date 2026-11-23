@@ -219,7 +219,7 @@ static void scan_dir(const char* dir, int depth) {
         char p[256];
         snprintf(p, sizeof(p), "%s%s%s", dir, strcmp(dir, "/") ? "/" : "", e.name);
         if (e.is_dir) {
-            if (depth < 6 && strcmp(p, "/home/banana/Examples") != 0) scan_dir(p, depth + 1);
+            if (depth < 6 && strcmp(p, "/usr/share/extras") != 0) scan_dir(p, depth + 1);
             continue;
         }
         if (!is_audio(e.name) || strlen(p) >= sizeof(g_songs[0].path)) continue;

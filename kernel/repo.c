@@ -20,8 +20,8 @@ static const char* DEFAULT_SOURCES =
     "#   repo <url> key=<public key, 64 hex digits>   a signed repository\n"
     "#   repo <url> trusted                           no signature (local folders)\n"
     "#\n"
-    "# Make your own repository on Linux with tools/repo/banana-repo (see the\n"
-    "# README): `banana-repo key` prints the line to put here.\n"
+    "# Make your own repository on Linux with tools/repo/banana-repo (see\n"
+    "# docs/APPS.md): `banana-repo key` prints the line to put here.\n"
     "\n"
     "# the apps and the examples that come with Banana OS (built into it: no network)\n"
     "repo builtin: trusted\n";

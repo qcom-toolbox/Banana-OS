@@ -20,6 +20,10 @@
 #include "../kernel/gui.h"
 #include "../kernel/taskmgr.h"
 #include "../kernel/audio.h"
+#include "../kernel/audioin.h"
+#include "../usb/uvc.h"
+#include "../kernel/timer.h"
+#include "../kernel/task.h"
 #include "../kernel/settings.h"
 #include "aptcmd.h"
 #include "adbcmd.h"
@@ -250,7 +254,7 @@ static void cmd_pkg(int argc, char** argv) {
     } else if (strcmp(sub, "list") == 0 || strcmp(sub, "ls") == 0) {
         static pkg_info_t list[64];
         int n = pkg_list(list, 64);
-        if (!n) { terminal_writeln("no apps installed - `pkg install <file.bpk>` (try ~/Examples)"); return; }
+        if (!n) { terminal_writeln("no apps installed - `pkg install <file.bpk>` (try /usr/share/extras, or the App Store)"); return; }
         say("  %-14s %-8s %-7s %s\n", "NAME", "VERSION", "TYPE", "TITLE");
         for (int i = 0; i < n && i < 64; i++) print_info(&list[i]);
     } else if (strcmp(sub, "info") == 0 && argc >= 3) {
@@ -315,6 +319,124 @@ static void cmd_play(int argc, char** argv) {
     char err[128];
     if (audio_play_wav(argv[1], err, sizeof(err)) != 0) { fail("play", err); return; }
     say("playing %s (%s) - it goes on in the background; `play -s` stops it\n", argv[1], audio_device_name());
+}
+
+/* mic | mic level [seconds] | mic record <seconds> <file.wav>: the
+ * microphone (kernel/audioin.c) - what records, how loud it is, a .wav of it */
+static void wav_header(uint8_t* h, uint32_t data_bytes) {
+    static const uint8_t tmpl[44] = { 'R','I','F','F', 0,0,0,0, 'W','A','V','E', 'f','m','t',' ', 16,0,0,0, 1,0, 1,0,
+                                      0x80,0xBB,0,0, 0x00,0x77,0x01,0, 2,0, 16,0, 'd','a','t','a', 0,0,0,0 };
+    memcpy(h, tmpl, 44);                                 /* PCM, mono, 48000 Hz, 96000 B/s, 16-bit */
+    uint32_t riff = data_bytes + 36;
+    for (int i = 0; i < 4; i++) { h[4 + i] = (uint8_t)(riff >> (8 * i)); h[40 + i] = (uint8_t)(data_bytes >> (8 * i)); }
+}
+
+static void cmd_mic(int argc, char** argv) {
+    if (!audio_in_available()) { fail("mic", "no microphone (QEMU: -device intel-hda -device hda-micro, or -device AC97)"); return; }
+    int record = argc >= 4 && !strcmp(argv[1], "record");
+    int level = argc >= 2 && !strcmp(argv[1], "level");
+    if (argc >= 2 && !record && !level) { terminal_writeln("usage: mic | mic level [seconds] | mic record <seconds> <file.wav>"); return; }
+    uint32_t secs = record ? 0 : level ? 5 : 1;
+    if ((record || level) && argc >= 3) k_parse_u32(argv[2], &secs);
+    if (secs < 1) secs = 1;
+    if (secs > 60) { fail("mic", "60 seconds at most"); return; }
+    uint32_t want = secs * AUDIO_IN_RATE, got = 0;
+    int16_t* pcm = record ? (int16_t*)kmalloc(44 + want * 2) : NULL;
+    if (record && !pcm) { fail("mic", "out of memory"); return; }
+    int16_t chunk[2048];
+    uint64_t cur;
+    if (audio_in_open(&cur) != 0) { kfree(pcm); fail("mic", "the microphone does not start"); return; }
+    say("mic: %s - %s %u s\n", audio_in_name(), record ? "recording" : "listening", secs);
+    int peak = 0, shown = 0;
+    uint32_t start = timer_ms(), next = start + 200;
+    while (got < want && timer_ms() - start < secs * 1000u + 2000u) {
+        int n = audio_in_read(&cur, chunk, 2048, 1);
+        if (n < 0) break;
+        for (int i = 0; i < n; i++) {
+            int a = chunk[i] < 0 ? -chunk[i] : chunk[i];
+            if (a > peak) peak = a;
+            if (a > shown) shown = a;
+        }
+        uint32_t take = (uint32_t)n < want - got ? (uint32_t)n : want - got;
+        if (pcm) memcpy((uint8_t*)pcm + 44 + got * 2, chunk, take * 2);
+        got += take;
+        if (level && timer_ms() >= next) {
+            char bar[41];
+            int k = shown * 40 / 32768;
+            for (int i = 0; i < 40; i++) bar[i] = i < k ? '#' : '.';
+            bar[40] = 0;
+            say("  [%s] %5d\n", bar, shown);
+            shown = 0;
+            next += 200;
+        }
+        task_sleep_ms(10);                               /* (2048 frames a call: 4x what 10 ms record) */
+    }
+    audio_in_close();
+    say("mic: %u of %u frames in %u ms, peak %d (%d%%)\n", got, want, timer_ms() - start, peak, peak * 100 / 32767);
+    if (record) {
+        wav_header((uint8_t*)pcm, got * 2);
+        if (fs_write_path(argv[3], pcm, 44 + got * 2) < 0) fail("mic", "cannot write the file");
+        else say("mic: saved %s (%u bytes, 48 kHz 16-bit mono) - `play %s` plays it\n", argv[3], 44 + got * 2, argv[3]);
+        kfree(pcm);
+    }
+}
+
+/* webcam | webcam snap <file>: the camera streams for a few seconds -
+ * how many pictures came; snap saves the first one (.bmp, or the JPEG an
+ * MJPEG camera sends) */
+static void cmd_webcam(int argc, char** argv) {
+    int snap = argc >= 3 && !strcmp(argv[1], "snap");
+    if (argc >= 2 && !snap) { terminal_writeln("usage: webcam | webcam snap <file.bmp|file.jpg>"); return; }
+    if (!camera_available()) { fail("webcam", "no camera (a USB webcam: USB Video Class, on an xHCI port)"); return; }
+    int w = 0, h = 0;
+    if (camera_open(&w, &h) != 0) { fail("webcam", "the camera does not start"); return; }
+    uint32_t cap = camera_frame_bytes();
+    uint8_t* buf = (uint8_t*)kmalloc(cap + 54);
+    if (!buf) { camera_close(); fail("webcam", "out of memory"); return; }
+    say("webcam: %s, %dx%d\n", camera_name(), w, h);
+    camera_frame_t f;
+    uint32_t seq = 0, got = 0, start = timer_ms();
+    int saved = 0;
+    while (timer_ms() - start < (snap ? 5000u : 3000u) && !(snap && saved)) {
+        int rc = camera_frame(buf + 54, cap, &f, &seq);
+        if (rc == 1 && got++ == 0) say("webcam: first picture after %u ms (%s, %u bytes)\n", timer_ms() - start,
+                                      f.format == CAMERA_JPEG ? "JPEG" : "pixels", f.bytes);
+        if (rc == 1 && snap) {
+            int r;
+            if (f.format == CAMERA_JPEG) r = fs_write_path(argv[2], buf + 54, f.bytes);
+            else {
+                /* a 32-bit BMP, rows bottom up: the pixels turned over in place */
+                uint32_t* px = (uint32_t*)(buf + 54);
+                for (int y = 0; y < f.height / 2; y++)
+                    for (int x = 0; x < f.width; x++) {
+                        uint32_t t = px[y * f.width + x];
+                        px[y * f.width + x] = px[(f.height - 1 - y) * f.width + x];
+                        px[(f.height - 1 - y) * f.width + x] = t;
+                    }
+                uint32_t img = (uint32_t)f.width * (uint32_t)f.height * 4u, file = 54 + img;
+                memset(buf, 0, 54);
+                buf[0] = 'B'; buf[1] = 'M';
+                for (int i = 0; i < 4; i++) {
+                    buf[2 + i] = (uint8_t)(file >> (8 * i));
+                    buf[18 + i] = (uint8_t)((uint32_t)f.width >> (8 * i));
+                    buf[22 + i] = (uint8_t)((uint32_t)f.height >> (8 * i));
+                    buf[34 + i] = (uint8_t)(img >> (8 * i));
+                }
+                buf[10] = 54; buf[14] = 40; buf[26] = 1; buf[28] = 32;
+                r = fs_write_path(argv[2], buf, file);
+            }
+            if (r < 0) fail("webcam", "cannot write the file");
+            else say("webcam: saved %s\n", argv[2]);
+            saved = 1;
+        }
+        task_sleep_ms(10);
+    }
+    uint32_t ms = timer_ms() - start;
+    if (!snap) say("webcam: %u pictures in %u ms (%u.%u per second)\n", got, ms, ms ? got * 1000u / ms : 0,
+                   ms ? (got * 10000u / ms) % 10 : 0);
+    else if (!saved) fail("webcam", "no picture came");
+    kfree(buf);
+    camera_close();
 }
 
 static void cmd_beep(int argc, char** argv) {
@@ -389,6 +511,9 @@ int syscmd_dispatch(const char* line) {
     if (strcmp(argv[0], "beep") == 0) { cmd_beep(argc, argv); return 1; }
     if (strcmp(argv[0], "volume") == 0) { cmd_volume(argc, argv); return 1; }
     if (strcmp(argv[0], "lsaudio") == 0) { audio_list(); return 1; }
+    if (strcmp(argv[0], "mic") == 0) { cmd_mic(argc, argv); return 1; }
+    if (strcmp(argv[0], "webcam") == 0) { cmd_webcam(argc, argv); return 1; }
+    if (strcmp(argv[0], "lscam") == 0) { camera_list(); return 1; }
     if (strcmp(argv[0], "apps") == 0) {
         if (!gui_open_apps()) cmd_pkg(2, (char*[]){ "pkg", "list" });
         return 1;

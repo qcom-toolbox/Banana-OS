@@ -1307,7 +1307,7 @@ static const char* const known_cmds[] = {
     "ntp", "ifconfig", "dhcp", "ping", "nslookup", "host", "netstat", "arp", "curl", "wget",
     "cryptotest", "wallpaper", "lsusb", "lsinput", "dmesg", "usb", "httpd", "sshd", "rdpd", "rdp", "passwd", "files", "browser", "notepad",
     /* shell/syscmds.c */
-    "mount", "umount", "eject", "fstest", "selftest", "crashtest", "pkg", "apt", "apt-get", "adb", "fastboot", "apps", "taskmgr", "settings", "notify", "play", "beep", "volume", "lsaudio",
+    "mount", "umount", "eject", "fstest", "selftest", "crashtest", "pkg", "apt", "apt-get", "adb", "fastboot", "apps", "taskmgr", "settings", "notify", "play", "beep", "volume", "lsaudio", "mic", "webcam", "lscam",
     /* shell/moncmds.c */
     "laptop", "usbc", "free", "swap", "latency", "df", "htop", "sched", "renice", "lscpu", "sensors", "gamepad", "ipv6", "toggle6", "ping6", "firewall", "kptest", "lsgpu", "gpubench", "brightness", "resolution", "drivers", "driver",
     /* shell/fscmds.c */
@@ -3150,10 +3150,8 @@ void shell_run(void) {
     int live = sysinfo_live_boot();
     boottime_mark("disks (an installed Banana OS?)");
     int loaded = live ? 0 : fsdisk_try_load();
-    if (loaded <= 0) {
-        fs_init();
-        examples_seed();          /* the SDK example apps in ~/Examples */
-    }
+    if (loaded <= 0) fs_init();
+    examples_seed();              /* the SDK's example and test apps in /usr/share/extras */
     if (loaded < 0)
         terminal_write_color(
             "The installed disk's files could not be read (damaged). Starting with a fresh\n"

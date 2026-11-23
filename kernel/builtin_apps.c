@@ -16,7 +16,7 @@
 #include "notification.h"
 
 extern const uint8_t app_webworker[],app_webworker_end[];
-extern const uint8_t app_mediaplayer[], app_mediaplayer_end[], app_music[], app_music_end[], app_amethyst[], app_amethyst_end[], app_photos[], app_photos_end[], app_code[], app_code_end[], app_store[], app_store_end[], app_terminal[], app_terminal_end[];
+extern const uint8_t app_mediaplayer[], app_mediaplayer_end[], app_music[], app_music_end[], app_amethyst[], app_amethyst_end[], app_photos[], app_photos_end[], app_camera[], app_camera_end[], app_code[], app_code_end[], app_store[], app_store_end[], app_terminal[], app_terminal_end[];
 #ifdef __x86_64__
 extern const uint8_t app_libjsworker[], app_libjsworker_end[];
 extern const uint8_t app_webmedia[], app_webmedia_end[];
@@ -39,6 +39,7 @@ static const struct { const char* name; const uint8_t* start; const uint8_t* end
     { "music", app_music, app_music_end, 0 },
     { "amethyst", app_amethyst, app_amethyst_end, 0 },
     { "photos", app_photos, app_photos_end, 0 },
+    { "camera", app_camera, app_camera_end, 0 },
     { "code", app_code, app_code_end, 0 },
     { "store", app_store, app_store_end, 0 },
 #ifdef __x86_64__
@@ -538,15 +539,15 @@ int builtin_package(const char* file_in, char** data, uint32_t* len) {
 
 static const char* const PROFILE_NAMES[PROFILE_COUNT] = { "Full", "Standard", "Minimal" };
 static const char* const PROFILE_APPS[PROFILE_COUNT] = {
-    "every app: App Store, Media Player, Music, Photos, Amethyst Music, Banana Code, and the examples",
-    "the everyday apps: App Store, Media Player, Music, Photos",
+    "every app: App Store, Media Player, Music, Photos, Camera, Amethyst Music, Banana Code, and the examples",
+    "the everyday apps: App Store, Media Player, Music, Photos, Camera",
     "the App Store only - the other apps can be installed from it",
 };
 /* what each profile leaves out (package names; "" ends the list) */
-static const char* const PROFILE_OUT[PROFILE_COUNT][6] = {
+static const char* const PROFILE_OUT[PROFILE_COUNT][7] = {
     { "" },
     { "amethyst", "code", "" },
-    { "mediaplayer", "music", "photos", "amethyst", "code", "" },
+    { "mediaplayer", "music", "photos", "camera", "amethyst", "code", "" },
 };
 
 const char* builtin_profile_name(int p) { return p >= 0 && p < PROFILE_COUNT ? PROFILE_NAMES[p] : ""; }

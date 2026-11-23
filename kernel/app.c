@@ -6,6 +6,8 @@
 #include "gpu_i915.h"
 #include "appwin.h"
 #include "audio.h"
+#include "audioin.h"
+#include "../usb/uvc.h"
 #include "fs.h"
 #include "fsdisk.h"
 #include "kheap.h"
@@ -178,6 +180,11 @@ typedef struct {
     uint32_t  web_deadline, web_cpu_start, web_cpu_limit;
     uint32_t  web_stop_reason, web_stop_cpu;
     uint32_t  web_window, web_window_cpu;
+    /* the microphone and the camera (version 34): open for it, its place */
+    int       mic_on, cam_on;
+    int       cam_w, cam_h;
+    uint64_t  mic_cursor;
+    uint32_t  cam_seq;
 } app_proc_t;
 
 /* pending signals change on several cores at once (a stop seen by the
@@ -1959,6 +1966,90 @@ static int a_http_get(const char* url, char** data, unsigned long* len, char* ct
 
 /* ── sound / clipboard ─────────────────────────────────────────────── */
 
+/* ── the microphone and the camera (version 34) ── */
+static void av_release(app_proc_t* p) {
+    if (p->mic_on) { p->mic_on = 0; audio_in_close(); }
+    if (p->cam_on) { p->cam_on = 0; camera_close(); }
+}
+
+static int a_mic(int op, void* buf, unsigned int len) {
+    app_proc_t* p = cur();
+    if (!p) return -1;
+    switch (op) {
+    case BANANA_MIC_OPEN:
+        if (p->mic_on) return AUDIO_IN_RATE;
+        if (!audio_in_available()) return -19;
+        if (audio_in_open(&p->mic_cursor) != 0) return -5;
+        p->mic_on = 1;
+        return AUDIO_IN_RATE;
+    case BANANA_MIC_READ: case BANANA_MIC_READ_MONO: {
+        if (!p->mic_on) return -9;
+        int ch = op == BANANA_MIC_READ ? 2 : 1;
+        if (!buf) return -14;
+        int n = audio_in_read(&p->mic_cursor, (int16_t*)buf, len / (uint32_t)(ch * 2), ch);
+        return n < 0 ? -5 : n;
+    }
+    case BANANA_MIC_LEVEL: return p->mic_on ? audio_in_level() : -9;
+    case BANANA_MIC_NAME:
+        if (!buf || !len) return -14;
+        kstrlcpy((char*)buf, audio_in_name(), len);
+        return 0;
+    case BANANA_MIC_CLOSE:
+        if (p->mic_on) { p->mic_on = 0; audio_in_close(); }
+        return 0;
+    }
+    return -22;
+}
+
+static int a_camera(int op, void* buf, unsigned int len, banana_camframe_t* info) {
+    app_proc_t* p = cur();
+    if (!p) return -1;
+    switch (op) {
+    case BANANA_CAM_OPEN: {
+        if (!p->cam_on) {
+            if (!camera_available()) return -19;
+            if (camera_open(&p->cam_w, &p->cam_h) != 0) return -5;
+            p->cam_on = 1;
+            p->cam_seq = 0;
+        }
+        if (info) {
+            memset(info, 0, sizeof(*info));
+            info->width = p->cam_w;
+            info->height = p->cam_h;
+            info->bytes = camera_frame_bytes();
+        }
+        return 0;
+    }
+    case BANANA_CAM_FRAME: {
+        if (!p->cam_on) return -9;
+        if (!buf) return -14;
+        camera_frame_t f;
+        memset(&f, 0, sizeof(f));
+        int rc = camera_frame(buf, len, &f, &p->cam_seq);
+        if (rc < 0) return len < camera_frame_bytes() ? -22 : -5;
+        if (info) {
+            memset(info, 0, sizeof(*info));
+            if (rc == 1) {
+                info->width = f.width;
+                info->height = f.height;
+                info->format = f.format;
+                info->seq = f.seq;
+                info->bytes = f.bytes;
+            }
+        }
+        return rc;
+    }
+    case BANANA_CAM_NAME:
+        if (!buf || !len) return -14;
+        kstrlcpy((char*)buf, camera_name(), len);
+        return 0;
+    case BANANA_CAM_CLOSE:
+        if (p->cam_on) { p->cam_on = 0; camera_close(); }
+        return 0;
+    }
+    return -22;
+}
+
 static int a_audio_play(const void* pcm, unsigned long bytes, int rate, int ch, int bits) {
     return audio_play(pcm, (uint32_t)bytes, rate, ch, bits);
 }
@@ -2810,6 +2901,8 @@ static void spec_init(void) {
     SPEC(web_ipc, "ibibi", 0);
     SPEC(poll_mask, "iiiL", 0);           /* fds: checked in a_poll */
     SPEC(uptime_ns, "o", sizeof(unsigned long long));
+    SPEC(mic, "iBi", 0);
+    SPEC(camera, "iBio", sizeof(banana_camframe_t));
     SPEC(pkg_install, "sbi", 0);
     SPEC(app_run, "siibi", 0);          /* argv: checked in it */
     SPEC(repo_update, "bi", 0);
@@ -3433,6 +3526,7 @@ static int resume_user(app_proc_t* p) {
 /* execve done: the old program's space goes (the kernel's tables are loaded) */
 static void exec_switch(app_proc_t* p) {
     p->exec_next = 0;
+    av_release(p);                          /* (the old program's microphone and camera) */
     gpu_virgl_release(p->id + 1);
     gem_release(p->id + 1);
     appwin_close_owner(p->id);              /* (their pictures were the old program's memory) */
@@ -4304,6 +4398,8 @@ static void api_init(void) {
     g_api.fd_sync = G(a_fd_sync);
     g_api.web_ipc = G(a_web_ipc);
     g_api.uptime_ns = G(a_uptime_ns);
+    g_api.mic = G(a_mic);
+    g_api.camera = G(a_camera);
 #ifdef __x86_64__
     g_api.proc_list = G(a_proc_list);                  /* (the system calls' table: 64-bit) */
 #endif
@@ -4692,6 +4788,7 @@ static void teardown(app_proc_t* p) {
     for (int i = 0; i < APP_FDS; i++) fd_close(p, i);   /* its descriptors: sockets close (connections end), pipes too */
     gpu_virgl_release(p->id + 1);
     gem_release(p->id + 1);                 /* (its GPU buffers: once the GPU is done with them) */
+    av_release(p);                          /* (its microphone and camera: they stop when nobody records) */
     appwin_close_owner(p->id);              /* (their pictures are its memory: before it goes) */
     webview_close_owner(p->id);
     discard(p);

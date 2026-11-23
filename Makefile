@@ -269,7 +269,7 @@ kernel/exbin.o kernel/exbin.o64: $(EXAMPLE_BPKZ)
 # ── the apps that come with Banana OS (apps/): FFmpeg-based, built into the
 # kernel compressed and installed at boot (kernel/builtin_apps.c). FFmpeg
 # itself is built once by ports/ffmpeg/build.sh (the first build takes a while).
-APPS     = mediaplayer music amethyst photos code store
+APPS     = mediaplayer music amethyst photos camera code store
 APP_DEPS = $(SDK_DEPS) ports/ffmpeg/build.sh
 define APP_RULE
 # (&: one make of the app makes both - two at once raced in its folder)

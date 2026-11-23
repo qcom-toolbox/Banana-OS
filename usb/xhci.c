@@ -104,6 +104,8 @@ typedef struct {
     ring_t*       ep[32];              /* by DCI */
     volatile int  halted[32];          /* endpoint stalled: reset in poll */
     uint8_t       isoch[32];           /* isochronous endpoints */
+    uint16_t      iso_mps[32];         /* ... their packet size and packets per (micro)frame */
+    uint8_t       iso_mult[32];
     uint8_t*      ctrl_buf;            /* control data bounce buffer */
     volatile int      ctrl_done;
     volatile uint32_t ctrl_code, ctrl_residual;
@@ -473,6 +475,8 @@ static int xhci_open_endpoint(usb_device_t* d, const usb_ep_desc_t* ep) {
     e[4] = (kind != USB_EP_BULK) ? (esit | (esit << 16)) : (mps ? mps : 512);
     r->deq = r->enq;
     xd->isoch[dci] = (kind == USB_EP_ISOCH);
+    xd->iso_mps[dci] = (uint16_t)(mps ? mps : 1);
+    xd->iso_mult[dci] = (uint8_t)(kind == USB_EP_ISOCH ? burst : 0);
 
     uint32_t cc = command(x, (uint32_t)(uintptr_t)xd->in_ctx, 0,
                           (TRB_CONFIG_EP << 10) | ((uint32_t)xd->slot << 24));
@@ -499,8 +503,15 @@ static int xhci_submit(usb_xfer_t* xf) {
     if (ring_full(r)) { xf->status = USB_XFER_ERROR; return -1; }
     xf->hcpriv = x;
     if (xd->isoch[dci]) {                                    /* one service interval's packet */
+        /* A high-bandwidth endpoint (high speed, up to 3 packets a
+         * microframe: webcams) takes its packets as bursts of one: the TD's
+         * Transfer Burst Count is the packets it has, less one (TLBPC 0) */
+        uint32_t pkts = (xf->len + xd->iso_mps[dci] - 1) / xd->iso_mps[dci];
+        uint32_t tbc = pkts ? pkts - 1 : 0;
+        if (tbc > xd->iso_mult[dci]) tbc = xd->iso_mult[dci];
         xf->status = USB_XFER_PENDING;
-        ring_push(r, start, 0, xf->len & 0x1FFFF, (TRB_ISOCH << 10) | TRB_IOC | TRB_SIA | (in ? TRB_ISP : 0), xf);
+        ring_push(r, start, 0, xf->len & 0x1FFFF,
+                  (TRB_ISOCH << 10) | TRB_IOC | TRB_SIA | (in ? TRB_ISP : 0) | (tbc << 7), xf);
         x->db[xd->slot] = dci;
         return 0;
     }

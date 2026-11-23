@@ -70,7 +70,7 @@ python3 tools/serialtest.py --log "$logs/serial.log" \
     --cmd 'pkg remove libjsworker ## integrated OS component' \
     --cmd 'selftest browser isolation ## 0 failed' \
     --cmd 'selftest ram ## 0 failed' \
-    --cmd 'pkg install /home/banana/Examples/shelltest.bpk' \
+    --cmd 'pkg install /usr/share/extras/shelltest.bpk' \
     --cmd 'apt install neovim' \
     --cmd 'apt install git' \
     --cmd 'cd /tmp && git init -q gitci && cd gitci && echo a > a && git add a && git -c user.name=ci -c user.email=ci@ci.invalid commit -qm gitci && git log --oneline ## gitci' \

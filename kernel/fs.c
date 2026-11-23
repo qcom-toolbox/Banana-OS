@@ -1012,14 +1012,9 @@ void fs_init(void) {
         "root:x:0:0:root:/root:/bin/sh\n"
         "banana:x:1000:1000:banana:/home/banana:/bin/sh\n");
 
-    f = create_file_in(home_dir, "readme.txt");
-    if (f >= 0) fs_set_text(f,
-        "Home sweet /home/banana.\n"
-        "Try: ls -l, pwd, touch, cp, mv, mkdir -p a/b/c, cd ..\n"
-        "Networking: ifconfig, ping example.com, curl http://example.com\n"
-        "Wallpapers: wget -O ~/Pictures/pic.jpg <url>, then: wallpaper ~/Pictures/pic.jpg\n"
-        "USB sticks (FAT32) show up in /mnt/usb - `mount` lists them, `umount` ejects\n"
-        "Apps: pkg install app.bpk, pkg list, then type the app's name\n");
+    /* (no readme.txt any more: a new home starts empty but for its
+     * folders; an installed system's own one, from before, is its files
+     * and stays as it is) */
 
     /* real shells start in $HOME, not / */
     cwd = home_dir;
