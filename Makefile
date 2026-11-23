@@ -36,8 +36,8 @@ C_SRCS   = $(wildcard kernel/*.c) $(wildcard shell/*.c) $(wildcard net/*.c) \
            $(wildcard crypto/*.c) $(wildcard usb/*.c) $(wildcard web/*.c) $(wildcard media/*.c) \
            third_party/stb/stb_image_impl.c $(wildcard third_party/igc/*.c) $(wildcard third_party/rge/*.c) $(wildcard third_party/uacpi/source/*.c) \
            third_party/radeon/atom.c third_party/radeon/evergreen_gfx.c third_party/radeon/r600_gfx.c third_party/radeon/ni_gfx.c third_party/radeon/evergreen_golden.c third_party/radeon/radeon_cs_check.c third_party/radeon/evergreen_wm.c
-ASM_SRCS   = boot/boot.asm kernel/isr.asm kernel/task_switch.asm kernel/appcall.asm kernel/exbin.asm kernel/frameworkbin.asm kernel/fontbin.asm kernel/appbin.asm kernel/s3_resume.asm
-ASM_SRCS64 = boot/boot64.asm kernel/isr64.asm kernel/task_switch64.asm kernel/appcall64.asm kernel/exbin.asm kernel/frameworkbin.asm kernel/fontbin.asm kernel/landscapebin.asm kernel/appbin.asm kernel/smp_tramp.asm kernel/s3_resume.asm
+ASM_SRCS   = boot/boot.asm kernel/isr.asm kernel/task_switch.asm kernel/appcall.asm kernel/exbin.asm kernel/frameworkbin.asm kernel/fontzbin.asm kernel/appbin.asm kernel/s3_resume.asm
+ASM_SRCS64 = boot/boot64.asm kernel/isr64.asm kernel/task_switch64.asm kernel/appcall64.asm kernel/exbin.asm kernel/frameworkbin.asm kernel/fontzbin.asm kernel/landscapebin.asm kernel/appbin.asm kernel/smp_tramp.asm kernel/s3_resume.asm
 kernel/landscapebin.o kernel/landscapebin.o64: $(wildcard assets/wallpapers/landscapes/*.jpg)
 
 kernel/frameworkbin.o kernel/frameworkbin.o64: $(wildcard web/fixtures/* web/fixtures/astro/* web/fixtures/astro/_astro/*) $(wildcard web/test/cases/mutation_observer*.html)
@@ -239,6 +239,7 @@ run-tap: Banana_OS.iso
 clean:
 	for e in $(EXAMPLES); do $(MAKE) -s -C sdk/examples/$$e clean; done
 	rm -f $(EXAMPLE_BPKZ)
+	rm -rf build/fonts
 	for a in $(APPS) $(APPS64) terminal webworker webmedia webgl; do $(MAKE) -s -C apps/$$a clean; done
 	for d in $(DRIVER_EXAMPLES); do $(MAKE) -s -C driver-sdk/examples/$$d clean; done
 	rm -f banana-sdk.tar.gz
@@ -409,7 +410,12 @@ DRIVER_EXAMPLES = edu bochsfb sdk-probe usb-serial-demo
 .PHONY: driver-examples
 driver-examples:
 	for d in $(DRIVER_EXAMPLES); do $(MAKE) -C driver-sdk/examples/$$d; done
-kernel/fontbin.o kernel/fontbin.o64: $(wildcard fonts/*.ttf)
+# the kernels' fonts, compressed (kernel/fontzbin.asm; font.c inflates them)
+FONTS_Z = $(patsubst fonts/%.ttf,build/fonts/%.ttf.z,$(wildcard fonts/*.ttf))
+build/fonts/%.ttf.z: fonts/%.ttf
+	mkdir -p build/fonts
+	python3 -c "import sys, zlib; open(sys.argv[2], 'wb').write(zlib.compress(open(sys.argv[1], 'rb').read(), 9))" $< $@
+kernel/fontzbin.o kernel/fontzbin.o64: $(FONTS_Z)
 
 .PHONY: examples sdk driver-sdk
 examples: $(EXAMPLE_BPKS)

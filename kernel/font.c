@@ -329,18 +329,29 @@ int  font_doc(void) { return g_doc; }
 
 /* ── the built-in fonts ── */
 #ifndef FONT_HOST
-extern const uint8_t font_sans[], font_sans_end[], font_sans_bold[], font_sans_bold_end[];
-extern const uint8_t font_mono[], font_mono_end[], font_mono_bold[], font_mono_bold_end[];
-extern const uint8_t font_emoji[], font_emoji_end[], font_cjk[], font_cjk_end[];
-extern const uint8_t font_hangul[], font_hangul_end[];
+/* kept zlib-compressed in the kernel (kernel/fontzbin.asm: 5 MB less in each
+ * kernel, so the ISO fits older installs' boot area) and inflated here, once:
+ * the faces read them in place from then on */
+#define FONTZ(n) extern const uint8_t fontz_##n[], fontz_##n##_end[];
+FONTZ(sans) FONTZ(sans_bold) FONTZ(mono) FONTZ(mono_bold) FONTZ(emoji) FONTZ(cjk) FONTZ(hangul)
+#undef FONTZ
+char* stbi_zlib_decode_malloc(const char* buffer, int len, int* outlen);
+
+static void register_z(int face, const uint8_t* z, const uint8_t* z_end) {
+    int len = 0;
+    uint8_t* data = (uint8_t*)stbi_zlib_decode_malloc((const char*)z, (int)(z_end - z), &len);
+    if (!data || len <= 0) { kfree(data); return; }       /* (no memory: drawn with the next face) */
+    font_register(face, data, (uint32_t)len);
+    if (!g_ok[face]) kfree(data);
+}
 
 void fonts_init(void) {
-    font_register(FONT_SANS, font_sans, (uint32_t)(font_sans_end - font_sans));
-    font_register(FONT_SANS_BOLD, font_sans_bold, (uint32_t)(font_sans_bold_end - font_sans_bold));
-    font_register(FONT_MONO, font_mono, (uint32_t)(font_mono_end - font_mono));
-    font_register(FONT_MONO_BOLD, font_mono_bold, (uint32_t)(font_mono_bold_end - font_mono_bold));
-    font_register(FONT_EMOJI, font_emoji, (uint32_t)(font_emoji_end - font_emoji));
-    font_register(FONT_CJK, font_cjk, (uint32_t)(font_cjk_end - font_cjk));
-    font_register(FONT_HANGUL, font_hangul, (uint32_t)(font_hangul_end - font_hangul));
+    register_z(FONT_SANS, fontz_sans, fontz_sans_end);
+    register_z(FONT_SANS_BOLD, fontz_sans_bold, fontz_sans_bold_end);
+    register_z(FONT_MONO, fontz_mono, fontz_mono_end);
+    register_z(FONT_MONO_BOLD, fontz_mono_bold, fontz_mono_bold_end);
+    register_z(FONT_EMOJI, fontz_emoji, fontz_emoji_end);
+    register_z(FONT_CJK, fontz_cjk, fontz_cjk_end);
+    register_z(FONT_HANGUL, fontz_hangul, fontz_hangul_end);
 }
 #endif

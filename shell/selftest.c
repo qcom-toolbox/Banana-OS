@@ -427,6 +427,25 @@ static void t_utf8(void) {
     } else {
         skip("beyond Latin-1 drawn with DejaVu Sans Mono", "the font is not loaded");
     }
+    /* the built-in faces (kept compressed in the kernel, inflated at boot):
+     * every one loaded, and the fallbacks draw what DejaVu lacks */
+    int faces = 0;
+    for (int f = 0; f < FONT_FACES; f++) faces += font_available(f) != 0;
+    static const char* const wide[] = { "\xE4\xB8\xAD", "\xED\x95\x9C", "\xF0\x9F\x98\x80" };   /* CJK, Hangul, emoji */
+    int drawn_wide = 0;
+    for (unsigned g = 0; g < 3; g++) {
+        static uint32_t buf[32 * 32];
+        memset(buf, 0, sizeof(buf));
+        font_draw(buf, 32, 0, 0, 32, 32, FONT_SANS, 20, 4, 24, wide[g], (uint32_t)strlen(wide[g]), 0x00FFFFFFu, 0);
+        int lit = 0;
+        for (int i = 0; i < 32 * 32; i++) if (buf[i]) lit++;
+        if (lit > 8) drawn_wide++;
+    }
+    {
+        char note[64];
+        ksnprintf(note, sizeof(note), "%d of %d faces, %d of 3 drawn", faces, FONT_FACES, drawn_wide);
+        report("the built-in fonts inflated: CJK, Hangul and emoji drawn by the fallbacks", faces == FONT_FACES && drawn_wide == 3, note);
+    }
     /* double width, like wcwidth(): emoji, CJK, Hangul, fullwidth forms two
      * columns, combining marks none */
     {

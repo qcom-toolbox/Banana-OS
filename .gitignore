@@ -43,3 +43,4 @@ build/ksyms64.*
 Banana_OS-mesa.iso
 
 /banana-driver-sdk.tar.gz
+build/fonts/
