@@ -462,8 +462,8 @@ netdev_t* e1000_probe(void) {
         g_nd.irq = 0xFF;
     }
 
-    klog("%s: %s at mmio 0x%x irq %u mac %02x:%02x:%02x:%02x:%02x:%02x\n",
-         g_nd.name, model, bar0, pd.irq_line, g_nd.mac[0], g_nd.mac[1], g_nd.mac[2],
+    klog("%s: %s at mmio 0x%lx irq %u mac %02x:%02x:%02x:%02x:%02x:%02x\n",
+         g_nd.name, model, (unsigned long)bar0, pd.irq_line, g_nd.mac[0], g_nd.mac[1], g_nd.mac[2],
          g_nd.mac[3], g_nd.mac[4], g_nd.mac[5]);
     return &g_nd;
 }

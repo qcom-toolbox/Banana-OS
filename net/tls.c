@@ -62,6 +62,7 @@ struct tls_conn {
     uint32_t    errmsg_len;
 };
 
+static void fail(tls_conn_t* t, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 static void fail(tls_conn_t* t, const char* fmt, ...) {
     if (!t->errmsg || !t->errmsg_len) return;
     __builtin_va_list ap;

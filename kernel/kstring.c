@@ -199,45 +199,84 @@ static void ob_num(outbuf_t* o, uint64_t v, int base, int upper, int neg,
     if (left) ob_pad(o, ' ', width - total);
 }
 
-int kvsnprintf(char* buf, size_t n, const char* fmt, __builtin_va_list ap) {
+/* A conversion's argument size from its length modifier: none / h / hh
+ * (int), l (long: 32 bits on i386, 64 on x86_64), ll / j (64 bits),
+ * z / t (size_t, ptrdiff_t: the width of a pointer). */
+enum { ARG_INT, ARG_LONG, ARG_64, ARG_PTR };
+
+static uint64_t arg_unsigned(__builtin_va_list* ap, int size) {
+    switch (size) {
+    case ARG_LONG: return (uint64_t)__builtin_va_arg(*ap, unsigned long);
+    case ARG_64:   return (uint64_t)__builtin_va_arg(*ap, unsigned long long);
+    case ARG_PTR:  return (uint64_t)__builtin_va_arg(*ap, size_t);
+    default:       return (uint64_t)__builtin_va_arg(*ap, unsigned int);
+    }
+}
+
+static int64_t arg_signed(__builtin_va_list* ap, int size) {
+    switch (size) {
+    case ARG_LONG: return (int64_t)__builtin_va_arg(*ap, long);
+    case ARG_64:   return (int64_t)__builtin_va_arg(*ap, long long);
+    case ARG_PTR:  return (int64_t)__builtin_va_arg(*ap, intptr_t);
+    default:       return (int64_t)__builtin_va_arg(*ap, int);
+    }
+}
+
+int kvsnprintf(char* buf, size_t n, const char* fmt, __builtin_va_list ap_in) {
     outbuf_t o = { buf, n, 0 };
+    /* (a copy: va_list is an array on x86_64, and the helpers take its address) */
+    __builtin_va_list ap;
+    __builtin_va_copy(ap, ap_in);
     for (const char* p = fmt; *p; p++) {
         if (*p != '%') { ob_putc(&o, *p); continue; }
         p++;
-        int left = 0, zero = 0, width = 0, lng = 0;
+        int left = 0, zero = 0, width = 0, prec = -1, size = ARG_INT;
         for (;; p++) {
             if (*p == '-') left = 1;
             else if (*p == '0') zero = 1;
+            else if (*p == ' ' || *p == '+' || *p == '#') { /* (accepted, not used) */ }
             else break;
         }
-        while (k_isdigit((unsigned char)*p)) width = width * 10 + (*p++ - '0');
-        while (*p == 'l') { lng++; p++; }
+        if (*p == '*') {                             /* width from an argument */
+            width = __builtin_va_arg(ap, int);
+            if (width < 0) { left = 1; width = -width; }
+            p++;
+        } else {
+            while (k_isdigit((unsigned char)*p)) width = width * 10 + (*p++ - '0');
+        }
+        if (*p == '.') {                             /* precision: %.3s, %.*s */
+            p++;
+            prec = 0;
+            if (*p == '*') {
+                prec = __builtin_va_arg(ap, int);
+                if (prec < 0) prec = -1;
+                p++;
+            } else {
+                while (k_isdigit((unsigned char)*p)) prec = prec * 10 + (*p++ - '0');
+            }
+        }
+        for (;; p++) {                               /* length modifiers */
+            if (*p == 'l') size = size == ARG_LONG ? ARG_64 : ARG_LONG;
+            else if (*p == 'j' || *p == 'q' || *p == 'L') size = ARG_64;
+            else if (*p == 'z' || *p == 't') size = ARG_PTR;
+            else if (*p != 'h') break;
+        }
         switch (*p) {
         case 'd': case 'i': {
-            int64_t v = (lng >= 2) ? __builtin_va_arg(ap, long long)
-                                   : (int64_t)__builtin_va_arg(ap, int);
+            int64_t v = arg_signed(&ap, size);
             int neg = v < 0;
-            ob_num(&o, neg ? (uint64_t)(-v) : (uint64_t)v, 10, 0, neg, width, zero, left);
+            ob_num(&o, neg ? 0 - (uint64_t)v : (uint64_t)v, 10, 0, neg, width, zero, left);
             break;
         }
-        case 'u': {
-            uint64_t v = (lng >= 2) ? __builtin_va_arg(ap, unsigned long long)
-                                    : (uint64_t)__builtin_va_arg(ap, unsigned int);
-            ob_num(&o, v, 10, 0, 0, width, zero, left);
+        case 'u':
+            ob_num(&o, arg_unsigned(&ap, size), 10, 0, 0, width, zero, left);
             break;
-        }
-        case 'x': case 'X': {
-            uint64_t v = (lng >= 2) ? __builtin_va_arg(ap, unsigned long long)
-                                    : (uint64_t)__builtin_va_arg(ap, unsigned int);
-            ob_num(&o, v, 16, *p == 'X', 0, width, zero, left);
+        case 'x': case 'X':
+            ob_num(&o, arg_unsigned(&ap, size), 16, *p == 'X', 0, width, zero, left);
             break;
-        }
-        case 'o': {                                  /* (modes: chmod, stat) */
-            uint64_t v = (lng >= 2) ? __builtin_va_arg(ap, unsigned long long)
-                                    : (uint64_t)__builtin_va_arg(ap, unsigned int);
-            ob_num(&o, v, 8, 0, 0, width, zero, left);
+        case 'o':                                    /* (modes: chmod, stat) */
+            ob_num(&o, arg_unsigned(&ap, size), 8, 0, 0, width, zero, left);
             break;
-        }
         case 'p': {
             uint64_t v = (uint64_t)(uintptr_t)__builtin_va_arg(ap, void*);   /* (all of it: app memory lies past 4 GiB) */
             ob_putc(&o, '0'); ob_putc(&o, 'x');
@@ -247,14 +286,17 @@ int kvsnprintf(char* buf, size_t n, const char* fmt, __builtin_va_list ap) {
         case 's': {
             const char* s = __builtin_va_arg(ap, const char*);
             if (!s) s = "(null)";
-            int l = (int)strlen(s);
+            int l = 0;                               /* (never reads past the precision) */
+            while (s[l] && (prec < 0 || l < prec)) l++;
             if (!left) ob_pad(&o, ' ', width - l);
-            while (*s) ob_putc(&o, *s++);
+            for (int i = 0; i < l; i++) ob_putc(&o, s[i]);
             if (left) ob_pad(&o, ' ', width - l);
             break;
         }
         case 'c':
+            if (!left) ob_pad(&o, ' ', width - 1);
             ob_putc(&o, (char)__builtin_va_arg(ap, int));
+            if (left) ob_pad(&o, ' ', width - 1);
             break;
         case '%':
             ob_putc(&o, '%');
@@ -268,6 +310,7 @@ int kvsnprintf(char* buf, size_t n, const char* fmt, __builtin_va_list ap) {
             break;
         }
     }
+    __builtin_va_end(ap);
     if (n) buf[(o.len < n) ? o.len : n - 1] = '\0';
     return (int)o.len;
 }

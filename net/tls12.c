@@ -81,6 +81,7 @@ struct tls12_conn {
     uint32_t    errmsg_len;
 };
 
+static void fail(tls12_conn_t* t, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 static void fail(tls12_conn_t* t, const char* fmt, ...) {
     if (!t->errmsg || !t->errmsg_len || t->errmsg[0]) return;   /* the first reason wins */
     __builtin_va_list ap;

@@ -43,6 +43,7 @@ static void put(const char* s) {
     g_out[g_out_len] = 0;
 }
 
+static void putf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 static void putf(const char* fmt, ...) {
     char b[160];
     __builtin_va_list ap;

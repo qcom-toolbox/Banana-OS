@@ -22,7 +22,7 @@ void serial_drain(void);
 void serial_panic_write(const char* text);
 
 /* printf to the serial port only (kernel debug log) */
-void klog(const char* fmt, ...);
+void klog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 /* "verbose" boot: the log is also written on the screen (kernel/kernel.c) */
 void klog_to_screen(int on);
 /* the last 64 KiB of the log (dmesg): its bytes copied to out, how many */

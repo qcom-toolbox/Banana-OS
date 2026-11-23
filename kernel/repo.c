@@ -51,6 +51,7 @@ int repo_status(char* msg, int mcap) {
     return g_busy ? (g_pct < 0 ? 0 : g_pct) : -1;
 }
 
+static void say(repo_log_t log, void* ctx, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
 static void say(repo_log_t log, void* ctx, const char* fmt, ...) {
     char line[256];
     __builtin_va_list ap;

@@ -274,7 +274,7 @@ static void path_data(rc_t* R, const char* d) {
         if (!need) break;
         int ok = 1;
         for (int i = 0; i < need && ok; i++) {
-            if (C == 'A' && (i == 3 || i == 4)) { int f; ok = read_flag(&p, &f); a[i] = f; }
+            if (C == 'A' && (i == 3 || i == 4)) { int f = 0; ok = read_flag(&p, &f); a[i] = f; }
             else ok = read_num(&p, &a[i]);
         }
         if (!ok) break;

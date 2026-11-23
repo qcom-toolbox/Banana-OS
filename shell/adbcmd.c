@@ -31,6 +31,7 @@
 
 /* ══ output ════════════════════════════════════════════════════════ */
 
+static void say(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 static void say(const char* fmt, ...) {
     char buf[400];
     __builtin_va_list ap;
@@ -40,6 +41,7 @@ static void say(const char* fmt, ...) {
     terminal_write(buf);
 }
 
+static void err(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 static void err(const char* fmt, ...) {
     char buf[400];
     __builtin_va_list ap;

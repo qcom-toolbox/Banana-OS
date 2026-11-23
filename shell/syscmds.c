@@ -31,6 +31,7 @@
 #include "../kernel/ext4.h"
 #include "../kernel/notification.h"
 
+static void say(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 static void say(const char* fmt, ...) {
     char buf[256];
     __builtin_va_list ap;

@@ -99,7 +99,7 @@ void latency_set(int on) {
     g_last_report = timer_ms();
     latency_enabled = 1;
     resume_irqs(f);
-    klog("latency: started boot-core session shared_counter_per_ms=%llu\n", timer_counter_per_ms());
+    klog("latency: started boot-core session shared_counter_per_ms=%llu\n", (unsigned long long)timer_counter_per_ms());
 }
 
 void latency_report(void) {
@@ -125,9 +125,10 @@ void latency_report(void) {
     klog("latency: ram_total_kb=%u ram_free_kb=%u ram_avail_kb=%u ram_largest_kb=%u\n",
          m.total_kb, m.free_kb, m.avail_kb, m.largest_kb);
     klog("latency: swap_pages=%u swap_bytes=%llu swap_disk_pages=%u swap_disk_used=%llu\n",
-         z.pages, z.bytes, z.disk_pages, z.disk_used);
+         z.pages, (unsigned long long)z.bytes, z.disk_pages, (unsigned long long)z.disk_used);
     klog("latency: swap_out=%llu swap_in=%llu disk_out=%llu disk_in=%llu\n",
-         z.pages_out, z.pages_in, z.disk_out, z.disk_in);
+         (unsigned long long)z.pages_out, (unsigned long long)z.pages_in,
+         (unsigned long long)z.disk_out, (unsigned long long)z.disk_in);
     for (int c = 0; c < cpu_count(); c++)
         klog("latency: cpu=%d busy_pct=%u\n", c, task_core_pct(c));
 }

@@ -55,6 +55,7 @@ static void d_vlog(const char* fmt, __builtin_va_list ap) {
     if (n && buf[n - 1] != '\n' && n < sizeof(buf) - 1) { buf[n] = '\n'; buf[n + 1] = 0; }
     klog("%s", buf);
 }
+static void d_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 static void d_log(const char* fmt, ...) {
     __builtin_va_list ap;
     __builtin_va_start(ap, fmt);

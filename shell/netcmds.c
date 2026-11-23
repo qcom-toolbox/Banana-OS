@@ -60,6 +60,7 @@ static void err(const char* cmd, const char* msg) {
     terminal_putchar('\n');
 }
 
+static void printf_line(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 static void printf_line(const char* fmt, ...) {
     char buf[256];
     __builtin_va_list ap;

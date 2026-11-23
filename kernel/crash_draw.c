@@ -41,6 +41,7 @@ const char* crash_stop_code(const crash_report_t* r) {
     }
 }
 
+static void line(crash_emit_t emit, void* user, int heading, const char* fmt, ...) __attribute__((format(printf, 4, 5)));
 static void line(crash_emit_t emit, void* user, int heading, const char* fmt, ...) {
     char b[160];
     __builtin_va_list ap;

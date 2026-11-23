@@ -36,6 +36,8 @@ typedef uint32_t __le32;
 
 #define KERN_DEBUG ""
 #define KERN_INFO ""
+/* (atom.c's SDEBUG prints KERN_DEBUG, "", on its own: klog is printf-checked) */
+#pragma GCC diagnostic ignored "-Wformat-zero-length"
 #define printk(...) klog(__VA_ARGS__)
 #define pr_info(...) klog("atom: " __VA_ARGS__)
 #define DRM_ERROR(...) klog("atom: " __VA_ARGS__)

@@ -34,9 +34,10 @@ int    k_tolower(int c);
 /* Parses an unsigned decimal; returns chars consumed (0 = no digits). */
 int    k_parse_u32(const char* s, uint32_t* out);
 
-/* Minimal printf family: %d %i %u %x %X %s %c %p %% with optional
- * '-', '0', width and 'l'/'ll' length (64-bit %llu/%llx supported). */
-int    ksnprintf(char* buf, size_t n, const char* fmt, ...);
-int    kvsnprintf(char* buf, size_t n, const char* fmt, __builtin_va_list ap);
+/* Minimal printf family: %d %i %u %x %X %o %s %c %p %% with optional
+ * '-', '0', width, precision (%.3s, %.*s) and the h / l / ll / z / j
+ * length modifiers (checked by gcc: the format attribute). */
+int    ksnprintf(char* buf, size_t n, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
+int    kvsnprintf(char* buf, size_t n, const char* fmt, __builtin_va_list ap) __attribute__((format(printf, 3, 0)));
 
 #endif

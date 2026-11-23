@@ -13,6 +13,7 @@
 
 /* `wallpaper` - pick the desktop wallpaper from the shell. */
 
+static void out(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 static void out(const char* fmt, ...) {
     char buf[256];
     __builtin_va_list ap;

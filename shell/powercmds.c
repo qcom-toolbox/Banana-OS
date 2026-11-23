@@ -4,6 +4,7 @@
 #include "terminal.h"
 #include "kstring.h"
 #include "timer.h"
+static void line(const char* fmt,...) __attribute__((format(printf, 1, 2)));
 static void line(const char* fmt,...) {
     char b[256];__builtin_va_list ap;__builtin_va_start(ap,fmt);
     kvsnprintf(b,sizeof(b),fmt,ap);__builtin_va_end(ap);terminal_write(b);

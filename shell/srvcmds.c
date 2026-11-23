@@ -26,6 +26,7 @@
 
 #define RC_HEADER "# Banana OS services started at boot - `httpd enable`, `sshd enable`, ...\n"
 
+static void say(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 static void say(const char* fmt, ...) {
     char buf[256];
     __builtin_va_list ap;

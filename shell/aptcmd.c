@@ -12,6 +12,7 @@
  * is the same command; `pkg` keeps installing .bpk files.
  */
 
+static void say(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 static void say(const char* fmt, ...) {
     char buf[320];
     __builtin_va_list ap;

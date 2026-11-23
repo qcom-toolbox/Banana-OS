@@ -266,6 +266,7 @@ static int read_chunked(stream_t* s, body_ctx_t* b) {
 
 /* ── one request ────────────────────────────────────────────────── */
 
+static void info(const http_request_t* req, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 static void info(const http_request_t* req, const char* fmt, ...) {
     if (!req->on_info) return;
     char msg[300];
