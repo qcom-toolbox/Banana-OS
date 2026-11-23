@@ -448,6 +448,25 @@ they were plugged in): 1 and a `banana_gamepad_t` - the sticks (`lx`, `ly`,
 Xbox layout: USB HID gamepads and joysticks (PlayStation, Logitech, most PC
 pads), Xbox 360 and Xbox One / Series controllers. Read it once a frame.
 
+### Microphone and camera (API version 34)
+
+`__banana->mic(op, buf, len)`: `BANANA_MIC_OPEN` starts recording for the
+app and returns the rate (always 48000; -19 without a microphone);
+`BANANA_MIC_READ` / `BANANA_MIC_READ_MONO` copy what was recorded since the
+last read - 16-bit samples, stereo or both channels mixed - and return the
+frames (0: nothing new; it never waits; about 1.3 s are kept);
+`BANANA_MIC_LEVEL` is the loudest sample of the last ~100 ms;
+`BANANA_MIC_NAME`, `BANANA_MIC_CLOSE`.
+
+`__banana->camera(op, buf, len, &info)`: `BANANA_CAM_OPEN` starts the
+webcam (`info.width` / `info.height`, and `info.bytes`: the buffer a picture
+needs); `BANANA_CAM_FRAME` copies the newest picture not taken yet and
+returns 1 - `info.format` says what it is: `BANANA_CAM_XRGB` (pixels) or
+`BANANA_CAM_JPEG` (a JPEG file of `info.bytes` to decode, as MJPEG cameras
+send them) - or 0 if none came since. `BANANA_CAM_NAME`, `BANANA_CAM_CLOSE`.
+Both stop by themselves when the app ends. Check `BANANA_HAS(__banana,
+camera)` first; `apps/camera` uses both (and stb_image for JPEG pictures).
+
 ### Drag and drop (API version 13)
 
 Files dragged from Files or the desktop and let go over an app's window
