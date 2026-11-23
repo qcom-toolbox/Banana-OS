@@ -989,8 +989,10 @@ static void t_swap(void) {
 #else
     zswap_stats_t a, b;
     /* (other apps' idle pages - the shells on the consoles - compressed
-     * first: what is left after is the test app's alone) */
+     * first and, installed, on to the disk: what the test's own writeback
+     * moves there after is the test app's alone, not theirs as well) */
     zswap_compress_now();
+    if (zswap_disk_bytes()) zswap_writeback(0xFFFFFFFFu);
     zswap_stats(&a);
     g_sw_done = 0;
     task_create("swaptest", swap_helper);
@@ -1011,7 +1013,24 @@ static void t_swap(void) {
     else {
         ksnprintf(note, sizeof(note), "%u pages written, %u read back", g_sw_disk, (uint32_t)(b.disk_in - a.disk_in));
         report("compressed pages to the disk and back, every byte right", rc == 0 && g_sw_disk >= 3000 && b.disk_in - a.disk_in >= 3000, note);
-        report("nothing left on the disk once it unmapped", b.disk_pages == a.disk_pages && b.disk_used == a.disk_used, "");
+        /* (a shell's page or two may have gone there meanwhile, or come back) */
+        ksnprintf(note, sizeof(note), "%u pages on the disk before, %u after; %u KiB of it taken before, %u after",
+                  a.disk_pages, b.disk_pages, (uint32_t)(a.disk_used >> 10), (uint32_t)(b.disk_used >> 10));
+        report("nothing left on the disk once it unmapped", b.disk_pages <= a.disk_pages + 32 &&
+               b.disk_used <= a.disk_used + 32u * 4096u, note);
+        /* and every sector taken is an entry's: none lost with an entry freed
+         * (page-out may hold one for a moment: looked at again) */
+        uint32_t ents = 0, counted = 0;
+        uint64_t held = 0, used = 0;
+        for (int k = 0; k < 20; k++) {
+            zswap_audit(&ents, &counted, &held, &used);
+            if (ents == counted && held == used) break;
+            task_sleep_ms(50);
+        }
+        ksnprintf(note, sizeof(note), "%u entries on the disk, %u counted; %u KiB in their slots, %u KiB taken",
+                  ents, counted, (uint32_t)(held >> 10), (uint32_t)(used >> 10));
+        report("the swap area's sectors: each one an entry's", ents == counted && held == used, note);
+
     }
 #endif
 }

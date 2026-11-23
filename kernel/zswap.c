@@ -383,6 +383,29 @@ void zswap_stats(zswap_stats_t* s) {
     spin_unlock_irq(&g_zlock, f);
 }
 
+/* the stats against the entries themselves: the pages on the disk (DISK, or
+ * READING: still counted) and the sectors held by an entry's slot - what an
+ * entry gone without its slot given back would leave (selftest). Slots that
+ * page-out holds between zswap_disk_put and zswap_store_disk are in no entry
+ * yet: *held may then be below *used for a moment */
+void zswap_audit(uint32_t* disk_ents, uint32_t* disk_counted, uint64_t* held, uint64_t* used) {
+    uint32_t n = 0;
+    uint64_t sect = 0;
+    uintptr_t f = spin_lock_irq(&g_zlock);
+    for (uint32_t b = 0; b < g_nblk; b++)
+        for (uint32_t i = 0; i < EBLK; i++) {
+            const zent_t* e = &g_blk[b][i];
+            if (e->state == ZS_FREE || !e->slot) continue;
+            if (e->state == ZS_DISK || e->state == ZS_READING) n++;
+            sect += nsect(e->len);
+        }
+    *disk_ents = n;
+    *disk_counted = g_st.disk_pages;
+    *held = sect * 512u;
+    *used = (uint64_t)g_slots_used * 512u;
+    spin_unlock_irq(&g_zlock, f);
+}
+
 void zswap_enable(int on) { g_on = on != 0; }
 int  zswap_enabled(void) { return g_on; }
 

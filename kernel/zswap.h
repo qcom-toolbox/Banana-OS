@@ -97,5 +97,10 @@ typedef struct {
     uint32_t entries;                     /* entries made (each page compressed or on the disk takes one) */
 } zswap_stats_t;
 void zswap_stats(zswap_stats_t* s);
+/* the entries counted one by one: those on the disk (*disk_ents) against the
+ * stats' disk_pages (*disk_counted), the swap area's bytes their slots hold
+ * (*held) against those taken (*used) - equal unless an entry leaked its slot
+ * or the count drifted (selftest) */
+void zswap_audit(uint32_t* disk_ents, uint32_t* disk_counted, uint64_t* held, uint64_t* used);
 
 #endif
