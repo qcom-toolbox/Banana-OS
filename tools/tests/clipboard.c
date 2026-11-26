@@ -31,6 +31,10 @@ int fs_write_path(const char* p,const void* b,uint32_t n){
  CHECK(!strcmp(p,PINNED_FILE));char* c=malloc(n+1);CHECK(c);memcpy(c,b,n);c[n]=0;
  free(file.content);file.content=c;file.size=n;file.cap=n+1;file.used=file.loaded=1;return 0;
 }
+/* (the kernel's stores: written with the system's rights - the same file here) */
+int fs_write_path_sys(const char* p,const void* b,uint32_t n){return fs_write_path(p,b,n);}
+void fs_mkdir_p_sys(const char* p){fs_mkdir_p(p);}
+void fs_delete_sys(const char* p){fs_delete(p,0);}
 static void input(const char* s){file.content=strdup(s);CHECK(file.content);file.size=(uint32_t)strlen(s);file.cap=file.size+1;file.used=file.loaded=1;}
 static void entry(int index,const char* text,int pin){
  char b[CLIPBOARD_MAX+1];uint32_t n=0;int p=-1;

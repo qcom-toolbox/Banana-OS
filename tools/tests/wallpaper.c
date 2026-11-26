@@ -26,6 +26,8 @@ fs_file_t* fs_get_file(int i){if(i<0||i>1||read_fail)return NULL;return &files[i
 void fs_pin(int i){CHECK(i>=0&&i<2);pins[i]++;}
 void fs_unpin(int i){CHECK(i>=0&&i<2&&pins[i]>0);pins[i]--;}
 int fs_write_path(const char* p,const void* b,uint32_t n){(void)p;(void)b;return (int)n;}
+/* the setting is saved with the system's rights (whoever ran `wallpaper`) */
+int fs_write_path_sys(const char* p,const void* b,uint32_t n){return fs_write_path(p,b,n);}
 void fs_file_path(int i,char* p,int cap){(void)i;snprintf(p,(size_t)cap,"/pic.jpg");}
 const fb_info_t* fb_info(void){return &framebuffer;}
 int fb_available(void){return 1;}

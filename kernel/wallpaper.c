@@ -273,7 +273,7 @@ static void save_config(void) {
         uint32_t n = (uint32_t)strlen(buf);
         ksnprintf(buf + n, sizeof(buf) - n, "recent %s\n", g_recent[i]);
     }
-    fs_write_path(WALLPAPER_CONFIG, buf, (uint32_t)strlen(buf));
+    fs_write_path_sys(WALLPAPER_CONFIG, buf, (uint32_t)strlen(buf));   /* (`wallpaper` run by a user: still saved) */
 }
 static void save_config_now(void) { save_config(); }
 

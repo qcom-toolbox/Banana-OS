@@ -194,6 +194,7 @@ const char* elevate_cmd_privileged(int argc, char** argv) {
     if (is(c, "crashtest")) return s && !is(s, "preview") && !is(s, "report") ? "stop the system" : NULL;
     if (is(c, "adduser") || is(c, "useradd") || is(c, "deluser") || is(c, "userdel") || is(c, "usermod")) return "change the users";
     if (is(c, "elevation")) return s && !is(s, "test") ? "change how administrator rights are asked" : NULL;
+    if (is(c, "theme")) return s && is(s, "install") ? "add a theme for everyone" : NULL;   /* (/usr/share/themes; `theme new` writes your home) */
     if (is(c, "homecompat")) return s ? "change how older apps see the home folder" : NULL;
     if (is(c, "passwd")) {                                     /* another user's password, or a switch */
         for (int i = 1; i < argc; i++) if (argv[i][0] != '-') return "change another user's password";

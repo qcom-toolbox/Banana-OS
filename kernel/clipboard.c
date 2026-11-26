@@ -167,7 +167,7 @@ static void save_pinned(void) {
     uintptr_t f = spin_lock_irq(&g_lock);
     for (int i = 0; i < g_nhist; i++) if (g_hist[i].pinned) { total += g_hist[i].len + 12; n++; }
     spin_unlock_irq(&g_lock, f);
-    if (!n) { if (fs_find_file(PINNED_FILE) >= 0) fs_delete(PINNED_FILE, 0); return; }
+    if (!n) { if (fs_find_file(PINNED_FILE) >= 0) fs_delete_sys(PINNED_FILE); return; }
     char* buf = (char*)kmalloc(total + 1);
     if (!buf) return;
     uint32_t off = 0;
@@ -181,8 +181,8 @@ static void save_pinned(void) {
         buf[off++] = '\n';
     }
     spin_unlock_irq(&g_lock, f);
-    fs_mkdir_p("/etc");
-    fs_write_path(PINNED_FILE, buf, off);
+    fs_mkdir_p_sys("/etc");
+    fs_write_path_sys(PINNED_FILE, buf, off);
     kfree(buf);
 }
 

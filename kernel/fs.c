@@ -2634,3 +2634,20 @@ uint32_t fs_unload_idle(uint32_t idle_ms) {
     if (n) touched();                               /* (views of the tree list again) */
     return n;
 }
+
+int fs_write_path_sys(const char* path, const void* data, uint32_t size) {
+    const fs_cred_t* o = fs_cred_swap(NULL);
+    int r = fs_write_path(path, data, size);
+    fs_cred_swap(o);
+    return r;
+}
+void fs_mkdir_p_sys(const char* path) {
+    const fs_cred_t* o = fs_cred_swap(NULL);
+    fs_mkdir_p(path);
+    fs_cred_swap(o);
+}
+void fs_delete_sys(const char* path) {
+    const fs_cred_t* o = fs_cred_swap(NULL);
+    fs_delete(path, 0);
+    fs_cred_swap(o);
+}

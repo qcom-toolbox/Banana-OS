@@ -344,8 +344,8 @@ static void recent_use(int idx) {
         off += l;
         buf[off++] = '\n';
     }
-    fs_mkdir_p("/etc");
-    fs_write_path(RECENT_FILE, buf, off);
+    fs_mkdir_p_sys("/etc");
+    fs_write_path_sys(RECENT_FILE, buf, off);
 }
 
 /* ── what the grid shows: a search's matches, else the tab's emoji ── */

@@ -329,6 +329,11 @@ typedef struct {
 } fs_cred_t;
 const fs_cred_t* fs_cred_swap(const fs_cred_t* c);
 const fs_cred_t* fs_cred_current(void);
+/* the kernel's own stores (/etc/wallpaper...): written with the system's
+ * rights whoever's command changed the setting */
+int  fs_write_path_sys(const char* path, const void* data, uint32_t size);
+void fs_mkdir_p_sys(const char* path);
+void fs_delete_sys(const char* path);
 /* the current credential may read (4) / write (2) / search or run (1) a
  * file (is_dir 0) or folder, every folder above it searchable; 1 or 0
  * (fs_perm_error then) */
