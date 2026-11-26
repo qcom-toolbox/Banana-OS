@@ -148,9 +148,9 @@ static int recv_msg(amsg_t* m, uint32_t timeout_ms) {
 
 /* ══ adb: this computer's key ══════════════════════════════════════ */
 
-#define KEY_DIR  "/home/banana/.android"
-#define KEY_FILE KEY_DIR "/adbkey"
-#define PUB_FILE KEY_DIR "/adbkey.pub"
+#define KEY_DIR  fs_home_join("/.android")
+#define KEY_FILE fs_home_join("/.android/adbkey")
+#define PUB_FILE fs_home_join("/.android/adbkey.pub")
 
 static rsa_key_t g_key;
 static int       g_have_key;

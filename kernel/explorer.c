@@ -25,6 +25,7 @@
  * their app, pictures open in Photos, fonts install, USB sticks eject.
  */
 #include "explorer.h"
+#include "users.h"
 #include "i18n.h"
 #include "theme.h"
 #include "keyboard.h"
@@ -51,7 +52,7 @@
 #include "zip.h"
 #include "shortcut.h"
 
-#define HOME      "/home/banana"
+#define HOME      fs_home_path()
 #define TITLE_H   20
 #define NAVBAR_Y  22                 /* back / forward, address, search */
 #define NAVBAR_H  30
@@ -100,7 +101,7 @@ static win_geom_t g_win = { .x = 24, .y = 24, .w = 760, .h = 500, .min_w = 560, 
 #define g_y g_win.y
 #define WIN_W g_win.w
 #define WIN_H g_win.h
-static char     g_path[FS_PATH_LEN] = HOME;
+static char     g_path[FS_PATH_LEN] = "/home/banana";   /* (the home, until it is opened: go(HOME)) */
 static item_t   g_items[MAX_ITEMS];
 static int      g_count;
 static int      g_scroll;               /* first visible row (Details) / row of cells (Icons) */
@@ -413,7 +414,7 @@ static void go_library(const char* name) {
 
 /* ── public API ───────────────────────────────────────────────────── */
 
-void explorer_open(const char* path) {
+static void explorer_open_inner(const char* path) {
     g_open = 1;
     g_win.dragging = g_win.resizing = 0;
     win_clamp(&g_win);
@@ -884,7 +885,13 @@ enum { M_OPEN = 1, M_EDIT, M_INSTALL, M_PLAY, M_WALLPAPER, M_COPY, M_CUT, M_PAST
        M_SELECT_NONE, M_BROWSER, M_FONT, M_CODE, M_RESTORE, M_EMPTY_TRASH, M_DELETE_FOREVER, M_SELECT_ALL, M_HIDDEN,
        M_EXTRACT, M_EXTRACT_HERE, M_ZIP, M_SHORTCUT };
 
+static void menu_cb_inner(int id, void* arg);
 static void menu_cb(int id, void* arg) {
+    const fs_cred_t* oc = fs_cred_swap((const fs_cred_t*)session_cred());
+    menu_cb_inner(id, arg);
+    fs_cred_swap(oc);
+}
+static void menu_cb_inner(int id, void* arg) {
     (void)arg;
     char path[FS_PATH_LEN];
     if (g_sel >= 0 && g_sel < g_count) child_path(item_name(&g_items[g_sel]), path, sizeof(path));
@@ -1107,16 +1114,16 @@ static int item_at(int mx, int my) {
 typedef struct { const char* label; fileicon_t icon; const char* path; int head; } place_t;
 static const place_t BASE_PLACES[] = {
     { "Favorites", FI_FAVORITES, NULL, 1 },
-    { "Downloads", FI_DOWNLOADS, HOME "/Downloads", 0 },
-    { "banana", FI_HOME, HOME, 0 },
+    { "Downloads", FI_DOWNLOADS, "~/Downloads", 0 },
+    { "~", FI_HOME, "~", 0 },
     { "Libraries", FI_LIBRARY, NULL, 1 },
-    { "Documents", FI_DOCUMENTS, HOME "/Documents", 0 },
-    { "Music", FI_MUSIC, HOME "/Music", 0 },
-    { "Pictures", FI_PICTURES, HOME "/Pictures", 0 },
-    { "Videos", FI_VIDEOS, HOME "/Videos", 0 },
+    { "Documents", FI_DOCUMENTS, "~/Documents", 0 },
+    { "Music", FI_MUSIC, "~/Music", 0 },
+    { "Pictures", FI_PICTURES, "~/Pictures", 0 },
+    { "Videos", FI_VIDEOS, "~/Videos", 0 },
     { "Computer", FI_COMPUTER, "/", 1 },
     { "Local Disk (/)", FI_DISK, "/", 0 },
-    { "Recycle Bin", FI_TRASH, TRASH_FILES, 1 },
+    { "Recycle Bin", FI_TRASH, "~/.Trash/files", 1 },
 };
 #define NBASE (int)(sizeof(BASE_PLACES) / sizeof(BASE_PLACES[0]))
 #define NAV_ROW 22
@@ -1163,10 +1170,22 @@ static void drive_label(int mnt, char* out, int cap, fileicon_t* icon) {
     ksnprintf(out, (size_t)cap, "%s (%s)", label[0] ? label : kind_name(bd ? bd->kind : ""), base);
 }
 
+static char g_place_path[NBASE][FS_PATH_LEN];   /* (the home's places: the logged-in user's) */
+static char g_home_label[40];
+
 static void build_places(void) {
     int n = 0, nd = 0;
     for (int i = 0; i < NBASE; i++) {
         g_places[n++] = BASE_PLACES[i];
+        if (BASE_PLACES[i].path && BASE_PLACES[i].path[0] == '~') {
+            ksnprintf(g_place_path[i], FS_PATH_LEN, "%s%s", fs_home_path(), BASE_PLACES[i].path + 1);
+            g_places[n - 1].path = g_place_path[i];
+        }
+        if (!strcmp(BASE_PLACES[i].label, "~")) {       /* the home: its user's name */
+            const char* h = strrchr(fs_home_path(), '/');
+            kstrlcpy(g_home_label, h && h[1] ? h + 1 : "home", sizeof(g_home_label));
+            g_places[n - 1].label = g_home_label;
+        }
         if (BASE_PLACES[i].icon != FI_DISK) continue;
         /* the drives, after Local Disk */
         for (int m = 1; m <= FS_MAX_MOUNTS && nd < FS_MAX_MOUNTS; m++) {
@@ -1226,7 +1245,7 @@ static void open_place(int i) {
     const place_t* p = &PLACES[i];
     if (!p->path) return;
     if (!strcmp(p->path, TRASH_FILES)) { fs_mkdir_p(TRASH_FILES); fs_mkdir_p(TRASH_INFO); go(TRASH_FILES); return; }
-    if (strncmp(p->path, HOME "/", strlen(HOME) + 1) == 0) go_library(p->path + strlen(HOME) + 1);
+    if (strncmp(p->path, HOME, strlen(HOME)) == 0 && p->path[strlen(HOME)] == '/') go_library(p->path + strlen(HOME) + 1);
     else go(p->path);
 }
 
@@ -1338,7 +1357,7 @@ static void text_edit(char* buf, int cap, char c) {
     else if ((unsigned char)c >= 32 && (int)n < cap - 1) { buf[n] = c; buf[n + 1] = 0; }
 }
 
-void explorer_key(char c) {
+static void explorer_key_inner(char c) {
     static int esc;
     g_gen++;
     if (g_renaming >= 0) {
@@ -1416,7 +1435,7 @@ void explorer_key(char c) {
     }
 }
 
-void explorer_fkey(int k) {
+static void explorer_fkey_inner(int k) {
     if (k == KEYF_F1 + 1) explorer_start_rename();                       /* F2 */
     else if (k == KEYF_F1 + 2) g_search_focus = 1;                      /* F3 */
     else if (k == KEYF_F1 + 3) { g_addr_edit = 1; kstrlcpy(g_addr, g_path, sizeof(g_addr)); }   /* F4 */
@@ -1462,7 +1481,7 @@ void explorer_rclick(int mx, int my) {
     item_menu(mx, my, row);
 }
 
-void explorer_click(int mx, int my) {
+static void explorer_click_inner(int mx, int my) {
     if (!explorer_contains(mx, my)) return;
     int lx = mx - g_x, ly = my - g_y;
     g_gen++;
@@ -1594,7 +1613,7 @@ static int item_rect(int i, int* x, int* y, int* w, int* h) {
     return 1;
 }
 
-void explorer_mouse(int mx, int my, int left) {
+static void explorer_mouse_inner(int mx, int my, int left) {
     if (win_mouse(&g_win, mx, my, left)) { g_gen++; clamp_scroll(); return; }
     if (!g_open) return;
     if (g_band) {
@@ -2048,7 +2067,7 @@ void explorer_drag_over(int mx, int my) {
     if (r != g_drop_row || p != g_drop_place) { g_drop_row = r; g_drop_place = p; g_gen++; }
 }
 
-int explorer_drop(const char (*paths)[FS_PATH_LEN], int n, int mx, int my, int copy) {
+static int explorer_drop_inner(const char (*paths)[FS_PATH_LEN], int n, int mx, int my, int copy) {
     g_drop_row = g_drop_place = -1;
     g_gen++;
     char dst[FS_PATH_LEN];
@@ -2070,7 +2089,7 @@ int explorer_drop(const char (*paths)[FS_PATH_LEN], int n, int mx, int my, int c
 }
 
 /* opens a path as a double click in Files would (the desktop's files) */
-void explorer_launch(const char* path) {
+static void explorer_launch_inner(const char* path) {
     if (fs_find_dir(path) >= 0) { explorer_open(path); gui_raise_files(); return; }
     char dir[FS_PATH_LEN];
     fileops_parent(path, dir, sizeof(dir));
@@ -2091,3 +2110,48 @@ void explorer_refresh(void) { if (g_open) { scan(); g_gen++; } }
 
 /* the window manager (kernel/gui.c) moves, snaps and maximizes it through its geometry */
 win_geom_t* explorer_geom(void) { return &g_win; }
+
+/* What a user does in this window has that user's rights (kernel/fs.c):
+ * the logged-in one's - a system file is not theirs to change */
+void explorer_open(const char* path) {
+    const fs_cred_t* oc = fs_cred_swap((const fs_cred_t*)session_cred());
+    explorer_open_inner(path);
+    fs_cred_swap(oc);
+}
+
+void explorer_key(char c) {
+    const fs_cred_t* oc = fs_cred_swap((const fs_cred_t*)session_cred());
+    explorer_key_inner(c);
+    fs_cred_swap(oc);
+}
+
+void explorer_fkey(int k) {
+    const fs_cred_t* oc = fs_cred_swap((const fs_cred_t*)session_cred());
+    explorer_fkey_inner(k);
+    fs_cred_swap(oc);
+}
+
+void explorer_click(int mx, int my) {
+    const fs_cred_t* oc = fs_cred_swap((const fs_cred_t*)session_cred());
+    explorer_click_inner(mx, my);
+    fs_cred_swap(oc);
+}
+
+void explorer_mouse(int mx, int my, int left) {
+    const fs_cred_t* oc = fs_cred_swap((const fs_cred_t*)session_cred());
+    explorer_mouse_inner(mx, my, left);
+    fs_cred_swap(oc);
+}
+
+int explorer_drop(const char (*paths)[FS_PATH_LEN], int n, int mx, int my, int copy) {
+    const fs_cred_t* oc = fs_cred_swap((const fs_cred_t*)session_cred());
+    int r = explorer_drop_inner(paths, n, mx, my, copy);
+    fs_cred_swap(oc);
+    return r;
+}
+
+void explorer_launch(const char* path) {
+    const fs_cred_t* oc = fs_cred_swap((const fs_cred_t*)session_cred());
+    explorer_launch_inner(path);
+    fs_cred_swap(oc);
+}

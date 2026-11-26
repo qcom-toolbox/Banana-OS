@@ -18,6 +18,7 @@ uint32_t kheap_largest_free(void){return pressure?0:16u*1024*1024;}
 uint32_t timer_ms(void){return now;}
 uint32_t rtc_now(void){return 1700000000;}
 int* task_cwd_slot(void){static int slot;return &slot;}
+const void** task_cred_slot(void){static const void* slot;return &slot;}
 void task_sleep_ms(uint32_t n){now+=n;}
 const char* hostname_get(void){return "test";}
 void klog(const char* fmt,...){(void)fmt;}

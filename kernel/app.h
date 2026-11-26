@@ -99,4 +99,12 @@ int  app_console_focused(void);
  * kernel's memory: 0 with *raw (its allocation) and *entry, or -1 with err */
 int  app_load_image(const uint8_t* f, uint32_t size, uint8_t** raw, uintptr_t* entry, char* err, int ecap);
 
+/* the terminal session of the system command running now (elevate.h's key) */
+uint32_t app_kcmd_session(void);
+/* every process of that user is ended (Switch user); how many */
+int app_end_user(uint32_t uid);
+struct pty;
+/* app_spawn_tty, as user uid (an SSH login) */
+int app_spawn_tty_as(uint32_t uid, const char* path, int argc, char** argv, char** envp, struct pty* t, char* err, int ecap);
+
 #endif

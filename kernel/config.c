@@ -41,7 +41,19 @@ int cfg_get(const char* path, const char* key, char* out, int cap) {
     return 1;
 }
 
+static int cfg_set_inner(const char* path, const char* key, const char* value, const char* header);
+
+/* The system's settings files are the system's: written with the kernel's
+ * rights whoever's command or window changed a setting (what may be
+ * changed by whom is decided before: shell/shell.c, elevate.h) */
 int cfg_set(const char* path, const char* key, const char* value, const char* header) {
+    const fs_cred_t* old = fs_cred_swap(NULL);
+    int r = cfg_set_inner(path, key, value, header);
+    fs_cred_swap(old);
+    return r;
+}
+
+static int cfg_set_inner(const char* path, const char* key, const char* value, const char* header) {
     const char* old = "";
     int idx = fs_find_file(path);
     if (idx >= 0) {

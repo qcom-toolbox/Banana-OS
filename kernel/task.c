@@ -93,6 +93,7 @@ typedef struct task {
     uintptr_t    rsp0;                    /* ... and the kernel stack ring 3 enters on (0: none) */
     uintptr_t    fs_base;                 /* ... and its thread pointer (TLS, 64-bit): task_set_fs */
     int          cwd;                     /* its current folder (kernel/fs.c's index): inherited from its creator */
+    const void*  fs_cred;                 /* whose rights its file operations have now (kernel/fs.c; NULL: the kernel's) */
 } task_t;
 
 static task_t           g_tasks[TASK_MAX];
@@ -557,6 +558,7 @@ int task_create_stack(const char* name, void (*entry)(void), uint32_t stack_byte
     t->crash[0] = 0;
     /* a nice value the user chose is inherited (an app's threads) */
     t->cwd = g_current ? g_current->cwd : 0;          /* (a new task starts where its creator is) */
+    t->fs_cred = NULL;                                /* (the kernel's rights: an app's call sets its own) */
     t->nice_set = g_current && g_current != &g_idle && g_current->nice_set;
     set_nice(t, t->nice_set ? g_current->nice : 0);
     t->switched_in = 0;
@@ -1091,6 +1093,13 @@ void task_recover_fault(uint32_t vector, uint32_t err, uintptr_t ip, uintptr_t a
  * shell's cd does not move the others; before the scheduler runs, one for all */
 int* task_cwd_slot(void) {
     return g_current ? &g_current->cwd : &g_boot_cwd;
+}
+
+/* the calling task's file rights (kernel/fs.c, fs_cred_t*): set by an app's
+ * file system calls for their duration, NULL - the kernel's - otherwise */
+const void** task_cred_slot(void) {
+    static const void* boot;
+    return g_current ? &g_current->fs_cred : &boot;
 }
 
 uintptr_t task_get_fs(void) { return g_current ? g_current->fs_base : 0; }

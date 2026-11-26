@@ -200,7 +200,7 @@ static void cmd_rdpd(int argc, char** argv) {
 /* ── passwd ───────────────────────────────────────────────────────── */
 
 /* reads a line without echoing it; -1 if cancelled with Ctrl+C */
-static int read_secret(const char* prompt, char* buf, int cap) {
+int shell_read_secret(const char* prompt, char* buf, int cap) {
     terminal_write(prompt);
     terminal_flush();
     int my_vt = terminal_vt_get_active();
@@ -221,35 +221,6 @@ static int read_secret(const char* prompt, char* buf, int cap) {
     buf[n] = '\0';
     terminal_putchar('\n');
     return n;
-}
-
-static void cmd_passwd(int argc, char** argv) {
-    if (argc >= 2 && strcmp(argv[1], "-d") == 0) {
-        passwd_clear(PASSWD_USER);
-        terminal_writeln("passwd: password removed - SSH logins are refused until a new one is set");
-        return;
-    }
-    if (argc >= 2) { terminal_writeln("usage: passwd [-d]    (sets the password of " PASSWD_USER ", used by SSH)"); return; }
-    char a[128], b[128];
-    say("Changing password for %s.\n", PASSWD_USER);
-    if (read_secret("New password: ", a, sizeof(a)) < 0) return;
-    if ((int)strlen(a) < PASSWD_MIN) {
-        say("passwd: too short - at least %d characters\n", PASSWD_MIN);
-        memset(a, 0, sizeof(a));
-        return;
-    }
-    if (read_secret("Retype new password: ", b, sizeof(b)) < 0) { memset(a, 0, sizeof(a)); return; }
-    int same = strcmp(a, b) == 0;
-    memset(b, 0, sizeof(b));
-    if (!same) { memset(a, 0, sizeof(a)); fail("passwd", "passwords do not match"); return; }
-    terminal_writeln("passwd: hashing...");
-    terminal_flush();
-    int r = passwd_set(PASSWD_USER, a);
-    memset(a, 0, sizeof(a));
-    if (r != 0) { fail("passwd", "could not write " PASSWD_FILE); return; }
-    terminal_writeln("passwd: password updated");
-    if (!fsdisk_is_installed())
-        terminal_writeln("        (kept after reboot once Banana OS is installed: `install`)");
 }
 
 /* ── rdp (the client) ─────────────────────────────────────────────── */
@@ -280,7 +251,7 @@ static void cmd_rdp(int argc, char** argv) {
     if (!p.user[0]) kstrlcpy(p.user, PASSWD_USER, sizeof(p.user));
 
     char pw[128];
-    int n = read_secret("Password (empty for none): ", pw, sizeof(pw));
+    int n = shell_read_secret("Password (empty for none): ", pw, sizeof(pw));
     if (n < 0) return;
     kstrlcpy(p.password, pw, sizeof(p.password));
     memset(pw, 0, sizeof(pw));
@@ -304,7 +275,6 @@ int srvcmd_dispatch(const char* line) {
     if (strcmp(argv[0], "sshd") == 0)   { cmd_sshd(argc, argv); return 1; }
     if (strcmp(argv[0], "rdpd") == 0)   { cmd_rdpd(argc, argv); return 1; }
     if (strcmp(argv[0], "rdp") == 0)    { cmd_rdp(argc, argv); return 1; }
-    if (strcmp(argv[0], "passwd") == 0) { cmd_passwd(argc, argv); return 1; }
     if (strcmp(argv[0], "notepad") == 0) {
         /* the desktop's text editor, optionally with a file (relative: to the current folder) */
         char path[FS_PATH_LEN];
@@ -357,7 +327,7 @@ int srvcmd_dispatch(const char* line) {
             ksnprintf(path, sizeof(path), "%s%s%s", cwd, strcmp(cwd, "/") ? "/" : "", p);
             p = path;
         } else if (p && p[0] == '~') {
-            ksnprintf(path, sizeof(path), "/home/banana%s", p + 1);
+            ksnprintf(path, sizeof(path), "%s%s", fs_home_path(), p + 1);
             p = path;
         }
         if (p && fs_find_dir(p) < 0) { fail("files", "no such folder"); return 1; }

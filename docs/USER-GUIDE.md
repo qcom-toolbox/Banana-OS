@@ -162,6 +162,20 @@ Bash-flavored extras (available in both personas, since they share one engine):
 - `!!` - re-runs (and re-records) the previous command
 - `type <cmd>` - like `which`, but alias-aware
 
+
+## Users and administrator rights
+
+Banana OS has users the Unix way: `/etc/passwd`, `/etc/group`, `/etc/shadow` (root's only) and `/etc/doas.conf`. **banana** is the first user and an **administrator** - a member of the `wheel` group, whom `doas.conf` lets act as root (`permit persist :wheel`). **root** has no login and no password (it is locked); its rights come through `doas`.
+
+- **More users**: Settings > Users, or `adduser [--admin] <name>`. Each gets a group of its own, `/home/<name>` (theirs only, 0700) and the `users` group. `deluser`, `usermod --admin / --no-admin` (or `-aG wheel`), `lsusers`; `passwd` sets your own password (the current one is asked), `passwd <user>` someone else's (an administrator's). The last administrator always stays one.
+- **Files have owners**: a user writes their home, `/tmp` (sticky: only what is theirs goes), USB sticks; the system's folders (`/bin`, `/etc`, `/apps`, `/usr`) are root's. `id`, `groups` and `whoami` say who you are.
+- **In a terminal**: `doas <command>` runs it as root - your password is asked, then remembered for a while in that terminal (`doas -L` forgets it); `doas -s` a root shell; `su <user>` becomes another user (their password). The system's commands that change the system - `pkg install`, `apt upgrade`, `update`, `ifconfig eth0 ...`, `hostname <name>`, `adduser`... - ask the same way by themselves. A standard user is told to ask an administrator.
+- **On the desktop**: when an app (the App Store) or Settings needs an administrator, a small window comes up in the bottom-right corner, over the others - not over the whole screen, nothing else is stopped. An administrator answers **Yes / No** (Settings > Users > Administrator prompt: *ask for the password* instead); a standard user picks an administrator and types that one's password. On a Settings page that changes the system (Network, Date & time, Startup, Apps, System update, Users) the first change asks, then the page stays unlocked while it is open.
+- **How long it is remembered**: Settings > Users > *Remember it for* - every time, 1, 5 (the default), 15 or 60 minutes.
+- **No password set**: an administrator with no password is never asked - so a computer used as before users (the live CD, an install that never set one) works as it always did. Installing Banana OS from the live CD needs no permission; `update` on an installed system does.
+- **Logging in**: with several users, or a password, the login screen shows the users to pick (a click, Tab or the arrows); Start > Shut down > *Switch user* ends your apps and shows it again. SSH logs in any user that has a password.
+- **What it does not cover yet**: on the 32-bit kernel apps run in ring 0, so the rights are advisory there; Files refuses a system file with a message (it does not offer the administrator prompt yet).
+
 ## Installing to a Hard Disk (`install` / `sync`)
 
 By default Banana OS boots from the CD/ISO every time and its filesystem is in-memory only, reset on every reboot. `install` does a real install onto a **second, dedicated IDE or SATA hard disk** attached to the VM (never the boot CD - optical drives are detected and skipped; `disks` shows what was found):

@@ -46,12 +46,16 @@ static uint32_t    g_last_ms;
 static int         g_last_row = -1;
 
 static const struct { const char* name; const char* path; fileicon_t icon; } PLACES[] = {
-    { "Home",      "/home/banana",           FI_HOME },
-    { "Pictures",  "/home/banana/Pictures",  FI_PICTURES },
-    { "Downloads", "/home/banana/Downloads", FI_DOWNLOADS },
+    { "Home",      "~",           FI_HOME },
+    { "Pictures",  "~/Pictures",  FI_PICTURES },
+    { "Downloads", "~/Downloads", FI_DOWNLOADS },
     { "USB",       "/mnt",                   FI_USB },
     { "Computer",  "/",                      FI_COMPUTER },
 };
+
+/* a place's folder: the logged-in user's home for "~" */
+static const char* place_path(int i) { return PLACES[i].path[0] == '~' ? fs_home_join(PLACES[i].path + 1) : PLACES[i].path; }
+
 #define NPLACES ((int)(sizeof(PLACES) / sizeof(PLACES[0])))
 
 static int inside(int mx, int my, int x, int y, int w, int h) { return mx >= x && mx < x + w && my >= y && my < y + h; }
@@ -156,7 +160,7 @@ void fc_open(const char* title, const char* start_dir, fc_filter_t filter, fc_do
     g_save = 0;
     g_confirm = 0;
     g_on = 1;
-    load(start_dir && *start_dir ? start_dir : "/home/banana");
+    load(start_dir && *start_dir ? start_dir : fs_home_path());
 }
 
 void fc_save(const char* title, const char* start_dir, const char* name, fc_done_t done) {
@@ -169,7 +173,7 @@ void fc_save(const char* title, const char* start_dir, const char* name, fc_done
     size_t l = strlen(g_fname);
     g_type = l == 0 || (l >= 4 && !strcasecmp(g_fname + l - 4, ".txt")) ? 0 : 1;   /* (another kind of file: all files) */
     g_on = 1;
-    load(start_dir && *start_dir ? start_dir : "/home/banana");
+    load(start_dir && *start_dir ? start_dir : fs_home_path());
 }
 
 /* a new folder here, chosen in the list ("New folder (2)"... if taken) */
@@ -228,7 +232,7 @@ void fc_draw(int x, int y, int w, int h) {
     for (int i = 0; i < NPLACES; i++) {
         int py = ly + 4 + i * 24;
         if (py + 22 > ly + lh) break;
-        int on = !strcmp(g_dir, PLACES[i].path);
+        int on = !strcmp(g_dir, place_path(i));
         uint32_t bg = on ? C_SEL : C_SIDE;
         gfx_fill_rect(x + 2, py, SIDE_W - 4, 22, bg);
         fileicon_draw(PLACES[i].icon, x + 6, py + 3, 16);
@@ -330,7 +334,7 @@ int fc_click(int mx, int my) {
     if (inside(mx, my, g_x + 44, g_y + 20, NEWDIR_W, 20)) { new_folder(); return 1; }
     int ly = list_y(), lh = list_h();
     for (int i = 0; i < NPLACES; i++)
-        if (ly + 4 + i * 24 + 22 <= ly + lh && inside(mx, my, g_x, ly + 4 + i * 24, SIDE_W, 22)) { load(PLACES[i].path); return 1; }
+        if (ly + 4 + i * 24 + 22 <= ly + lh && inside(mx, my, g_x, ly + 4 + i * 24, SIDE_W, 22)) { load(place_path(i)); return 1; }
     int lx = g_x + SIDE_W + 4, lw = g_w - SIDE_W - 4;
     if (inside(mx, my, lx, ly, lw, lh)) {
         int row = g_top + (my - ly) / ROW_H;
@@ -390,7 +394,7 @@ int fc_nav(int code) {
     case KB_TAB: case KB_BACKTAB: {                 /* the places, in turn */
         static int place;
         place = (place + (code == KB_TAB ? 1 : NPLACES - 1)) % NPLACES;
-        load(PLACES[place].path);
+        load(place_path(place));
         return 1;
     }
     default: return 0;

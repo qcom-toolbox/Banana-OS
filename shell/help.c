@@ -28,6 +28,7 @@ static const topic_t TOPICS[] = {
     { "text",     "Reading and editing text" },
     { "disks",    "Disks and filesystems" },
     { "system",   "System, processes and power" },
+    { "users",    "Users and administrator rights" },
     { "network",  "Network" },
     { "servers",  "Servers and remote access" },
     { "apps",     "Apps and packages" },
@@ -346,9 +347,47 @@ static const page_t PAGES[] = {
       NULL, "shutdown now", "reboot" },
     { "reboot", "system", "reboot", "restart now (files saved first)", NULL, NULL, NULL, "shutdown" },
     { "halt", "system", "halt", "stop the processor (no power-off)", NULL, NULL, NULL, "shutdown" },
-    { "passwd", "system", "passwd [-d]", "set the password",
-      "Sets the password of banana, asked at boot (unless autologin is on), on the lock screen and for "
-      "SSH and Remote Desktop. -d removes it.", "-d|remove the password", NULL, "autologin, sshd" },
+    { "passwd", "users", "passwd [-d] [user]", "set a password",
+      "Sets your password - asked at the login (unless autologin is on), on the lock screen, by doas and the "
+      "administrator prompt, and for SSH and Remote Desktop. Your current one is asked first. Another user's "
+      "(passwd alice) is an administrator's. -d removes it: an account with no password logs in and acts as "
+      "an administrator without being asked. root has none - it is locked; doas is the way to its rights.",
+      "-d|remove the password", "passwd\npasswd alice", "doas, adduser, autologin, sshd" },
+    { "doas", "users", "doas [-n] [-s] [-u user] <command> [args...] | doas -L", "run a command as root (or another user)",
+      "Runs the command with root's rights - for an administrator (the wheel group: /etc/doas.conf says who may). "
+      "Your password is asked, then remembered for a while in that terminal (Settings > Users > Administrator "
+      "prompt: how long, or every time); with no password set it is never asked. The system's own commands "
+      "that change the system (pkg install, apt upgrade, update, ifconfig..., adduser) ask the same way by "
+      "themselves. -u: as that user (doas.conf: permit ... as <user>). -s: a shell. -n: fail instead of "
+      "asking. -L: forget the password given here.",
+      "-u USER|as that user|-s|a shell|-n|never ask|-L|forget the remembered password",
+      "doas nano /etc/hosts\ndoas -s\ndoas -L", "su, passwd, adduser" },
+    { "su", "users", "su [-] [-c command] [user]", "become another user",
+      "Runs a shell (or the command) as that user (root when none is given), with that user's password. root "
+      "has no password: use doas (doas su - works). - makes it a login: that user's home and environment.",
+      "-|-l|a login shell|-c CMD|run that command", "su alice\ndoas su -", "doas" },
+    { "adduser", "users", "adduser [--admin] [--name \"Full Name\"] [--no-password] <user>", "add a user",
+      "Makes an account: its group, /home/<user> (theirs only), and asks for its password (empty: none). "
+      "--admin: an administrator too (the wheel group). Settings > Users does the same. An administrator's.",
+      "--admin|also an administrator|--name|the full name|--no-password|do not ask", "adduser alice", "deluser, usermod, lsusers" },
+    { "useradd", "users", "useradd ...", "the same as adduser", NULL, NULL, NULL, "adduser" },
+    { "deluser", "users", "deluser [--remove-home] <user>", "remove a user",
+      "Removes the account (never the last administrator, nor yourself). Its home folder stays unless "
+      "--remove-home. An administrator's.", "--remove-home|its files too", NULL, "adduser" },
+    { "userdel", "users", "userdel ...", "the same as deluser", NULL, NULL, NULL, "deluser" },
+    { "usermod", "users", "usermod --admin|--no-admin|-aG wheel|-rG wheel <user>", "make a user an administrator, or not",
+      "Puts the user in the wheel group (an administrator: doas, the administrator prompt, the system's "
+      "settings) or takes them out. The last administrator stays one. An administrator's.", NULL,
+      "usermod -aG wheel alice", "adduser, lsusers" },
+    { "elevation", "users", "elevation [password on|off] [remember <minutes>] | elevation test", "how administrator rights are asked",
+      "Shows or sets what Settings > Users > Administrator prompt sets: whether the desktop's prompt asks an "
+      "administrator for the password (on) or only Yes / No (off, the default), and how many minutes a given "
+      "password is remembered (0: asked every time, 60 at most; 5 by default) - on the desktop and in terminals. "
+      "Setting them is an administrator's. elevation test shows the desktop's prompt.", NULL,
+      "elevation password on\nelevation remember 0", "doas" },
+    { "lsusers", "users", "lsusers", "the users",
+      "Every person's account: its id, administrator or standard, whether it has a password, its home, who is "
+      "logged in. id and groups (GNU coreutils) show your own.", NULL, NULL, "adduser, passwd" },
     { "autologin", "system", "autologin [on|off]", "log in at boot without the password", NULL, NULL, NULL, "passwd" },
     { "proc_info", "system", "proc_info [-c -t -n -v -f -m -s -ht]", "the processor", NULL, NULL, NULL, "lscpu" },
     { "ram_info", "system", "ram_info [-t -u -h -f -p -m]", "memory details (-h: the kernel heap)", NULL, NULL, NULL, "free" },

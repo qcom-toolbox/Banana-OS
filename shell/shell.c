@@ -31,6 +31,7 @@
 #include "../kernel/clipboard.h"
 #include "netcmds.h"
 #include "srvcmds.h"
+#include "usercmds.h"
 #include "syscmds.h"
 #include "moncmds.h"
 #include "fscmds.h"
@@ -58,6 +59,8 @@
 #include "../kernel/pty.h"
 #include "../kernel/kheap.h"
 #include "../kernel/meminfo.h"
+#include "../kernel/users.h"
+#include "../kernel/elevate.h"
 
 extern char _kernel_end[];   /* boot/linker.ld */
 
@@ -243,7 +246,7 @@ static int env_unset(const char* name) {
  * persona, rather than going stale like a snapshot taken at export time
  * would; anything else falls back to the user-defined table above. */
 static void resolve_var(const char* name, int persona, char* out, int outlen) {
-    if (k_strcmp(name, "HOME") == 0)  { k_strcpy_n(out, "/home/banana", outlen); return; }
+    if (k_strcmp(name, "HOME") == 0)  { k_strcpy_n(out, fs_home_path(), outlen); return; }
     if (k_strcmp(name, "USER") == 0)  { k_strcpy_n(out, "banana", outlen); return; }
     if (k_strcmp(name, "SHELL") == 0) {
         k_strcpy_n(out, (persona == SHELL_KIND_BASH) ? "/bin/bash" : "/bin/sh", outlen);
@@ -1649,7 +1652,7 @@ static void cmd_prof(const char* args) {
     ksnprintf(head, sizeof(head), "Banana OS build %s (commit %s)", banana_build(), banana_commit());
     prof_line(&s, head);
     if (prof_run(sec, prof_line, &s) == 0 && s.buf) {
-        const char* path = "/home/banana/prof.txt";
+        const char* path = fs_home_join("/prof.txt");
         int fi = fs_find_file(path);
         if (fi < 0) fi = fs_create(path);
         if (fi >= 0 && fs_write(fi, s.buf, s.n) == 0 && !quiet) terminal_writeln("prof: saved in /home/banana/prof.txt");
@@ -1665,7 +1668,8 @@ static void cmd_build(void) {
     terminal_writeln(b);
 }
 
-static void cmd_whoami(void) { terminal_writeln("banana"); }
+uint32_t shell_caller_uid(void);
+static void cmd_whoami(void) { char n[USER_NAME_MAX]; user_name_of(shell_caller_uid(), n, sizeof(n)); terminal_writeln(n); }
 static int cmd_hostname(const char* args) {
     args = k_skip_spaces(args);
     if (!*args || !strcmp(args, "-s")) { terminal_writeln(hostname_get()); return 0; }
@@ -2719,8 +2723,45 @@ int shell_exec_line(const char* line) {
     return g_not_found ? 127 : g_command_status;
 }
 
+/* A command that changes the system, run by a user (an app's kcmd, bash):
+ * an administrator's - root, or allowed without being asked now (no
+ * password, or given a moment ago: elevate.h) - runs with the kernel's
+ * rights; anyone else is told to ask doas. The kernel's own shell (no
+ * credential) runs everything, as before users. */
+static void dispatch_checked(const char* line, int persona);
+static uint32_t g_caller = UID_FIRST;
+uint32_t shell_caller_uid(void) { return g_caller; }
 static void dispatch_plain(const char* line, int persona) {
     if (!*line) return;
+    const fs_cred_t* c = fs_cred_current();
+    /* (who typed it: an app's user - or, in the kernel's own shell, the logged-in one) */
+    g_caller = c ? c->uid : session_uid();
+    if (!c || c->uid == 0) {
+        const fs_cred_t* old = c ? fs_cred_swap(NULL) : NULL;   /* (root: the kernel's rights, as the kernel shell has) */
+        dispatch_checked(line, persona);
+        if (c) fs_cred_swap(old);
+        return;
+    }
+    char buf[256];
+    kstrlcpy(buf, line, sizeof(buf));
+    char* argv[12];
+    int argc = shell_split_args(buf, argv, 12);
+    const char* what = elevate_cmd_privileged(argc, argv);
+    if (!what) { dispatch_checked(line, persona); return; }
+    if (!elevate_silent(c->uid, UID_ROOT, app_kcmd_session(), argv[0])) {
+        terminal_write_color(argc ? argv[0] : "", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_write_color(": an administrator's rights are needed to ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_write_color(what, VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_writeln(user_is_admin(c->uid) ? " - try: doas <the command>" : " - ask an administrator (doas)");
+        g_command_status = 126;
+        return;
+    }
+    const fs_cred_t* old = fs_cred_swap(NULL);
+    dispatch_checked(line, persona);
+    fs_cred_swap(old);
+}
+
+static void dispatch_checked(const char* line, int persona) {
 
     /* install / update / installer: not there on an installed system */
     {
@@ -2977,6 +3018,7 @@ static void dispatch_plain(const char* line, int persona) {
     if (fscmd_dispatch(line)) return;
     if (k_strcmp(line, "vmtools") == 0 || k_strncmp(line, "vmtools ", 8) == 0) { vmtools_command(line + 7); return; }
     if (srvcmd_dispatch(line)) return;
+    if (usercmd_dispatch(line)) return;
     if (netcmd_dispatch(line)) return;
 
     /* a program, a script or an installed app found through $PATH */
@@ -3152,6 +3194,13 @@ void shell_run(void) {
     int loaded = live ? 0 : fsdisk_try_load();
     if (loaded <= 0) fs_init();
     examples_seed();              /* the SDK's example and test apps in /usr/share/extras */
+    users_boot();                 /* /etc/passwd, group, shadow, doas.conf: there and up to date (kernel/users.c) */
+    {   /* the first person logged in until the login says otherwise: banana */
+        const user_t* first = user_by_name(PASSWD_USER);
+        const user_t* p[1];
+        if (!first && users_people(p, 1) == 1) first = p[0];
+        session_set(first ? first->uid : UID_FIRST);
+    }
     if (loaded < 0)
         terminal_write_color(
             "The installed disk's files could not be read (damaged). Starting with a fresh\n"
@@ -3258,7 +3307,9 @@ static int remote_bash(int tty) {
     if (cmd[0]) { argv[0] = "bash"; argv[1] = "-c"; argv[2] = (char*)cmd; argc = 3; }
     char err[64];
     uint8_t* b = (uint8_t*)kmalloc(4096);
-    int pid = b ? app_spawn_tty("/bin/bash", argc, argv, vcons_env(), t, err, sizeof(err)) : -1;
+    const user_t* who = user_by_name(tty_user(tty));        /* (who logged in over SSH) */
+    int pid = !b ? -1 : who ? app_spawn_tty_as(who->uid, "/bin/bash", argc, argv, vcons_env_for(who), t, err, sizeof(err))
+                            : app_spawn_tty("/bin/bash", argc, argv, vcons_env(), t, err, sizeof(err));
     if (pid < 0) { kfree(b); app_pty_close(t); return 0; }
     for (;;) {
         int busy = 0;

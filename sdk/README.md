@@ -467,6 +467,18 @@ send them) - or 0 if none came since. `BANANA_CAM_NAME`, `BANANA_CAM_CLOSE`.
 Both stop by themselves when the app ends. Check `BANANA_HAS(__banana,
 camera)` first; `apps/camera` uses both (and stb_image for JPEG pictures).
 
+### Users (API version 35)
+
+Processes have real Unix ids now: `getuid`, `geteuid`, `getgid`, `getgroups`,
+`setuid`, `setresuid`, `initgroups` (Unix's rules: root may change to any id,
+others only between those they have); `getpwnam` / `getpwuid` / `getgrnam`
+read `/etc/passwd` and `/etc/group`. Files are checked against them (owner,
+group, others). `__banana->auth(op, user, secret, cmd)` is what `doas` and `su`
+are made of (`BANANA_AUTH_DOAS_CHECK`, `_DOAS`, `_SU`, `_CHECK`, `_PASSWD`,
+`_FORGET`, `_KCMD`); `pkg_install` and the `repo_*` calls that change what is
+installed ask the user's permission on the desktop (an administrator's) and
+fail with -13 when refused. On an older system everything runs as banana (1000).
+
 ### Drag and drop (API version 13)
 
 Files dragged from Files or the desktop and let go over an app's window

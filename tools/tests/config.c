@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../kernel/config.c"
+/* (users: the settings files are written with the kernel's rights) */
+const fs_cred_t* fs_cred_swap(const fs_cred_t* c) { (void)c; return NULL; }
+
 static fs_file_t file;
 static int exists,evict,io_error,fail_alloc,fail_write,writes,flushes,installed=1;
 static unsigned checks,live;

@@ -19,6 +19,7 @@
 #include "i18n.h"
 #include "theme.h"
 #include "startmenu.h"
+#include "users.h"
 #include "gfx.h"
 #include "kstring.h"
 #include "fs.h"
@@ -29,7 +30,7 @@
 #include "utf8.h"
 #include "fileicons.h"
 
-#define HOME     "/home/banana"
+#define HOME     fs_home_path()
 #define LW       256                /* the white programs pane */
 #define RW_MIN   160                /* the places column: wider for longer (translated) names */
 #define RW       places_w()
@@ -242,11 +243,11 @@ static int last_visible(const fb_info_t* fi) {
 /* the places on the right */
 typedef struct { const char* label; const char* path; int sm; fileicon_t icon; } place_t;
 static const place_t PLACES[] = {
-    { "banana", HOME, 0, FI_HOME },
-    { "Documents", HOME "/Documents", 0, FI_DOCUMENTS },
-    { "Pictures", HOME "/Pictures", 0, FI_PICTURES },
-    { "Music", HOME "/Music", 0, FI_MUSIC },
-    { "Downloads", HOME "/Downloads", 0, FI_DOWNLOADS },
+    { "~", "~", 0, FI_HOME },
+    { "Documents", "~/Documents", 0, FI_DOCUMENTS },
+    { "Pictures", "~/Pictures", 0, FI_PICTURES },
+    { "Music", "~/Music", 0, FI_MUSIC },
+    { "Downloads", "~/Downloads", 0, FI_DOWNLOADS },
     { NULL, NULL, 0, 0 },
     { "Computer", "/", 0, FI_COMPUTER },
     { NULL, NULL, 0, 0 },
@@ -256,12 +257,13 @@ static const place_t PLACES[] = {
     { "Install Banana OS", NULL, SM_INSTALL, 0 },
 };
 #define NPLACES (int)(sizeof(PLACES) / sizeof(PLACES[0]))
+static const char* place_label(int i);
 
 static int places_w(void) {
     int w = RW_MIN;
     for (int i = 0; i < NPLACES; i++) {
         if (!PLACES[i].label) continue;
-        const char* t = _(PLACES[i].label);
+        const char* t = place_label(i);
         int tw = u8_width(t, (int)strlen(t)) * 8 + 24;
         if (tw > w) w = tw;
     }
@@ -495,7 +497,7 @@ static void draw_right(const fb_info_t* fi) {
         /* (the glass behind is a gradient: text on it without a box) */
         if (hl) { frame(x + 2, ry, RW - 4, R_ROW - 2, C_RHL, C_RHL_B); bg = C_RHL; }
         int ty = ry + 8;
-        if (hl) gfx_draw_text(x + 12, ty, _(PLACES[i].label), C_WHITE, bg);
+        if (hl) gfx_draw_text(x + 12, ty, place_label(i), C_WHITE, bg);
         else {
             /* transparent text: draw it on the gradient's colour at that height */
             int t = (ry - y) * 255 / (menu_h(fi) > 1 ? menu_h(fi) : 1);
@@ -504,8 +506,8 @@ static void draw_right(const fb_info_t* fi) {
                 int a = (int)((C_GLASS1 >> s) & 255), b = (int)((C_GLASS2 >> s) & 255);
                 c |= (uint32_t)(a + (b - a) * t / 255) << s;
             }
-            gfx_fill_rect(x + 10, ty - 2, (int)strlen(_(PLACES[i].label)) * 8 + 4, 12, c);
-            gfx_draw_text(x + 12, ty, _(PLACES[i].label), C_WHITE, c);
+            gfx_fill_rect(x + 10, ty - 2, (int)strlen(place_label(i)) * 8 + 4, 12, c);
+            gfx_draw_text(x + 12, ty, place_label(i), C_WHITE, c);
         }
     }
 }
@@ -626,8 +628,16 @@ void startmenu_hover(const fb_info_t* fi, int mx, int my) {
 static void open_place(int i) {
     const place_t* p = &PLACES[i];
     if (p->sm) { g_host.action(p->sm); return; }
-    if (fs_find_dir(p->path) < 0 && strcmp(p->path, "/") != 0) fs_mkdir(p->path);   /* a library: made when first opened */
-    g_host.open_path(p->path);
+    const char* path = p->path[0] == '~' ? fs_home_join(p->path + 1) : p->path;   /* (the logged-in user's) */
+    if (fs_find_dir(path) < 0 && strcmp(path, "/") != 0) fs_mkdir(path);   /* a library: made when first opened */
+    g_host.open_path(path);
+}
+
+/* a place's name: the home's is its user's */
+static const char* place_label(int i) {
+    if (strcmp(PLACES[i].label, "~")) return _(PLACES[i].label);
+    const char* h = strrchr(fs_home_path(), '/');
+    return h && h[1] ? h + 1 : "home";
 }
 
 static void activate(int i) {
@@ -646,12 +656,16 @@ static void power_cb(int id, void* arg) { (void)arg; g_host.action(id); }
 static void power_menu(const fb_info_t* fi) {
     int x, y, w, h;
     button_rect(fi, B_ARROW, &x, &y, &w, &h);
-    ctx_item_t items[6];
+    ctx_item_t items[7];
     int n = 0;
     items[n++] = (ctx_item_t){ _("Restart"), SM_RESTART, 0 };
     char reason[160];
     items[n++] = (ctx_item_t){ _("Sleep"), SM_SLEEP, acpi_s3_status(reason,sizeof(reason))!=0 };
     items[n++] = (ctx_item_t){ _("Lock"), SM_LOCK, 0 };
+    {   /* another user: when there is one */
+        const user_t* p[2];
+        items[n++] = (ctx_item_t){ _("Switch user"), SM_SWITCH, users_people(p, 2) < 2 };
+    }
     items[n++] = (ctx_item_t){ CTX_SEP, 0, 0 };
     items[n++] = (ctx_item_t){ _("Exit to the shell"), SM_QUIT, 0 };
     ctxmenu_open(x + w, y - n * 22, items, n, power_cb, NULL);

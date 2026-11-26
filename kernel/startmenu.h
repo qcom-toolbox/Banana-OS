@@ -17,7 +17,7 @@
 
 /* what the menu asks the desktop to do */
 enum { SM_TERMINAL = 1, SM_FILES, SM_BROWSER, SM_NOTEPAD, SM_APPS, SM_TASKMGR, SM_SETTINGS, SM_INSTALL,
-       SM_SHUTDOWN, SM_RESTART, SM_LOCK, SM_QUIT, SM_SLEEP, SM_DEVMGR, SM_DISKMGR };
+       SM_SHUTDOWN, SM_RESTART, SM_LOCK, SM_QUIT, SM_SLEEP, SM_DEVMGR, SM_DISKMGR, SM_SWITCH };
 
 typedef struct {
     void (*action)(int sm);                     /* SM_*; the desktop closes the menu */

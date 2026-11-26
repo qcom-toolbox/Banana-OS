@@ -3,6 +3,7 @@
  * vcons.h). */
 #define VT_KERNEL 1
 #include "vcons.h"
+#include "users.h"
 #include "../apps/terminal/vt.h"
 #include "pty.h"
 #include "app.h"
@@ -80,8 +81,9 @@ static char g_termcap[] =
     "md=\\E[1m:me=\\E[0m:mh=\\E[2m:mr=\\E[7m:nd=\\E[C:nw=\\EE:rc=\\E8:sc=\\E7:se=\\E[27m:sf=\\n:"
     "so=\\E[7m:sr=\\EM:st=\\EH:ta=^I:te=\\E[?1049l:ti=\\E[?1049h:ue=\\E[24m:up=\\E[A:us=\\E[4m:"
     "vb=\\E[?5h\\E[?5l:ve=\\E[?12l\\E[?25h:vi=\\E[?25l:vs=\\E[?12;25h:";
+static char g_env_home[80] = "HOME=/home/banana", g_env_user[48] = "USER=banana", g_env_logname[48] = "LOGNAME=banana";
 static char* g_env[] = {
-    "HOME=/home/banana", "USER=banana", "LOGNAME=banana", "PATH=/bin:/usr/bin:/apps",
+    g_env_home, g_env_user, g_env_logname, "PATH=/bin:/usr/bin:/apps",
     "LANG=C.UTF-8", "SHELL=/bin/bash", "TMPDIR=/tmp", "TERM=xterm-256color", g_termcap, NULL
 };
 
@@ -168,8 +170,18 @@ static void give_up(const char* why) {
     g_broken = 1;
 }
 
+/* the environment for user u (NULL: the one logged in): its HOME, USER, LOGNAME */
+char** vcons_env_for(const void* user) {
+    const user_t* u = user ? (const user_t*)user : session_user();
+    ksnprintf(g_env_home, sizeof(g_env_home), "HOME=%s", u && u->home[0] ? u->home : "/home/banana");
+    ksnprintf(g_env_user, sizeof(g_env_user), "USER=%s", u ? u->name : "banana");
+    ksnprintf(g_env_logname, sizeof(g_env_logname), "LOGNAME=%s", u ? u->name : "banana");
+    return g_env;
+}
+
 static void spawn(int i) {
     vc_t* v = &g_vc[i];
+    vcons_env_for(NULL);                               /* (bash as the one logged in: it is the console's user) */
     char* argv[] = { "-bash", NULL };                  /* (a login shell: /etc/profile, ~/.bash_profile) */
     char err[64];
     uint32_t now = timer_ms();
@@ -221,7 +233,7 @@ static int respawn(void) {
 }
 
 int vcons_running(void) { return g_on; }
-char** vcons_env(void) { return g_env; }
+char** vcons_env(void) { return vcons_env_for(NULL); }
 int vcons_current(void) { return g_cur; }
 
 int vcons_minor(pty_t* t) {

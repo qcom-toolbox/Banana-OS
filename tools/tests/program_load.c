@@ -13,6 +13,12 @@ static fs_file_t file;
 static char bytes[]="\177ELF-native-program";
 #define CHECK(c) do { checks++; if(!(c)){fprintf(stderr,"FAIL %d: %s\n",__LINE__,#c);exit(1);} }while(0)
 static void api_init(void) {}
+/* (users: who starts it - here no app, and it may run the program unless told otherwise) */
+static int no_exec;
+static app_proc_t* cur(void) { return NULL; }
+static void env_for_session(void) {}
+static int fs_access_entry(int is_dir, int idx, unsigned want) { (void)is_dir; (void)idx; (void)want; return !no_exec; }
+static void creds_inherit(app_proc_t* p, const app_proc_t* parent) { (void)p; (void)parent; }
 static int fs_find_file(const char* p) { CHECK(!strcmp(p,"/bin/probe"));return missing?-1:0; }
 static void fs_file_path(int i,char* b,int n) { CHECK(i==0);snprintf(b,(size_t)n,"/bin/probe"); }
 static void fs_pin(int i) { if(i==0)file.pins++; }
@@ -57,6 +63,12 @@ int main(void) {
         fail_at=fault;allocations=0;load_calls=0;
         app_proc_t* p=prepare("/bin/probe",1,argv,NULL,err,sizeof(err));
         CHECK((p!=NULL)==(fault==0));CHECK(file.pins==0);
+        if(fault==0){                          /* a program the caller may not run: refused, nothing claimed */
+            no_exec=1;
+            app_proc_t* q=prepare("/bin/probe",1,argv,NULL,err,sizeof(err));
+            CHECK(q==NULL && !strcmp(err,"permission denied") && file.pins==0);
+            no_exec=0;
+        }
         if(p){CHECK(p->used && !strcmp(p->name,"probe"));discard(p);}
         else CHECK(!g_procs[0].us && !g_procs[0].mem);
     }

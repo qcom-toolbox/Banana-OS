@@ -76,6 +76,12 @@ void fs_init(void);
 /* directory ops - all paths may be absolute ("/a/b"), relative ("a/b"),
  * use "." / ".." / "~" (home), same as a real Unix shell. */
 int  fs_mkdir(const char* path);           /* returns dir index or -1 */
+/* the logged-in user's home folder ("/home/banana" until someone else
+ * logs in): what ~ means for the kernel's commands and windows */
+void        fs_set_home(const char* path);
+const char* fs_home_path(void);
+/* the home + rel ("/Downloads"): a buffer of 8 reused in turn (several in one expression) */
+const char* fs_home_join(const char* rel);
 int  fs_mkdir_p(const char* path);         /* mkdir -p: create intermediate dirs too */
 int  fs_find_dir(const char* path);        /* returns dir index or -1 */
 void fs_ls(const char* path);              /* NULL/"" lists cwd */
@@ -311,6 +317,22 @@ typedef struct {
 } fs_stat_t;
 
 /* follow: 1 like stat(), 0 like lstat(); 0 or -1 */
+/* Users (kernel/users.h): a file operation's rights. A task's current
+ * credential (NULL: the kernel's - as before users, only the owner's w bit
+ * counts) is set for the length of an app's file system call or a user's
+ * command; fs_cred_swap returns the one it replaces. */
+#define FS_CRED_GROUPS 16
+typedef struct {
+    uint32_t uid, gid;
+    int      ngroups;
+    uint32_t groups[FS_CRED_GROUPS];
+} fs_cred_t;
+const fs_cred_t* fs_cred_swap(const fs_cred_t* c);
+const fs_cred_t* fs_cred_current(void);
+/* the current credential may read (4) / write (2) / search or run (1) a
+ * file (is_dir 0) or folder, every folder above it searchable; 1 or 0
+ * (fs_perm_error then) */
+int  fs_access_entry(int is_dir, int idx, uint32_t want);
 int  fs_stat(const char* path, int follow, fs_stat_t* st);
 int  fs_chmod(const char* path, uint32_t perms);          /* the low 12 bits; 0 or -1 */
 int  fs_chown(const char* path, int uid, int gid);        /* -1 keeps that one; 0 or -1 */

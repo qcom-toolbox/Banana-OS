@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "sshd.h"
+#include "../kernel/users.h"
 #include "tcp.h"
 #include "tty.h"
 #include "task.h"
@@ -607,7 +608,7 @@ static void on_userauth(ssh_t* s, const uint8_t* p, uint32_t n) {
     char pw[128];
     r_cstr(&r, pw, sizeof(pw));
     int ok = !r.err && strcmp(service, "ssh-connection") == 0 &&
-             strcmp(user, PASSWD_USER) == 0 && passwd_check(user, pw);
+             user_is_person(user_by_name(user)) && passwd_check(user, pw);   /* (any person with a password) */
     memset(pw, 0, sizeof(pw));
     if (ok) {
         uint8_t m = MSG_USERAUTH_SUCCESS;

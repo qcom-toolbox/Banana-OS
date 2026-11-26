@@ -18,7 +18,7 @@
  */
 
 #define BANANA_API_MAGIC   0x414E4142u     /* "BANA" */
-#define BANANA_API_VERSION 34u
+#define BANANA_API_VERSION 35u
 
 /* open() flags */
 #define BANANA_O_READ    0x01
@@ -670,6 +670,32 @@ typedef struct banana_api {
      * BANANA_CAM_NAME: its name into buf. BANANA_CAM_CLOSE (or the app's
      * end) stops it. */
     int (*camera)(int op, void* buf, unsigned int len, banana_camframe_t* info);
+    /* version 35: users (BANANA_HAS(api, auth)).
+     * proc_cred: the calling process's ids, Unix's way. BANANA_CRED_GET:
+     * ids[0..5] = real, effective, saved user id, real, effective, saved
+     * group id (bytes >= 24). BANANA_CRED_GROUPS: its supplementary groups
+     * into ids, how many. BANANA_CRED_SETRESUID / _SETRESGID: ids[0..2]
+     * (-1: kept) - root any, others only to ids they have; _SETUID /
+     * _SETGID: ids[0] (root: all three); _SETGROUPS: root only. 0, or -1
+     * (EPERM). */
+    int (*proc_cred)(int op, unsigned int* ids, unsigned long bytes);
+    /* auth: acting as another user. BANANA_AUTH_DOAS_CHECK (user: the
+     * target, NULL root; cmd: what will run): 0 permitted now without a
+     * password, 1 permitted once the caller's password is given, -1 not
+     * permitted (/etc/doas.conf), -2 no such user. BANANA_AUTH_DOAS: the
+     * same check, secret the caller's password (NULL when none is needed):
+     * 0 and the process is that user now (all its ids and groups), -13 a
+     * wrong password, -1 not permitted. BANANA_AUTH_SU: becomes user (NULL
+     * root) with that user's password (none needed for root): 0, -13, -1
+     * (locked - root has no password: doas). BANANA_AUTH_FORGET: no more
+     * remembered password here (doas -L). BANANA_AUTH_CHECK: 1 if secret is
+     * the password of user (NULL: the caller's; another's: root only), 0.
+     * BANANA_AUTH_PASSWD: user's (NULL: the caller's) password becomes
+     * secret (NULL or "": none) - cmd the current one (the caller's own,
+     * when it has one); another's: root. 0, -13, -1. BANANA_AUTH_KCMD: cmd
+     * is a system command line (kcmd): 1 if it changes the system and the
+     * caller must be made root first (doas), 0 if it may run as it is. */
+    int (*auth)(int op, const char* user, const char* secret, const char* cmd);
 } banana_api_t;
 
 #define BANANA_SIG_DEFAULT 0
@@ -714,6 +740,22 @@ typedef struct banana_ucontext {
     unsigned long long      uc_sigmask[16];    /* (the first word: signals 1-64) */
     unsigned char           fpregs_mem[512] __attribute__((aligned(16)));
 } banana_ucontext_t;
+
+/* proc_cred / auth (version 35) */
+#define BANANA_CRED_GET        0
+#define BANANA_CRED_GROUPS     1
+#define BANANA_CRED_SETRESUID  2
+#define BANANA_CRED_SETRESGID  3
+#define BANANA_CRED_SETGROUPS  4
+#define BANANA_CRED_SETUID     5
+#define BANANA_CRED_SETGID     6
+#define BANANA_AUTH_DOAS_CHECK 0
+#define BANANA_AUTH_DOAS       1
+#define BANANA_AUTH_SU         2
+#define BANANA_AUTH_FORGET     3
+#define BANANA_AUTH_CHECK      4
+#define BANANA_AUTH_PASSWD     5
+#define BANANA_AUTH_KCMD       6
 
 /* mic / camera (version 34) */
 #define BANANA_MIC_OPEN      0

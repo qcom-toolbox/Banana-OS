@@ -173,7 +173,7 @@ int devcmd_dispatch(int argc, char** argv) {
         const char* w = argc > 2 ? argv[2] : "";
         if (argc >= 3 && !strcmp(argv[1], "radeon") && !strcmp(argv[2], "dump")) {
             char msg[160];
-            gpu_radeon_dump(argc > 3 ? argv[3] : "/home/banana/radeon-report", msg, sizeof(msg));
+            gpu_radeon_dump(argc > 3 ? argv[3] : fs_home_join("/radeon-report"), msg, sizeof(msg));
             terminal_write("gpu radeon dump: ");
             say(msg);
             return 1;

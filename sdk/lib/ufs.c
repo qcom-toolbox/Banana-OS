@@ -177,14 +177,29 @@ int faccessat(int dirfd, const char* path, int mode, int flags) {
     struct stat st;
     if (stat_any(p, &st, !(flags & AT_SYMLINK_NOFOLLOW))) return -1;
     if (mode == F_OK) return 0;
-    /* (one user: the owner's bits - everything runs as it) */
-    if (((mode & R_OK) && !(st.st_mode & 0400)) || ((mode & W_OK) && !(st.st_mode & 0200)) ||
-        ((mode & X_OK) && !(st.st_mode & 0111))) return fail(EACCES);
+    /* Unix's rule, for the real user (AT_EACCESS: the effective one): root
+     * may read and write anything and run what anyone may run; others the
+     * owner's, the group's or the others' bits */
+    uid_t u = (flags & AT_EACCESS) ? geteuid() : getuid();
+    gid_t g = (flags & AT_EACCESS) ? getegid() : getgid();
+    if (u == 0) return (mode & X_OK) && !(st.st_mode & 0111) && !S_ISDIR(st.st_mode) ? fail(EACCES) : 0;
+    unsigned bits;
+    if (st.st_uid == u) bits = (st.st_mode >> 6) & 7;
+    else {
+        int in = st.st_gid == g;
+        if (!in) {
+            gid_t list[16];
+            int n = getgroups(16, list);
+            for (int i = 0; i < n && !in; i++) in = list[i] == st.st_gid;
+        }
+        bits = in ? (st.st_mode >> 3) & 7 : st.st_mode & 7;
+    }
+    if (((mode & R_OK) && !(bits & 4)) || ((mode & W_OK) && !(bits & 2)) || ((mode & X_OK) && !(bits & 1))) return fail(EACCES);
     return 0;
 }
 int access(const char* path, int mode) { return faccessat(AT_FDCWD, path, mode, 0); }
-int eaccess(const char* path, int mode) { return faccessat(AT_FDCWD, path, mode, 0); }
-int euidaccess(const char* path, int mode) { return faccessat(AT_FDCWD, path, mode, 0); }
+int eaccess(const char* path, int mode) { return faccessat(AT_FDCWD, path, mode, AT_EACCESS); }
+int euidaccess(const char* path, int mode) { return faccessat(AT_FDCWD, path, mode, AT_EACCESS); }
 
 /* ── changing a file's record ──────────────────────────────────────── */
 
@@ -511,6 +526,11 @@ DIR* opendir(const char* path) {
     struct stat st;
     if (!path || stat(path, &st)) return NULL;
     if (!S_ISDIR(st.st_mode)) { errno = ENOTDIR; return NULL; }
+    /* (a folder one may not read: EACCES now, as Unix's opendir - not an empty listing) */
+    if (__banana->version >= 35) {
+        banana_dirent_t probe;
+        if (__banana->readdir(path, 0, &probe) == -13) { errno = EACCES; return NULL; }
+    }
     DIR* d = calloc(1, sizeof(DIR));
     if (!d) { errno = ENOMEM; return NULL; }
     snprintf(d->path, sizeof(d->path), "%s", path);

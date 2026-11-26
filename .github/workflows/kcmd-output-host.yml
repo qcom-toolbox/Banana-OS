@@ -45,6 +45,8 @@ jobs:
           python3 tools/test_text_load.py --32 --sanitize
           python3 tools/test_ksnprintf.py --sanitize
           python3 tools/test_ksnprintf.py --32 --sanitize
+          python3 tools/test_users.py --sanitize
+          python3 tools/test_users.py --32 --sanitize
           python3 tools/test_uvc.py --sanitize
           python3 tools/test_uvc.py --32 --sanitize
           python3 tools/test_uaudio_in.py --sanitize

@@ -18,6 +18,7 @@
 #include "kstring.h"
 #include "utf8.h"
 #include "usb.h"
+#include "users.h"
 
 int login_enabled(void) {
     char v[8];
@@ -30,8 +31,22 @@ void login_set_enabled(int on) {
     cfg_persist();
 }
 
+/* the people who can log in; *def: the one picked first (the last to
+ * log in - or banana) */
+static int people(const user_t** out, int max, int* def) {
+    int n = users_people(out, max);
+    *def = 0;
+    for (int i = 0; i < n; i++) if (out[i]->uid == session_uid()) *def = i;
+    return n;
+}
+
+/* a login is asked: switched on, and someone to choose or a password to type */
 int login_required(void) {
-    return login_enabled() && passwd_is_set(PASSWD_USER);
+    if (!login_enabled()) return 0;
+    const user_t* p[USERS_MAX];
+    int def, n = people(p, USERS_MAX, &def);
+    if (n > 1) return 1;
+    return n == 1 && passwd_is_set(p[0]->name);
 }
 
 /* ── drawing ── */
@@ -102,6 +117,8 @@ static void filled_circle(int cx, int cy, int r, uint32_t color) {
 
 typedef struct {
     int  locked;                /* unlocking the desktop (not the boot login) */
+    const user_t* who[8];       /* the people to pick from (the lock screen: the one logged in) */
+    int  nwho, sel;
     char pw[64];
     const char* message;        /* under the field: an error, "Checking..." */
     uint32_t message_color;
@@ -129,9 +146,23 @@ static void draw(const uint32_t* bg, const login_view_t* v) {
     /* the panel */
     int pw = 340, ph = 200, px = cx - pw / 2, py = g_h / 2 - 90;
     dim_rect(px, py, pw, ph, 2, 5);
+    const user_t* u = v->nwho ? v->who[v->sel] : NULL;
+    char initial[2] = { u && u->name[0] ? (char)(u->name[0] >= 'a' && u->name[0] <= 'z' ? u->name[0] - 32 : u->name[0]) : 'B', 0 };
     filled_circle(cx, py + 42, 26, 0x003A7BD5u);
-    text_center(FONT_SANS_BOLD, 26, cx, py + 52, "B", 0x00FFFFFFu);
-    text_center(FONT_SANS_BOLD, 18, cx, py + 98, "banana", 0x00FFFFFFu);
+    text_center(FONT_SANS_BOLD, 26, cx, py + 52, initial, 0x00FFFFFFu);
+    text_center(FONT_SANS_BOLD, 18, cx, py + 98, u ? u->name : "banana", 0x00FFFFFFu);
+    /* the others: under the panel, a click (or Tab, the arrows) picks one */
+    if (v->nwho > 1) {
+        int tw = 84, total = v->nwho * tw, x0 = cx - total / 2, ty = py + ph + 18;
+        for (int i = 0; i < v->nwho; i++) {
+            int tx = x0 + i * tw;
+            dim_rect(tx + 4, ty, tw - 8, 58, i == v->sel ? 1 : 2, i == v->sel ? 2 : 5);
+            char in[2] = { (char)(v->who[i]->name[0] >= 'a' && v->who[i]->name[0] <= 'z' ? v->who[i]->name[0] - 32 : v->who[i]->name[0]), 0 };
+            filled_circle(tx + tw / 2, ty + 18, 12, i == v->sel ? 0x003A7BD5u : 0x00505E74u);
+            text_center(FONT_SANS_BOLD, 13, tx + tw / 2, ty + 23, in, 0x00FFFFFFu);
+            text_center(FONT_SANS, 12, tx + tw / 2, ty + 48, v->who[i]->name, 0x00FFFFFFu);
+        }
+    }
 
     /* the password field: one dot per character */
     int fx, fy, fw, fh, bx;
@@ -140,7 +171,7 @@ static void draw(const uint32_t* bg, const login_view_t* v) {
         for (int xx = fx; xx < fx + fw; xx++) g_target[yy * g_stride + xx] = 0x00F4F6FAu;
     int n = u8_cols(v->pw, (int)strlen(v->pw));
     if (n == 0) {
-        text(FONT_SANS, 14, fx + 10, fy + 20, "Password", 0x009098A8u);
+        text(FONT_SANS, 14, fx + 10, fy + 20, u && !passwd_is_set(u->name) ? "No password - press Enter" : "Password", 0x009098A8u);
     } else {
         char dots[3 * 32 + 1];
         int k = 0;
@@ -181,8 +212,19 @@ static int take_keys(login_view_t* v, int* skip, int* changed) {
         char c = keyboard_try_getchar();
         if (!c) return 0;
         *changed = 1;
+        if (*skip == 2 && c == '[') { (*skip)--; continue; }
+        if (*skip == 1) {                            /* an arrow: left / right pick the user */
+            *skip = 0;
+            if (v->nwho > 1 && (c == 'C' || c == 'D')) {
+                v->sel = (v->sel + (c == 'C' ? 1 : v->nwho - 1)) % v->nwho;
+                memset(v->pw, 0, sizeof(v->pw));
+                v->message = 0;
+            }
+            continue;
+        }
         if (*skip) { (*skip)--; continue; }
         if (c == 27) { *skip = 2; continue; }        /* arrow keys: ESC [ X */
+        if (c == '\t' && v->nwho > 1) { v->sel = (v->sel + 1) % v->nwho; memset(v->pw, 0, sizeof(v->pw)); v->message = 0; continue; }
         int n = (int)strlen(v->pw);
         v->message = 0;
         if (c == '\n') return 1;
@@ -211,7 +253,13 @@ static void login_graphical(int locked, int* mouse_x, int* mouse_y) {
 
     login_view_t v;
     memset(&v, 0, sizeof(v));
-    v.locked = locked;
+    v.locked = locked == 1;                      /* (2: Switch user - the picker, over the desktop) */
+    if (locked == 1) {                           /* (the lock screen: the one logged in) */
+        v.who[0] = session_user();
+        v.nwho = v.who[0] ? 1 : 0;
+    } else {
+        v.nwho = people(v.who, 8, &v.sel);
+    }
     keyboard_set_owner(task_current_pid());  /* no other task takes a key meanwhile */
     v.mx = mouse_x ? *mouse_x : g_w / 2;
     v.my = mouse_y ? *mouse_y : g_h / 2 + 120;
@@ -242,13 +290,25 @@ static void login_graphical(int locked, int* mouse_x, int* mouse_y) {
             int hover = v.mx >= bx && v.mx < bx + 30 && v.my >= fy && v.my < fy + fh;
             if (hover != v.hover) { v.hover = hover; changed = 1; }
             if (ms.btn_left && !prev_left && hover) clicked = 1;
+            if (ms.btn_left && !prev_left && v.nwho > 1) {      /* a user's tile */
+                int tw = 84, x0 = g_w / 2 - v.nwho * tw / 2, ty = g_h / 2 - 90 + 200 + 18;
+                if (v.my >= ty && v.my < ty + 58 && v.mx >= x0 && v.mx < x0 + v.nwho * tw) {
+                    v.sel = (v.mx - x0) / tw;
+                    memset(v.pw, 0, sizeof(v.pw));
+                    v.message = 0;
+                    changed = 1;
+                }
+            }
             prev_left = ms.btn_left;
         }
-        if (take_keys(&v, &skip, &changed) || (clicked && v.pw[0])) {
+        const user_t* who = v.nwho ? v.who[v.sel] : NULL;
+        if (take_keys(&v, &skip, &changed) || (clicked && (v.pw[0] || (who && !passwd_is_set(who->name))))) {
+            if (!who) break;
+            if (!passwd_is_set(who->name)) { session_set(who->uid); break; }   /* (no password: in) */
             v.message = "Checking...";
             v.message_color = 0x00C8D2E0u;
             draw(bg, &v);
-            if (passwd_check(PASSWD_USER, v.pw)) break;
+            if (passwd_check(who->name, v.pw)) { if (locked != 1) session_set(who->uid); break; }
             failures++;
             memset(v.pw, 0, sizeof(v.pw));
             v.message = "Wrong password - try again";
@@ -274,10 +334,41 @@ static void login_graphical(int locked, int* mouse_x, int* mouse_y) {
     if (!locked) terminal_screen_changed();      /* the console comes back (the desktop redraws itself) */
 }
 
+/* a line typed at the console (echo: shown) into buf */
+static void read_console(char* buf, int cap, int echo) {
+    int n = 0, skip = 0;
+    for (;;) {
+        char c = keyboard_try_getchar();
+        if (!c) { task_sleep_ms(10); continue; }
+        if (skip) { skip--; continue; }
+        if (c == 27) { skip = 2; continue; }
+        if (c == '\n') break;
+        if (c == '\b') { if (n) { n = u8_prev(buf, n); if (echo) terminal_write("\b \b"); } continue; }
+        if ((unsigned char)c >= 32 && n < cap - 1) { buf[n++] = c; if (echo) terminal_putchar(c); }
+    }
+    buf[n] = 0;
+    terminal_putchar('\n');
+}
+
 static void login_text(void) {
     int failures = 0;
     for (;;) {
-        terminal_write("\nbanana-os login: banana\nPassword: ");
+        /* the user (Enter alone: the one picked first) */
+        const user_t* p[USERS_MAX];
+        int def, np = people(p, USERS_MAX, &def);
+        char name[USER_NAME_MAX];
+        terminal_write("\nbanana-os login: ");
+        if (np > 1) {
+            terminal_flush();
+            read_console(name, sizeof(name), 1);
+            if (!name[0] && np) kstrlcpy(name, p[def]->name, sizeof(name));
+        } else {
+            kstrlcpy(name, np ? p[0]->name : PASSWD_USER, sizeof(name));
+            terminal_writeln(name);
+        }
+        const user_t* u = user_by_name(name);
+        if (u && user_is_person(u) && !passwd_is_set(u->name)) { session_set(u->uid); terminal_writeln(""); return; }
+        terminal_write("Password: ");
         terminal_flush();
         char pw[64];
         int n = 0, skip = 0;
@@ -292,9 +383,9 @@ static void login_text(void) {
         }
         pw[n] = 0;
         terminal_putchar('\n');
-        int ok = passwd_check(PASSWD_USER, pw);
+        int ok = u && user_is_person(u) && passwd_check(u->name, pw);
         memset(pw, 0, sizeof(pw));
-        if (ok) { terminal_writeln(""); return; }
+        if (ok) { session_set(u->uid); terminal_writeln(""); return; }
         failures++;
         terminal_writeln("Login incorrect");
         task_sleep_ms((uint32_t)(failures < 5 ? failures : 5) * 1000u);
@@ -310,8 +401,17 @@ void login_screen(void) {
         login_text();
 }
 
+void login_switch(int* mouse_x, int* mouse_y) {
+    const fb_info_t* fi = fb_info();
+    if (!fb_available() || !fi || fi->bpp != 32 || !font_available(FONT_SANS)) return;
+    g_locked = 1;
+    login_graphical(2, mouse_x, mouse_y);
+    g_locked = 0;
+}
+
 int login_lock(int* mouse_x, int* mouse_y) {
-    if (!passwd_is_set(PASSWD_USER) || g_locked) return -1;
+    const user_t* me = session_user();
+    if (!me || !passwd_is_set(me->name) || g_locked) return -1;
     const fb_info_t* fi = fb_info();
     if (!fb_available() || !fi || fi->bpp != 32 || !font_available(FONT_SANS)) return -1;
     g_locked = 1;

@@ -13,7 +13,7 @@ static void say(const char* s) { terminal_writeln(s); }
 /* a path as typed: absolute, ~/..., or from the current folder */
 static void resolve(const char* in, char* out, int cap) {
     if (in[0] == '/') kstrlcpy(out, in, (size_t)cap);
-    else if (in[0] == '~') ksnprintf(out, (size_t)cap, "/home/banana%s", in + 1);
+    else if (in[0] == '~') ksnprintf(out, (size_t)cap, "%s%s", fs_home_path(), in + 1);
     else {
         char cwd[FS_PATH_LEN];
         fs_cwd_path(cwd, sizeof(cwd));

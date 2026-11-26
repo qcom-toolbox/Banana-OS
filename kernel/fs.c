@@ -114,10 +114,24 @@ static int next_component(const char** p, char* out, int outlen) {
 }
 
 /* Expands a leading "~" (home) into FS_HOME_PATH; otherwise copies as-is. */
+/* the logged-in user's home (~ for the kernel's own commands and windows) */
+static char g_home_path[64] = FS_HOME_PATH;
+void fs_set_home(const char* path) { k_strcpy(g_home_path, path && path[0] ? path : FS_HOME_PATH, sizeof(g_home_path)); }
+const char* fs_home_path(void) { return g_home_path; }
+const char* fs_home_join(const char* rel) {
+    static char buf[8][FS_PATH_LEN];
+    static unsigned k;
+    char* o = buf[k++ & 7];
+    k_strcpy(o, g_home_path, FS_PATH_LEN);
+    int n = k_strlen(o);
+    k_strcpy(o + n, rel ? rel : "", FS_PATH_LEN - n);
+    return o;
+}
+
 static void expand_tilde(const char* in, char* out, int outlen) {
     if (in && in[0] == '~' && (in[1] == '\0' || in[1] == '/')) {
         int i = 0;
-        const char* h = FS_HOME_PATH;
+        const char* h = g_home_path;
         while (h[i] && i < outlen - 1) { out[i] = h[i]; i++; }
         const char* rest = in + 1;
         int j = 0;
@@ -398,31 +412,104 @@ static uint32_t dmode(int d) { return D(d).mode ? D(d).mode : FS_MODE_DIR; }
 static uint32_t fmode(int i) { return F(i).mode ? F(i).mode : FS_MODE_FILE; }
 static int      is_link(int i) { return (F(i).mode & FS_S_IFMT) == FS_S_IFLNK; }
 
-/* the owner's w bit decides (everything runs as the one user) */
+/* Whose rights a file operation has: the calling task's credential
+ * (an app's file system call, a user's command: fs_cred_swap) - or none,
+ * the kernel's own work, which keeps the rules from before users: only
+ * the owner's w bit decides. A credential gets Unix's: root may do
+ * anything (but run a file nobody may run); others the owner's, the
+ * group's or the others' bits; every folder on the way must be
+ * searchable (x); in a sticky folder (/tmp) only an entry's owner - or
+ * the folder's - removes or renames it. */
+static const fs_cred_t* cred(void) { return (const fs_cred_t*)*task_cred_slot(); }
+
+const fs_cred_t* fs_cred_swap(const fs_cred_t* c) {
+    const void** slot = task_cred_slot();
+    const fs_cred_t* old = (const fs_cred_t*)*slot;
+    *slot = c;
+    return old;
+}
+
+const fs_cred_t* fs_cred_current(void) { return cred(); }
+
+static int in_groups(const fs_cred_t* c, uint32_t gid) {
+    if (c->gid == gid) return 1;
+    for (int k = 0; k < c->ngroups && k < FS_CRED_GROUPS; k++) if (c->groups[k] == gid) return 1;
+    return 0;
+}
+
+/* want: 4 read, 2 write, 1 search / run - of an entry of mode, uid, gid */
+static int allowed(const fs_cred_t* c, uint32_t mode, uint32_t uid, uint32_t gid, uint32_t want) {
+    if (c->uid == 0) return !(want & 1) || (mode & 0111u) || (mode & FS_S_IFMT) == FS_S_IFDIR;
+    uint32_t bits = c->uid == uid ? (mode >> 6) : in_groups(c, gid) ? (mode >> 3) : mode;
+    return (bits & want & 7u) == (want & 7u);
+}
+
+/* every folder from d up to / searchable */
+static int searchable(const fs_cred_t* c, int d) {
+    for (int n = 0; d >= 0 && n < FS_MAX_DIRS; n++) {
+        if (!allowed(c, dmode(d), D(d).uid, D(d).gid, 1)) return 0;
+        if (d == 0) break;
+        d = D(d).parent_dir;
+    }
+    return 1;
+}
+
 static int dir_writable(int d) {
-    if (dmode(d) & 0200u) return 1;
+    const fs_cred_t* c = cred();
+    if (c && D(d).mnt && searchable(c, d)) return 1;        /* (a FAT / exFAT stick: no owners - the user's) */
+    if (!c ? (dmode(d) & 0200u) != 0 : (searchable(c, d) && allowed(c, dmode(d), D(d).uid, D(d).gid, 3))) return 1;
     g_perm_err = 1;
     return 0;
 }
 
 static int file_writable(int i) {
-    if (fmode(i) & 0200u) return 1;
+    const fs_cred_t* c = cred();
+    if (c && F(i).mnt && searchable(c, F(i).parent_dir)) return 1;
+    if (!c ? (fmode(i) & 0200u) != 0 : (searchable(c, F(i).parent_dir) && allowed(c, fmode(i), F(i).uid, F(i).gid, 2))) return 1;
     g_perm_err = 1;
     return 0;
 }
 
-/* a new entry: the default mode, owned like the folder it is made in */
+/* an entry (owned by uid) of folder d may go or be renamed: the folder
+ * writable, and if it is sticky the caller owns the entry or the folder */
+static int may_unlink(int d, uint32_t uid) {
+    if (!dir_writable(d)) return 0;
+    const fs_cred_t* c = cred();
+    if (c && c->uid != 0 && (dmode(d) & 01000u) && c->uid != uid && c->uid != D(d).uid) { g_perm_err = 1; return 0; }
+    return 1;
+}
+
+int fs_access_entry(int is_dir, int idx, uint32_t want) {
+    const fs_cred_t* c = cred();
+    if (!c) return 1;
+    if (is_dir) {
+        if (idx < 0 || idx >= g_dslots || !D(idx).used) return 0;
+        int parent = idx ? D(idx).parent_dir : -1;
+        if ((parent >= 0 && !searchable(c, parent)) || (!D(idx).mnt && !allowed(c, dmode(idx), D(idx).uid, D(idx).gid, want))) { g_perm_err = 1; return 0; }
+        return 1;
+    }
+    if (idx < 0 || idx >= g_fslots || !F(idx).used) return 0;
+    if (!searchable(c, F(idx).parent_dir) || (!F(idx).mnt && !allowed(c, fmode(idx), F(idx).uid, F(idx).gid, want))) { g_perm_err = 1; return 0; }
+    return 1;
+}
+
+/* a new entry: the default mode; the creator's (a credential's uid and
+ * group - the folder's group if it is set-group-id), else owned like the
+ * folder it is made in (the kernel's own: as before users) */
 static void init_dir_meta(int i, int parent) {
+    const fs_cred_t* c = cred();
     D(i).mode = FS_MODE_DIR;
-    D(i).uid = parent >= 0 ? D(parent).uid : FS_UID_ROOT;
-    D(i).gid = parent >= 0 ? D(parent).gid : FS_UID_ROOT;
+    D(i).uid = c ? c->uid : parent >= 0 ? D(parent).uid : FS_UID_ROOT;
+    D(i).gid = c ? ((parent >= 0 && (dmode(parent) & 02000u)) ? D(parent).gid : c->gid) : parent >= 0 ? D(parent).gid : FS_UID_ROOT;
+    if (c && parent >= 0 && (dmode(parent) & 02000u)) D(i).mode |= 02000u;
     D(i).mtime = D(i).ctime = D(i).atime = rtc_now();
 }
 
 static void init_file_meta(int i, int parent) {
+    const fs_cred_t* c = cred();
     F(i).mode = FS_MODE_FILE;
-    F(i).uid = D(parent).uid;
-    F(i).gid = D(parent).gid;
+    F(i).uid = c ? c->uid : D(parent).uid;
+    F(i).gid = c ? ((dmode(parent) & 02000u) ? D(parent).gid : c->gid) : D(parent).gid;
     F(i).mtime = F(i).ctime = F(i).atime = rtc_now();
 }
 
@@ -504,7 +591,7 @@ static void free_file(int i) {
 /* deletes a file, on its volume too */
 static int remove_file(int i) {
     touched();
-    if (!dir_writable(F(i).parent_dir)) return -1;
+    if (!may_unlink(F(i).parent_dir, F(i).uid)) return -1;
     mount_t* m = mount_of(F(i).mnt);
     int parent = F(i).parent_dir;
     if (m && (m->ops->remove_at ? m->ops->remove_at(m->ctx, D(parent).node, F(i).name, F(i).node, 0)
@@ -959,7 +1046,7 @@ static int delete_dir_recursive(int idx) {
         if (delete_dir_recursive(i) != 0) rc = -1;
     }
     if (rc) return rc;
-    if (!dir_writable(D(idx).parent_dir)) return -1;
+    if (!may_unlink(D(idx).parent_dir, D(idx).uid)) return -1;
     mount_t* m = mount_of(D(idx).mnt);
     if (m && (m->ops->remove_at ? m->ops->remove_at(m->ctx, D(D(idx).parent_dir).node, D(idx).name, D(idx).node, 1)
                                 : m->ops->remove(m->ctx, D(idx).node, 1)) != 0) { g_io_err = 1; return -1; }
@@ -1376,7 +1463,7 @@ int fs_move(const char* src, const char* dst) {
     int target_dir; char target_name[FS_NAME_LEN];
     if (!resolve_target(dp, sleaf, &target_dir, target_name, sizeof(target_name)))
         return -1;
-    if (!dir_writable(sparent) || !dir_writable(target_dir)) return -1;
+    if (!may_unlink(sparent, sfile >= 0 ? F(sfile).uid : D(sdir).uid) || !dir_writable(target_dir)) return -1;
 
     if (sfile >= 0) {
         int existing = find_file_in(target_dir, target_name);
@@ -2219,6 +2306,11 @@ int fs_chmod(const char* path, uint32_t perms) {
     int idx, k = lookup(path, 1, &idx);
     if (k < 0) return -1;
     if (k ? D(idx).mnt : F(idx).mnt) { g_io_err = 1; return -1; }   /* FAT / exFAT keep no modes */
+    const fs_cred_t* c = cred();
+    if (c && c->uid != 0) {
+        if ((k ? D(idx).uid : F(idx).uid) != c->uid) { g_perm_err = 1; return -1; }   /* (EPERM: not its owner) */
+        if (!in_groups(c, k ? D(idx).gid : F(idx).gid)) perms &= ~02000u;          /* (set-group-id: only for one's groups) */
+    }
     touched();
     if (k) D(idx).mode = FS_S_IFDIR | (perms & 07777u);
     else F(idx).mode = (fmode(idx) & FS_S_IFMT) | (perms & 07777u);
@@ -2231,6 +2323,11 @@ int fs_chown(const char* path, int uid, int gid) {
     int idx, k = lookup(path, 1, &idx);
     if (k < 0) return -1;
     if (k ? D(idx).mnt : F(idx).mnt) { g_io_err = 1; return -1; }
+    const fs_cred_t* c = cred();
+    if (c && c->uid != 0) {
+        uint32_t owner = k ? D(idx).uid : F(idx).uid;
+        if ((uid >= 0 && (uint32_t)uid != owner) || owner != c->uid || (gid >= 0 && !in_groups(c, (uint32_t)gid))) { g_perm_err = 1; return -1; }
+    }
     touched();
     if (k) {
         if (uid >= 0) D(idx).uid = (uint32_t)uid;
@@ -2282,6 +2379,8 @@ int fs_utime(const char* path, int follow, uint32_t atime, uint32_t mtime) {
     g_io_err = g_perm_err = 0;
     int idx, k = lookup(path, follow, &idx);
     if (k < 0) return -1;
+    const fs_cred_t* c = cred();
+    if (c && c->uid != 0 && (k ? D(idx).uid : F(idx).uid) != c->uid && !fs_access_entry(k, idx, 2)) return -1;   /* (not its owner: who may write it) */
     touched();
     if (k) {
         if (atime != ~0u) D(idx).atime = atime;

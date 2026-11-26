@@ -201,7 +201,7 @@ int trash_restore(const char* trashed) {
     if (!in_trash(trashed)) return -1;
     char orig[FS_PATH_LEN], dir[FS_PATH_LEN], ip[FS_PATH_LEN];
     trash_origin(trashed, orig, sizeof(orig));
-    if (!orig[0]) kstrlcpy(orig, "/home/banana/restored", sizeof(orig));
+    if (!orig[0]) kstrlcpy(orig, fs_home_join("/restored"), sizeof(orig));
     fileops_parent(orig, dir, sizeof(dir));
     fs_mkdir_p(dir);
     /* back under its own name (if that is taken: a free one) */

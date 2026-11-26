@@ -40,6 +40,7 @@ Banana OS 0.6 is a minimal x86 operating system written from scratch (no Linux k
 - Web browser: tabs, HTML + CSS layout (selectors level 4, variables, `calc()`, media queries), images, forms, JavaScript (ES2020+ with classes, modules, promises, regular expressions) with a DOM, history, copy and paste
 - Notepad: a GUI text editor
 - Microphones (HD Audio, AC'97, USB) and USB webcams (UVC), with the Camera app
+- Users and Unix permissions: `doas`, `su`, `adduser`, a gentle administrator prompt on the desktop ([how](docs/USER-GUIDE.md#users-and-administrator-rights))
 - One clipboard shared by the terminals, the editor, Notepad and the browser; resizable, maximizable windows
 - File explorer window with text/picture previews
 - Real bootable disk install (`install`/`sync`) - installs onto a dedicated IDE or SATA hard disk so Banana OS boots on its own, with a persistent filesystem, no CD required

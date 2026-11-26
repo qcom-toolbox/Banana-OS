@@ -7,6 +7,10 @@
 #include "appwin.h"
 #include "audio.h"
 #include "audioin.h"
+#include "users.h"
+#include "../shell/netcmds.h"
+#include "passwd.h"
+#include "elevate.h"
 #include "../usb/uvc.h"
 #include "fs.h"
 #include "fsdisk.h"
@@ -184,6 +188,10 @@ typedef struct {
     int       mic_on, cam_on;
     int       cam_w, cam_h;
     uint64_t  mic_cursor;
+    /* who it is (version 35): its file rights - the effective user, group
+     * and groups (kernel/fs.c checks them) - and the real and saved ids */
+    fs_cred_t cred;
+    uint32_t  ruid, suid, rgid, sgid;
     uint32_t  cam_seq;
 } app_proc_t;
 
@@ -214,9 +222,11 @@ static void cmdline_set(app_proc_t* p, int argc, char** argv) {
     p->cmdline[n] = 0;
     p->start_ms = timer_ms();
 }
-/* the environment a program the system starts gets (execve passes its own) */
-static const char* const g_default_env[] = {
-    "HOME=/home/banana", "USER=banana", "LOGNAME=banana", "PATH=/bin:/usr/bin:/apps",
+/* the environment a program the system starts gets (execve passes its own):
+ * the first three are the logged-in user's (env_for_session) */
+static char g_env_home[80] = "HOME=/home/banana", g_env_user[48] = "USER=banana", g_env_logname[48] = "LOGNAME=banana";
+static const char* g_default_env[] = {
+    g_env_home, g_env_user, g_env_logname, "PATH=/bin:/usr/bin:/apps",
 #ifdef __x86_64__
     "LANG=C.UTF-8", "SHELL=/bin/bash", "TMPDIR=/tmp", "TERM=banana", NULL,     /* (GNU bash: ports/bash) */
 #else
@@ -788,6 +798,7 @@ static int a_open(const char* path, int flags) {
     if (didx >= 0) {
         /* a folder: a descriptor that knows where it is (read: EISDIR) */
         if (flags & (BANANA_O_WRITE | BANANA_O_TRUNC | BANANA_O_APPEND)) return -21;
+        if (!fs_access_entry(1, didx, 1)) return -13;
         kfile_t* d = kfile_new(KF_DIR, KF_READ);
         char* ap = (char*)kmalloc(FS_PATH_LEN);
         if (!d || !ap) { kfree(ap); kfile_put(d); return -12; }
@@ -801,9 +812,12 @@ static int a_open(const char* path, int flags) {
     if (idx < 0) {
         if (!(flags & BANANA_O_CREATE)) return -1;
         idx = fs_create(path);
-        if (idx < 0) return -1;
-    } else if ((flags & BANANA_O_TRUNC) && (flags & BANANA_O_WRITE)) {
-        if (fs_write(idx, "", 0) != 0) return -1;
+        if (idx < 0) return fs_perm_error() ? -13 : -1;
+    } else {
+        uint32_t want = ((flags & BANANA_O_WRITE) || (flags & (BANANA_O_TRUNC | BANANA_O_APPEND)) ? 2u : 0u) |
+                        (!flags || (flags & BANANA_O_READ) ? 4u : 0u);
+        if (!fs_access_entry(0, idx, want)) return -13;              /* EACCES */
+        if ((flags & BANANA_O_TRUNC) && (flags & BANANA_O_WRITE) && fs_write(idx, "", 0) != 0) return fs_perm_error() ? -13 : -1;
     }
     kfile_t* f = kfile_new(KF_FILE, (flags ? flags : BANANA_O_READ) & (KF_READ | KF_WRITE | KF_APPEND));
     if (!f) return -1;
@@ -1244,8 +1258,8 @@ static int a_remove(const char* path) {
     return fs_find_dir(path) >= 0 ? -1 : 0;
 }
 
-static int a_mkdir(const char* path) { return path && fs_mkdir(path) >= 0 ? 0 : -1; }
-static int a_rename(const char* a, const char* b) { return a && b && fs_move(a, b) >= 0 ? 0 : -1; }
+static int a_mkdir(const char* path) { return path && fs_mkdir(path) >= 0 ? 0 : fs_perm_error() ? -13 : -1; }
+static int a_rename(const char* a, const char* b) { return a && b && fs_move(a, b) >= 0 ? 0 : fs_perm_error() ? -13 : -1; }
 
 static int a_stat(const char* path, banana_stat_t* st) {
     if (!path || !st) return -1;
@@ -1267,6 +1281,9 @@ static void ustat_fill(banana_ustat_t* u, const fs_stat_t* st) {
     u->mode = st->mode;
     u->uid = st->uid;
     u->gid = st->gid;
+    /* (a FAT / exFAT stick has no owners: it is whoever asks - as kernel/fs.c lets them write it) */
+    const fs_cred_t* c = fs_cred_current();
+    if (st->mnt && c) { u->uid = c->uid; u->gid = c->gid; }
     u->nlink = st->is_dir ? 2 : st->nlink ? st->nlink : 1;
     u->size = st->size;
     u->ino = st->is_dir ? (uint64_t)st->index * 2 + 1 : (uint64_t)st->ino * 2 + 2;
@@ -1280,6 +1297,7 @@ static int a_fs_ustat(const char* path, int follow, banana_ustat_t* u) {
     if (!path || !u || !uok(u, sizeof(*u))) return -14;
     fs_stat_t st;
     if (fs_stat(path, follow, &st) != 0) return fs_errno();
+    if (!fs_access_entry(st.is_dir, st.index, 0)) return -13;     /* (a folder on the way not searchable) */
     ustat_fill(u, &st);
     return 0;
 }
@@ -1468,6 +1486,10 @@ static int a_fs_fdattr(int fd, int what, long long a, long long b) {
 
 static int a_readdir(const char* path, int index, banana_dirent_t* ent) {
     if (!path || !ent || index < 0) return -1;
+    {
+        int d = fs_find_dir(path);
+        if (d >= 0 && !fs_access_entry(1, d, 5)) return -13;     /* (read and search it) */
+    }
     /* (from the heap for the call: apps on several cores may list at once) */
     int* idx = (int*)kmalloc(FS_LIST_MAX * sizeof(int));
     if (!idx) return -1;
@@ -1503,7 +1525,9 @@ static int a_getcwd(char* buf, int size) {
 }
 
 static int a_chdir(const char* path) {
-    if (!path || fs_find_dir(path) < 0) return -1;
+    int d = path ? fs_find_dir(path) : -1;
+    if (d < 0) return -1;
+    if (!fs_access_entry(1, d, 1)) return -13;
     fs_cd(path);
     return 0;
 }
@@ -1792,18 +1816,51 @@ static int a_http_fetch(const banana_http_req_t* rq, banana_http_resp_t* out) {
 
 static int a_key_mods(void) { return keyboard_mods(); }
 
+/* ── an administrator's: the system changed on an app's behalf ── */
+
+/* the session key a process's elevation is remembered under: its terminal, or the desktop */
+static uint32_t proc_session(const app_proc_t* p) {
+    return p && p->ctty ? 0x10000u + (uint32_t)tty_num(p->ctty) : ELEVATE_DESKTOP;
+}
+
+/* p may have the system do `what`: root, or allowed (silently or by the
+ * desktop's prompt); then the work has the kernel's rights - *saved holds
+ * the app's to put back (admin_end). 0 if refused (msg says so) */
+static int admin_begin(app_proc_t* p, const char* what, const fs_cred_t** saved, char* msg, int mcap) {
+    if (!p) return 0;
+    if (p->cred.uid != 0 && !elevate_request(p->cred.uid, proc_session(p), p->name, what)) {
+        ksnprintf(msg, (size_t)mcap, "%s: an administrator's permission is needed (refused)", what);
+        return 0;
+    }
+    *saved = fs_cred_swap(NULL);
+    return 1;
+}
+static void admin_end(const fs_cred_t* saved) { fs_cred_swap(saved); }
+
 static int a_pkg_install(const char* path, char* msg, int mcap) {
     char m[160];
     if (!msg || mcap <= 0) { msg = m; mcap = sizeof(m); }
     if (!path) return -1;
-    return pkg_install(path, msg, mcap) == 0 ? 0 : -1;
+    /* (the package is read with the app's rights: it may only install what it can read) */
+    int fi = fs_find_file(path);
+    if (fi < 0 || !fs_access_entry(0, fi, 4)) { kstrlcpy(msg, "cannot read that package", (size_t)mcap); return -1; }
+    const fs_cred_t* sv;
+    if (!admin_begin(cur(), "install an app", &sv, msg, mcap)) return -13;
+    int rc = pkg_install(path, msg, mcap) == 0 ? 0 : -1;
+    admin_end(sv);
+    return rc;
 }
 
 /* ── version 11: the package manager ── */
 static int a_repo_update(char* msg, int mcap) {
     char m[200];
     if (!msg || mcap <= 0) { msg = m; mcap = sizeof(m); }
-    return repo_update(NULL, NULL, msg, mcap);
+    /* (fetching the lists changes nothing installed: the App Store does it
+     * whenever it opens - no prompt for that) */
+    const fs_cred_t* sv = fs_cred_swap(NULL);
+    int rc = repo_update(NULL, NULL, msg, mcap);
+    fs_cred_swap(sv);
+    return rc;
 }
 
 static void to_api(banana_pkg_t* o, const repo_pkg_t* p, const pkg_info_t* inst) {
@@ -1852,14 +1909,22 @@ static int a_repo_install(const char* name, char* msg, int mcap) {
     char m[200];
     if (!msg || mcap <= 0) { msg = m; mcap = sizeof(m); }
     if (!name) return -1;
-    return repo_install(name, 0, NULL, NULL, msg, mcap);
+    const fs_cred_t* sv;
+    if (!admin_begin(cur(), "install an app", &sv, msg, mcap)) return -13;
+    int rc = repo_install(name, 0, NULL, NULL, msg, mcap);
+    admin_end(sv);
+    return rc;
 }
 
 static int a_repo_remove(const char* name, char* msg, int mcap) {
     char m[200];
     if (!msg || mcap <= 0) { msg = m; mcap = sizeof(m); }
     if (!name) return -1;
-    return repo_remove(name, msg, mcap);
+    const fs_cred_t* sv;
+    if (!admin_begin(cur(), "remove an app", &sv, msg, mcap)) return -13;
+    int rc = repo_remove(name, msg, mcap);
+    admin_end(sv);
+    return rc;
 }
 
 static int a_repo_status(char* msg, int mcap) { return repo_status(msg, mcap); }
@@ -1872,7 +1937,11 @@ static int a_repo_icon(const char* name, char* path, int pcap) {
 static int a_repo_upgrade(char* msg, int mcap) {
     char m[200];
     if (!msg || mcap <= 0) { msg = m; mcap = sizeof(m); }
-    return repo_upgrade(NULL, NULL, msg, mcap);
+    const fs_cred_t* sv;
+    if (!admin_begin(cur(), "update the apps", &sv, msg, mcap)) return -13;
+    int rc = repo_upgrade(NULL, NULL, msg, mcap);
+    admin_end(sv);
+    return rc;
 }
 
 static int a_repo_sources(banana_repo_source_t* out, int max) {
@@ -1898,14 +1967,22 @@ static int a_repo_add_source(const char* url, const char* key_hex, int trusted, 
         kstrlcpy(msg, "give the server's key, or choose to trust it without one", (size_t)mcap);
         return -1;
     }
-    return repo_add_source(url, key_hex, trusted, msg, mcap);
+    const fs_cred_t* sv;
+    if (!admin_begin(cur(), "add an app source", &sv, msg, mcap)) return -13;
+    int rc = repo_add_source(url, key_hex, trusted, msg, mcap);
+    admin_end(sv);
+    return rc;
 }
 
 static int a_repo_remove_source(const char* url, char* msg, int mcap) {
     char m[200];
     if (!msg || mcap <= 0) { msg = m; mcap = sizeof(m); }
     if (!url || !url[0] || (url[0] >= '0' && url[0] <= '9')) return -1;   /* by URL only, not by number */
-    return repo_remove_source(url, msg, mcap);
+    const fs_cred_t* sv;
+    if (!admin_begin(cur(), "remove an app source", &sv, msg, mcap)) return -13;
+    int rc = repo_remove_source(url, msg, mcap);
+    admin_end(sv);
+    return rc;
 }
 
 static int a_win_dropped(int win, int index, char* path, int cap) {
@@ -2303,6 +2380,8 @@ typedef struct {
     volatile int cancel;                /* the program is gone or cannot take more: keys read as ^C, then the end */
     volatile int in_end;                /* stdin ended */
     volatile int done, rc;
+    fs_cred_t   cred;                                /* the caller's rights (an administrator's command: elevated in the shell) */
+    uint32_t    session;                             /* its terminal (elevation remembered there) */
 } kjob_t;
 static kjob_t* g_kjob[TASK_MAX];
 
@@ -2338,6 +2417,7 @@ static void kcmd_entry(void) {
     int me = task_current_pid();
     kjob_t* j = me >= 0 && me < TASK_MAX ? g_kjob[me] : NULL;
     if (!j) return;
+    fs_cred_swap(&j->cred);                              /* (the command has the caller's rights) */
     int ok = !j->redirect || terminal_redirect_begin(kcmd_put, j, j->ansi, j->cols, j->rows) == 0;
     if (ok && j->redirect) keyboard_redirect_begin(kcmd_get, j);
     j->rc = ok ? shell_exec_line(j->line) : -12;
@@ -2406,6 +2486,152 @@ static int kcmd_stopping(app_proc_t* p) {
 #endif
 }
 
+/* ── users (version 35) ──────────────────────────────────────────────── */
+
+static void creds_become(app_proc_t* p, uint32_t uid);
+
+static int a_proc_cred(int op, unsigned int* ids, unsigned long bytes) {
+    app_proc_t* p = cur();
+    if (!p) return -1;
+    unsigned int n = (unsigned int)(bytes / sizeof(unsigned int));
+    if (n && !ids) return -14;
+    int root = p->cred.uid == 0;
+    switch (op) {
+    case BANANA_CRED_GET:
+        if (n < 6) return -22;
+        ids[0] = p->ruid; ids[1] = p->cred.uid; ids[2] = p->suid;
+        ids[3] = p->rgid; ids[4] = p->cred.gid; ids[5] = p->sgid;
+        return 0;
+    case BANANA_CRED_GROUPS: {
+        int k = 0;
+        for (int i = 0; i < p->cred.ngroups; i++) { if ((unsigned)k < n) ids[k] = p->cred.groups[i]; k++; }
+        return k;
+    }
+    case BANANA_CRED_SETRESUID: case BANANA_CRED_SETRESGID: {
+        if (n < 3) return -22;
+        int u = op == BANANA_CRED_SETRESUID;
+        uint32_t have[3] = { u ? p->ruid : p->rgid, u ? p->cred.uid : p->cred.gid, u ? p->suid : p->sgid };
+        for (int i = 0; i < 3; i++) {
+            if (ids[i] == 0xFFFFFFFFu || root) continue;
+            if (ids[i] != have[0] && ids[i] != have[1] && ids[i] != have[2]) return -1;   /* EPERM */
+        }
+        if (u) {
+            if (ids[0] != 0xFFFFFFFFu) p->ruid = ids[0];
+            if (ids[2] != 0xFFFFFFFFu) p->suid = ids[2];
+            if (ids[1] != 0xFFFFFFFFu && ids[1] != p->cred.uid) {
+                /* (another effective user: its rights - root keeps its groups as they were set) */
+                p->cred.uid = ids[1];
+            }
+        } else {
+            if (ids[0] != 0xFFFFFFFFu) p->rgid = ids[0];
+            if (ids[2] != 0xFFFFFFFFu) p->sgid = ids[2];
+            if (ids[1] != 0xFFFFFFFFu) p->cred.gid = ids[1];
+        }
+        return 0;
+    }
+    case BANANA_CRED_SETUID: case BANANA_CRED_SETGID: {
+        if (n < 1) return -22;
+        int u = op == BANANA_CRED_SETUID;
+        uint32_t id = ids[0];
+        if (root) {
+            if (u) { p->ruid = p->suid = p->cred.uid = id; }
+            else { p->rgid = p->sgid = p->cred.gid = id; }
+            return 0;
+        }
+        if (u ? (id != p->ruid && id != p->suid) : (id != p->rgid && id != p->sgid)) return -1;
+        if (u) p->cred.uid = id; else p->cred.gid = id;
+        return 0;
+    }
+    case BANANA_CRED_SETGROUPS:
+        if (!root) return -1;
+        if (n > FS_CRED_GROUPS) n = FS_CRED_GROUPS;
+        p->cred.ngroups = (int)n;
+        for (unsigned int i = 0; i < n; i++) p->cred.groups[i] = ids[i];
+        return 0;
+    }
+    return -22;
+}
+
+/* a wrong password costs a second (guessing) */
+static void auth_failed(void) { task_sleep_ms(1000); }
+
+static int a_auth(int op, const char* user, const char* secret, const char* cmd) {
+    app_proc_t* p = cur();
+    if (!p) return -1;
+    uint32_t me = p->cred.uid;
+    uint32_t session = proc_session(p);
+    char myname[USER_NAME_MAX];
+    user_name_of(p->ruid, myname, sizeof(myname));
+    const user_t* t = user ? user_by_name(user) : user_by_uid(UID_ROOT);
+    switch (op) {
+    case BANANA_AUTH_DOAS_CHECK: case BANANA_AUTH_DOAS: {
+        if (!t) return -2;
+        uint32_t target = t->uid;
+        /* (doas asks for the password of who is behind it: the real user) */
+        uint32_t who = p->ruid;
+        if (me == 0) who = 0;
+        if (!elevate_permitted(who, target, cmd, NULL, NULL)) return -1;
+        int silent = elevate_silent(who, target, session, cmd);
+        if (op == BANANA_AUTH_DOAS_CHECK) return silent ? 0 : 1;
+        if (!silent) {
+            if (!secret || !passwd_check(myname, secret)) { auth_failed(); return -13; }
+            int np, persist;
+            elevate_permitted(who, target, cmd, &np, &persist);
+            if (persist) elevate_remember(who, session);
+        }
+        klog("doas: %s -> %s (%s)\n", myname, t->name, cmd ? cmd : "");
+        creds_become(p, target);
+        return 0;
+    }
+    case BANANA_AUTH_SU:
+        if (!t) return -2;
+        if (me != 0) {
+            if (passwd_locked(t->name)) return -1;
+            if (passwd_is_set(t->name) && (!secret || !passwd_check(t->name, secret))) { auth_failed(); return -13; }
+        }
+        klog("su: %s -> %s\n", myname, t->name);
+        creds_become(p, t->uid);
+        return 0;
+    case BANANA_AUTH_FORGET:
+        elevate_forget(p->ruid, session);
+        return 0;
+    case BANANA_AUTH_CHECK: {
+        const user_t* u = user ? t : user_by_uid(p->ruid);
+        if (!u) return 0;
+        if (u->uid != p->ruid && me != 0) return -1;
+        int ok = secret && passwd_check(u->name, secret);
+        if (!ok) auth_failed();
+        return ok;
+    }
+    case BANANA_AUTH_PASSWD: {
+        const user_t* u = user ? t : user_by_uid(p->ruid);
+        if (!u) return -2;
+        if (u->uid != p->ruid && me != 0) return -1;
+        if (me != 0 && passwd_is_set(u->name) && (!cmd || !passwd_check(u->name, cmd))) { auth_failed(); return -13; }
+        if (secret && secret[0] && strlen(secret) < PASSWD_MIN) return -22;
+        int r = secret && secret[0] ? passwd_set(u->name, secret) : passwd_clear(u->name);
+        return r == 0 ? 0 : -1;
+    }
+    case BANANA_AUTH_KCMD: {
+        if (!cmd || me == 0) return 0;
+        char buf[256];
+        kstrlcpy(buf, cmd, sizeof(buf));
+        char* argv[12];
+        int argc = shell_split_args(buf, argv, 12);
+        if (!elevate_cmd_privileged(argc, argv)) return 0;
+        return elevate_silent(me, UID_ROOT, session, argv[0]) ? 0 : 1;
+    }
+    }
+    return -22;
+}
+
+/* the elevation session of the command running now (shell/shell.c): its terminal's */
+uint32_t app_kcmd_session(void) {
+    int me = task_current_pid();
+    kjob_t* j = me >= 0 && me < TASK_MAX ? g_kjob[me] : NULL;
+    return j ? j->session : ELEVATE_DESKTOP;
+}
+
 static int a_kcmd(const char* line) {
     app_proc_t* p = cur();
     if (!p || !line) return -14;
@@ -2416,6 +2642,8 @@ static int a_kcmd(const char* line) {
     if (!j || !l) { kfree(j); kfree(l); return -12; }
     memcpy(l, line, len + 1);
     j->line = l;
+    j->cred = p->cred;
+    j->session = proc_session(p);
     j->redirect = !(o && o->type == KF_CONS);                   /* (the console's own: as it was) */
     j->ansi = o && o->type == KF_PTS;
     j->cols = 80;
@@ -2902,6 +3130,8 @@ static void spec_init(void) {
     SPEC(poll_mask, "iiiL", 0);           /* fds: checked in a_poll */
     SPEC(uptime_ns, "o", sizeof(unsigned long long));
     SPEC(mic, "iBi", 0);
+    SPEC(proc_cred, "iB", 0);
+    SPEC(auth, "isss", 0);
     SPEC(camera, "iBio", sizeof(banana_camframe_t));
     SPEC(pkg_install, "sbi", 0);
     SPEC(app_run, "siibi", 0);          /* argv: checked in it */
@@ -3326,7 +3556,10 @@ void app_syscall(sysframe_t* r) {
     }
     sysfn_t fn = (sysfn_t)((void* const*)&g_api)[slot];
     if (mine) { g_insys[me] = (uint16_t)(slot + 1); g_lastip[me] = r->rip; }     /* (ps: what it is in, where) */
+    /* the call has the app's rights: its files, its user's (kernel/fs.c) */
+    const fs_cred_t* oc = fs_cred_swap(&p->cred);
     r->rax = fn(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]);
+    fs_cred_swap(oc);
     if (mine) g_insys[me] = 0;
     sig_check(p, r);                            /* signals sent to it go to their handlers now */
     __asm__ volatile("cli");
@@ -3574,6 +3807,8 @@ static int a_proc_fork(void) {
     c->uapi = p->uapi; c->ret_stub = p->ret_stub; c->sigret_stub = p->sigret_stub;
     c->vt = p->vt; c->has_term = p->has_term; c->handles_int = p->handles_int;
     c->own_task = 1;
+    c->cred = p->cred;
+    c->ruid = p->ruid; c->suid = p->suid; c->rgid = p->rgid; c->sgid = p->sgid;
     memcpy(c->sig_disp, p->sig_disp, sizeof(c->sig_disp));
     c->sig_onstack = p->sig_onstack;
     c->sig_entry = p->sig_entry;
@@ -3874,6 +4109,11 @@ static int a_proc_kill(int pid, int sig) {
         app_proc_t* t = &g_procs[i];
         if (!t->used || t->zombie || t->pid < 0) continue;
         if (!(pid > 0 ? t->seq == pid : pid == 0 ? t->pgid == p->pgid : pid == -1 ? 1 : t->pgid == -pid)) continue;
+        /* (another user's: only root - Unix's rule: the real or effective id is the target's real or saved one) */
+        if (p->cred.uid != 0 && p->ruid != t->ruid && p->ruid != t->suid && p->cred.uid != t->ruid && p->cred.uid != t->suid) {
+            if (pid > 0) return -1;                         /* EPERM */
+            continue;
+        }
         n++;
         if (sig) proc_signal(t, sig);
     }
@@ -4399,6 +4639,8 @@ static void api_init(void) {
     g_api.web_ipc = G(a_web_ipc);
     g_api.uptime_ns = G(a_uptime_ns);
     g_api.mic = G(a_mic);
+    g_api.proc_cred = G(a_proc_cred);
+    g_api.auth = G(a_auth);
     g_api.camera = G(a_camera);
 #ifdef __x86_64__
     g_api.proc_list = G(a_proc_list);                  /* (the system calls' table: 64-bit) */
@@ -4810,6 +5052,9 @@ static void release(app_proc_t* p) {
 
 
 static int run(app_proc_t* p) {
+    /* (an app's exit or crash leaves from inside a system call, past the
+     * dispatcher's restore: the task's credential goes back here) */
+    const fs_cred_t* before = fs_cred_current();
 #ifndef __x86_64__
     *(volatile uint32_t*)p->stack = STACK_CANARY;      /* the bottom of the stack: overflow check */
 #endif
@@ -4843,6 +5088,7 @@ static int run(app_proc_t* p) {
     if (*(volatile uint32_t*)p->stack != STACK_CANARY)
         klog("app %s: its stack overflowed (256 KiB) - memory may be damaged\n", p->name);
 #endif
+    fs_cred_swap(before);
     return p->exit_code;
 }
 
@@ -4978,11 +5224,38 @@ static int load_program(app_proc_t* p, const uint8_t* f, uint32_t size, int argc
 }
 #endif
 
+/* the system's processes run as the logged-in user: HOME, USER, LOGNAME theirs */
+static void env_for_session(void) {
+    const user_t* u = session_user();
+    ksnprintf(g_env_home, sizeof(g_env_home), "HOME=%s", u && u->home[0] ? u->home : "/home/banana");
+    ksnprintf(g_env_user, sizeof(g_env_user), "USER=%s", u ? u->name : "banana");
+    ksnprintf(g_env_logname, sizeof(g_env_logname), "LOGNAME=%s", u ? u->name : "banana");
+}
+
+/* a process's ids: all of uid's (a login, the system starting it, su) */
+static void creds_become(app_proc_t* p, uint32_t uid) {
+    users_make_cred(uid, &p->cred);
+    p->ruid = p->suid = uid;
+    p->rgid = p->sgid = p->cred.gid;
+}
+
+/* a new process's ids: its parent's (an app starting it), else the logged-in user's */
+static void creds_inherit(app_proc_t* p, const app_proc_t* parent) {
+    if (parent) {
+        p->cred = parent->cred;
+        p->ruid = parent->ruid; p->suid = parent->suid;
+        p->rgid = parent->rgid; p->sgid = parent->sgid;
+    } else creds_become(p, session_uid());
+}
+
 /* reads, loads and prepares an app (slot claimed, not started) */
 static app_proc_t* prepare(const char* path, int argc, char** argv, char** envp, char* err, int ecap) {
     api_init();
+    app_proc_t* parent = cur();
+    if (!envp) env_for_session();
     int fi = fs_find_file(path);
     if (fi < 0) { kstrlcpy(err, "no such program", (size_t)ecap); return NULL; }
+    if (!fs_access_entry(0, fi, 1)) { kstrlcpy(err, "permission denied", (size_t)ecap); return NULL; }   /* (x, for who starts it) */
     app_proc_t* p = NULL;
     for (int i = 0; i < APP_MAX; i++) if (!g_procs[i].used) { p = &g_procs[i]; p->id = i; break; }
     if (!p) { kstrlcpy(err, "too many apps running", (size_t)ecap); return NULL; }
@@ -4991,6 +5264,7 @@ static app_proc_t* prepare(const char* path, int argc, char** argv, char** envp,
     p->id = id;
     p->seq = ++g_seq;
     p->pgid = p->sid = p->seq;                          /* (its own group and session; no parent) */
+    creds_inherit(p, parent);
     fs_file_path(fi, p->exe, sizeof(p->exe));
     fs_file_t* f = pin_program(fi);
     if (!f) { kstrlcpy(err, "cannot read it", (size_t)ecap); return NULL; }
@@ -5170,9 +5444,17 @@ static void tty_entry(void) {
 
 /* path started in a task of its own, a session leader with t as its
  * controlling terminal and stdin / stdout / stderr; its pid, or -1 with err */
+static int spawn_tty(const char* path, int argc, char** argv, char** envp, pty_t* t, uint32_t uid, char* err, int ecap);
 int app_spawn_tty(const char* path, int argc, char** argv, char** envp, pty_t* t, char* err, int ecap) {
+    return spawn_tty(path, argc, argv, envp, t, 0xFFFFFFFFu, err, ecap);
+}
+int app_spawn_tty_as(uint32_t uid, const char* path, int argc, char** argv, char** envp, pty_t* t, char* err, int ecap) {
+    return spawn_tty(path, argc, argv, envp, t, uid, err, ecap);
+}
+static int spawn_tty(const char* path, int argc, char** argv, char** envp, pty_t* t, uint32_t uid, char* err, int ecap) {
     app_proc_t* p = prepare(path, argc, argv, envp, err, ecap);
     if (!p) return -1;
+    if (uid != 0xFFFFFFFFu) creds_become(p, uid);      /* (an SSH login: that user's) */
     p->pid = -1;
     p->own_task = 1;
     p->has_term = 0;
@@ -5264,6 +5546,19 @@ int app_snapshot(app_info_t* out, int max) {
         out[n].mem = app_mem_bytes(p);
         out[n].threads = 1;
         for (int t = 0; t < APP_THREADS; t++) if (p->threads[t].used && !p->threads[t].done) out[n].threads++;
+        n++;
+    }
+    return n;
+}
+
+/* every process of the user ends (switching user: the one before's apps) - how many */
+int app_end_user(uint32_t uid) {
+    int n = 0;
+    for (int i = 0; i < APP_MAX; i++) {
+        app_proc_t* t = &g_procs[i];
+        if (!t->used || t->zombie || t->ruid != uid) continue;
+        t->kill_req = 1;
+        proc_wake(t);
         n++;
     }
     return n;

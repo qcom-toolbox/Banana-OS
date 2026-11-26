@@ -5,7 +5,7 @@
 #include "kstring.h"
 
 #define BH_MAX  120
-#define BH_PATH "/home/banana/.config/browser-history"
+#define BH_PATH fs_home_join("/.config/browser-history")
 
 typedef struct {
     char     url[BH_URL];
@@ -23,7 +23,7 @@ static void save(void) {
     if (!b) return;
     for (int i = 0; i < g_n; i++)
         n += (uint32_t)ksnprintf(b + n, cap - n, "%u\t%s\t%s\n", g_v[i].hits, g_v[i].url, g_v[i].title);
-    fs_mkdir_p("/home/banana/.config");
+    fs_mkdir_p(fs_home_join("/.config"));
     fs_write_path(BH_PATH, b, n);
     kfree(b);
 }

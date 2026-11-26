@@ -14,10 +14,11 @@
  * from ("Path=..."), so Restore puts it back.
  */
 
-#define DESKTOP_DIR  "/home/banana/Desktop"
-#define TRASH_DIR    "/home/banana/.Trash"
-#define TRASH_FILES  TRASH_DIR "/files"
-#define TRASH_INFO   TRASH_DIR "/info"
+/* (the logged-in user's: fs_home_join) */
+#define DESKTOP_DIR  fs_home_join("/Desktop")
+#define TRASH_DIR    fs_home_join("/.Trash")
+#define TRASH_FILES  fs_home_join("/.Trash/files")
+#define TRASH_INFO   fs_home_join("/.Trash/info")
 
 /* A free name: 0 on success; -1 and empty out on exhaustion/truncation. */
 int  fileops_unique(const char* dir, const char* base, char* out, int cap);

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "rdpd.h"
+#include "../kernel/users.h"
 #include "rdp.h"
 #include "tcp.h"
 #include "tls12.h"
@@ -547,8 +548,10 @@ static int check_client_info(rdp_t* s) {
     pw[pi] = 0;
     if (r.err) { memset(pw, 0, sizeof(pw)); return 0; }
 
-    int ok = name[0] && strcasecmp(name, PASSWD_USER) == 0 &&
-             (passwd_is_set(PASSWD_USER) ? passwd_check(PASSWD_USER, pw) : 1);
+    /* (the desktop is shared: the one logged in on it) */
+    const user_t* me = session_user();
+    const char* who = me ? me->name : PASSWD_USER;
+    int ok = name[0] && strcasecmp(name, who) == 0 && (passwd_is_set(who) ? passwd_check(who, pw) : 1);
     memset(pw, 0, sizeof(pw));
     if (ok) {
         s->authed = 1;

@@ -146,7 +146,7 @@ static tab_t* cur_tab(void) { return g_ntabs ? g_tabs[g_cur] : NULL; }
  * forgotten when the browser closes. */
 
 #define COOKIES     128
-#define COOKIE_FILE "/home/banana/.config/browser/cookies"
+#define COOKIE_FILE fs_home_join("/.config/browser/cookies")
 typedef struct { char domain[96]; char name[64]; char value[1024]; int persist; int httponly; } cookie_t;
 static cookie_t g_cookies[COOKIES];
 static int g_ncookies;
@@ -307,7 +307,7 @@ static void cookies_save(void) {
         n += (uint32_t)ksnprintf(buf + n, cap - n, "%s%s\t%s\t%s\n", g_cookies[i].httponly ? "#HttpOnly_" : "",
                                  g_cookies[i].domain, g_cookies[i].name, g_cookies[i].value);
     }
-    fs_mkdir_p("/home/banana/.config/browser");
+    fs_mkdir_p(fs_home_join("/.config/browser"));
     fs_write_path(COOKIE_FILE, buf, n);
     kfree(buf);
 }
@@ -355,7 +355,7 @@ static void cookies_load(void) {
  * archive, a .bpk, "Content-Disposition: attachment") is saved to
  * ~/Downloads instead; "Save link as" / "Save page as" always save. */
 
-#define DOWNLOAD_DIR "/home/banana/Downloads"
+#define DOWNLOAD_DIR fs_home_join("/Downloads")
 
 typedef struct {
     int      force;          /* save whatever comes */
@@ -1559,7 +1559,7 @@ static void after_page_event(tab_t* t) {
             g_pick_node = p->file_pick;
             g_pick_done = 0;
             g_pick_on = 1;
-            fc_open("Choose a file to upload", "/home/banana", NULL, pick_chosen);
+            fc_open("Choose a file to upload", fs_home_path(), NULL, pick_chosen);
             g_gen++;
         }
     }

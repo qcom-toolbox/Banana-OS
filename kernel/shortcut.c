@@ -65,7 +65,7 @@ int shortcut_resolve(const char* typed, char* target, int tcap, char* name, int 
     /* a folder or a file: its own name */
     if (p[0] == '/' || p[0] == '~') {
         char full[FS_PATH_LEN];
-        if (p[0] == '~') ksnprintf(full, sizeof(full), "/home/banana%s", p + 1);
+        if (p[0] == '~') ksnprintf(full, sizeof(full), "%s%s", fs_home_path(), p + 1);
         else kstrlcpy(full, p, sizeof(full));
         int k = (int)strlen(full);
         while (k > 1 && full[k - 1] == '/') full[--k] = 0;

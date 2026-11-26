@@ -16,6 +16,7 @@ typedef struct { uint32_t width,height; } fb_info_t;
 typedef struct { char* content; } fs_file_t;
 static desk_item_t g_desk[DESK_MAX];static int g_ndesk,checks;
 static fb_info_t screen={800,600};static fs_file_t file;
+static const char* fs_home_join(const char* rel) { static char b[96]; snprintf(b, sizeof(b), "/home/banana%s", rel); return b; }
 static int fs_find_file(const char* p) { (void)p;return 0; }
 static fs_file_t* fs_get_file(int i) { (void)i;return &file; }
 static const fb_info_t* fb_info(void) { return &screen; }

@@ -667,10 +667,18 @@ pid_t getpid(void) { return has_v17() ? __banana->app_id() : 1; }
 /* a thread's id: the app's and the thread's, so no two threads share one */
 pid_t gettid(void) { return getpid() * 1000 + (__banana->version >= 3 ? __banana->thread_id() : 0); }
 int getpagesize(void) { return 4096; }
-uid_t getuid(void) { return 1000; }
-uid_t geteuid(void) { return 1000; }
-gid_t getgid(void) { return 1000; }
-gid_t getegid(void) { return 1000; }
+/* the process's ids (API 35: real, effective, saved user; the same for
+ * groups) - on an older system everything runs as banana (1000) */
+int __banana_has_users(void) { return __banana->version >= 35 && BANANA_HAS(__banana, auth); }
+unsigned int __banana_id(int k) {
+    unsigned int v[6];
+    if (__banana_has_users() && __banana->proc_cred(BANANA_CRED_GET, v, sizeof(v)) == 0) return v[k];
+    return 1000;
+}
+uid_t getuid(void) { return __banana_id(0); }
+uid_t geteuid(void) { return __banana_id(1); }
+gid_t getgid(void) { return __banana_id(3); }
+gid_t getegid(void) { return __banana_id(4); }
 
 long sysconf(int name) {
     unsigned long long total = 512ull << 20, avail = 256ull << 20;

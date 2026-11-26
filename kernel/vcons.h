@@ -26,6 +26,7 @@ int  vcons_broken(const char** why);
 void vcons_stop(void);
 /* the environment the consoles' shells get (TERM...) */
 char** vcons_env(void);
+char** vcons_env_for(const void* user);   /* (a user_t*: its HOME, USER, LOGNAME; NULL the one logged in) */
 /* output to the screen, input from the serial line, shells started again:
  * 1 if there was something to do */
 int  vcons_pump(void);

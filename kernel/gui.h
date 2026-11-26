@@ -13,6 +13,7 @@ void gui_cursor_tick(void);
 
 void gui_set_enabled(int enabled);
 int  gui_is_enabled(void);
+void gui_request_redraw(void);            /* the desktop drawn again soon (any task) */
 
 /* returns 1 if key was consumed by GUI */
 int gui_handle_key(char c);

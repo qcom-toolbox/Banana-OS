@@ -7,6 +7,8 @@
 #include "acpi_sleep.h"
 #include "gui.h"
 #include "notification.h"
+#include "elevate.h"
+#include "users.h"
 #include "serial.h"
 #include "terminal.h"
 #include "timer.h"
@@ -71,7 +73,7 @@ static int g_screenshot_requested;
  * down, Lock, Exit to shell). */
 /* (About and Wallpaper live in Settings now: reached from the desktop's menu) */
 enum { ACT_TERMINAL = 0, ACT_FILES, ACT_BROWSER, ACT_NOTEPAD, ACT_APPS, ACT_TASKMGR, ACT_SETTINGS, ACT_QUIT, ACT_ABOUT,
-       ACT_WALLPAPER, ACT_LOCK, ACT_INSTALL, ACT_PROGRAMS, ACT_POWER, ACT_RESTART, ACT_SHUTDOWN, ACT_RUN_APP, ACT_SLEEP, ACT_DEVMGR, ACT_DISKMGR };
+       ACT_WALLPAPER, ACT_LOCK, ACT_INSTALL, ACT_PROGRAMS, ACT_POWER, ACT_RESTART, ACT_SHUTDOWN, ACT_RUN_APP, ACT_SLEEP, ACT_DEVMGR, ACT_DISKMGR, ACT_SWITCH };
 /* slots: the installer's ("Install Banana OS") is there only on the live CD */
 #define MENU_ITEMS_MAX 10
 #define MENU_SLOT_INSTALL 8
@@ -128,6 +130,7 @@ static int         g_sub_slot = -1;     /* the Start menu item whose submenu is 
 static int g_menu_open = 0;
 static int g_start_hover;         /* the pointer is on the Start orb */
 static int g_lock_pending = 0;   /* "Lock screen" was chosen */
+static int g_switch_pending = 0; /* "Switch user" was chosen */
 static int g_in_lock = 0;        /* the lock screen is up (in some task's gui_poll) */
 /* The pointer. The desktop loop moves it, and so does the timer interrupt
  * (gui_cursor_tick) while the loop is not drawing: interrupts are off
@@ -1819,7 +1822,7 @@ static void desk_add_path(int kind, const char* label, const char* path) {
 
 /* ── where the icons are: ~/.config/desktop-icons ("key<TAB>col<TAB>row"),
  *    the rest fill the free cells in columns from the top left ── */
-#define LAYOUT_FILE "/home/banana/.config/desktop-icons"
+#define LAYOUT_FILE fs_home_join("/.config/desktop-icons")
 #define LAYOUT_MAX  128
 static struct { char key[56]; int col, row; } g_lay[LAYOUT_MAX];
 static int g_nlay = -1;
@@ -1886,7 +1889,7 @@ static void layout_save(void) {
     int o = 0;
     for (int i = 0; i < g_nlay && o < (int)sizeof(buf) - 72; i++)
         o += ksnprintf(buf + o, sizeof(buf) - (size_t)o, "%s\t%d\t%d\n", g_lay[i].key, g_lay[i].col, g_lay[i].row);
-    fs_mkdir_p("/home/banana/.config");
+    fs_mkdir_p(fs_home_join("/.config"));
     fs_write_path(LAYOUT_FILE, buf, (uint32_t)o);
 }
 
@@ -1946,7 +1949,7 @@ static pkg_info_t g_pkgs[DESK_MAX];
 
 /* icons taken off the desktop (programs, the Recycle Bin): their keys in
  * ~/.config/desktop-hidden, one a line. */
-#define HIDDEN_FILE "/home/banana/.config/desktop-hidden"
+#define HIDDEN_FILE fs_home_join("/.config/desktop-hidden")
 #define HIDDEN_MAX  48
 static char g_hidden[HIDDEN_MAX][56];
 static int  g_nhidden = -1;
@@ -1969,7 +1972,7 @@ static void hidden_save(void) {
     static char buf[HIDDEN_MAX * 57];
     int o = 0;
     for (int i = 0; i < g_nhidden; i++) o += ksnprintf(buf + o, sizeof(buf) - (size_t)o, "%s\n", g_hidden[i]);
-    fs_mkdir_p("/home/banana/.config");
+    fs_mkdir_p(fs_home_join("/.config"));
     fs_write_path(HIDDEN_FILE, buf, (uint32_t)o);
 }
 
@@ -2012,7 +2015,7 @@ static void desk_hide(int i) {
  * ~/.config/desktop-apps lists the desktop (graphical) apps already given
  * one: an app installed later gets its shortcut once (as a Windows
  * installer makes one); an app removed takes its shortcuts along. ── */
-#define DESK_APPS_FILE "/home/banana/.config/desktop-apps"
+#define DESK_APPS_FILE fs_home_join("/.config/desktop-apps")
 
 static int listed(const char* file, const char* name) {
     int fi = fs_find_file(file);
@@ -2027,7 +2030,7 @@ static void list_add(const char* file, const char* name) {
     char line[PKG_NAME_MAX + 2];
     ksnprintf(line, sizeof(line), "%s\n", name);
     int fi = fs_find_file(file);
-    if (fi < 0) { fs_mkdir_p("/home/banana/.config"); fi = fs_create(file); }
+    if (fi < 0) { fs_mkdir_p(fs_home_join("/.config")); fi = fs_create(file); }
     if (fi >= 0) fs_append(fi, line, (uint32_t)strlen(line));
 }
 
@@ -2063,7 +2066,7 @@ static void desk_sync_links(void) {
             ksnprintf(target, sizeof(target), "app:%s", PROGS[i]);
             desk_make_link(_(PROGS[i]), target, key);
         }
-        fs_mkdir_p("/home/banana/.config");
+        fs_mkdir_p(fs_home_join("/.config"));
         if (fs_find_file(DESK_APPS_FILE) < 0) fs_create(DESK_APPS_FILE);
     }
     int n = pkg_list(g_pkgs, DESK_MAX);
@@ -2280,6 +2283,7 @@ static void sm_action(int sm) {
     case SM_SHUTDOWN: act = ACT_SHUTDOWN; break;
     case SM_RESTART:  act = ACT_RESTART; break;
     case SM_LOCK:     act = ACT_LOCK; break;
+    case SM_SWITCH:   act = ACT_SWITCH; break;
     case SM_QUIT:     act = ACT_QUIT; break;
     case SM_SLEEP:    act = ACT_SLEEP; break;
     }
@@ -2627,6 +2631,107 @@ static void render_desktop(const fb_info_t* fi, int mx, int my) {
     if (!shown) { shown = 1; boottime_mark("the desktop's first frame"); }
 }
 
+void gui_request_redraw(void) { g_force_redraw = 1; }
+
+/* ── the administrator prompt (kernel/elevate.c) ──────────────────────
+ * Not over the whole screen and stopping nothing: a small window in the
+ * bottom-right corner, over the others, until it is answered. Yes / No for
+ * an administrator (a password if Settings asks for one); a standard user
+ * picks an administrator and types that one's password. Its keys only
+ * once clicked into (or when it shows a password field). */
+static int ep_btn(const elevate_prompt_t* e, int which, int* bx, int* by, int* bw) {
+    *bw = 76;
+    *by = e->y + e->h - 34;
+    *bx = which ? e->x + e->w - 12 - *bw : e->x + e->w - 12 - 2 * *bw - 8;
+    return 0;
+}
+
+static void eprompt_draw(const fb_info_t* fi) {
+    elevate_prompt_t* e = elevate_prompt();
+    if (!e->open) return;
+    int w = 360, h = 122 + (e->admin_pick ? 22 : 0) + (e->need_password ? 30 : 0) + (e->err[0] ? 16 : 0);
+    int x = (int)fi->width - w - 14, y = (int)fi->height - BAR_H - h - 14;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    e->x = x; e->y = y; e->w = w; e->h = h;
+    uint32_t bg = TC(0x1D232C), edge = elevate_prompt_focused() ? TC(0xF0B429) : TC(0x505E74);
+    gfx_fill_rect(x + 4, y + 4, w, h, TC(0x080A0E));
+    draw_bevel_box(x, y, w, h, bg, edge, TC(0x10151D));
+    gfx_fill_rect(x + 1, y + 1, w - 2, 24, TC(0x3A3320));
+    /* a shield */
+    gfx_fill_rect(x + 10, y + 6, 10, 9, TC(0xF0B429));
+    gfx_fill_rect(x + 12, y + 15, 6, 3, TC(0xF0B429));
+    gfx_draw_text(x + 28, y + 8, _("Administrator rights"), TC(0xFFFFFF), TC(0x3A3320));
+    char line[96];
+    ksnprintf(line, sizeof(line), "%s wants to", e->app);
+    gfx_draw_text(x + 14, y + 36, line, TC(0xE8EEF6), bg);
+    ksnprintf(line, sizeof(line), "%s.", e->what);
+    gfx_draw_text(x + 14, y + 52, line, TC(0xE8EEF6), bg);
+    int yy = y + 72;
+    if (e->admin_pick) {
+        ksnprintf(line, sizeof(line), "%s %s  >", _("As:"), e->admin[0] ? e->admin : "?");
+        gfx_draw_text(x + 14, yy, line, TC(0x9AC8FF), bg);
+        yy += 22;
+    }
+    if (e->need_password) {
+        gfx_fill_rect(x + 14, yy, w - 28, 22, TC(0xFFFFFF));
+        gfx_fill_rect(x + 14, yy + 21, w - 28, 1, TC(0x1A73E8));
+        char dots[40];
+        int n = (int)strlen(e->typed);
+        if (n > 38) n = 38;
+        for (int i = 0; i < n; i++) dots[i] = '*';
+        dots[n] = 0;
+        if (n) gfx_draw_text(x + 20, yy + 7, dots, TC(0x101010), TC(0xFFFFFF));
+        else gfx_draw_text(x + 20, yy + 7, elevate_prompt_focused() ? "" : _("password - click here"), TC(0x8A929E), TC(0xFFFFFF));
+        if (elevate_prompt_focused()) gfx_fill_rect(x + 20 + n * 8, yy + 4, 1, 14, TC(0x202020));
+        yy += 30;
+    }
+    if (e->err[0]) gfx_draw_text(x + 14, yy, e->err, TC(0xF08070), bg);
+    int bx, by, bw;
+    ep_btn(e, 0, &bx, &by, &bw);
+    draw_bevel_box(bx, by, bw, 24, TC(0x405478), TC(0x6B7892), TC(0x222A36));
+    gfx_draw_text(bx + (bw - 3 * 8) / 2, by + 8, _("Yes"), TC(0xFFFFFF), TC(0x405478));
+    ep_btn(e, 1, &bx, &by, &bw);
+    draw_bevel_box(bx, by, bw, 24, TC(0x303740), TC(0x535D6E), TC(0x15191F));
+    gfx_draw_text(bx + (bw - 2 * 8) / 2, by + 8, _("No"), TC(0xE8EEF6), TC(0x303740));
+}
+
+/* 1 if the click was the prompt's (a click elsewhere: its keys go back) */
+static int eprompt_click(int mx, int my) {
+    elevate_prompt_t* e = elevate_prompt();
+    if (!e->open) return 0;
+    if (mx < e->x || mx >= e->x + e->w || my < e->y || my >= e->y + e->h) {
+        if (!e->need_password) elevate_prompt_focus(0);       /* (a password being typed keeps them) */
+        return 0;
+    }
+    int bx, by, bw;
+    ep_btn(e, 0, &bx, &by, &bw);
+    if (mx >= bx && mx < bx + bw && my >= by && my < by + 24) { elevate_prompt_answer(1); return 1; }
+    ep_btn(e, 1, &bx, &by, &bw);
+    if (mx >= bx && mx < bx + bw && my >= by && my < by + 24) { elevate_prompt_answer(0); return 1; }
+    if (e->admin_pick && my >= e->y + 68 && my < e->y + 90) { elevate_prompt_next_admin(); return 1; }
+    elevate_prompt_focus(1);
+    return 1;
+}
+
+static void eprompt_key(char c) {
+    elevate_prompt_t* e = elevate_prompt();
+    if (!e->open) return;
+    if (c == '\n' || c == '\r') { elevate_prompt_answer(1); return; }
+    if (c == 27) { elevate_prompt_answer(0); return; }
+    if (c == '\t' && e->admin_pick) { elevate_prompt_next_admin(); return; }
+    if (!e->need_password) {                                   /* (Yes / No: y or n) */
+        if (c == 'y' || c == 'Y') elevate_prompt_answer(1);
+        else if (c == 'n' || c == 'N') elevate_prompt_answer(0);
+        return;
+    }
+    size_t n = strlen(e->typed);
+    if (c == '\b' || c == 127) { if (n) e->typed[n - 1] = 0; }
+    else if ((unsigned char)c >= 32 && n + 1 < sizeof(e->typed)) { e->typed[n] = c; e->typed[n + 1] = 0; }
+    e->err[0] = 0;
+    g_force_redraw = 1;
+}
+
 /* what is drawn over the windows: the taskbar, panels, menus, notes */
 static void render_overlays(const fb_info_t* fi, int mx, int my) {
     if(!fullscreen_active())draw_taskbar_fb(fi);
@@ -2652,6 +2757,7 @@ static void render_overlays(const fb_info_t* fi, int mx, int my) {
     kb_draw_overlays(fi);
     ctxmenu_draw();
     ask_draw(fi);                                   /* a dialog (New shortcut...) over everything */
+    eprompt_draw(fi);                               /* an administrator's question: over that too */
 }
 
 /* A game's frame: only the front app window's pixels changed (and it is
@@ -3077,6 +3183,26 @@ static void gui_poll_body(void) {
      * windows' shells poll too) leaves the screen and the keyboard to it */
     if (g_in_lock || crash_preview_active() || crash_in_progress()) return;
     /* (background tasks - the servers, app windows - call this too, but read no keys) */
+    if (g_switch_pending && g_gui_enabled && !task_is_background()) {
+        /* Switch user: the one logged in's apps end, its windows close, the
+         * picker comes; the desktop is the next one's (icons, home, apps) */
+        g_switch_pending = 0;
+        uint32_t before = session_uid();
+        appwin_release_mouse();
+        vmtools_capture_pointer(0);
+        g_in_lock = 1;
+        g_menu_open = 0; nettray_close();
+        explorer_close(); notepad_close(); settings_close();
+        app_end_user(before);
+        login_switch(&g_cur_mx, &g_cur_my);
+        g_nlay = -1;                       /* (the desktop's icons: the new user's layout) */
+        g_nhidden = -1;
+        g_mouse_from_lock = 1;
+        g_ptr_drawn_x = -1;
+        g_in_lock = 0;
+        keyboard_ctrl_alt_del_pending();
+        gui_screen_changed();
+    }
     if (g_lock_pending && g_gui_enabled && !task_is_background()) {
         g_lock_pending = 0;
         appwin_release_mouse();
@@ -3128,12 +3254,21 @@ static void gui_poll_body(void) {
          * while one is in front, keys are handed to it from here (Ctrl+T
          * and the Start menu first). Apps and Task Manager read no keys
          * (Esc closes them). */
-        if (nettray_is_open() || g_ask.open || gui_notepad_focused() || gui_appwin_focused() || (kb_modal() && g_front_app >= 0) ||
+        if (elevate_prompt_focused() || nettray_is_open() || g_ask.open || gui_notepad_focused() || gui_appwin_focused() || (kb_modal() && g_front_app >= 0) ||
             ((g_front_app == APP_LAUNCHER || g_front_app == APP_TASKMGR || g_front_app == APP_FILES || g_front_app == APP_SETTINGS || g_front_app == APP_INSTALLER || g_front_app == APP_DEVMGR || g_front_app == APP_DISKMGR) &&
              app_visible(g_front_app) && tty_current() < 0)) {
             for (int k = 0; k < 64; k++) {
                 char c = keyboard_try_getchar();
                 if (!c) break;
+                if (elevate_prompt_focused()) {         /* the administrator prompt, clicked into */
+                    if (c == 27) {
+                        char c2 = keyboard_try_getchar();
+                        if (c2 == '[') { char c3 = keyboard_try_getchar(); if (c3 >= '0' && c3 <= '9') keyboard_try_getchar(); continue; }
+                    }
+                    eprompt_key(c);
+                    g_force_redraw = 1;
+                    continue;
+                }
                 if (g_ask.open) {                       /* a dialog (New shortcut...): its field */
                     if (c == 27) {
                         char c2 = keyboard_try_getchar();
@@ -3330,6 +3465,8 @@ static void gui_poll_body(void) {
         prev_right = right;
         if(captured) { click=rclick=0;left=0; }
         if ((click || rclick) && g_np_open) { if (click) np_click(fi, mx, my); else g_np_open = 0; g_force_redraw = 1; click = rclick = 0; }
+        if (click && eprompt_click(mx, my)) { click = 0; g_force_redraw = 1; }
+        else if (click) g_force_redraw |= elevate_prompt()->open;
         if (click && notify_click(fi, mx, my)) { click = 0; g_force_redraw = 1; }
         if ((click || rclick) && g_cb_open) { if (click) cb_click(fi, mx, my); else g_cb_open = 0; g_force_redraw = 1; click = rclick = 0; }
         if ((click || rclick) && ep_is_open()) { if (click) ep_click(fi, BAR_H, mx, my); else ep_close(); g_force_redraw = 1; click = rclick = 0; }
@@ -3786,8 +3923,11 @@ static void do_action(int act) {
     case ACT_RESTART: shell_power(1); break;          /* (saves the files first) */
     case ACT_SHUTDOWN: shell_power(0); break;
     case ACT_SLEEP: shell_sleep();g_force_redraw=1;break;
+    case ACT_SWITCH:
+        g_switch_pending = 1;              /* gui_poll(): the user picker, outside any menu */
+        break;
     case ACT_LOCK:
-        if (passwd_is_set(PASSWD_USER)) {
+        if (session_user() && passwd_is_set(session_user()->name)) {
             g_lock_pending = 1;            /* gui_poll() shows it, outside any menu */
         } else {
             settings_open_page(SETTINGS_PAGE_STARTUP);
@@ -4031,6 +4171,7 @@ int gui_handle_arrow(char esc_code) {
 
 int gui_handle_key(char c) {
     if (gfx_available() && !g_gui_enabled) return 0;
+    if (gfx_available() && elevate_prompt_focused()) { eprompt_key(c); g_force_redraw = 1; return 1; }
     if (gfx_available() && g_ask.open) { ask_key(c); return 1; }     /* a dialog (New shortcut...) has the keys */
     if(gfx_available() && nettray_is_open()) {
         int code=c=='\t' && (keyboard_mods()&1)?KB_BACKTAB:(unsigned char)c;

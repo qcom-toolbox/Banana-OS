@@ -48,13 +48,17 @@ uid_t   getuid(void);
 uid_t   geteuid(void);
 gid_t   getgid(void);
 gid_t   getegid(void);
-int     setuid(uid_t uid);         /* only to banana (1000): EPERM otherwise */
+int     setuid(uid_t uid);         /* Unix's rules (root: any; others: their real / saved id) */
 int     setgid(gid_t gid);
 int     seteuid(uid_t uid);
 int     setegid(gid_t gid);
 int     setreuid(uid_t r, uid_t e);
 int     setregid(gid_t r, gid_t e);
 int     getgroups(int n, gid_t* list);
+int     setresuid(uid_t r, uid_t e, uid_t s);
+int     setresgid(gid_t r, gid_t e, gid_t s);
+int     getresuid(uid_t* r, uid_t* e, uid_t* s);
+int     getresgid(gid_t* r, gid_t* e, gid_t* s);
 int     getpagesize(void);
 int     gethostname(char* name, size_t len);
 #define F_OK 0

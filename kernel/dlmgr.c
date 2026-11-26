@@ -10,7 +10,7 @@
 
 #define DLM_MAX      40               /* entries kept in the list */
 #define DLM_WORKERS  2                /* downloads at once (more wait their turn) */
-#define LIST_PATH    "/home/banana/.config/downloads"
+#define LIST_PATH    fs_home_join("/.config/downloads")
 
 typedef struct {
     int      used;
@@ -50,7 +50,7 @@ static void save_list(void) {
         n += (uint32_t)ksnprintf(b + n, cap - n, "%d\t%u\t%u\t%u\t%s\t%s\n", e->i.state, e->i.got, e->i.total,
                                  e->i.when, e->i.path, e->full_url ? e->full_url : "");
     }
-    fs_mkdir_p("/home/banana/.config");
+    fs_mkdir_p(fs_home_join("/.config"));
     fs_write_path(LIST_PATH, b, n);
     kfree(b);
 }

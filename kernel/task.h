@@ -112,6 +112,7 @@ void task_set_fs(uintptr_t base);
 uintptr_t task_get_fs(void);              /* (fork: the calling thread's, for its child) */
 /* the calling task's current folder (kernel/fs.c), its own */
 int* task_cwd_slot(void);
+const void** task_cred_slot(void);
 
 /* 1 once the scheduler runs (task_init): tasks may sleep */
 int  task_ready(void);

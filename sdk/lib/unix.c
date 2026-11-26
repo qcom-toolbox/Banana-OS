@@ -275,7 +275,14 @@ ssize_t getline(char** line, size_t* cap, FILE* f) { return getdelim(line, cap, 
 
 /* ── processes: fork, exec, wait, groups (proc.c) ─────────────────── */
 
-char* getlogin(void) { return "banana"; }
+char* getlogin(void) {
+    /* (the real user's name; LOGNAME as a login gave it) */
+    static char name[64];
+    struct passwd* pw = getpwuid(getuid());
+    const char* n = pw ? pw->pw_name : getenv("LOGNAME");
+    snprintf(name, sizeof(name), "%s", n ? n : "banana");
+    return name;
+}
 static long pc_value(int n) {
     switch (n) {
     case _PC_LINK_MAX: return 65000;
@@ -293,82 +300,241 @@ long pathconf(const char* p, int n) { (void)p; return pc_value(n); }
 long fpathconf(int fd, int n) { (void)fd; return pc_value(n); }
 int getdtablesize(void) { return 64 + 3; }
 
-/* ── the user ─────────────────────────────────────────────────────── */
+/* ── users and groups ─────────────────────────────────────────────── */
 
-static struct passwd g_pw = { "banana", "x", 1000, 1000, "Banana OS", "/home/banana", "/bin/bash" };
-static struct passwd g_root = { "root", "x", 0, 0, "root", "/root", "/bin/bash" };
-static char* g_members[] = { "banana", NULL };
-static char* g_root_members[] = { NULL };
-static struct group g_gr = { "banana", "x", 1000, g_members };
-static struct group g_root_gr = { "root", "x", 0, g_root_members };
+/* /etc/passwd and /etc/group, read line by line (an older system without
+ * them: banana and root, as before) */
+extern int __banana_has_users(void);
+extern unsigned int __banana_id(int k);
 
-struct passwd* getpwuid(uid_t uid) { return uid == 1000 ? &g_pw : uid == 0 ? &g_root : NULL; }
-struct passwd* getpwnam(const char* name) { return !name ? NULL : !strcmp(name, "banana") ? &g_pw : !strcmp(name, "root") ? &g_root : NULL; }
-int getpwuid_r(uid_t uid, struct passwd* pw, char* buf, size_t len, struct passwd** out) {
-    (void)buf; (void)len;
-    struct passwd* p = getpwuid(uid);
-    if (p) *pw = *p;
-    *out = p ? pw : NULL;
+static struct passwd g_pw;
+static char g_pwbuf[512];
+static struct group g_gr;
+static char g_grbuf[1024];
+static char* g_grmem[64];
+
+/* line split at ':' into at most n fields (in place); how many */
+static int split_colon(char* line, char** f, int n) {
+    int k = 0;
+    char* nl = strchr(line, '\n');
+    if (nl) *nl = 0;
+    f[k++] = line;
+    for (char* p = line; *p && k < n; p++) if (*p == ':') { *p = 0; f[k++] = p + 1; }
+    return k;
+}
+
+static int pw_fill(struct passwd* pw, char* buf, size_t len, const char* line) {
+    if (strlen(line) + 1 > len) return ERANGE;
+    strcpy(buf, line);
+    char* f[7];
+    if (split_colon(buf, f, 7) < 7) return ENOENT;
+    pw->pw_name = f[0]; pw->pw_passwd = f[1];
+    pw->pw_uid = (uid_t)strtoul(f[2], NULL, 10); pw->pw_gid = (gid_t)strtoul(f[3], NULL, 10);
+    pw->pw_gecos = f[4]; pw->pw_dir = f[5]; pw->pw_shell = f[6];
     return 0;
+}
+
+static int gr_fill(struct group* gr, char** mem, int nmem, char* buf, size_t len, const char* line) {
+    if (strlen(line) + 1 > len) return ERANGE;
+    strcpy(buf, line);
+    char* f[4];
+    if (split_colon(buf, f, 4) < 3) return ENOENT;
+    gr->gr_name = f[0]; gr->gr_passwd = f[1];
+    gr->gr_gid = (gid_t)strtoul(f[2], NULL, 10);
+    int k = 0;
+    if (f[3]) {
+        char* m = f[3];
+        while (m && *m && k < nmem - 1) {
+            mem[k++] = m;
+            m = strchr(m, ',');
+            if (m) *m++ = 0;
+        }
+    }
+    mem[k] = NULL;
+    gr->gr_mem = mem;
+    return 0;
+}
+
+/* the first line of path whose field `key` (0 name, 2 id) is name / id */
+static int find_line(const char* path, int key, const char* name, unsigned id, char* out, size_t cap) {
+    FILE* fp = fopen(path, "r");
+    if (!fp) return -1;
+    char line[1024];
+    int found = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (line[0] == '#' || !strchr(line, ':')) continue;
+        char tmp[1024];
+        strcpy(tmp, line);
+        char* f[4];
+        if (split_colon(tmp, f, 4) < 3) continue;
+        if (key == 0 ? !strcmp(f[0], name) : (unsigned)strtoul(f[2], NULL, 10) == id) {
+            strncpy(out, line, cap - 1);
+            out[cap - 1] = 0;
+            char* nl = strchr(out, '\n');
+            if (nl) *nl = 0;
+            found = 1;
+            break;
+        }
+    }
+    fclose(fp);
+    return found ? 0 : 1;
+}
+
+static const char* const OLD_PASSWD[2] = { "root:x:0:0:root:/root:/bin/bash", "banana:x:1000:1000:Banana OS:/home/banana:/bin/bash" };
+static const char* const OLD_GROUP[2] = { "root:x:0:", "banana:x:1000:banana" };
+
+static int pw_lookup(int key, const char* name, unsigned id, struct passwd* pw, char* buf, size_t len) {
+    char line[512];
+    int r = find_line("/etc/passwd", key, name, id, line, sizeof(line));
+    if (r < 0) {                                         /* (no /etc/passwd: the old two) */
+        for (int i = 0; i < 2; i++) {
+            char tmp[128], *f[7];
+            strcpy(tmp, OLD_PASSWD[i]);
+            split_colon(tmp, f, 7);
+            if (key == 0 ? !strcmp(f[0], name) : strtoul(f[2], NULL, 10) == id) return pw_fill(pw, buf, len, OLD_PASSWD[i]);
+        }
+        return ENOENT;
+    }
+    return r ? ENOENT : pw_fill(pw, buf, len, line);
+}
+
+static int gr_lookup(int key, const char* name, unsigned id, struct group* gr, char** mem, int nmem, char* buf, size_t len) {
+    char line[1024];
+    int r = find_line("/etc/group", key, name, id, line, sizeof(line));
+    if (r < 0) {
+        for (int i = 0; i < 2; i++) {
+            char tmp[128], *f[4];
+            strcpy(tmp, OLD_GROUP[i]);
+            split_colon(tmp, f, 4);
+            if (key == 0 ? !strcmp(f[0], name) : strtoul(f[2], NULL, 10) == id) return gr_fill(gr, mem, nmem, buf, len, OLD_GROUP[i]);
+        }
+        return ENOENT;
+    }
+    return r ? ENOENT : gr_fill(gr, mem, nmem, buf, len, line);
+}
+
+struct passwd* getpwuid(uid_t uid) { return pw_lookup(2, NULL, uid, &g_pw, g_pwbuf, sizeof(g_pwbuf)) ? NULL : &g_pw; }
+struct passwd* getpwnam(const char* name) { return !name || pw_lookup(0, name, 0, &g_pw, g_pwbuf, sizeof(g_pwbuf)) ? NULL : &g_pw; }
+int getpwuid_r(uid_t uid, struct passwd* pw, char* buf, size_t len, struct passwd** out) {
+    int r = pw_lookup(2, NULL, uid, pw, buf, len);
+    *out = r ? NULL : pw;
+    return r == ENOENT ? 0 : r;
 }
 int getpwnam_r(const char* name, struct passwd* pw, char* buf, size_t len, struct passwd** out) {
-    (void)buf; (void)len;
-    struct passwd* p = getpwnam(name);
-    if (p) *pw = *p;
-    *out = p ? pw : NULL;
-    return 0;
+    int r = name ? pw_lookup(0, name, 0, pw, buf, len) : ENOENT;
+    *out = r ? NULL : pw;
+    return r == ENOENT ? 0 : r;
 }
-struct group* getgrgid(gid_t gid) { return gid == 1000 ? &g_gr : gid == 0 ? &g_root_gr : NULL; }
-struct group* getgrnam(const char* name) { return !name ? NULL : !strcmp(name, "banana") ? &g_gr : !strcmp(name, "root") ? &g_root_gr : NULL; }
+struct group* getgrgid(gid_t gid) { return gr_lookup(2, NULL, gid, &g_gr, g_grmem, 64, g_grbuf, sizeof(g_grbuf)) ? NULL : &g_gr; }
+struct group* getgrnam(const char* name) { return !name || gr_lookup(0, name, 0, &g_gr, g_grmem, 64, g_grbuf, sizeof(g_grbuf)) ? NULL : &g_gr; }
 int getgrgid_r(gid_t gid, struct group* g, char* buf, size_t len, struct group** out) {
-    (void)buf; (void)len;
-    struct group* r = getgrgid(gid);
-    if (r) *g = *r;
-    *out = r ? g : NULL;
-    return 0;
+    /* (the member pointers go at the start of buf, the text after them) */
+    size_t pl = 32 * sizeof(char*);
+    if (len < pl + 16) { *out = NULL; return ERANGE; }
+    int r = gr_lookup(2, NULL, gid, g, (char**)buf, 32, buf + pl, len - pl);
+    *out = r ? NULL : g;
+    return r == ENOENT ? 0 : r;
 }
 int getgrnam_r(const char* name, struct group* g, char* buf, size_t len, struct group** out) {
-    (void)buf; (void)len;
-    struct group* r = getgrnam(name);
-    if (r) *g = *r;
-    *out = r ? g : NULL;
-    return 0;
+    size_t pl = 32 * sizeof(char*);
+    if (len < pl + 16 || !name) { *out = NULL; return name ? ERANGE : 0; }
+    int r = gr_lookup(0, name, 0, g, (char**)buf, 32, buf + pl, len - pl);
+    *out = r ? NULL : g;
+    return r == ENOENT ? 0 : r;
 }
 
-/* the user database, walked (one entry each) */
-static int g_pwent, g_grent;
-void setpwent(void) { g_pwent = 0; }
-void endpwent(void) { g_pwent = 0; }
-struct passwd* getpwent(void) { int i = g_pwent++; return i == 0 ? &g_root : i == 1 ? &g_pw : NULL; }
-void setgrent(void) { g_grent = 0; }
-void endgrent(void) { g_grent = 0; }
-struct group* getgrent(void) { int i = g_grent++; return i == 0 ? &g_root_gr : i == 1 ? &g_gr : NULL; }
+/* the user database, walked */
+static FILE* g_pwf;
+static FILE* g_grf;
+static int g_pwold, g_grold;
+void setpwent(void) { if (g_pwf) rewind(g_pwf); g_pwold = 0; }
+void endpwent(void) { if (g_pwf) fclose(g_pwf); g_pwf = NULL; g_pwold = 0; }
+struct passwd* getpwent(void) {
+    if (!g_pwf && !g_pwold) { g_pwf = fopen("/etc/passwd", "r"); if (!g_pwf) g_pwold = 1; }
+    if (g_pwold) { if (g_pwold > 2) return NULL; return pw_fill(&g_pw, g_pwbuf, sizeof(g_pwbuf), OLD_PASSWD[g_pwold++ - 1]) ? NULL : &g_pw; }
+    char line[512];
+    while (fgets(line, sizeof(line), g_pwf)) {
+        if (line[0] == '#' || !strchr(line, ':')) continue;
+        if (pw_fill(&g_pw, g_pwbuf, sizeof(g_pwbuf), line) == 0) return &g_pw;
+    }
+    return NULL;
+}
+void setgrent(void) { if (g_grf) rewind(g_grf); g_grold = 0; }
+void endgrent(void) { if (g_grf) fclose(g_grf); g_grf = NULL; g_grold = 0; }
+struct group* getgrent(void) {
+    if (!g_grf && !g_grold) { g_grf = fopen("/etc/group", "r"); if (!g_grf) g_grold = 1; }
+    if (g_grold) { if (g_grold > 2) return NULL; return gr_fill(&g_gr, g_grmem, 64, g_grbuf, sizeof(g_grbuf), OLD_GROUP[g_grold++ - 1]) ? NULL : &g_gr; }
+    char line[1024];
+    while (fgets(line, sizeof(line), g_grf)) {
+        if (line[0] == '#' || !strchr(line, ':')) continue;
+        if (gr_fill(&g_gr, g_grmem, 64, g_grbuf, sizeof(g_grbuf), line) == 0) return &g_gr;
+    }
+    return NULL;
+}
 
-/* changing user: there is only banana, so only to banana */
-static int same_id(unsigned id) {
-    if (id == 1000 || id == (unsigned)-1) return 0;
+/* changing ids (API 35: Unix's rules in the kernel; before, only banana) */
+static int cred_call(int op, unsigned a, unsigned b, unsigned c) {
+    if (!__banana_has_users()) {
+        if ((a == 1000 || a == (unsigned)-1) && (b == 1000 || b == (unsigned)-1) && (c == 1000 || c == (unsigned)-1)) return 0;
+        errno = EPERM;
+        return -1;
+    }
+    unsigned v[3] = { a, b, c };
+    if (__banana->proc_cred(op, v, sizeof(v)) == 0) return 0;
     errno = EPERM;
     return -1;
 }
-int setuid(uid_t uid) { return same_id(uid); }
-int setgid(gid_t gid) { return same_id(gid); }
-int seteuid(uid_t uid) { return same_id(uid); }
-int setegid(gid_t gid) { return same_id(gid); }
-int setreuid(uid_t r, uid_t e) { return same_id(r) || same_id(e) ? -1 : 0; }
-int setregid(gid_t r, gid_t e) { return same_id(r) || same_id(e) ? -1 : 0; }
-/* supplementary groups: an app has only its own (getgroups) - setting them
- * is accepted and changes nothing */
+int setuid(uid_t uid) { return cred_call(BANANA_CRED_SETUID, uid, -1, -1); }
+int setgid(gid_t gid) { return cred_call(BANANA_CRED_SETGID, gid, -1, -1); }
+int seteuid(uid_t uid) { return cred_call(BANANA_CRED_SETRESUID, -1, uid, -1); }
+int setegid(gid_t gid) { return cred_call(BANANA_CRED_SETRESGID, -1, gid, -1); }
+int setreuid(uid_t r, uid_t e) { return cred_call(BANANA_CRED_SETRESUID, r, e, -1); }
+int setregid(gid_t r, gid_t e) { return cred_call(BANANA_CRED_SETRESGID, r, e, -1); }
+int setresuid(uid_t r, uid_t e, uid_t s) { return cred_call(BANANA_CRED_SETRESUID, r, e, s); }
+int setresgid(gid_t r, gid_t e, gid_t s) { return cred_call(BANANA_CRED_SETRESGID, r, e, s); }
+int getresuid(uid_t* r, uid_t* e, uid_t* s) { *r = __banana_id(0); *e = __banana_id(1); *s = __banana_id(2); return 0; }
+int getresgid(gid_t* r, gid_t* e, gid_t* s) { *r = __banana_id(3); *e = __banana_id(4); *s = __banana_id(5); return 0; }
+
 int setgroups(size_t n, const gid_t* list) {
-    (void)list;
     if (n > 65536) { errno = EINVAL; return -1; }
-    return 0;
+    if (!__banana_has_users()) return 0;
+    unsigned v[16];
+    if (n > 16) n = 16;
+    for (size_t i = 0; i < n; i++) v[i] = list[i];
+    if (__banana->proc_cred(BANANA_CRED_SETGROUPS, v, n * sizeof(unsigned)) == 0) return 0;
+    errno = EPERM;
+    return -1;
 }
 
 int getgroups(int n, gid_t* list) {
-    if (n == 0) return 1;
-    if (n < 1) { errno = EINVAL; return -1; }
-    list[0] = 1000;
-    return 1;
+    if (n < 0) { errno = EINVAL; return -1; }
+    if (!__banana_has_users()) {
+        if (n == 0) return 1;
+        list[0] = 1000;
+        return 1;
+    }
+    unsigned v[16];
+    int k = __banana->proc_cred(BANANA_CRED_GROUPS, v, sizeof(v));
+    if (k < 0) k = 0;
+    if (k > 16) k = 16;
+    if (n == 0) return k;
+    if (n < k) { errno = EINVAL; return -1; }
+    for (int i = 0; i < k; i++) list[i] = v[i];
+    return k;
+}
+
+int initgroups(const char* user, gid_t gid) {
+    gid_t g[16];
+    int n = 0;
+    g[n++] = gid;
+    setgrent();
+    struct group* gr;
+    while ((gr = getgrent()) && n < 16) {
+        if (gr->gr_gid == gid) continue;
+        for (char** m = gr->gr_mem; m && *m; m++) if (!strcmp(*m, user)) { g[n++] = gr->gr_gid; break; }
+    }
+    endgrent();
+    return setgroups((size_t)n, g);
 }
 
 /* ── the system ───────────────────────────────────────────────────── */

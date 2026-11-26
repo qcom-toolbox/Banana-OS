@@ -18,4 +18,7 @@ void login_screen(void);            /* returns once the password was right */
 int  login_lock(int* mouse_x, int* mouse_y);   /* (the pointer, in and out) */
 int  login_is_locked(void);
 
+/* Switch user: the picker over the desktop; the session is who logs in */
+void login_switch(int* mouse_x, int* mouse_y);
+
 #endif

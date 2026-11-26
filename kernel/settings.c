@@ -49,6 +49,8 @@
 #include "tz.h"
 #include "acpi_sleep.h"
 #include "laptop.h"
+#include "users.h"
+#include "elevate.h"
 #include "gpu.h"
 
 void shell_power(int reboot);
@@ -67,8 +69,13 @@ void shell_power(int reboot);
 #define C_ACCENT TC(0x3A7BD5)
 #define C_SEL    TC(0x2C3E5C)
 
-enum { PG_DISPLAY = 0, PG_THEMES, PG_FONTS, PG_SCREEN, PG_TASKBAR, PG_SOUND, PG_KEYBOARD, PG_LANGUAGE, PG_MOUSE, PG_NETWORK, PG_TIME, PG_STARTUP, PG_APPS, PG_ABOUT, PG_WIFI, PG_POWER, PG_UPDATE, PG_COUNT };
-static const char* const PAGE_NAMES[PG_COUNT] = { "Wallpaper", "Themes", "Fonts", "Screen", "Taskbar", "Sound", "Keyboard", "Language", "Mouse", "Network", "Date & time", "Startup", "Apps", "About", "Wi-Fi", "Power & USB-C", "System update" };
+enum { PG_DISPLAY = 0, PG_THEMES, PG_FONTS, PG_SCREEN, PG_TASKBAR, PG_SOUND, PG_KEYBOARD, PG_LANGUAGE, PG_MOUSE, PG_NETWORK, PG_TIME, PG_STARTUP, PG_APPS, PG_ABOUT, PG_WIFI, PG_POWER, PG_UPDATE, PG_USERS, PG_COUNT };
+static const char* const PAGE_NAMES[PG_COUNT] = { "Wallpaper", "Themes", "Fonts", "Screen", "Taskbar", "Sound", "Keyboard", "Language", "Mouse", "Network", "Date & time", "Startup", "Apps", "About", "Wi-Fi", "Power & USB-C", "System update", "Users" };
+
+static void draw_users(void);
+static int  users_key(char c);
+/* the one logged in (users.h) */
+static const char* me_name(void) { const user_t* u = session_user(); return u ? u->name : PASSWD_USER; }
 
 #define KB_ROW 20                           /* Keyboard: a row of the layout list (two columns) */
 
@@ -415,7 +422,7 @@ static void click_fonts(int mx, int my) {
         }
     int by = g_win.y + g_win.h - 50;
     if (inside(mx, my, x, by, 120, 20)) {
-        fc_open(_("Choose a font to install (.ttf)"), "/home/banana/Downloads", is_ttf, font_chosen);
+        fc_open(_("Choose a font to install (.ttf)"), fs_home_join("/Downloads"), is_ttf, font_chosen);
         return;
     }
     int ly = fonts_list_y(), n = font_rows_total(), rows = fonts_rows();
@@ -777,15 +784,15 @@ static void click_themes(int mx, int my) {
         return;
     }
     if (inside(mx, my, x, by, 128, 20)) {
-        fc_open(_("Choose a theme to install (.theme, .btheme)"), "/home/banana/Downloads", is_theme_file, theme_chosen);
+        fc_open(_("Choose a theme to install (.theme, .btheme)"), fs_home_join("/Downloads"), is_theme_file, theme_chosen);
         return;
     }
     if (inside(mx, my, x + 136, by, 128, 20)) {
         char path[96];
         const theme_t* t = theme_get(theme_current());
-        ksnprintf(path, sizeof(path), "/home/banana/Documents/%s.theme", t ? t->name : "my");
+        ksnprintf(path, sizeof(path), "%s/Documents/%s.theme", fs_home_path(), t ? t->name : "my");
         for (char* p = path + 23; *p; p++) if (*p == ' ') *p = '-';
-        fs_mkdir_p("/home/banana/Documents");
+        fs_mkdir_p(fs_home_join("/Documents"));
         if (theme_export(theme_current(), NULL, path) == 0) ksnprintf(g_status, sizeof(g_status), "Saved %s - edit it, then Install", path);
         else ksnprintf(g_status, sizeof(g_status), "Could not write %s", path);
     }
@@ -895,7 +902,7 @@ static void draw_startup(void) {
 
     /* auto-login: the login screen's switch, the other way round */
     checkbox(x, ry[4], !login_required());
-    label(x + 24, ry[4] + 3, passwd_is_set(PASSWD_USER) ? "Log in automatically (no password asked at boot)"
+    label(x + 24, ry[4] + 3, passwd_is_set(me_name()) ? "Log in automatically (no password asked at boot)"
                                                         : "Log in automatically (always: no password is set)", C_TEXT);
 
     checkbox(x, ry[0], rc_on("desktop"));
@@ -921,8 +928,8 @@ static void draw_startup(void) {
 
     /* the password */
     int py = su_pw_y(y);
-    label(x, py, _("Password (for SSH and RDP logins)"), C_HEAD);
-    int set = passwd_is_set(PASSWD_USER);
+    label(x, py, _("Your password (the login, administrator rights, SSH, RDP)"), C_HEAD);
+    int set = passwd_is_set(me_name());
     label(x, py + 18, set ? "A password is set." : "No password yet: the SSH server will not start without one.",
           set ? C_DIM : TC(0xFFC060));
     static const char* const NAMES[2] = { "New:", "Again:" };
@@ -950,7 +957,9 @@ static void su_submit_password(void) {
         ksnprintf(g_status, sizeof(g_status), "The password needs at least %d characters", PASSWD_MIN);
     } else if (strcmp(g_pw[0], g_pw[1]) != 0) {
         kstrlcpy(g_status, "The two passwords are not the same", sizeof(g_status));
-    } else if (passwd_set(PASSWD_USER, g_pw[0]) != 0) {
+    } else if (passwd_is_set(me_name())) {
+        kstrlcpy(g_status, "Change it on the Users page (your current password is asked there)", sizeof(g_status));
+    } else if (passwd_set(me_name(), g_pw[0]) != 0) {
         kstrlcpy(g_status, "Could not save the password", sizeof(g_status));
     } else {
         kstrlcpy(g_status, fsdisk_is_installed() ? "Password saved" : "Password saved (until reboot: not installed)",
@@ -1005,7 +1014,7 @@ static void click_startup(int mx, int my) {
         int on = !rc_on("sshd");
         rc_set("sshd", on, rc_port("sshd", 22));
         kstrlcpy(g_status, !on ? "The SSH server no longer starts at boot"
-                 : passwd_is_set(PASSWD_USER) ? "The SSH server starts at boot"
+                 : passwd_is_set(me_name()) ? "The SSH server starts at boot"
                  : "The SSH server starts at boot (set a password below)", sizeof(g_status));
         return;
     }
@@ -1013,12 +1022,12 @@ static void click_startup(int mx, int my) {
         int on = !rc_on("rdpd");
         rc_set("rdpd", on, rc_port("rdpd", 3389));
         kstrlcpy(g_status, !on ? "The Remote Desktop server no longer starts at boot"
-                 : passwd_is_set(PASSWD_USER) ? "The Remote Desktop server starts at boot"
+                 : passwd_is_set(me_name()) ? "The Remote Desktop server starts at boot"
                  : "The Remote Desktop server starts at boot (set a password below)", sizeof(g_status));
         return;
     }
     if (inside(mx, my, x, ry[4] - 4, w - 100, 24)) {
-        if (!passwd_is_set(PASSWD_USER)) {
+        if (!passwd_is_set(me_name())) {
             kstrlcpy(g_status, "No password is set: Banana OS always logs in by itself", sizeof(g_status));
             return;
         }
@@ -1234,6 +1243,7 @@ void settings_key(char c) {
         g_gen++;
         return;
     }
+    if (users_key(c)) { g_gen++; return; }           /* the Users page's fields */
     if (ipf_key(c)) return;                          /* the manual address fields (Network) */
     if (g_page != PG_STARTUP || g_pw_focus < 0) {
         if (c == 27) settings_close();              /* Esc closes, as in the other windows */
@@ -1709,7 +1719,7 @@ static void click_update(int mx, int my) {
     int x = cx0(), y = cy0();
     if (inside(mx, my, x, y + 144, 110, 20)) { fsdisk_set_update_file(NULL); up_scan(); return; }
     if (inside(mx, my, x + 120, y + 144, 150, 20) && !g_up_busy) {
-        fc_open(_("Choose the Banana OS ISO file (Banana_OS.iso)"), "/home/banana/Downloads", is_iso, iso_chosen);
+        fc_open(_("Choose the Banana OS ISO file (Banana_OS.iso)"), fs_home_join("/Downloads"), is_iso, iso_chosen);
         return;
     }
     if (inside(mx, my, x, y + 184, 150, 24)) { up_start(); return; }
@@ -2003,6 +2013,7 @@ void settings_draw(const fb_info_t* fi) {
     case PG_STARTUP:  draw_startup(); break;
     case PG_APPS:     draw_apps(); break;
     case PG_UPDATE:   draw_update(); break;
+    case PG_USERS:    draw_users(); break;
     default:         draw_about(); break;
     }
     if (g_status[0]) gfx_draw_text(x + 10, y + H - 18, g_status, C_DIM, C_PANEL);
@@ -2031,6 +2042,217 @@ int settings_navkey(int code) {
     return r != 0;
 }
 
+/* ── Users: the accounts, and how the administrator prompt asks ───────
+ * Everything here but one's own password is an administrator's: the
+ * first such click asks (elevate.h - Yes / No, or a password), then the
+ * page stays unlocked while it is shown. The same for the pages that
+ * change the system (Network, Date & time, Startup, Apps, System update,
+ * the PC's name). */
+static int  g_unlocked = -1;                     /* the page an administrator allowed */
+static int  g_replay_x, g_replay_y, g_replay_page = -1;
+static int  g_u_sel;                             /* the user chosen in the list */
+static int  g_u_focus = -1;                      /* 0 the new user's name, 1 current, 2 new, 3 again */
+static int  g_u_admin;                           /* the new user: an administrator */
+static char g_u_text[4][64];
+
+static int page_needs_admin(int page) {
+    return page == PG_NETWORK || page == PG_TIME || page == PG_STARTUP || page == PG_APPS || page == PG_UPDATE || page == PG_USERS;
+}
+
+static void unlocked_cb(void* ctx, int allowed) {
+    (void)ctx;
+    if (!allowed) { kstrlcpy(g_status, "Not allowed: an administrator's permission is needed", sizeof(g_status)); g_gen++; return; }
+    if (g_replay_page != g_page) return;                  /* (another page meanwhile) */
+    g_unlocked = g_page;
+    int x = g_replay_x, y = g_replay_y;
+    g_replay_page = -1;
+    settings_click(x, y);                                  /* (what was clicked, now allowed) */
+}
+
+/* 1 if the click may change the system now; else the prompt is asked (and the click replayed once allowed) */
+static int admin_ok(int mx, int my) {
+    if (g_unlocked == g_page) return 1;
+    if (elevate_silent(session_uid(), UID_ROOT, ELEVATE_DESKTOP, NULL)) { g_unlocked = g_page; return 1; }
+    if (g_replay_page >= 0) return 0;                      /* (asked already) */
+    g_replay_x = mx; g_replay_y = my; g_replay_page = g_page;
+    static const char* const what[PG_COUNT] = { [PG_NETWORK] = "change the network settings", [PG_TIME] = "change the date and time",
+        [PG_STARTUP] = "change what starts with the computer", [PG_APPS] = "install or remove apps", [PG_UPDATE] = "update the system",
+        [PG_USERS] = "change the users", [PG_ABOUT] = "rename the computer" };
+    elevate_ask_async(session_uid(), "Settings", what[g_page] ? what[g_page] : "change the system", unlocked_cb, NULL);
+    return 0;
+}
+
+#define U_ROW 22
+static int u_people(const user_t** p) { return users_people(p, USERS_MAX); }
+
+static void field(int x, int y, int w, const char* text, int secret, int focus) {
+    bevel(x, y, w, 20, TC(0x141920), TC(0x10141C), focus ? C_ACCENT : TC(0x404B5C));
+    char shown[40];
+    int n = (int)strlen(text), k = 0;
+    for (; k < n && k < (w - 12) / 8 && k < 38; k++) shown[k] = secret ? '*' : text[k];
+    shown[k] = 0;
+    gfx_draw_text(x + 6, y + 6, shown, C_TEXT, TC(0x141920));
+    if (focus && (timer_ms() / 500) % 2 == 0) gfx_fill_rect(x + 6 + k * 8, y + 4, 2, 12, C_TEXT);
+}
+
+static void draw_users(void) {
+    int x = cx0(), y = cy0(), w = cw();
+    label(x, y, _("Users"), C_HEAD);
+    const user_t* p[USERS_MAX];
+    int n = u_people(p);
+    if (g_u_sel >= n) g_u_sel = 0;
+    for (int i = 0; i < n && i < 6; i++) {
+        int ry = y + 22 + i * U_ROW;
+        if (i == g_u_sel) gfx_fill_rect(x, ry - 3, w, U_ROW - 2, C_SEL);
+        char line[120];
+        ksnprintf(line, sizeof(line), "%-14s %-14s %s%s", p[i]->name, user_is_admin(p[i]->uid) ? "Administrator" : "Standard",
+                  passwd_is_set(p[i]->name) ? "password" : "no password", p[i]->uid == session_uid() ? "  (you)" : "");
+        gfx_draw_text(x + 6, ry + 2, line, C_TEXT, i == g_u_sel ? C_SEL : C_PANEL);
+    }
+    int by = y + 22 + 6 * U_ROW + 4;
+    const user_t* u = n ? p[g_u_sel] : NULL;
+    int self = u && u->uid == session_uid();
+    if (u) {
+        button(x, by, 150, user_is_admin(u->uid) ? "Make standard" : "Make administrator", 0);
+        if (!self) button(x + 158, by, 80, "Remove", 0);
+        /* the password: one's own asks the current one */
+        char t[80];
+        ksnprintf(t, sizeof(t), self ? "Your password" : "%s's password", u->name);
+        label(x, by + 32, t, C_HEAD);
+        int fy = by + 52, fx = x;
+        if (self && passwd_is_set(u->name)) { label(fx, fy + 6, "Current:", C_DIM); field(fx + 70, fy, 110, g_u_text[1], 1, g_u_focus == 1); fx += 190; }
+        label(fx, fy + 6, "New:", C_DIM); field(fx + 38, fy, 110, g_u_text[2], 1, g_u_focus == 2);
+        label(fx + 158, fy + 6, "Again:", C_DIM); field(fx + 208, fy, 110, g_u_text[3], 1, g_u_focus == 3);
+        button(x + w - 70, fy, 70, "Set", 0);
+    }
+    /* a new user */
+    int ay = by + 86;
+    label(x, ay, _("Add a user"), C_HEAD);
+    label(x, ay + 26, "Name:", C_DIM);
+    field(x + 50, ay + 20, 150, g_u_text[0], 0, g_u_focus == 0);
+    checkbox(x + 212, ay + 23, g_u_admin);
+    label(x + 232, ay + 26, "Administrator", C_TEXT);
+    button(x + w - 70, ay + 20, 70, "Add", 0);
+    /* the administrator prompt */
+    int py = ay + 58;
+    label(x, py, _("Administrator prompt"), C_HEAD);
+    checkbox(x, py + 22, elevate_gui_wants_password());
+    label(x + 20, py + 25, "Ask for the password (not only Yes / No) on the desktop", C_TEXT);
+    label(x, py + 50, "Remember it for:", C_DIM);
+    static const int mins[5] = { 0, 1, 5, 15, 60 };
+    static const char* const names[5] = { "Every time", "1 min", "5 min", "15 min", "60 min" };
+    int m = elevate_remember_minutes(), bx = x + 130;
+    for (int i = 0; i < 5; i++) { int bw = i ? 62 : 90; button(bx, py + 46, bw, names[i], m == mins[i]); bx += bw + 6; }
+    label(x, py + 74, "With no password set, an administrator is never asked.", C_DIM);
+}
+
+static void u_clear(void) { memset(g_u_text, 0, sizeof(g_u_text)); g_u_focus = -1; }
+
+static void u_set_password(const user_t* u) {
+    int self = u->uid == session_uid();
+    if ((int)strlen(g_u_text[2]) < PASSWD_MIN) ksnprintf(g_status, sizeof(g_status), "The password needs at least %d characters", PASSWD_MIN);
+    else if (strcmp(g_u_text[2], g_u_text[3])) kstrlcpy(g_status, "The two passwords are not the same", sizeof(g_status));
+    else if (self && passwd_is_set(u->name) && !passwd_check(u->name, g_u_text[1])) kstrlcpy(g_status, "That is not your current password", sizeof(g_status));
+    else if (passwd_set(u->name, g_u_text[2]) != 0) kstrlcpy(g_status, "Could not save the password", sizeof(g_status));
+    else ksnprintf(g_status, sizeof(g_status), "The password of %s is set", u->name);
+    u_clear();
+}
+
+static void click_users(int mx, int my) {
+    int x = cx0(), y = cy0(), w = cw();
+    const user_t* p[USERS_MAX];
+    int n = u_people(p);
+    for (int i = 0; i < n && i < 6; i++)
+        if (inside(mx, my, x, y + 19 + i * U_ROW, w, U_ROW - 2)) { if (g_u_sel != i) u_clear(); g_u_sel = i; return; }
+    int by = y + 22 + 6 * U_ROW + 4;
+    const user_t* u = n && g_u_sel < n ? p[g_u_sel] : NULL;
+    int self = u && u->uid == session_uid();
+    char err[96];
+    if (u) {
+        int fy = by + 52, fx = x;
+        if (self && passwd_is_set(u->name)) { if (inside(mx, my, fx + 70, fy, 110, 20)) { g_u_focus = 1; return; } fx += 190; }
+        if (inside(mx, my, fx + 38, fy, 110, 20)) { g_u_focus = 2; return; }
+        if (inside(mx, my, fx + 208, fy, 110, 20)) { g_u_focus = 3; return; }
+        if (inside(mx, my, x + w - 70, fy, 70, 20)) { if (self || admin_ok(mx, my)) u_set_password(u); return; }
+        if (inside(mx, my, x, by, 150, 20)) {
+            if (!admin_ok(mx, my)) return;
+            if (user_set_admin(u->name, !user_is_admin(u->uid), err, sizeof(err)) == 0)
+                ksnprintf(g_status, sizeof(g_status), "%s is %s now", u->name, user_is_admin(u->uid) ? "an administrator" : "a standard user");
+            else kstrlcpy(g_status, err, sizeof(g_status));
+            return;
+        }
+        if (!self && inside(mx, my, x + 158, by, 80, 20)) {
+            if (!admin_ok(mx, my)) return;
+            char name[USER_NAME_MAX];
+            kstrlcpy(name, u->name, sizeof(name));
+            if (user_del(name, 0, err, sizeof(err)) == 0) { ksnprintf(g_status, sizeof(g_status), "%s removed (its home folder is kept)", name); g_u_sel = 0; }
+            else kstrlcpy(g_status, err, sizeof(g_status));
+            return;
+        }
+    }
+    int ay = by + 86;
+    if (inside(mx, my, x + 50, ay + 20, 150, 20)) { g_u_focus = 0; return; }
+    if (inside(mx, my, x + 208, ay + 18, 120, 22)) { g_u_admin = !g_u_admin; return; }
+    if (inside(mx, my, x + w - 70, ay + 20, 70, 20)) {
+        if (!admin_ok(mx, my)) return;
+        if (user_add(g_u_text[0], NULL, g_u_admin, err, sizeof(err)) == 0) {
+            ksnprintf(g_status, sizeof(g_status), "%s added - no password yet (choose it and set one)", g_u_text[0]);
+            const user_t* q[USERS_MAX];
+            int m = u_people(q);
+            for (int i = 0; i < m; i++) if (!strcmp(q[i]->name, g_u_text[0])) g_u_sel = i;
+            u_clear();
+            g_u_admin = 0;
+        } else kstrlcpy(g_status, err, sizeof(g_status));
+        return;
+    }
+    int py = ay + 58;
+    if (inside(mx, my, x, py + 18, w, 22)) {
+        if (!admin_ok(mx, my)) return;
+        elevate_set_gui_password(!elevate_gui_wants_password());
+        kstrlcpy(g_status, elevate_gui_wants_password() ? "The desktop's prompt asks for the password" : "The desktop's prompt asks Yes / No", sizeof(g_status));
+        return;
+    }
+    static const int mins[5] = { 0, 1, 5, 15, 60 };
+    int bx = x + 130;
+    for (int i = 0; i < 5; i++) {
+        int bw = i ? 62 : 90;
+        if (inside(mx, my, bx, py + 46, bw, 20)) {
+            if (!admin_ok(mx, my)) return;
+            elevate_set_remember_minutes(mins[i]);
+            ksnprintf(g_status, sizeof(g_status), mins[i] ? "Remembered for %d minute%s" : "Asked every time", mins[i], mins[i] == 1 ? "" : "s");
+            return;
+        }
+        bx += bw + 6;
+    }
+    g_u_focus = -1;
+}
+
+static int users_key(char c) {
+    if (g_page != PG_USERS || g_u_focus < 0) return 0;
+    char* t = g_u_text[g_u_focus];
+    int n = (int)strlen(t);
+    if (c == '\n') {
+        if (g_u_focus == 0) { g_u_focus = -1; return 1; }
+        if (g_u_focus < 3) { g_u_focus++; return 1; }
+        const user_t* p[USERS_MAX];
+        int m = u_people(p);
+        if (g_u_sel < m && (p[g_u_sel]->uid == session_uid() || g_unlocked == PG_USERS)) u_set_password(p[g_u_sel]);
+        else kstrlcpy(g_status, "Click Set (an administrator's permission is asked)", sizeof(g_status));
+        return 1;
+    }
+    if (c == 27) { u_clear(); return 1; }
+    if (c == '\t') { g_u_focus = g_u_focus == 0 ? 0 : g_u_focus == 3 ? 1 : g_u_focus + 1; return 1; }
+    if (c == '\b') { if (n) t[n - 1] = 0; return 1; }
+    if ((unsigned char)c >= 32 && n < 62) {
+        if (g_u_focus == 0 && !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) {
+            if (c >= 'A' && c <= 'Z') c = (char)(c + 32); else return 1;   /* (a user name: small letters) */
+        }
+        t[n] = c;
+        t[n + 1] = 0;
+    }
+    return 1;
+}
+
 void settings_click(int mx, int my) {
     if (!settings_contains(mx, my)) return;
     int lx = mx - g_win.x, ly = my - g_win.y;
@@ -2049,10 +2271,14 @@ void settings_click(int mx, int my) {
     /* sidebar */
     if (lx >= 8 && lx < 8 + SIDE_W - 4) {
         int i = (ly - BODY_Y - 4) / sidebar_item_h();
-        if (ly >= BODY_Y + 4 && i >= 0 && i < PG_COUNT) { wifi_clear_password(); g_page = i; g_pc_focus = 0; fc_close(); }
+        if (ly >= BODY_Y + 4 && i >= 0 && i < PG_COUNT) { wifi_clear_password(); g_page = i; g_pc_focus = 0; fc_close(); g_unlocked = -1; g_replay_page = -1; u_clear(); }
         return;
     }
     if (fc_active()) { fc_click(mx, my); return; }
+    if (g_page == PG_USERS) { click_users(mx, my); g_gen++; return; }
+    /* a page that changes the system: an administrator's (asked once, then unlocked while it is shown) -
+     * the password fields of Startup are one's own */
+    if (page_needs_admin(g_page) && !(g_page == PG_STARTUP && my >= su_pw_y(cy0())) && !admin_ok(mx, my)) return;
 
     int x = cx0(), y = cy0();
     if(g_page==PG_POWER) {
@@ -2073,6 +2299,13 @@ void settings_click(int mx, int my) {
         }
         if (inside(mx, my, x + fw + 10, y + 53, 90, 20)) {
             if (!g_pc_dirty) kstrlcpy(g_pc_name, hostname_get(), sizeof(g_pc_name));
+            if (g_unlocked != PG_ABOUT && !elevate_silent(session_uid(), UID_ROOT, ELEVATE_DESKTOP, NULL)) {
+                if (g_replay_page < 0) {
+                    g_replay_x = mx; g_replay_y = my; g_replay_page = g_page;
+                    elevate_ask_async(session_uid(), "Settings", "rename the computer", unlocked_cb, NULL);
+                }
+                return;
+            }
             pc_submit();
             return;
         }
@@ -2298,6 +2531,9 @@ void settings_open(void) {
 
 void settings_close(void) {
     wifi_clear_password();
+    g_unlocked = -1;
+    g_replay_page = -1;
+    u_clear();
     g_open = 0;
     g_pc_focus = 0;
     fc_close();

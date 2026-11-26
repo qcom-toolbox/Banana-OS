@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "notepad.h"
+#include "users.h"
 #include "i18n.h"
 #include "theme.h"
 #include "keyboard.h"
@@ -151,8 +152,8 @@ static void clamp_scroll(void) {
 static void full_path(const char* in, char* out, int cap) {
     while (*in == ' ') in++;
     if (in[0] == '/') kstrlcpy(out, in, (size_t)cap);
-    else if (in[0] == '~') ksnprintf(out, (size_t)cap, "/home/banana%s", in + 1);
-    else ksnprintf(out, (size_t)cap, "/home/banana/%s", in);
+    else if (in[0] == '~') ksnprintf(out, (size_t)cap, "%s%s", fs_home_path(), in + 1);
+    else ksnprintf(out, (size_t)cap, "%s/%s", fs_home_path(), in);
 }
 
 static void new_text(void) {
@@ -239,7 +240,7 @@ static void start_dir(char* out, int cap) {
         char* s = strrchr(out, '/');
         if (s && s != out) { *s = 0; return; }
     }
-    kstrlcpy(out, fs_find_dir("/home/banana/Documents") >= 0 ? "/home/banana/Documents" : "/home/banana", (size_t)cap);
+    kstrlcpy(out, fs_find_dir(fs_home_join("/Documents")) >= 0 ? fs_home_join("/Documents") : fs_home_path(), (size_t)cap);
 }
 
 static void open_dialog(void) {
@@ -302,7 +303,7 @@ static void cut(void) {
     g_gen++;
 }
 
-void notepad_paste(void) {
+static void notepad_paste_inner(void) {
     if (!g_open) return;
     uint32_t n;
     const char* clip = clipboard_get(&n);
@@ -413,7 +414,7 @@ static void prompt_done(int ok) {
 
 /* ── window ───────────────────────────────────────────────────────── */
 
-void notepad_open(const char* path) {
+static void notepad_open_inner(const char* path) {
     if (!g_tb_ready) {
         if (tb_load(&g_tb, "", 0) != 0) { status("Out of memory - cannot open editor", 1); return; }
         g_tb_ready = 1;
@@ -487,7 +488,7 @@ static void sb_geom(int* ty, int* th) {
     *ty = range > 0 ? (track - *th) * g_top / range : 0;
 }
 
-void notepad_click(int mx, int my) {
+static void notepad_click_inner(int mx, int my) {
     if (!notepad_contains(mx, my)) return;
     int lx = mx - g_win.x, ly = my - g_win.y;
     g_gen++;
@@ -623,7 +624,7 @@ static void prompt_key(char c) {
     else if ((unsigned char)c >= 32 && n < sizeof(g_input) - 1) { g_input[n] = c; g_input[n + 1] = 0; }
 }
 
-void notepad_key(char c) {
+static void notepad_key_inner(char c) {
     if (!g_open) return;
     g_gen++;
     /* a dialog (Open / Save As, or "save the changes?") has the keys; an
@@ -795,9 +796,41 @@ void notepad_draw(const fb_info_t* fi) {
     if (g_prompt == P_CLOSE) draw_close_box();
 }
 
-void notepad_fkey(int k) {
+static void notepad_fkey_inner(int k) {
     if (k == KEYF_F1 + 2) find_next();                    /* F3, like Ctrl+G */
 }
 
 /* the window manager (kernel/gui.c) moves, snaps and maximizes it through its geometry */
 win_geom_t* notepad_geom(void) { return &g_win; }
+
+/* What a user does in this window has that user's rights (kernel/fs.c):
+ * the logged-in one's - a system file is not theirs to change */
+void notepad_open(const char* path) {
+    const fs_cred_t* oc = fs_cred_swap((const fs_cred_t*)session_cred());
+    notepad_open_inner(path);
+    fs_cred_swap(oc);
+}
+
+void notepad_click(int mx, int my) {
+    const fs_cred_t* oc = fs_cred_swap((const fs_cred_t*)session_cred());
+    notepad_click_inner(mx, my);
+    fs_cred_swap(oc);
+}
+
+void notepad_key(char c) {
+    const fs_cred_t* oc = fs_cred_swap((const fs_cred_t*)session_cred());
+    notepad_key_inner(c);
+    fs_cred_swap(oc);
+}
+
+void notepad_fkey(int k) {
+    const fs_cred_t* oc = fs_cred_swap((const fs_cred_t*)session_cred());
+    notepad_fkey_inner(k);
+    fs_cred_swap(oc);
+}
+
+void notepad_paste(void) {
+    const fs_cred_t* oc = fs_cred_swap((const fs_cred_t*)session_cred());
+    notepad_paste_inner();
+    fs_cred_swap(oc);
+}
