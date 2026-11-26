@@ -292,6 +292,13 @@ Minecraft too - draw on the Radeon:
 
 ## Java and LWJGL
 
+Minecraft's F3 screen names the processor ("CPU: 8x Intel(R) Core(TM) ...")
+through the OSHI library, which reads `/proc/cpuinfo` and
+`/sys/devices/system/cpu` (written by Banana OS at every start) and, in
+OSHI 6 (Minecraft 1.19+), uses JNA: its own Linux `libjnidispatch.so`
+loads on Banana OS (the SDK's `dlopen` gives it the app's C library).
+Run Java with `-Dos.name=Linux`, as LWJGL needs anyway.
+
 `java.bpk` carries the Mesa runtime's `libOSMesa.so` in `/usr/java/lib`
 (CI copies it from the `mesa` job), so Java apps that draw through LWJGL,
 such as Minecraft, use the same drivers as the Mesa ISO.

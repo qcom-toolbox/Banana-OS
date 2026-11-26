@@ -196,6 +196,7 @@ static void* tree_sym(lib_t* l, const char* name) {
 /* ── loading ──────────────────────────────────────────────────────── */
 
 static lib_t* load(const char* name, const char* from_dir, int flags);
+static int is_system_libc(const char* name);
 
 static int read_file(const char* path, unsigned char** out, size_t* len) {
     int fd = open(path, O_RDONLY);
@@ -414,6 +415,7 @@ static lib_t* load_file(const char* path, int flags) {
     for (const Dyn* d = dyn; d->tag != DT_NULL; d++) {
         if (d->tag != DT_NEEDED) continue;
         const char* need = l->strtab + d->val;
+        if (is_system_libc(need)) continue;              /* (the app's: found in the global scope) */
         lib_t* dep = load(need, dir, RTLD_LOCAL);
         if (!dep) { unload(l); return NULL; }
         if (l->ndeps < 16) l->deps[l->ndeps++] = dep;
@@ -434,6 +436,21 @@ static lib_t* loaded(const char* path) {
     for (lib_t* l = g_libs; l; l = l->next)
         if (!strcmp(l->path, path) || (!strchr(path, '/') && !strcmp(l->name, base))) return l;
     return NULL;
+}
+
+/* the system's C library under Linux's names (libc.so.6, libdl, libm,
+ * libpthread, librt...): the app's own - every SDK app carries it. A
+ * library built on Linux that needs only those loads (JNA's
+ * libjnidispatch.so, from its jar); dlopen("libc.so.6") is the app. */
+static int is_system_libc(const char* name) {
+    const char* b = strrchr(name, '/');
+    b = b ? b + 1 : name;
+    static const char* const libs[] = { "libc.so", "libdl.so", "libm.so", "libpthread.so", "librt.so", "libutil.so", "ld-linux-x86-64.so", NULL };
+    for (int i = 0; libs[i]; i++) {
+        size_t n = strlen(libs[i]);
+        if (!strncmp(b, libs[i], n) && (b[n] == 0 || b[n] == '.')) return 1;
+    }
+    return 0;
 }
 
 static lib_t* load(const char* name, const char* from_dir, int flags) {
@@ -472,7 +489,7 @@ static int file_exists(const char* path) {
 }
 
 void* dlopen(const char* path, int flags) {
-    if (!path) return &g_self;
+    if (!path || is_system_libc(path)) return &g_self;
     pthread_mutex_lock(&g_lock);
     lib_t* l = load(path, NULL, flags);
     pthread_mutex_unlock(&g_lock);

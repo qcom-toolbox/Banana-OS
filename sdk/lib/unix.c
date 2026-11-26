@@ -238,6 +238,21 @@ int mkstemp(char* tmpl) {
     return -1;
 }
 
+/* mkstemp with open's flags too (O_CLOEXEC, O_APPEND) */
+int mkostemp(char* tmpl, int flags) {
+    int fd = mkstemp(tmpl);
+    if (fd >= 0 && (flags & ~O_ACCMODE)) {
+        if (flags & O_CLOEXEC) fcntl(fd, F_SETFD, FD_CLOEXEC);
+        if (flags & (O_APPEND | O_NONBLOCK)) fcntl(fd, F_SETFL, flags & (O_APPEND | O_NONBLOCK));
+    }
+    return fd;
+}
+
+/* glibc's internal names that Linux-built libraries call (sdk/lib/dl.c
+ * loads those: libjnidispatch.so, Java's JNA, from its jar) */
+ssize_t __getdelim(char** line, size_t* cap, int delim, FILE* f) { return getdelim(line, cap, delim, f); }
+char* __strdup(const char* s) { return strdup(s); }
+
 /* (unsafe: the name may be taken before it is used - mkstemp is not) */
 char* mktemp(char* tmpl) {
     size_t n = strlen(tmpl);

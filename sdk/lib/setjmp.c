@@ -9,6 +9,8 @@ __asm__(
     ".text\n"
     ".globl setjmp\n"
     ".hidden setjmp\n"
+    ".globl _setjmp\n"                 /* (glibc's name for it: Linux libraries call that) */
+    "_setjmp:\n"
     "setjmp:\n"
     "    movq %rbx, 0(%rdi)\n"
     "    movq %rbp, 8(%rdi)\n"
@@ -44,6 +46,8 @@ __asm__(
     ".text\n"
     ".globl setjmp\n"
     ".hidden setjmp\n"
+    ".globl _setjmp\n"                 /* (glibc's name for it: Linux libraries call that) */
+    "_setjmp:\n"
     "setjmp:\n"
     "    movl 4(%esp), %eax\n"
     "    movl %ebx, 0(%eax)\n"

@@ -62,6 +62,7 @@ int    ptsname_r(int fd, char* buf, size_t len);
 int    putenv(char* s);
 int    clearenv(void);
 int    mkstemp(char* tmpl);
+int    mkostemp(char* tmpl, int flags);
 char*  mkdtemp(char* tmpl);
 char*  mktemp(char* tmpl);
 extern char** environ;

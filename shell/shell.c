@@ -32,6 +32,7 @@
 #include "netcmds.h"
 #include "srvcmds.h"
 #include "usercmds.h"
+#include "../kernel/procfs.h"
 #include "syscmds.h"
 #include "moncmds.h"
 #include "fscmds.h"
@@ -3195,6 +3196,7 @@ void shell_run(void) {
     if (loaded <= 0) fs_init();
     examples_seed();              /* the SDK's example and test apps in /usr/share/extras */
     users_boot();                 /* /etc/passwd, group, shadow, doas.conf: there and up to date (kernel/users.c) */
+    procfs_boot();                /* /proc/cpuinfo, /sys/devices/system/cpu: the processor for Java (OSHI), neofetch (kernel/procfs.c) */
     {   /* the first person logged in until the login says otherwise: banana */
         const user_t* first = user_by_name(PASSWD_USER);
         const user_t* p[1];
