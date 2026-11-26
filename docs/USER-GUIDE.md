@@ -132,8 +132,12 @@ Banana OS seeds a small Unix-style root hierarchy at boot (in-memory, reset on r
 ├── usr/
 ├── var/            (lib/pkg/lists: the repositories' package lists; cache/pkg: App Store pictures)
 ├── tmp/
-└── dev/
+├── dev/
+├── proc/           (made when read, as on Linux: cpuinfo, meminfo, stat, uptime, loadavg, version, mounts, self/, <pid>/ ...)
+└── sys/devices/system/cpu/  (each processor's topology/ and cpufreq/)
 ```
+
+`/proc` is made when it is read and never saved: `cpuinfo` lists every processor thread (`processor`, with `siblings`, `core id` and `cpu cores` saying which ones share a core), `meminfo`, `stat` (each core's busy and idle time), `uptime`, `loadavg`, `version`, `mounts`, `cmdline`, `sys/kernel/hostname`, and a folder for each process (`stat`, `status`, `cmdline`, `comm`, `statm`, `exe`; `self` is your own). It is read-only. Task Manager's CPU page also shows the cores and the logical processors (threads), with a graph for each (*Show each core*).
 
 Every path-taking command accepts absolute (`/etc/motd`), relative (`../etc`), `.`/`..`, and `~` (home) paths, just like a real Unix shell.
 

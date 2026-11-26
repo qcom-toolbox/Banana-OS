@@ -94,6 +94,9 @@ void kfile_put(kfile_t* f) {
     case KF_DIR:
         kfree(f->path);
         break;
+    case KF_MEM:
+        kfree(f->mem);
+        break;
     case KF_PIPE: {
         uintptr_t fl = spin_lock_irq(&g_lock);
         drop_in(f);

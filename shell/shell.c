@@ -1036,6 +1036,18 @@ static void cmd_cat(const char* name) {
         terminal_write_color("cat: missing filename\n", VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
         return;
     }
+    {   /* /proc: made now (kernel/procfs.c) */
+        char pp[FS_PATH_LEN];
+        uint32_t len = 0;
+        char* text = procfs_path(name, pp, sizeof(pp)) ? procfs_read(pp, &len) : NULL;
+        if (text) {
+            for (uint32_t k = 0; k < len; k++) if (!text[k]) text[k] = ' ';   /* (cmdline's NULs) */
+            terminal_write(text);
+            if (len && text[len - 1] != '\n') terminal_putchar('\n');
+            kfree(text);
+            return;
+        }
+    }
     int idx = fs_find_file(name);
     if (idx < 0) {
         terminal_write_color("cat: no such file: ", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);

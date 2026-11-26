@@ -25,6 +25,7 @@
 #define KF_PTS  6          /* ... its slave (/dev/pts/N, /dev/tty) */
 #define KF_DEV  7          /* /dev/null, zero, full, random, urandom (dev: which) */
 #define KF_DIR  8          /* a folder (open of one: its path - openat, fchdir, fdopendir) */
+#define KF_MEM  9          /* a text made when opened: a /proc file (kernel/procfs.c) - mem, mem_len, pos */
 
 #define KF_DEV_NULL   1
 #define KF_DEV_ZERO   2
@@ -64,6 +65,8 @@ typedef struct kfile {
     struct pty*   pty;             /* KF_PTM, KF_PTS */
     int           dev;             /* KF_DEV: KF_DEV_* */
     char*         path;            /* KF_DIR: its absolute path (kmalloc'd) */
+    char*         mem;             /* KF_MEM: its text (kmalloc'd) */
+    uint32_t      mem_len;
 } kfile_t;
 
 kfile_t* kfile_new(int type, int flags);       /* one reference; NULL if out of memory */

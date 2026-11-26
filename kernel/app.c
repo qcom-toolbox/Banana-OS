@@ -30,6 +30,7 @@
 #include "paging.h"
 #include "../net/http.h"
 #include "../sdk/include/banana_api.h"
+#include "procfs.h"
 #include "smp.h"
 #include "zswap.h"
 #include "webview.h"
@@ -790,11 +791,48 @@ static int gpu_path_ok(const char* path, int flags) {
     return 0;
 }
 
+static int a_open(const char* path, int flags);
+/* open() of a /proc path (absolute, clean): -errno */
+static int proc_open(app_proc_t* p, const char* pp, int flags, int depth) {
+    int k = procfs_kind(pp);
+    if (k == 3) {                                       /* self, exe: what it points to */
+        char t[FS_PATH_LEN], full[FS_PATH_LEN];
+        if (depth > 2 || procfs_link(pp, t, sizeof(t)) < 0) return -2;
+        if (t[0] != '/') { ksnprintf(full, sizeof(full), "/proc/%s", t); return proc_open(p, full, flags, depth + 1); }
+        return a_open(t, flags);
+    }
+    if (!k) return (flags & BANANA_O_CREATE) ? -13 : -2;
+    if (flags & (BANANA_O_WRITE | BANANA_O_CREATE | BANANA_O_TRUNC | BANANA_O_APPEND)) return -13;   /* (read-only) */
+    if (k == 2) {
+        kfile_t* d = kfile_new(KF_DIR, KF_READ);
+        char* ap = (char*)kmalloc(FS_PATH_LEN);
+        if (!d || !ap) { kfree(ap); kfile_put(d); return -12; }
+        kstrlcpy(ap, pp, FS_PATH_LEN);
+        d->path = ap;
+        int fd = fd_install(p, d, 0, 0);
+        return fd < 0 ? -24 : fd;
+    }
+    uint32_t len = 0;
+    char* text = procfs_read(pp, &len);
+    if (!text) return -2;
+    kfile_t* f = kfile_new(KF_MEM, KF_READ);
+    if (!f) { kfree(text); return -12; }
+    f->mem = text;
+    f->mem_len = len;
+    f->pos = 0;
+    int fd = fd_install(p, f, 0, 0);
+    return fd < 0 ? -24 : fd;
+}
+
 static int a_open(const char* path, int flags) {
     app_proc_t* p = cur();
     if (!p || !path || !*path) return -1;
     if (p->web_restricted && (p->web_restricted != 2 || !gpu_path_ok(path, flags))) return -13;
     if (!strncmp(path, "/dev/", 5)) return dev_open(p, path, flags);   /* (-errno) */
+    {   /* /proc: made now (kernel/procfs.c) */
+        char pp[FS_PATH_LEN];
+        if (procfs_path(path, pp, sizeof(pp))) return proc_open(p, pp, flags, 0);
+    }
     int didx = fs_find_dir(path);
     if (didx >= 0) {
         /* a folder: a descriptor that knows where it is (read: EISDIR) */
@@ -877,6 +915,13 @@ static long a_read(int fd, void* buf, unsigned long len) {
     case KF_PTM:  return ptm_read(p, f, buf, n32);
     case KF_DEV:  return dev_read(f, buf, n32);
     case KF_DIR:  return -21;                           /* EISDIR */
+    case KF_MEM: {
+        uint32_t left = f->pos < f->mem_len ? f->mem_len - f->pos : 0;
+        if (n32 > left) n32 = left;
+        memcpy(buf, f->mem + f->pos, n32);
+        f->pos += n32;
+        return (long)n32;
+    }
     }
     /* the part asked for only: a big file on the disk is not read whole */
     int n = fs_read(f->fidx, f->pos, buf, n32);
@@ -898,6 +943,7 @@ static long fd_write(app_proc_t* p, int fd, const void* buf, unsigned long len) 
     case KF_PTM:  return ptm_write(p, f, buf, n32);
     case KF_DEV:  return dev_write(f, n32);
     case KF_DIR:  return -9;
+    case KF_MEM:  return -9;
     }
     if (!(f->flags & (KF_WRITE | KF_APPEND))) return -9;
     fs_file_t* ff = fs_file_info(f->fidx);             /* (its data is not read in for a write) */
@@ -912,8 +958,9 @@ static long fd_write(app_proc_t* p, int fd, const void* buf, unsigned long len) 
 
 static long a_seek(int fd, long off, int whence) {
     kfile_t* f = get_fd(cur(), fd);
-    if (!f || f->type != KF_FILE) return -1;
-    long base = whence == BANANA_SEEK_CUR ? (long)f->pos : whence == BANANA_SEEK_END ? (long)fs_file_info(f->fidx)->size : 0;
+    if (!f || (f->type != KF_FILE && f->type != KF_MEM)) return -1;
+    long size = f->type == KF_MEM ? (long)f->mem_len : (long)fs_file_info(f->fidx)->size;
+    long base = whence == BANANA_SEEK_CUR ? (long)f->pos : whence == BANANA_SEEK_END ? size : 0;
     long np = base + off;
     if (np < 0) return -1;
     f->pos = (uint32_t)np;
@@ -1054,11 +1101,11 @@ static int a_fd_info(int fd, void* out) {
     if (!f) return -9;
     banana_fdinfo_t* o = (banana_fdinfo_t*)out;
     memset(o, 0, sizeof(*o));
-    o->type = f->type;
+    o->type = f->type == KF_MEM ? KF_FILE : f->type;   /* (a /proc file: a file, as on Linux - apps of any SDK seek it) */
     o->flags = a_fd_fcntl(fd, 3, 0);
     o->is_sock = f->type == KF_PIPE && f->is_sock;
     o->cloexec = p->cloexec[fd];
-    o->size = f->type == KF_FILE ? fs_file_info(f->fidx)->size : f->type == KF_PIPE ? (unsigned)kpipe_nread(f)
+    o->size = f->type == KF_FILE ? fs_file_info(f->fidx)->size : f->type == KF_MEM ? f->mem_len : f->type == KF_PIPE ? (unsigned)kpipe_nread(f)
             : f->type == KF_PTM || f->type == KF_PTS ? (unsigned)tty_num(f->pty) : f->type == KF_DEV ? (unsigned)f->dev : 0;
     o->id = (uintptr_t)f;
     return 0;
@@ -1266,6 +1313,16 @@ static int a_stat(const char* path, banana_stat_t* st) {
     if (!path || !st) return -1;
     app_proc_t* sp = cur();
     if (sp && sp->web_restricted && (sp->web_restricted != 2 || !gpu_path_ok(path, 0))) return -1;
+    {
+        char pp[FS_PATH_LEN];
+        if (procfs_path(path, pp, sizeof(pp))) {
+            int k = procfs_kind(pp);
+            if (!k) return -1;
+            st->size = 0;
+            st->is_dir = k != 1;
+            return 0;
+        }
+    }
     int f = fs_find_file(path);
     if (f >= 0) { st->size = fs_file_info(f)->size; st->is_dir = 0; return 0; }
     if (fs_find_dir(path) >= 0) { st->size = 0; st->is_dir = 1; return 0; }
@@ -1294,8 +1351,40 @@ static void ustat_fill(banana_ustat_t* u, const fs_stat_t* st) {
     u->ctime = st->ctime;
 }
 
+/* a /proc entry's stat: kind 1 a file, 2 a folder, 3 a link */
+static void proc_ustat(banana_ustat_t* u, const char* pp, int kind, uint32_t size) {
+    memset(u, 0, sizeof(*u));
+    u->mode = kind == 2 ? 0040555u : kind == 3 ? 0120777u : 0100444u;
+    u->nlink = kind == 2 ? 2 : 1;
+    u->size = size;
+    uint32_t h = 5381;
+    for (const char* c = pp; *c; c++) h = h * 33 + (uint8_t)*c;
+    u->ino = h;
+    u->dev = 0xFFFEu;                                  /* (a filesystem of its own) */
+    u->atime = u->mtime = u->ctime = rtc_now();
+}
+
 static int a_fs_ustat(const char* path, int follow, banana_ustat_t* u) {
     if (!path || !u || !uok(u, sizeof(*u))) return -14;
+    {
+        char pp[FS_PATH_LEN];
+        if (procfs_path(path, pp, sizeof(pp))) {
+            int k = procfs_kind(pp);
+            if (k == 3 && follow) {
+                char t[FS_PATH_LEN], full[FS_PATH_LEN];
+                if (procfs_link(pp, t, sizeof(t)) < 0) return -2;
+                if (t[0] == '/') return a_fs_ustat(t, 1, u);
+                ksnprintf(full, sizeof(full), "/proc/%s", t);
+                k = procfs_kind(full);
+                if (!k) return -2;
+                proc_ustat(u, full, k, 0);
+                return 0;
+            }
+            if (!k) return -2;
+            proc_ustat(u, pp, k, 0);                   /* (size 0, as Linux says: read to the end) */
+            return 0;
+        }
+    }
     fs_stat_t st;
     if (fs_stat(path, follow, &st) != 0) return fs_errno();
     if (!fs_access_entry(st.is_dir, st.index, 0)) return -13;     /* (a folder on the way not searchable) */
@@ -1307,6 +1396,11 @@ static int a_fs_fdstat(int fd, banana_ustat_t* u) {
     if (!u || !uok(u, sizeof(*u))) return -14;
     HOLD(h, fd);
     if (!h) return -9;
+    if (h->type == KF_MEM) { proc_ustat(u, "mem", 1, h->mem_len); u->ino = (uint64_t)(uintptr_t)h; return 0; }
+    if (h->type == KF_DIR && h->path && !strncmp(h->path, "/proc", 5) && (h->path[5] == 0 || h->path[5] == '/')) {
+        proc_ustat(u, h->path, 2, 0);
+        return 0;
+    }
     if (h->type == KF_DIR) {
         fs_stat_t ds;
         if (fs_stat(h->path, 1, &ds) != 0) return -2;
@@ -1358,6 +1452,19 @@ static int a_fs_symlink(const char* target, const char* linkpath) {
 
 static int a_fs_readlink(const char* path, char* buf, int cap) {
     if (!path || !buf || cap <= 0 || !uok(buf, (size_t)cap)) return -14;
+    {
+        char pp[FS_PATH_LEN], t[FS_PATH_LEN];
+        if (procfs_path(path, pp, sizeof(pp))) {
+            int k = procfs_kind(pp);
+            if (!k) return -2;
+            if (k != 3) return -22;
+            int n = procfs_link(pp, t, sizeof(t));
+            if (n < 0) return -2;
+            if (n > cap) n = cap;
+            memcpy(buf, t, (size_t)n);
+            return n;
+        }
+    }
     fs_stat_t st;
     if (fs_stat(path, 0, &st) != 0) return -2;
     if (!st.is_link) return -22;                                          /* EINVAL: not a link */
@@ -1487,6 +1594,21 @@ static int a_fs_fdattr(int fd, int what, long long a, long long b) {
 
 static int a_readdir(const char* path, int index, banana_dirent_t* ent) {
     if (!path || !ent || index < 0) return -1;
+    {
+        char pp[FS_PATH_LEN];
+        if (procfs_path(path, pp, sizeof(pp))) {
+            int is_dir = 0;
+            if (procfs_kind(pp) == 3) {                 /* (/proc/self: its folder) */
+                char t[32];
+                if (procfs_link(pp, t, sizeof(t)) < 0) return -1;
+                ksnprintf(pp, sizeof(pp), "/proc/%s", t);
+            }
+            if (!procfs_entry(pp, index, ent->name, sizeof(ent->name), &is_dir)) return -1;
+            ent->size = 0;
+            ent->is_dir = is_dir;
+            return 0;
+        }
+    }
     {
         int d = fs_find_dir(path);
         if (d >= 0 && !fs_access_entry(1, d, 5)) return -13;     /* (read and search it) */
@@ -2966,14 +3088,7 @@ static sysspec_t g_spec[API_SLOTS];
 
 /* ── ps (version 30): the processes as the system sees them ── */
 static uint32_t app_mem_bytes(app_proc_t* p);
-static int a_proc_list(banana_procinfo_t* out, int max) {
-    if (!out || max <= 0 || max > 4096) return -22;
-    if (!uok(out, (size_t)max * sizeof(*out))) return -14;
-    int n = 0;
-    for (int i = 0; i < APP_MAX && n < max; i++) {
-        app_proc_t* t = &g_procs[i];
-        if (!t->used) continue;
-        banana_procinfo_t* o = &out[n++];
+static void procinfo_fill(banana_procinfo_t* o, app_proc_t* t) {
         memset(o, 0, sizeof(*o));
         o->pid = t->seq;
         o->ppid = t->ppid;
@@ -3000,9 +3115,37 @@ static int a_proc_list(banana_procinfo_t* out, int max) {
         kstrlcpy(o->name, t->name, sizeof(o->name));
         if (sys && g_spec[sys - 1].name) kstrlcpy(o->wchan, g_spec[sys - 1].name, sizeof(o->wchan));
         kstrlcpy(o->cmdline, t->cmdline[0] ? t->cmdline : t->name, sizeof(o->cmdline));
+}
+
+static int a_proc_list(banana_procinfo_t* out, int max) {
+    if (!out || max <= 0 || max > 4096) return -22;
+    if (!uok(out, (size_t)max * sizeof(*out))) return -14;
+    int n = 0;
+    for (int i = 0; i < APP_MAX && n < max; i++) {
+        app_proc_t* t = &g_procs[i];
+        if (!t->used) continue;
+        procinfo_fill(&out[n++], t);
     }
     return n;
 }
+
+/* the processes as /proc shows them (kernel/procfs.c) */
+int app_proc_snapshot(procfs_proc_t* out, int max) {
+    int n = 0;
+    for (int i = 0; i < APP_MAX && n < max; i++) {
+        app_proc_t* t = &g_procs[i];
+        if (!t->used) continue;
+        procfs_proc_t* o = &out[n++];
+        procinfo_fill(&o->i, t);
+        o->ruid = t->ruid;
+        o->euid = t->cred.uid;
+        o->rgid = t->rgid;
+        o->egid = t->cred.gid;
+        kstrlcpy(o->exe, t->exe, sizeof(o->exe));
+    }
+    return n;
+}
+int app_current_pid(void) { app_proc_t* p = cur(); return p ? p->seq : 0; }
 
 
 /* Calls that may run on whichever core the app thread makes them on - they
@@ -3676,6 +3819,37 @@ static int make_uapi(app_proc_t* p) {
     p->uapi = (banana_api_t*)at;
     return 0;
 }
+#endif
+
+#ifndef __x86_64__
+/* the processes for /proc on the 32-bit kernel: what it keeps of them */
+int app_proc_snapshot(procfs_proc_t* out, int max) {
+    int n = 0;
+    for (int i = 0; i < APP_MAX && n < max; i++) {
+        app_proc_t* t = &g_procs[i];
+        if (!t->used) continue;
+        procfs_proc_t* o = &out[n++];
+        memset(o, 0, sizeof(*o));
+        o->i.pid = t->seq;
+        o->i.ppid = t->ppid;
+        o->i.pgid = t->pgid;
+        o->i.sid = t->sid;
+        o->i.tty = -1;
+        o->i.state = t->zombie ? 'Z' : 'R';
+        o->i.sched = 'S';
+        o->i.threads = 1;
+        o->i.start_ms = t->start_ms;
+        kstrlcpy(o->i.name, t->name, sizeof(o->i.name));
+        kstrlcpy(o->i.cmdline, t->cmdline[0] ? t->cmdline : t->name, sizeof(o->i.cmdline));
+        o->ruid = t->ruid;
+        o->euid = t->cred.uid;
+        o->rgid = t->rgid;
+        o->egid = t->cred.gid;
+        kstrlcpy(o->exe, t->exe, sizeof(o->exe));
+    }
+    return n;
+}
+int app_current_pid(void) { app_proc_t* p = cur(); return p ? p->seq : 0; }
 #endif
 
 /* ── Unix processes (version 26) ───────────────────────────────────────

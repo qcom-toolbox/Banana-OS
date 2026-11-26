@@ -144,6 +144,8 @@ int  task_query(int pid, int* state, uint32_t* cpu_ms, uint32_t* cpu_pct);
 const char* task_state_str(task_state_t s);
 /* how busy processor core `cpu` was over the last sysmon sample (0-100) */
 uint32_t task_core_pct(int cpu);
+/* ... and the milliseconds it ran tasks since boot (the rest: idle - /proc/stat) */
+uint64_t task_core_busy_ms(int cpu);
 
 /* ── other processor cores (kernel/smp.c starts them) ───────────────
  * Kernel code only ever runs on the boot core: the kernel is written for

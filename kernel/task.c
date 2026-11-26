@@ -196,6 +196,7 @@ static ap_t g_ap[SMP_MAX_CPUS];
 static volatile int g_sleep_pause;
 static volatile int g_sleep_parked[SMP_MAX_CPUS];
 static uint32_t g_core_pct[SMP_MAX_CPUS];   /* per core, from sysmon's last sample */
+static uint64_t g_core_busy[SMP_MAX_CPUS];  /* per core: milliseconds it ran tasks, since boot (/proc/stat) */
 
 /* The idle core to wake for queued work: best one whose hardware-thread
  * siblings are idle too (a whole physical core: Hyper-Threading siblings
@@ -752,6 +753,7 @@ static void recompute_cpu_window(void) {
     }
     /* each core: the time it ran tasks (the boot core's idle loop and halts count as idle) */
     g_core_pct[0] = boot_ms * 100u / total > 100 ? 100 : boot_ms * 100u / total;
+    g_core_busy[0] += boot_ms > total ? total : boot_ms;
     for (int c = 1; c < cpu_count() && c < SMP_MAX_CPUS; c++) {
         uint32_t ms = __sync_fetch_and_and(&g_ap[c].busy_ms, 0);
         if (g_ap[c].task) {                                    /* (still running one) */
@@ -759,7 +761,12 @@ static void recompute_cpu_window(void) {
             if ((int32_t)(now - from) > 0) { ms += now - from; g_ap[c].counted = now; }
         }
         g_core_pct[c] = ms * 100u / total > 100 ? 100 : ms * 100u / total;
+        g_core_busy[c] += ms > total ? total : ms;
     }
+}
+
+uint64_t task_core_busy_ms(int cpu) {
+    return cpu >= 0 && cpu < SMP_MAX_CPUS ? g_core_busy[cpu] : 0;
 }
 
 uint32_t task_core_pct(int cpu) {
