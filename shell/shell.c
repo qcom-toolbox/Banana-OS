@@ -2150,10 +2150,21 @@ static void cmd_update_mode(const char* args, int repair) {
                              VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }
+    if (same == FSDISK_ERR_NEEDS_LIVE) {
+        terminal_write_color("update: this system is bigger than the disk's boot area. Start the Banana OS CD / USB\n"
+                             "        stick and run 'update' there once: the boot area grows and your files are moved\n"
+                             "        after it (kept). After that this system updates itself again.\n",
+                             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
     if (same < 0) {
         terminal_write_color("update: could not read the disk or the CD / USB stick.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }
+    if (fsdisk_update_grows())
+        terminal_writeln("update: the new system is bigger than this disk's boot area - it grows (to 1 GB, as a\n"
+                         "        new install has it, or less if your files need the room) and your files are\n"
+                         "        moved after it. This takes a little longer; do not switch off meanwhile.");
     if (fsdisk_install_layout() == 3)
         terminal_writeln("update: this install uses the old disk layout (32 MB boot area) - it will be\n"
                          "        moved to the new one: a 128 MB boot area, your files using the whole disk.");
@@ -2229,8 +2240,9 @@ static void cmd_update_mode(const char* args, int repair) {
     } else if (rc == FSDISK_ERR_ISO_TOO_BIG) {
         terminal_write_color("update: this CD's system is too big for the disk's boot area.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     } else if (rc == FSDISK_ERR_TOO_SMALL || rc == FSDISK_ERR_FULL) {
-        terminal_write_color("update: the disk is too small for the new layout (128 MB boot area + your files).\n"
-                             "        Nothing was changed.\n", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        terminal_write_color("update: the disk is too small for the new system's boot area and your files.\n"
+                             "        Nothing was changed: delete some files (or use a bigger disk) and retry.\n",
+                             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     } else {
         terminal_write_color("update: failed (disk I/O error). Your files are untouched; run 'update' again.\n",
                              VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);

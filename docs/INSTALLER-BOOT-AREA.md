@@ -34,8 +34,66 @@ to the same aligned, contiguous kernel bytes used by UEFI.
 The image builder verifies alignment, contiguity and identical contents
 before removing duplicate extents, updates both volume sizes and preserves
 other files. Unsupported layouts fail the build. The checksum image limit
-also applies during updates. Images genuinely larger than an existing boot
-area are still rejected before writing; no filesystem relocation is attempted.
+also applies during updates.
+
+## Growing the boot area on update
+
+An image larger than an existing boot area (a disk installed with the old
+128 MiB one, before build 250; or a 256 / 512 MiB partitioned install) is
+no longer rejected when `update` runs from the live CD or USB stick: the
+boot area grows to the size a new install would reserve (1 GiB), or to
+512 / 256 MiB when the files would not fit after it, and the ext4
+filesystem's start moves there (`grow_boot_area` in kernel/fsdisk.c,
+kernel/ext4move.c). The installed system updating itself (`update` from
+the desktop, Settings > System update) cannot move the filesystem it runs
+from: it says to update once from the live stick (`FSDISK_ERR_NEEDS_LIVE`).
+
+How the filesystem moves, delta blocks further in:
+
+1. `/swapfile` is deleted (the system makes it again at its next start).
+2. Inside the old filesystem, every file's data (and every folder's and
+   extent tree's blocks) lying before the new start, where the new
+   superblock and group descriptors go, or past the new end is copied into
+   what becomes the new filesystem (`ext4_move_into`, journaled
+   transaction by transaction).
+3. The old tree is read: names, inodes (hard links once), modes, owners,
+   dates, symbolic link targets, each file's extents.
+4. A new filesystem is made at the new start *around every block the old
+   one uses* (`ext4_mkfs` with those runs kept), its superblock without
+   the ext4 magic until it is complete. The folders, files and links are
+   made again; each file is given the old file's extents where they are
+   (`ext4_adopt_runs`), so its data is never copied a second time. The
+   kept blocks no file has (the old folders, trees, journal) become free.
+5. Sector 0 is written: the new image's MBR with the filesystem's new
+   partition entry. That one write switches the disk over. The rest of
+   the image follows as on every update, then the checksum table.
+
+Until step 5 the old filesystem is the disk's and stays whole: the new one
+is written only into blocks the old one has free. A power cut at any point
+before it leaves the old system and its files as they were (some files'
+data at new places); the next `update` starts again. After step 5 the
+files are in the new filesystem; a cut while the image is written leaves a
+disk that does not start until `update` is run again from the stick, with
+the files kept. If the files would not fit after even a 256 MiB area, or the
+old filesystem's own structures lie where the new one's go (a filesystem
+not made by Banana OS), nothing is changed and `update` says so.
+
+Tests: `sh tools/ext4test/run.sh` moves a filesystem holding files of every
+kind (fragmented, sparse, preallocated, hard and symbolic links, owners,
+permissions, dates, lost+found) by 128 MiB and by 896 MiB, checks every
+file and e2fsck on both filesystems, and cuts the power at 19 points of
+the move (120 in a longer sweep): each time the old filesystem replays its
+journal clean with every file intact, and a second move succeeds. In QEMU:
+build 212 installed on a 2 GiB disk, updated from the live CD to an image
+over 128 MiB (the boot area grew to 1 GiB), restarted from the disk with
+its files, hard links and old programs intact, `fsck` and e2fsck clean.
+
+The same tests found an older crash-safety bug in the ext4 journal: after a
+transaction's commit, its blocks were written in place with the
+superblock's copy among them, which cleared the recovery flag on the disk
+before the other blocks were there - a cut in between left a half-applied
+transaction that Linux (and e2fsck) would not replay. The superblock now
+keeps the flag set until the whole transaction is in place.
 
 Run the host regression tests with: sh tools/tests/fsdisk_boot.sh
 

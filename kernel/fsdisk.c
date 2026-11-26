@@ -1833,6 +1833,7 @@ static int v5_format(const ata_disk_t* d, uint32_t keep_lba, uint32_t keep_sect)
  * their files' data stays where it is, the inodes point at it. */
 
 #include "ext4.h"
+#include "ext4move.h"
 #include "tz.h"
 #include "settings.h"
 
@@ -2716,6 +2717,9 @@ static int sink_compare(uint32_t blk, uint32_t nblk, const uint8_t* data, void* 
     return 0;
 }
 
+static int g_grows;                             /* the last comparison: the boot area must grow (below) */
+static int can_grow(const ata_disk_t* d);
+
 int fsdisk_compare_boot(void) {
     memset(&g_tm, 0, sizeof(g_tm));
     g_cmp_ok = 0;
@@ -2728,8 +2732,13 @@ int fsdisk_compare_boot(void) {
     uint8_t partition[16];
     uint32_t base = boot_partition(&dst, partition);
     if (!base) return FSDISK_ERR_IO;
-    if (!boot_image_fits(base, iso_bytes))
-        return FSDISK_ERR_ISO_TOO_BIG;
+    g_grows = 0;
+    if (!boot_image_fits(base, iso_bytes)) {
+        /* bigger than the disk's boot area: it grows, the files moved after it -
+         * from the live stick (the installed system cannot move its own files) */
+        if (can_grow(&dst)) { g_grows = 1; return 0; }
+        return g_have_target && e4_detect(&dst) ? FSDISK_ERR_NEEDS_LIVE : FSDISK_ERR_ISO_TOO_BIG;
+    }
     int lay = fsdisk_install_layout();
     if (lay != (int)LAYOUT_V4 && lay != 5 && lay != 6) return 0;            /* an old layout: always worth updating */
     htab_load(&dst);
@@ -2791,6 +2800,91 @@ static int migrate_to_v4(const ata_disk_t* d) {
             rc = FSDISK_ERR_IO;
     }
     kfree(buf);
+    return rc;
+}
+
+/* ── a boot area that grows ───────────────────────────────────────────
+ * A new image bigger than the installed disk's boot area (a disk installed
+ * with the old 128 MiB one, before build 250): from the live stick, the
+ * area grows to the size a new install gives it (1 GiB, or less when the
+ * files would not fit after it: 512 or 256 MiB) and the ext4 filesystem's
+ * start moves there (kernel/ext4move.c: the files' data stays where it is
+ * unless it lay in what becomes the boot area). Until sector 0 is written
+ * - the MBR with the filesystem's new partition entry, which switches the
+ * disk over in one write - the old filesystem is the disk's and whole: a
+ * cut leaves the system as it was, and the update is simply run again.
+ * After it, the files are the new filesystem's: a cut while the image is
+ * written leaves a disk that does not start until `update` runs again. */
+
+int fsdisk_update_grows(void) { return g_grows; }
+
+typedef struct { ata_disk_t disk; uint32_t base; } gdev_t;
+static gdev_t g_gold, g_gnew;
+static int gd_read(void* c, uint32_t s, uint32_t n, void* b) { const gdev_t* g = (const gdev_t*)c; return disk_read(&g->disk, g->base + s, n, b); }
+static int gd_write(void* c, uint32_t s, uint32_t n, const void* b) { const gdev_t* g = (const gdev_t*)c; return disk_write(&g->disk, g->base + s, n, b); }
+static int gd_flush(void* c) { return disk_flush(&((const gdev_t*)c)->disk); }
+
+/* the disk's files can be moved from here: an ext4 install, not this
+ * system's own (nor mounted by it) */
+static int can_grow(const ata_disk_t* d) {
+    return !g_have_target && !ext4_mounted() && e4_detect(d);
+}
+
+static int grow_boot_area(const img_src_t* src, const ata_disk_t* d, uint32_t iso_bytes, uint8_t* partition) {
+    uint32_t base = boot_partition(d, NULL);
+    uint32_t end = (d->sectors - V4_TAIL_SECTORS) & ~(V5_BLOCK_SECT - 1u);
+    uint32_t want = boot_install_base(iso_bytes);
+    if (!base || !want || end <= base) return FSDISK_ERR_ISO_TOO_BIG;
+    g_gold.disk = g_gnew.disk = *d;
+    g_gold.base = base;
+    ext4_dev_t odev = { gd_read, gd_write, gd_flush, &g_gold, end - base }, ndev;
+    /* the biggest area the files still fit after: a new install's, or half, ... */
+    uint32_t nb = 0;
+    int rc = FSDISK_ERR_FULL;
+    for (uint32_t b = want; b > base && b >= BOOT_MIN_LBA && boot_image_fits(b, iso_bytes); b /= 2u) {
+        if ((uint64_t)b + V4_TAIL_SECTORS + V4_MIN_SLOT_SECTORS >= end) continue;
+        g_gnew.base = b;
+        ndev = (ext4_dev_t){ gd_read, gd_write, gd_flush, &g_gnew, end - b };
+        int c = ext4move_check(&odev, &ndev, (b - base) / V5_BLOCK_SECT);
+        if (c == EXT4MOVE_OK) { nb = b; break; }
+        if (c != EXT4MOVE_FULL) { rc = FSDISK_ERR_IO; break; }
+    }
+    if (!nb) {
+        klog("fsdisk: the boot area cannot grow from %u MB: %s\n", base / 2048u,
+             rc == FSDISK_ERR_FULL ? "the files would not fit after it" : "the filesystem does not mount");
+        return rc;
+    }
+    klog("fsdisk: the boot area grows from %u MB to %u MB: the filesystem moves after it\n", base / 2048u, nb / 2048u);
+    g_gnew.base = nb;
+    ndev = (ext4_dev_t){ gd_read, gd_write, gd_flush, &g_gnew, end - nb };
+    uint32_t t0 = timer_ms();
+    ext4move_info_t info;
+    int mv = ext4move_run(&odev, &ndev, (nb - base) / V5_BLOCK_SECT, &info);
+    if (mv != EXT4MOVE_OK) {
+        klog("fsdisk: moving the filesystem failed (%d) - the disk is as it was\n", mv);
+        /* (its own structures where the new ones go: not one Banana OS made - it stays) */
+        return mv == EXT4MOVE_FULL ? FSDISK_ERR_FULL : mv == EXT4MOVE_LAYOUT ? FSDISK_ERR_ISO_TOO_BIG : FSDISK_ERR_IO;
+    }
+    klog("fsdisk: the filesystem moved in %u ms: %u files, %u folders, %u MB of data copied out of the new boot area\n",
+         timer_ms() - t0, info.files, info.dirs, info.moved_blocks / 256u);
+    /* the switch: sector 0 - the new image's - with the filesystem's partition entry */
+    memset(partition, 0, 16);
+    partition[1] = partition[5] = 0xfe;
+    partition[2] = partition[3] = partition[6] = partition[7] = 0xff;
+    partition[4] = 0x83;
+    boot_put32(partition + 8, nb);
+    boot_put32(partition + 12, end - nb);
+    uint8_t* b0 = (uint8_t*)kmalloc(2048);
+    if (!b0) return FSDISK_ERR_IO;
+    rc = src_read(src, 0, 1, b0) == 0 && b0[510] == 0x55 && b0[511] == 0xaa ? FSDISK_OK : FSDISK_ERR_SOURCE_READ;
+    if (rc == FSDISK_OK) {
+        memcpy(b0 + 462, partition, 16);
+        if (disk_write(d, 0, 1, b0) != 0 || disk_flush(d) != 0) rc = FSDISK_ERR_IO;
+    }
+    kfree(b0);
+    if (rc == FSDISK_OK && boot_partition(d, NULL) != nb) rc = FSDISK_ERR_IO;
+    if (rc == FSDISK_OK) klog("fsdisk: the disk's filesystem starts at %u MB now\n", nb / 2048u);
+    g_fi_state = -1;
     return rc;
 }
 
@@ -2913,8 +3007,13 @@ static int update_from(img_src_t* sp, const ata_disk_t* dp, uint32_t iso_bytes, 
     uint8_t partition[16];
     uint32_t base = boot_partition(&dst, partition);
     if (!base) return FSDISK_ERR_IO;
-    if (!boot_image_fits(base, iso_bytes))
-        return FSDISK_ERR_ISO_TOO_BIG;
+    if (!boot_image_fits(base, iso_bytes)) {
+        if (!can_grow(&dst)) return g_have_target && e4_detect(&dst) ? FSDISK_ERR_NEEDS_LIVE : FSDISK_ERR_ISO_TOO_BIG;
+        int gr = grow_boot_area(&src, &dst, iso_bytes, partition);
+        if (gr != FSDISK_OK) return gr;
+        base = boot_partition(&dst, NULL);
+        if (!base || !boot_image_fits(base, iso_bytes)) return FSDISK_ERR_IO;
+    }
     int rc = migrate_to_v4(&dst);
     if (rc != FSDISK_OK) return rc;
     /* the boot area only: the files after it stay as they are. With the

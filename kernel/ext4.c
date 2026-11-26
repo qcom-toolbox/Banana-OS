@@ -255,6 +255,11 @@ static uint32_t gblocks(uint32_t g) { return g + 1 < g_groups ? BPG : g_nblocks 
 
 static void add16(uint8_t* p, int d) { p16(p, (uint32_t)((int)g16(p) + d)); }
 
+/* where blocks may be given out: [g_alo, g_ahi) (ext4_move_into: the disk's
+ * start is to become boot area), or anywhere when g_ahi is 0 */
+static uint32_t g_alo, g_ahi;
+static int inr(uint32_t b) { return !g_ahi || (b >= g_alo && b < g_ahi); }
+
 /* up to want free blocks in a row, from goal on (or anywhere): the first, *got
  * how many (they are in use from now on); 0: the disk is full */
 static uint32_t balloc(uint32_t goal, uint32_t want, uint32_t* got) {
@@ -270,9 +275,9 @@ static uint32_t balloc(uint32_t goal, uint32_t want, uint32_t* got) {
             uint32_t from = pass ? 0 : start, to = pass ? start : n;
             for (uint32_t i = from; i < to; ) {
                 if ((i & 7) == 0 && c->data[i >> 3] == 0xFF && i + 8 <= to) { i += 8; continue; }
-                if (c->data[i >> 3] & (1u << (i & 7))) { i++; continue; }
+                if ((c->data[i >> 3] & (1u << (i & 7))) || !inr(g * BPG + i)) { i++; continue; }
                 uint32_t r = 0;
-                while (i + r < n && r < want && !(c->data[(i + r) >> 3] & (1u << ((i + r) & 7)))) r++;
+                while (i + r < n && r < want && !(c->data[(i + r) >> 3] & (1u << ((i + r) & 7))) && inr(g * BPG + i + r)) r++;
                 for (uint32_t j = i; j < i + r; j++) c->data[j >> 3] |= (uint8_t)(1u << (j & 7));
                 cdirty(c);
                 cput(c);
@@ -299,7 +304,7 @@ static uint32_t balloc_contig(uint32_t want, uint32_t* got) {
         uint32_t n = gblocks(g);
         for (uint32_t i = 0; i < n && best_len < want; i++) {
             if ((i & 7) == 0 && i + 8 <= n && c->data[i >> 3] == 0xFF) { cur_len = 0; i += 7; continue; }
-            if (c->data[i >> 3] & (1u << (i & 7))) { cur_len = 0; continue; }
+            if ((c->data[i >> 3] & (1u << (i & 7))) || !inr(g * BPG + i)) { cur_len = 0; continue; }
             if (!cur_len) cur = g * BPG + i;
             if (++cur_len > best_len) { best = cur; best_len = cur_len; }
         }
@@ -1448,6 +1453,175 @@ int ext4_adopt(uint32_t ino, uint64_t size, uint32_t pblk, uint32_t nblocks) {
     return rc;
 }
 
+static int flush_locked(void);
+
+int ext4_adopt_runs(uint32_t ino, uint64_t size, const ext4_run_t* r, uint32_t n) {
+    if (!g_mounted) return -1;
+    for (uint32_t i = 0; i < n; i++) if (!r[i].len || r[i].pblk + r[i].len > g_nblocks || r[i].pblk < 1) return -1;
+    lock();
+    raw_inode_t in;
+    emap_t m;
+    int rc = -1;
+    if (iread(ino, &in) == 0 && emap_load(&in, &m) == 0) {
+        rc = m.n ? -1 : 0;                                    /* (an empty file only) */
+        for (uint32_t i = 0; i < n && rc == 0; i++) {
+            if (i && r[i].lblk < r[i - 1].lblk + r[i - 1].len) { rc = -1; break; }   /* (in order, apart) */
+            uint32_t lim = r[i].unw ? EXT_MAX_LEN - 1u : EXT_MAX_LEN;
+            for (uint32_t k = 0; k < r[i].len && rc == 0; ) {
+                uint32_t len = r[i].len - k < lim ? r[i].len - k : lim;
+                rc = emap_push(&m, r[i].lblk + k, r[i].pblk + k, len, r[i].unw);
+                k += len;
+            }
+        }
+        if (rc == 0) rc = emap_store(&in, &m);
+        if (rc == 0) { set_size(&in, size); rc = iwrite(ino, &in); }
+        emap_free(&m);
+    }
+    unlock();
+    return rc;
+}
+
+int ext4_runs(uint32_t ino, ext4_run_t** out, uint32_t* n) {
+    *out = 0;
+    *n = 0;
+    if (!g_mounted) return -1;
+    lock();
+    raw_inode_t in;
+    emap_t m;
+    int rc = -1;
+    if (iread(ino, &in) == 0 && emap_load(&in, &m) == 0) {
+        rc = 0;
+        if (m.n) {
+            ext4_run_t* r = (ext4_run_t*)kmalloc(m.n * sizeof(ext4_run_t));
+            if (!r) rc = -1;
+            else {
+                for (uint32_t i = 0; i < m.n; i++) r[i] = (ext4_run_t){ m.e[i].lblk, m.e[i].pblk, m.e[i].len, m.e[i].unw };
+                *out = r;
+                *n = m.n;
+            }
+        }
+        emap_free(&m);
+    }
+    unlock();
+    return rc;
+}
+
+int ext4_used_runs(int (*fn)(void* arg, uint32_t blk, uint32_t n), void* arg) {
+    if (!g_mounted) return -1;
+    lock();
+    int rc = flush_locked();
+    uint32_t start = 0, len = 0;
+    for (uint32_t g = 0; g < g_groups && rc == 0; g++) {
+        cblk_t* c = cmeta(bb_of(g), 0);
+        if (!c) { rc = -1; break; }
+        static uint8_t bits[BS];
+        memcpy(bits, c->data, BS);
+        cput(c);
+        uint32_t n = gblocks(g);
+        for (uint32_t i = 0; i < n && rc == 0; i++) {
+            if (bits[i >> 3] & (1u << (i & 7))) { if (!len) start = g * BPG + i; len++; continue; }
+            if (len) { unlock(); rc = fn(arg, start, len); lock(); len = 0; }
+        }
+    }
+    if (rc == 0 && len) { unlock(); rc = fn(arg, start, len); lock(); }
+    unlock();
+    return rc;
+}
+
+/* every inode's blocks (data and tree, but the journal's) that lie outside
+ * [lo, hi) copied into it, the inode pointing there, the old ones freed -
+ * transaction by transaction, so a cut leaves a whole filesystem */
+#define MOVE_RUN 64u
+int ext4_move_into(uint32_t lo, uint32_t hi, uint32_t* moved) {
+    if (moved) *moved = 0;
+    if (!g_mounted || lo >= hi || hi > g_nblocks) return -1;
+    uint8_t* buf = (uint8_t*)kmalloc(MOVE_RUN * BS);
+    if (!buf) return -1;
+    lock();
+    int rc = flush_locked();
+    g_alo = lo;
+    g_ahi = hi;
+    uint32_t total = 0, since = 0;
+    for (uint32_t g = 0; g < g_groups && rc == 0; g++) {
+        if (g16(desc(g) + 0x12) & BG_INODE_UNINIT) continue;
+        cblk_t* ib = cmeta(ib_of(g), 0);
+        if (!ib) { rc = -1; break; }
+        static uint8_t ibits[BS];
+        memcpy(ibits, ib->data, BS);
+        cput(ib);
+        for (uint32_t j = 0; j < g_ipg && rc == 0; j++) {
+            uint32_t ino = g * g_ipg + j + 1;
+            if (!(ibits[j >> 3] & (1u << (j & 7))) || (ino < EXT4_LPF_INO && ino != EXT4_ROOT_INO)) continue;
+            raw_inode_t in;
+            if (iread(ino, &in) != 0) { rc = -1; break; }
+            if (!i_mode(&in) || !i_links(&in) || !(g32(in.r + 0x20) & EXT4_EXTENTS_FL)) continue;
+            emap_t m;
+            if (emap_load(&in, &m) != 0) { rc = -1; break; }
+            int out = 0;
+            for (uint32_t i = 0; i < m.n && !out; i++) out = m.e[i].pblk < lo || m.e[i].pblk + m.e[i].len > hi;
+            for (uint32_t i = 0; i < m.ntree && !out; i++) out = !inr(m.tree[i]);
+            if (!out) { emap_free(&m); continue; }
+            /* the new list: what is inside stays, the rest gets new blocks (its data copied) */
+            emap_t r;
+            memset(&r, 0, sizeof(r));
+            ext_t* gone = 0;
+            uint32_t ngone = 0, gcap = 0;
+            for (uint32_t i = 0; i < m.n && rc == 0; i++) {
+                ext_t x = m.e[i];
+                for (uint32_t k = 0; k < x.len && rc == 0; ) {
+                    uint32_t p = x.pblk + k, run = 1;
+                    int in_range = inr(p);
+                    while (k + run < x.len && inr(p + run) == in_range) run++;
+                    if (in_range) { rc = emap_push(&r, x.lblk + k, p, run, x.unw); k += run; continue; }
+                    uint32_t got = 0, q = balloc(lo, run < MOVE_RUN ? run : MOVE_RUN, &got);
+                    if (!got) { rc = -2; break; }
+                    if (!x.unw) {
+                        for (uint32_t b = 0; b < got; b++) cforget(q + b);
+                        if (dev_read(p, got, buf) != 0 || dev_write(q, got, buf) != 0) { bfree(q, got); rc = -1; break; }
+                    }
+                    rc = emap_push(&r, x.lblk + k, q, got, x.unw);
+                    if (rc == 0 && ngone == gcap) {
+                        gcap = gcap ? gcap * 2 : 8;
+                        ext_t* ng = (ext_t*)krealloc(gone, gcap * sizeof(ext_t));
+                        if (!ng) rc = -1; else gone = ng;
+                    }
+                    if (rc == 0) gone[ngone++] = (ext_t){ q, p, got, 0 };    /* (lblk: where it went) */
+                    else bfree(q, got);
+                    k += got;
+                    total += got;
+                }
+            }
+            if (rc == 0) {
+                kfree(m.e);
+                m.e = r.e;
+                m.n = r.n;
+                m.cap = r.cap;
+                r.e = 0;
+                rc = emap_store(&in, &m) == 0 && iwrite(ino, &in) == 0 ? 0 : -2;
+            }
+            /* the old blocks go - or, failed, the new ones (the inode as it was) */
+            for (uint32_t i = 0; i < ngone; i++) bfree(rc == 0 ? gone[i].pblk : gone[i].lblk, gone[i].len);
+            kfree(r.e);
+            kfree(gone);
+            emap_free(&m);
+            /* (a transaction now and then: the copies are on the disk before it) */
+            if (rc == 0 && ++since >= 128u) { rc = flush_locked(); since = 0; unlock(); task_yield(); lock(); }
+        }
+    }
+    if (rc == 0) rc = flush_locked();
+    g_alo = g_ahi = 0;
+    unlock();
+    kfree(buf);
+    if (moved) *moved = total;
+    return rc;
+}
+
+uint32_t ext4_mkfs_blocks(uint32_t sectors) {
+    uint32_t nb = sectors / SPB, groups = (nb + BPG - 1) / BPG;
+    if (groups > 1 && nb - (groups - 1) * BPG < 512u) nb = (groups - 1) * BPG;
+    return nb;
+}
+
 /* ── to the disk ──────────────────────────────────────────────────── */
 
 uint32_t ext4_dirty_blocks(void) { return g_ndirty + (g_sb_dirty ? 1u : 0u); }
@@ -1600,8 +1774,14 @@ static int jcommit(cblk_t** a, uint32_t n) {
         if (rc == 0) rc = jw_flush();
         if (rc == 0) rc = g_dev.flush(g_dev.ctx);
     }
-    /* committed: in place now, then the journal empty again */
+    /* committed: in place now, then the journal empty again. The superblock's
+     * own copy keeps the recovery flag while it goes in place with the rest:
+     * a cut half-way must leave the journal to be replayed (by Linux too) */
+    cblk_t* sb0 = 0;
+    for (uint32_t i = 0; i < n && !sb0; i++) if (a[i]->blk == 0) sb0 = a[i];
+    if (sb0) p32(sb0->data + 1024 + 0x60, g32(sb0->data + 1024 + 0x60) | INCOMPAT_RECOVER);
     if (rc == 0) rc = write_runs(a, n);
+    if (sb0) p32(sb0->data + 1024 + 0x60, g32(sb0->data + 1024 + 0x60) & ~INCOMPAT_RECOVER);
     if (rc == 0) rc = g_dev.flush(g_dev.ctx);
     if (rc == 0) {
         g_jseq = tid + 1;
