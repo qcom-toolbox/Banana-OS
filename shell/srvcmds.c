@@ -6,6 +6,7 @@
 #include "../kernel/settings.h"
 #include "../net/upnp.h"
 #include "srvcmds.h"
+#include "../kernel/users.h"
 #include "../net/wifi.h"
 #include "netcmds.h"
 #include "../kernel/terminal.h"
@@ -150,7 +151,7 @@ static void cmd_sshd(int argc, char** argv) {
         sshd_print_status();
         uint16_t bp = 22;
         say("      at boot: %s\n", boot_enabled("sshd", &bp) ? "enabled" : "disabled (`sshd enable`)");
-        if (!passwd_is_set(PASSWD_USER)) terminal_writeln("      no password set yet: `passwd`");
+        if (!users_any_password()) terminal_writeln("      nobody has a password yet: `passwd`");
     } else if (strcmp(sub, "start") == 0 || strcmp(sub, "enable") == 0) {
         if (sshd_start(port, e, sizeof(e)) != 0) { fail("sshd", e); return; }
         if (fw_enabled() && !fw_allowed(FW_TCP, (uint16_t)port)) say("note: the firewall keeps port %d closed - `firewall allow tcp %d` opens it\n", port, port);
@@ -162,7 +163,7 @@ static void cmd_sshd(int argc, char** argv) {
         terminal_writeln("sshd: stopped (open sessions stay until they log out)");
     } else {
         terminal_writeln("usage: sshd [status | start [port] | stop | enable [port] | disable]");
-        terminal_writeln("       SSH server, default port 22; log in as " PASSWD_USER " with the `passwd` password");
+        terminal_writeln("       SSH server, default port 22; any user with a password logs in (as that user)");
     }
 }
 

@@ -99,6 +99,7 @@ int keyboard_take_fkey(void);
  * (wait 0), -1 the end; keyboard_getchar gives ^D (4) at the end */
 int  keyboard_redirect_begin(int (*get)(void* ctx, int wait), void* ctx);
 void keyboard_redirect_end(void);
+int  keyboard_redirected(void);   /* 1: this task's keys are a program's stdin (not the desktop's) */
 
 /* 0: the serial line no longer types on the console (kernel/vcons.c reads it) */
 void keyboard_serial_input(int on);

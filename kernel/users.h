@@ -58,6 +58,7 @@ int  user_in_group(uint32_t uid, uint32_t gid);
 /* root, or a member of wheel */
 int  user_is_admin(uint32_t uid);
 int  users_admin_count(void);              /* people who are administrators */
+int  users_any_password(void);             /* some person has a password (SSH can log someone in) */
 
 /* adduser: a new person, /home/<name> made (0700, theirs, with
  * Pictures / Downloads); admin: also in wheel. 0, or -1 with err. */
@@ -83,6 +84,17 @@ const char*   session_home(void);                   /* "/home/banana" */
 /* the logged-in user's file rights (an fs_cred_t*): what Files and
  * Notepad act with - the desktop's own work keeps the kernel's */
 const void*   session_cred(void);
+/* Older programs (built before users) run by someone other than banana:
+ * their paths in /home/banana are that user's home - on unless switched
+ * off (settings home_redirect=0), and not for the apps listed in
+ * home_redirect_skip (names, comma-separated). */
+int  home_redirect_wanted(const char* app);
+int  home_redirect_enabled(void);
+void home_redirect_set(int on);
+int  home_redirect_skips(const char* app);              /* app is listed */
+void home_redirect_skip(const char* app, int skip);     /* add / take it off the list */
+const char* home_redirect_list(void);                  /* the list ("" none) */
+
 /* the people who can log in (uid 1000-59999), in /etc/passwd's order */
 int           users_people(const user_t** out, int max);
 

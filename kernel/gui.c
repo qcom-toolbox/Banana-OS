@@ -3254,9 +3254,12 @@ static void gui_poll_body(void) {
          * while one is in front, keys are handed to it from here (Ctrl+T
          * and the Start menu first). Apps and Task Manager read no keys
          * (Esc closes them). */
-        if (elevate_prompt_focused() || nettray_is_open() || g_ask.open || gui_notepad_focused() || gui_appwin_focused() || (kb_modal() && g_front_app >= 0) ||
+        /* (a command run for a program - kcmd: its keys are that program's
+         * stdin, never the front window's: passwd from SSH or the serial line) */
+        if (!keyboard_redirected() &&
+            (elevate_prompt_focused() || nettray_is_open() || g_ask.open || gui_notepad_focused() || gui_appwin_focused() || (kb_modal() && g_front_app >= 0) ||
             ((g_front_app == APP_LAUNCHER || g_front_app == APP_TASKMGR || g_front_app == APP_FILES || g_front_app == APP_SETTINGS || g_front_app == APP_INSTALLER || g_front_app == APP_DEVMGR || g_front_app == APP_DISKMGR) &&
-             app_visible(g_front_app) && tty_current() < 0)) {
+             app_visible(g_front_app) && tty_current() < 0))) {
             for (int k = 0; k < 64; k++) {
                 char c = keyboard_try_getchar();
                 if (!c) break;
@@ -3869,6 +3872,10 @@ int gui_focused_vt(void) {
     /* an SSH session's shell always has the focus of its own terminal */
     int tt = tty_current();
     if (tt >= 0) return tty_vt(tt);
+    /* a command run for a program (kcmd) reads that program's stdin - an
+     * SSH session, the serial line, bash in a Terminal: its keys are its
+     * own, whatever has the desktop's focus (passwd, doas asked there) */
+    if (keyboard_redirected()) return terminal_vt_get_active();
 
     if (!gfx_available() || !g_gui_enabled) return 0; /* plain console owns input */
 

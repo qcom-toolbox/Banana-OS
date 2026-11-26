@@ -694,7 +694,12 @@ typedef struct banana_api {
      * secret (NULL or "": none) - cmd the current one (the caller's own,
      * when it has one); another's: root. 0, -13, -1. BANANA_AUTH_KCMD: cmd
      * is a system command line (kcmd): 1 if it changes the system and the
-     * caller must be made root first (doas), 0 if it may run as it is. */
+     * caller must be made root first (doas), 0 if it may run as it is.
+     * BANANA_AUTH_MODERN: the SDK's start-up says the program knows about
+     * users (built for version 35 or later): its paths are left as they are.
+     * A program that never says so is an older one - run by another user
+     * than banana, its paths in /home/banana are that user's home instead
+     * (Settings > Users: on by default, off, or not for some apps). */
     int (*auth)(int op, const char* user, const char* secret, const char* cmd);
 } banana_api_t;
 
@@ -756,6 +761,7 @@ typedef struct banana_ucontext {
 #define BANANA_AUTH_CHECK      4
 #define BANANA_AUTH_PASSWD     5
 #define BANANA_AUTH_KCMD       6
+#define BANANA_AUTH_MODERN     7      /* (crt0) built for users: no /home/banana redirect */
 
 /* mic / camera (version 34) */
 #define BANANA_MIC_OPEN      0

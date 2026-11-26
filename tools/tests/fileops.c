@@ -23,6 +23,11 @@ int fs_copy(const char* s,const char* d) { int i=fs_find_file(s);if(i<0||fail_co
 int fs_move(const char* s,const char* d) { (void)s;(void)d;return -1; }
 int fs_path_mount(const char* p) { return !strncmp(p,"/usb",4); }
 int fs_io_error(void) { return 0; }
+static int perm_refuse;
+int fs_perm_error(void) { return perm_refuse; }
+const fs_cred_t* fs_cred_swap(const fs_cred_t* c) { static const fs_cred_t* cur; const fs_cred_t* o=cur; cur=c; return o; }
+static fs_cred_t user_cred = { 1001, 1001, 0, {0} };
+const fs_cred_t* session_cred(void) { return &user_cred; }
 void fs_delete(const char* p,int recursive) { deleted++;for(int i=0;i<nd;i++)if(!strcmp(p,dirs[i].path)||(recursive&&!strncmp(p,dirs[i].path,strlen(p))&&dirs[i].path[strlen(p)]=='/'))dirs[i].info.used=0;for(int i=0;i<nf;i++)if(!strcmp(p,files[i].path)||(recursive&&!strncmp(p,files[i].path,strlen(p))&&files[i].path[strlen(p)]=='/'))files[i].info.used=0; }
 static void setup(int children) {
  CHECK(live==0);memset(dirs,0,sizeof(dirs));memset(files,0,sizeof(files));nd=nf=0;allocs=0;fail_alloc=-1;fail_copy=fail_list=oversized=deleted=occupied=0;
@@ -37,10 +42,15 @@ int main(void) {
  for(int count=0;count<=64;count++){setup(count);CHECK(transfer()==0);CHECK(fs_find_dir("/src")<0&&live==0);for(int i=0;i<count;i++){char p[128];snprintf(p,sizeof(p),"/usb/src/d%03d/data",i);CHECK(fs_find_file(p)>=0);}}
  for(int fail=0;fail<5;fail++){
   setup(33);if(fail==0)fail_copy=1;else if(fail<3)fail_list=fail;else oversized=fail-2;
-  CHECK(transfer()<0);CHECK(fs_find_dir("/src")>=0&&fs_find_file("/src/d032/data")>=0&&deleted==0&&live==0);
+  CHECK(transfer()<0);CHECK(fs_find_dir("/src")>=0&&fs_find_file("/src/d032/data")>=0&&live==0);
+  /* (a failed copy leaves nothing half-done behind: nothing is copied twice when it is tried again) */
+  CHECK(fs_find_dir("/usb/src")<0&&fs_find_file("/usb/src/d000/data")<0&&fileops_failed_stage()==0);
  }
  setup(3);CHECK(transfer()==0);int total=allocs;
- for(int at=0;at<total;at++){setup(3);fail_alloc=at;CHECK(transfer()<0);CHECK(fs_find_dir("/src")>=0&&deleted==0&&live==0);}
+ for(int at=0;at<total;at++){setup(3);fail_alloc=at;CHECK(transfer()<0);CHECK(fs_find_dir("/src")>=0&&fs_find_dir("/usb/src")<0&&live==0);}
+ /* refused by the rights: told so, and nothing changed */
+ setup(3);fail_copy=1;perm_refuse=1;{char out[512],err[128];CHECK(fileops_transfer("/src","/usb",1,out,sizeof(out),err,sizeof(err))<0);CHECK(!strcmp(err,"permission denied")&&fileops_failed_perm()==1&&fileops_failed_stage()==0);}
+ perm_refuse=0;
  setup(0);CHECK(fileops_copy_tree("/src","/usb/deep",13)<0);CHECK(deleted==0&&live==0);
  /* Exhausted candidate names and path truncation must never return a
   * destination that callers could overwrite. */

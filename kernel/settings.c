@@ -1014,7 +1014,7 @@ static void click_startup(int mx, int my) {
         int on = !rc_on("sshd");
         rc_set("sshd", on, rc_port("sshd", 22));
         kstrlcpy(g_status, !on ? "The SSH server no longer starts at boot"
-                 : passwd_is_set(me_name()) ? "The SSH server starts at boot"
+                 : users_any_password() ? "The SSH server starts at boot"
                  : "The SSH server starts at boot (set a password below)", sizeof(g_status));
         return;
     }
@@ -2143,7 +2143,9 @@ static void draw_users(void) {
     static const char* const names[5] = { "Every time", "1 min", "5 min", "15 min", "60 min" };
     int m = elevate_remember_minutes(), bx = x + 130;
     for (int i = 0; i < 5; i++) { int bw = i ? 62 : 90; button(bx, py + 46, bw, names[i], m == mins[i]); bx += bw + 6; }
-    label(x, py + 74, "With no password set, an administrator is never asked.", C_DIM);
+    label(x, py + 70, "With no password set, an administrator is never asked.", C_DIM);
+    checkbox(x, py + 88, home_redirect_enabled());
+    label(x + 20, py + 91, "Older apps: /home/banana is your own home", C_TEXT);
 }
 
 static void u_clear(void) { memset(g_u_text, 0, sizeof(g_u_text)); g_u_focus = -1; }
@@ -2210,6 +2212,13 @@ static void click_users(int mx, int my) {
         if (!admin_ok(mx, my)) return;
         elevate_set_gui_password(!elevate_gui_wants_password());
         kstrlcpy(g_status, elevate_gui_wants_password() ? "The desktop's prompt asks for the password" : "The desktop's prompt asks Yes / No", sizeof(g_status));
+        return;
+    }
+    if (inside(mx, my, x, py + 84, w, 22)) {
+        if (!admin_ok(mx, my)) return;
+        home_redirect_set(!home_redirect_enabled());
+        kstrlcpy(g_status, home_redirect_enabled() ? "Older apps find the user's own home in /home/banana"
+                                                   : "Older apps get /home/banana as it is", sizeof(g_status));
         return;
     }
     static const int mins[5] = { 0, 1, 5, 15, 60 };

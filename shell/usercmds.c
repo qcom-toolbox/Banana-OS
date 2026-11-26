@@ -188,6 +188,22 @@ static void cmd_elevation(int argc, char** argv) {
     say(line);
 }
 
+/* homecompat [on|off] | homecompat skip|unskip <app>: older programs run
+ * by another user than banana - /home/banana is their own home */
+static void cmd_homecompat(int argc, char** argv) {
+    if (argc == 2 && (!strcmp(argv[1], "on") || !strcmp(argv[1], "off"))) home_redirect_set(!strcmp(argv[1], "on"));
+    else if (argc == 3 && (!strcmp(argv[1], "skip") || !strcmp(argv[1], "unskip"))) home_redirect_skip(argv[2], !strcmp(argv[1], "skip"));
+    else if (argc != 1) { say("usage: homecompat [on|off] | homecompat skip|unskip <app>"); return; }
+    char line[320];
+    ksnprintf(line, sizeof(line), "homecompat: %s", home_redirect_enabled()
+              ? "on - an older app run by another user than banana finds that user's home in /home/banana"
+              : "off - older apps get /home/banana as it is");
+    say(line);
+    const char* l = home_redirect_list();
+    ksnprintf(line, sizeof(line), "            not for: %s", l[0] ? l : "(none)");
+    say(line);
+}
+
 int usercmd_dispatch(const char* line) {
     char buf[512];
     kstrlcpy(buf, line, sizeof(buf));
@@ -200,5 +216,6 @@ int usercmd_dispatch(const char* line) {
     if (!strcmp(argv[0], "usermod")) { cmd_usermod(argc, argv); return 1; }
     if (!strcmp(argv[0], "lsusers")) { cmd_users(); return 1; }
     if (!strcmp(argv[0], "elevation")) { cmd_elevation(argc, argv); return 1; }
+    if (!strcmp(argv[0], "homecompat")) { cmd_homecompat(argc, argv); return 1; }
     return 0;
 }

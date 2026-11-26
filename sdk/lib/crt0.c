@@ -28,6 +28,14 @@ int _banana_start(const banana_api_t* api, int argc, char** argv) {
         for (char* c = argv[0]; *c; c++) if (*c == '/') s = c + 1;
         program_invocation_short_name = s;
     }
+    /* (built for users, API 35: the system need not move /home/banana for
+     * it - unless BANANA_LEGACY=1 asks to be treated as an older program) */
+    if (api->version >= 35 && BANANA_HAS(api, auth)) {
+        int legacy = 0;
+        for (char** e = environ; e && *e; e++)
+            if (!__builtin_strcmp(*e, "BANANA_LEGACY=1")) legacy = 1;
+        if (!legacy) api->auth(BANANA_AUTH_MODERN, 0, 0, 0);
+    }
     __banana_stack_top = (unsigned long)__builtin_frame_address(0);
     __libc_init();
     exit(main(argc, argv, environ));

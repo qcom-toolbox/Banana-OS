@@ -192,6 +192,7 @@ typedef struct {
      * and groups (kernel/fs.c checks them) - and the real and saved ids */
     fs_cred_t cred;
     uint32_t  ruid, suid, rgid, sgid;
+    int       modern;          /* its start-up said it knows about users (else: /home/banana redirected) */
     uint32_t  cam_seq;
 } app_proc_t;
 
@@ -2612,6 +2613,9 @@ static int a_auth(int op, const char* user, const char* secret, const char* cmd)
         int r = secret && secret[0] ? passwd_set(u->name, secret) : passwd_clear(u->name);
         return r == 0 ? 0 : -1;
     }
+    case BANANA_AUTH_MODERN:
+        p->modern = 1;
+        return 0;
     case BANANA_AUTH_KCMD: {
         if (!cmd || me == 0) return 0;
         char buf[256];
@@ -3215,6 +3219,38 @@ static int args_ok(app_proc_t* p, const sysspec_t* sp, const uint64_t* a) {
     return 1;
 }
 
+/* ── older programs and other users (users.h: home_redirect_wanted) ──
+ * A program built before users (its start-up never said BANANA_AUTH_MODERN)
+ * may have /home/banana written into it - or its old C library tells it
+ * so. Run by another user, its path arguments under /home/banana are
+ * moved to that user's home, unless Settings > Users says not to (for all,
+ * or for that app). The strings are the kernel's copies for the call: what
+ * kfree takes back after it. How many. */
+static int home_redirect(app_proc_t* p, const sysspec_t* sp, uint64_t* a, char** moved) {
+    if (p->ruid == UID_FIRST || p->web_restricted) return 0;
+    const user_t* u = NULL;
+    int n = 0, asked = 0;
+    for (int i = 0; sp->args[i] && i < SYS_ARGS; i++) {
+        if (sp->args[i] != 's' || !a[i]) continue;
+        const char* s = (const char*)(uintptr_t)a[i];
+        if (strncmp(s, "/home/banana", 12) || (s[12] && s[12] != '/')) continue;
+        if (!asked) {                                   /* (only now: the settings are read) */
+            asked = 1;
+            u = user_by_uid(p->ruid);
+            if (!u || !u->home[0] || !strcmp(u->home, "/home/banana") || !home_redirect_wanted(p->name)) u = NULL;
+        }
+        if (!u) return n;
+        size_t need = strlen(u->home) + strlen(s + 12) + 1;
+        if (need > FS_PATH_LEN) continue;
+        char* c = (char*)kmalloc(need);
+        if (!c) continue;
+        ksnprintf(c, need, "%s%s", u->home, s + 12);
+        moved[n++] = c;
+        a[i] = (uint64_t)(uintptr_t)c;
+    }
+    return n;
+}
+
 /* what kernel/isr64.asm saved (the layout of idt.c's registers_t) */
 typedef struct {
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
@@ -3556,10 +3592,14 @@ void app_syscall(sysframe_t* r) {
     }
     sysfn_t fn = (sysfn_t)((void* const*)&g_api)[slot];
     if (mine) { g_insys[me] = (uint16_t)(slot + 1); g_lastip[me] = r->rip; }     /* (ps: what it is in, where) */
+    /* an older program run by another user: /home/banana in its paths is that user's home */
+    char* moved[SYS_ARGS];
+    int nmoved = p->modern ? 0 : home_redirect(p, &g_spec[slot], a, moved);
     /* the call has the app's rights: its files, its user's (kernel/fs.c) */
     const fs_cred_t* oc = fs_cred_swap(&p->cred);
     r->rax = fn(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]);
     fs_cred_swap(oc);
+    for (int k = 0; k < nmoved; k++) kfree(moved[k]);
     if (mine) g_insys[me] = 0;
     sig_check(p, r);                            /* signals sent to it go to their handlers now */
     __asm__ volatile("cli");
@@ -3759,6 +3799,7 @@ static int resume_user(app_proc_t* p) {
 /* execve done: the old program's space goes (the kernel's tables are loaded) */
 static void exec_switch(app_proc_t* p) {
     p->exec_next = 0;
+    p->modern = 0;                          /* (the new program says it again at its start, or is an older one) */
     av_release(p);                          /* (the old program's microphone and camera) */
     gpu_virgl_release(p->id + 1);
     gem_release(p->id + 1);
@@ -3809,6 +3850,7 @@ static int a_proc_fork(void) {
     c->own_task = 1;
     c->cred = p->cred;
     c->ruid = p->ruid; c->suid = p->suid; c->rgid = p->rgid; c->sgid = p->sgid;
+    c->modern = p->modern;
     memcpy(c->sig_disp, p->sig_disp, sizeof(c->sig_disp));
     c->sig_onstack = p->sig_onstack;
     c->sig_entry = p->sig_entry;

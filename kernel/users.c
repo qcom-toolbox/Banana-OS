@@ -5,6 +5,7 @@
 #include "kheap.h"
 #include "kstring.h"
 #include "config.h"
+#include "settings.h"
 #include "serial.h"
 
 /*
@@ -207,6 +208,12 @@ int users_admin_count(void) {
     return n;
 }
 
+int users_any_password(void) {
+    parse();
+    for (int i = 0; i < g_nusers; i++) if (user_is_person(&g_users[i]) && passwd_is_set(g_users[i].name)) return 1;
+    return 0;
+}
+
 int user_name_ok(const char* s) {
     if (!s || !s[0] || strlen(s) >= USER_NAME_MAX - 1) return 0;
     if (!((s[0] >= 'a' && s[0] <= 'z') || s[0] == '_')) return 0;
@@ -405,6 +412,40 @@ const void* session_cred(void) {
     users_make_cred(g_session, &c);
     return &c;
 }
+
+/* ── older programs: /home/banana moved (app.c) ─────────────────────── */
+
+int home_redirect_enabled(void) {
+    char v[8];
+    return !(settings_get("home_redirect", v, sizeof(v)) && v[0] == '0');
+}
+void home_redirect_set(int on) { settings_set("home_redirect", on ? "1" : "0"); }
+
+const char* home_redirect_list(void) {
+    static char v[256];
+    if (!settings_get("home_redirect_skip", v, sizeof(v))) v[0] = 0;
+    return v;
+}
+
+int home_redirect_skips(const char* app) { return app && app[0] && lists(home_redirect_list(), app); }
+
+void home_redirect_skip(const char* app, int skip) {
+    if (!app || !app[0] || strchr(app, ',') || strchr(app, '\n') || home_redirect_skips(app) == skip) return;
+    char now[256], out[256];
+    kstrlcpy(now, home_redirect_list(), sizeof(now));
+    out[0] = 0;
+    for (char* p = now; *p;) {
+        char* c = strchr(p, ',');
+        if (c) *c = 0;
+        if (p[0] && strcmp(p, app)) { if (out[0]) kstrlcat(out, ",", sizeof(out)); kstrlcat(out, p, sizeof(out)); }
+        if (!c) break;
+        p = c + 1;
+    }
+    if (skip) { if (out[0]) kstrlcat(out, ",", sizeof(out)); kstrlcat(out, app, sizeof(out)); }
+    settings_set("home_redirect_skip", out);
+}
+
+int home_redirect_wanted(const char* app) { return home_redirect_enabled() && !home_redirect_skips(app); }
 
 int users_people(const user_t** out, int max) {
     parse();

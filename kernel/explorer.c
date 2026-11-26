@@ -47,6 +47,7 @@
 #include "volume.h"
 #include "fileicons.h"
 #include "fileops.h"
+#include "elevate.h"
 #include "keyboard.h"
 #include "rtc.h"
 #include "zip.h"
@@ -456,6 +457,75 @@ static void select_name(const char* name) {
     for (int i = 0; i < g_count; i++) if (strcmp(item_name(&g_items[i]), name) == 0) g_sel = i;
 }
 
+/* ── what the rights refused: asked of an administrator, then done again ──
+ * Only the refused steps are kept (a paste that did half its items does
+ * not copy the other half twice; a refused copy left nothing behind, a
+ * move that copied but could not delete its source only deletes it). */
+enum { RT_MKDIR, RT_MKFILE, RT_TRASH, RT_DELETE, RT_RENAME, RT_XFER, RT_DELSRC };
+typedef struct { int kind, copy; char a[FS_PATH_LEN], b[FS_PATH_LEN]; } rt_step_t;
+#define RT_MAX 16
+static rt_step_t g_rt[RT_MAX];
+static int g_rt_n, g_rt_asking;
+
+static void rt_add(int kind, const char* a, const char* b, int copy) {
+    if (g_rt_asking || g_rt_n >= RT_MAX) return;
+    rt_step_t* t = &g_rt[g_rt_n++];
+    t->kind = kind; t->copy = copy;
+    kstrlcpy(t->a, a, sizeof(t->a));
+    kstrlcpy(t->b, b ? b : "", sizeof(t->b));
+}
+/* a refused fileops paste item (fileops_on_fail) */
+static void rt_paste_failed(const char* src, const char* dstdir, int copy, int stage, int perm) {
+    if (!perm) return;
+    if (stage == 1) rt_add(RT_DELSRC, src, NULL, 0);
+    else rt_add(RT_XFER, src, dstdir, copy);
+}
+
+static void rt_done(void* ctx, int allowed) {
+    (void)ctx;
+    int n = g_rt_n, done = 0;
+    char msg[112], err[64];
+    g_rt_asking = 0;
+    if (!allowed) {
+        g_rt_n = 0;
+        set_status_c("Not allowed: an administrator's permission is needed", 1);
+        return;
+    }
+    fileops_as_admin(1);
+    const fs_cred_t* oc = fs_cred_swap(NULL);           /* (the system's rights, for these steps only) */
+    for (int i = 0; i < n; i++) {
+        rt_step_t* t = &g_rt[i];
+        int ok = 0;
+        switch (t->kind) {
+        case RT_MKDIR:  ok = fs_find_dir(t->a) >= 0 || fs_mkdir(t->a) >= 0; break;
+        case RT_MKFILE: ok = fs_find_file(t->a) >= 0 || fs_write_path(t->a, "", 0) >= 0; break;
+        case RT_TRASH:  ok = trash_put(t->a) == 0; break;
+        case RT_DELETE: ok = fileops_delete(t->a) == 0; break;
+        case RT_DELSRC: ok = fs_find_dir(t->a) < 0 && fs_find_file(t->a) < 0 ? 1 : fileops_delete(t->a) == 0; break;
+        case RT_RENAME: ok = fs_find_file(t->b) < 0 && fs_find_dir(t->b) < 0 && fs_move(t->a, t->b) >= 0; break;
+        case RT_XFER:   ok = fileops_transfer(t->a, t->b, t->copy, NULL, 0, err, sizeof(err)) == 0; break;
+        }
+        done += ok;
+    }
+    fs_cred_swap(oc);
+    fileops_as_admin(0);
+    g_rt_n = 0;
+    drop_thumb();
+    scan();
+    if (done == n) ksnprintf(msg, sizeof(msg), "Done as administrator (%d item%s)", n, n == 1 ? "" : "s");
+    else ksnprintf(msg, sizeof(msg), "%d of %d could not be done, even as administrator", n - done, n);
+    set_status_c(msg, done < n);
+}
+
+/* after an action: ask for what was refused (1 if it asks) */
+static int rt_ask(const char* what) {
+    if (!g_rt_n || g_rt_asking) return 0;
+    g_rt_asking = 1;
+    set_status_c("Permission denied - asking an administrator...", 1);
+    elevate_ask_async(session_uid(), "Files", what, rt_done, NULL);
+    return 1;
+}
+
 static void new_folder(void) {
     char name[FS_NAME_LEN], path[FS_PATH_LEN];
     g_search[0] = 0;
@@ -464,7 +534,11 @@ static void new_folder(void) {
         else ksnprintf(name, sizeof(name), "New folder (%d)", n);
         child_path(name, path, sizeof(path));
         if (fs_find_dir(path) >= 0 || fs_find_file(path) >= 0) continue;
-        if (fs_mkdir(path) < 0) { set_status_c("Could not create the folder", 1); return; }
+        if (fs_mkdir(path) < 0) {
+            if (fs_perm_error()) { rt_add(RT_MKDIR, path, NULL, 0); rt_ask("create a folder here"); return; }
+            set_status_c("Could not create the folder", 1);
+            return;
+        }
         scan();
         select_name(name);
         extern void explorer_start_rename(void);
@@ -489,10 +563,12 @@ static void delete_selected(void) {
         size_t pl = strlen(paths[i]);
         if (strncmp(cwd, paths[i], pl) == 0 && (cwd[pl] == '\0' || cwd[pl] == '/')) continue;   /* a terminal is in it */
         if (trash_put(paths[i]) == 0) done++;
+        else if (fs_perm_error() || fileops_failed_perm()) rt_add(RT_TRASH, paths[i], NULL, 0);
     }
     drop_thumb();
     g_sel = -1;
     scan();
+    if (done < n && rt_ask("delete files that belong to the system")) return;
     if (done == 1 && n == 1) ksnprintf(msg, sizeof(msg), "\"%s\" is in the Recycle Bin", fileops_base(paths[0]));
     else ksnprintf(msg, sizeof(msg), "%d item%s moved to the Recycle Bin%s", done, done == 1 ? "" : "s", done < n ? " (some could not be)" : "");
     set_status_c(msg, done < n);
@@ -510,10 +586,12 @@ static void delete_for_good(void) {
             return;
         }
         g_confirm_delete = 0;
-        for (int i = 0; i < n; i++) fileops_delete(paths[i]);
+        for (int i = 0; i < n; i++)
+            if (fileops_delete(paths[i]) != 0 && fs_perm_error()) rt_add(RT_DELETE, paths[i], NULL, 0);
         drop_thumb();
         g_sel = -1;
         scan();
+        if (rt_ask("delete files that belong to the system")) return;
         ksnprintf(msg, sizeof(msg), "Deleted %d items", n);
         set_status(msg);
         return;
@@ -538,10 +616,11 @@ static void delete_for_good(void) {
             return;
         }
     }
-    fs_delete(path, 1);
+    if (fileops_delete(path) != 0 && fs_perm_error()) rt_add(RT_DELETE, path, NULL, 0);
     drop_thumb();
     g_sel = -1;
     scan();
+    if (rt_ask("delete a file that belongs to the system")) return;
     ksnprintf(msg, sizeof(msg), "Deleted \"%s\"", name);
     set_status(msg);
 }
@@ -679,9 +758,12 @@ static void paste_here(void) {
     if (fileops_clip_count()) {
         char msg[112];
         set_status(_("Copying..."));
+        fileops_on_fail(rt_paste_failed);
         fileops_paste(g_path, msg, sizeof(msg));
+        fileops_on_fail(NULL);
         scan();
         set_status(msg);
+        rt_ask("put files in a folder that belongs to the system");
         return;
     }
     if (!g_clip[0]) return;
@@ -694,17 +776,19 @@ static void paste_here(void) {
         ksnprintf(nm, sizeof(nm), "%s (%d)", base, n);
         child_path(nm, dst, sizeof(dst));
     }
-    int ok;
+    char err[64];
     set_status(g_clip_cut ? "Moving..." : "Copying...");
-    if (fs_find_dir(g_clip) >= 0) ok = g_clip_cut ? fs_move(g_clip, dst) >= 0 : fileops_copy_tree(g_clip, dst, 0) == 0;
-    else ok = g_clip_cut ? fs_move(g_clip, dst) >= 0 : fs_copy(g_clip, dst) >= 0;
+    int ok = fileops_transfer(g_clip, g_path, !g_clip_cut, dst, sizeof(dst), err, sizeof(err)) == 0;
     if (ok) ksnprintf(msg, sizeof(msg), "%s \"%s\"", g_clip_cut ? "Moved" : "Pasted", base);
-    else ksnprintf(msg, sizeof(msg), "Could not %s \"%s\"%s", g_clip_cut ? "move" : "copy", base,
-                   fs_io_error() ? " (the USB stick reported an error)" : "");
+    else {
+        ksnprintf(msg, sizeof(msg), "Could not %s \"%s\": %s", g_clip_cut ? "move" : "copy", base, err);
+        if (fileops_failed_perm()) rt_paste_failed(g_clip, g_path, !g_clip_cut, fileops_failed_stage(), 1);
+    }
     if (ok && g_clip_cut) g_clip[0] = 0;
     scan();
-    select_name(strrchr(dst, '/') + 1);
+    if (ok) select_name(fileops_base(dst));
     set_status_c(msg, !ok);
+    rt_ask("put files in a folder that belongs to the system");
 }
 
 static void new_text_file(void) {
@@ -715,7 +799,11 @@ static void new_text_file(void) {
         else ksnprintf(name, sizeof(name), "New Text Document (%d).txt", n);
         child_path(name, path, sizeof(path));
         if (fs_find_dir(path) >= 0 || fs_find_file(path) >= 0) continue;
-        if (fs_write_path(path, "", 0) < 0) { set_status_c("Could not create the file", 1); return; }
+        if (fs_write_path(path, "", 0) < 0) {
+            if (fs_perm_error()) { rt_add(RT_MKFILE, path, NULL, 0); rt_ask("create a file here"); return; }
+            set_status_c("Could not create the file", 1);
+            return;
+        }
         scan();
         select_name(name);
         extern void explorer_start_rename(void);
@@ -741,6 +829,7 @@ static void finish_rename(void) {
     if (strcmp(from, to) == 0) { set_status(""); return; }
     if (fs_find_file(to) >= 0 || fs_find_dir(to) >= 0) { set_status_c("That name is taken", 1); return; }
     int bad = fs_move(from, to) < 0;
+    if (bad && fs_perm_error()) { rt_add(RT_RENAME, from, to, 0); rt_ask("rename a file that belongs to the system"); return; }
     if (bad) ksnprintf(msg, sizeof(msg), "Could not rename it%s", fs_io_error() ? " (volume error)" : "");
     else ksnprintf(msg, sizeof(msg), "Renamed to \"%s\"", g_rename);
     scan();
@@ -2077,14 +2166,20 @@ static int explorer_drop_inner(const char (*paths)[FS_PATH_LEN], int n, int mx, 
     int done = 0, trash = !strcmp(dst, TRASH_FILES);
     char err[64] = "", msg[112];
     for (int i = 0; i < n; i++) {
-        if (trash) { if (trash_put(paths[i]) == 0) done++; continue; }
+        if (trash) {
+            if (trash_put(paths[i]) == 0) done++;
+            else if (fs_perm_error() || fileops_failed_perm()) rt_add(RT_TRASH, paths[i], NULL, 0);
+            continue;
+        }
         if (fileops_transfer(paths[i], dst, copy, NULL, 0, err, sizeof(err)) == 0) done++;
+        else if (fileops_failed_perm()) rt_paste_failed(paths[i], dst, copy, fileops_failed_stage(), 1);
     }
     scan();
     if (trash) ksnprintf(msg, sizeof(msg), "%d item%s moved to the Recycle Bin", done, done == 1 ? "" : "s");
     else if (done == n) ksnprintf(msg, sizeof(msg), "%s %d item%s to %s", copy ? "Copied" : "Moved", done, done == 1 ? "" : "s", fileops_base(dst));
     else ksnprintf(msg, sizeof(msg), "%d of %d could not be %s: %s", n - done, n, copy ? "copied" : "moved", err);
     set_status_c(msg, done < n);
+    rt_ask(trash ? "delete files that belong to the system" : "put files in a folder that belongs to the system");
     return 1;
 }
 

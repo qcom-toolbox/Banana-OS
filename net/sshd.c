@@ -979,8 +979,8 @@ static void shell_task_0(void) { shell_run_remote(g_ttys[0]); }
 static void shell_task_1(void) { shell_run_remote(g_ttys[1]); }
 
 int sshd_start(uint16_t port, char* err, int errcap) {
-    if (!passwd_is_set(PASSWD_USER)) {
-        ksnprintf(err, (size_t)errcap, "set a password first with `passwd` (it is the SSH login)");
+    if (!users_any_password()) {                       /* (who has a password can log in: someone must) */
+        ksnprintf(err, (size_t)errcap, "nobody has a password yet: set one with `passwd` (it is the SSH login)");
         return -1;
     }
     if (load_hostkey() != 0) {
@@ -1032,8 +1032,8 @@ void sshd_print_status(void) {
     } else {
         char ip[16];
         ip4_to_str(net_if()->ip, ip);
-        if (g_port == 22) ksnprintf(line, sizeof(line), "sshd: running on port 22 - ssh %s@%s", PASSWD_USER, ip);
-        else ksnprintf(line, sizeof(line), "sshd: running on port %u - ssh -p %u %s@%s", g_port, g_port, PASSWD_USER, ip);
+        if (g_port == 22) ksnprintf(line, sizeof(line), "sshd: running on port 22 - ssh <user>@%s (a user with a password)", ip);
+        else ksnprintf(line, sizeof(line), "sshd: running on port %u - ssh -p %u <user>@%s (a user with a password)", g_port, g_port, ip);
         terminal_writeln(line);
     }
     if (g_have_key && sshd_fingerprint(fp, sizeof(fp)) == 0) {

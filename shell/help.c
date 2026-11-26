@@ -385,6 +385,14 @@ static const page_t PAGES[] = {
       "password is remembered (0: asked every time, 60 at most; 5 by default) - on the desktop and in terminals. "
       "Setting them is an administrator's. elevation test shows the desktop's prompt.", NULL,
       "elevation password on\nelevation remember 0", "doas" },
+    { "homecompat", "users", "homecompat [on|off] | homecompat skip|unskip <app>", "older apps and other users' homes",
+      "Apps made before Banana OS had users may have /home/banana written into them. Run by another user, such "
+      "an app finds that user's own home there instead (on, the default): /home/banana/notes.txt is "
+      "/home/alice/notes.txt for alice. off: they get /home/banana as it is (banana's, which they may only read "
+      "if banana lets them). skip <app>: not for that app (unskip: again). Apps built with the SDK since "
+      "users came are never redirected - they ask for $HOME; BANANA_LEGACY=1 <command> runs one as an older app. "
+      "Changing it is an administrator's; Settings > Users has the switch too.", NULL,
+      "homecompat\nhomecompat skip myapp\nBANANA_LEGACY=1 touch /home/banana/x", "lsusers" },
     { "lsusers", "users", "lsusers", "the users",
       "Every person's account: its id, administrator or standard, whether it has a password, its home, who is "
       "logged in. id and groups (GNU coreutils) show your own.", NULL, NULL, "adduser, passwd" },

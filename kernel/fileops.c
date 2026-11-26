@@ -4,6 +4,13 @@
 #include "kstring.h"
 #include "kheap.h"
 #include "rtc.h"
+#include "users.h"
+
+/* how the last failed transfer ended (fileops.h); who is told of each failed paste */
+static int g_stage, g_perm;
+static fileops_fail_fn g_fail;
+static int g_admin;                       /* an administrator allowed it: the system's rights */
+void fileops_as_admin(int on) { g_admin = on; }
 
 const char* fileops_base(const char* path) {
     const char* s = strrchr(path, '/');
@@ -48,7 +55,7 @@ int fileops_unique(const char* dir, const char* base, char* out, int cap) {
     return -1;
 }
 
-int fileops_copy_tree(const char* src, const char* dst, int depth) {
+static int fileops_copy_tree_inner(const char* src, const char* dst, int depth) {
     if (depth > 12 || fs_mkdir(dst) < 0) return -1;
     /* Listing returns the total, even when its output array is smaller.
      * Never report a partial copy as complete: cross-volume moves delete
@@ -85,13 +92,15 @@ int fileops_copy_tree(const char* src, const char* dst, int depth) {
     return rc;
 }
 
-int fileops_delete(const char* path) {
+static int fileops_delete_inner(const char* path) {
     if (fs_find_dir(path) < 0 && fs_find_file(path) < 0) return -1;
     fs_delete(path, 1);
     return fs_find_dir(path) < 0 && fs_find_file(path) < 0 ? 0 : -1;
 }
 
-int fileops_transfer(const char* src, const char* dstdir, int copy, char* out, int cap, char* err, int ecap) {
+static int fileops_transfer_inner(const char* src, const char* dstdir, int copy, char* out, int cap, char* err, int ecap) {
+    g_stage = 0;
+    g_perm = 0;
     char e[8];
     if (!err) { err = e; ecap = sizeof(e); }
     int dir = fs_find_dir(src) >= 0;
@@ -117,14 +126,30 @@ int fileops_transfer(const char* src, const char* dstdir, int copy, char* out, i
                  (fileops_on_usb(src) && fs_path_mount(src) != fs_path_mount(dstdir));
     if (copy || across) {
         ok = dir ? fileops_copy_tree(src, dst, 0) == 0 : fs_copy(src, dst) >= 0;
-        if (ok && !copy) ok = fileops_delete(src) == 0;
+        if (!ok) {
+            g_perm = fs_perm_error();
+            /* (what a refused copy made of it goes: nothing half-done is left - nor copied twice when it is tried again) */
+            if (fs_find_dir(dst) >= 0) fileops_delete(dst);
+            else if (fs_find_file(dst) >= 0) fs_delete(dst, 0);
+        } else if (!copy) {
+            ok = fileops_delete(src) == 0;
+            if (!ok) { g_perm = fs_perm_error(); g_stage = 1; }   /* (copied - the source could not go) */
+        }
     } else {
         ok = fs_move(src, dst) >= 0;
+        if (!ok) g_perm = fs_perm_error();
     }
-    if (!ok) { kstrlcpy(err, fs_io_error() ? "the USB stick reported an error" : "it could not be written", (size_t)ecap); return -1; }
+    if (!ok) {
+        kstrlcpy(err, g_perm ? "permission denied" : fs_io_error() ? "the USB stick reported an error" : "it could not be written", (size_t)ecap);
+        return -1;
+    }
     if (out) kstrlcpy(out, dst, (size_t)cap);
     return 0;
 }
+
+int fileops_failed_stage(void) { return g_stage; }
+int fileops_failed_perm(void) { return g_perm; }
+void fileops_on_fail(fileops_fail_fn fn) { g_fail = fn; }
 
 /* ── the clipboard ── */
 static char g_clip[CLIP_MAX][FS_PATH_LEN];
@@ -139,13 +164,17 @@ void fileops_clip_set(const char* const* paths, int n, int cut) {
 int fileops_clip_count(void) { return g_nclip; }
 int fileops_clip_cut(void) { return g_clip_cut; }
 
-int fileops_paste(const char* dir, char* status, int cap) {
+static int fileops_paste_inner(const char* dir, char* status, int cap) {
     int done = 0, failed = 0;
     char why[64] = "";
     for (int i = 0; i < g_nclip; i++) {
         char err[64];
         if (fileops_transfer(g_clip[i], dir, !g_clip_cut, NULL, 0, err, sizeof(err)) == 0) done++;
-        else { failed++; kstrlcpy(why, err, sizeof(why)); }
+        else {
+            failed++;
+            kstrlcpy(why, err, sizeof(why));
+            if (g_fail) g_fail(g_clip[i], dir, !g_clip_cut, g_stage, g_perm);   /* (Files: an administrator may do it) */
+        }
     }
     if (g_clip_cut && !failed) g_nclip = 0;            /* moved: nothing left to paste */
     if (status) {
@@ -167,7 +196,8 @@ static void info_path(const char* trashed, char* out, int cap) {
     join(TRASH_INFO, nm, out, cap);
 }
 
-int trash_put(const char* path) {
+static int trash_put_inner(const char* path) {
+    g_perm = 0;
     if (in_trash(path) || !strcmp(path, TRASH_FILES)) return -1;
     if (fs_find_dir(path) < 0 && fs_find_file(path) < 0) return -1;
     fs_mkdir_p(TRASH_FILES);
@@ -197,7 +227,7 @@ void trash_origin(const char* trashed, char* out, int cap) {
     out[n] = 0;
 }
 
-int trash_restore(const char* trashed) {
+static int trash_restore_inner(const char* trashed) {
     if (!in_trash(trashed)) return -1;
     char orig[FS_PATH_LEN], dir[FS_PATH_LEN], ip[FS_PATH_LEN];
     trash_origin(trashed, orig, sizeof(orig));
@@ -223,10 +253,56 @@ int trash_count(void) {
     return (nf > 0 ? nf : 0) + (nd > 0 ? nd : 0);
 }
 
-int trash_empty(void) {
+static int trash_empty_inner(void) {
     int n = trash_count();
     if (fs_find_dir(TRASH_DIR) >= 0) fs_delete(TRASH_DIR, 1);
     fs_mkdir_p(TRASH_FILES);
     fs_mkdir_p(TRASH_INFO);
     return n;
 }
+int fileops_copy_tree(const char* src, const char* dst, int depth) {
+    const fs_cred_t* oc = fs_cred_swap(g_admin ? NULL : (const fs_cred_t*)session_cred());
+    int r = fileops_copy_tree_inner(src, dst, depth);
+    fs_cred_swap(oc);
+    return r;
+}
+int fileops_delete(const char* path) {
+    const fs_cred_t* oc = fs_cred_swap(g_admin ? NULL : (const fs_cred_t*)session_cred());
+    int r = fileops_delete_inner(path);
+    fs_cred_swap(oc);
+    return r;
+}
+int fileops_transfer(const char* src, const char* dstdir, int copy, char* out, int cap, char* err, int ecap) {
+    const fs_cred_t* oc = fs_cred_swap(g_admin ? NULL : (const fs_cred_t*)session_cred());
+    int r = fileops_transfer_inner(src, dstdir, copy, out, cap, err, ecap);
+    fs_cred_swap(oc);
+    return r;
+}
+int fileops_paste(const char* dir, char* status, int cap) {
+    const fs_cred_t* oc = fs_cred_swap(g_admin ? NULL : (const fs_cred_t*)session_cred());
+    int r = fileops_paste_inner(dir, status, cap);
+    fs_cred_swap(oc);
+    return r;
+}
+int trash_put(const char* path) {
+    const fs_cred_t* oc = fs_cred_swap(g_admin ? NULL : (const fs_cred_t*)session_cred());
+    int r = trash_put_inner(path);
+    fs_cred_swap(oc);
+    return r;
+}
+int trash_restore(const char* trashed) {
+    const fs_cred_t* oc = fs_cred_swap(g_admin ? NULL : (const fs_cred_t*)session_cred());
+    int r = trash_restore_inner(trashed);
+    fs_cred_swap(oc);
+    return r;
+}
+int trash_empty(void) {
+    const fs_cred_t* oc = fs_cred_swap(g_admin ? NULL : (const fs_cred_t*)session_cred());
+    int r = trash_empty_inner();
+    fs_cred_swap(oc);
+    return r;
+}
+
+/* (Files and the desktop act for the one logged in: what they do with files
+ * has that user's rights - the system's only once an administrator allowed
+ * it, fileops_as_admin) */

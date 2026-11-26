@@ -174,7 +174,10 @@ Banana OS has users the Unix way: `/etc/passwd`, `/etc/group`, `/etc/shadow` (ro
 - **How long it is remembered**: Settings > Users > *Remember it for* - every time, 1, 5 (the default), 15 or 60 minutes.
 - **No password set**: an administrator with no password is never asked - so a computer used as before users (the live CD, an install that never set one) works as it always did. Installing Banana OS from the live CD needs no permission; `update` on an installed system does.
 - **Logging in**: with several users, or a password, the login screen shows the users to pick (a click, Tab or the arrows); Start > Shut down > *Switch user* ends your apps and shows it again. SSH logs in any user that has a password.
-- **What it does not cover yet**: on the 32-bit kernel apps run in ring 0, so the rights are advisory there; Files refuses a system file with a message (it does not offer the administrator prompt yet).
+- **In Files**: Files and the desktop act with your rights. Creating, renaming, deleting, pasting or dropping something your rights refuse (a system folder, another user's file) brings up the administrator prompt; once allowed, only the refused items are done again - what already worked is not copied twice, a refused copy leaves nothing half-done, and a move that copied but could not delete the original only deletes it.
+- **Older apps and `/home/banana`**: apps made before users (API 34 and older) often write to `/home/banana` by name. For another user they are sent to that user's own home instead (`/home/banana/notes.txt` becomes `/home/alice/notes.txt`). Settings > Users > *Older apps: /home/banana is your own home*, or `homecompat on|off`, turns it on or off; `homecompat skip <app>` leaves one app alone (`unskip` undoes it). Apps made with SDK 35 are not redirected (set `BANANA_LEGACY=1` to test an app as an older one).
+- **SSH** starts once any user has a password (`passwd`) - not only banana - and logs in as that user.
+- **What it does not cover yet**: on the 32-bit kernel apps run in ring 0, so the rights are advisory there.
 
 ## Installing to a Hard Disk (`install` / `sync`)
 

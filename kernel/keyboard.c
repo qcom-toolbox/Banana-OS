@@ -250,6 +250,8 @@ int keyboard_redirect_begin(int (*get)(void* ctx, int wait), void* ctx) {
     return -1;
 }
 
+int keyboard_redirected(void) { return kin_cur() != NULL; }
+
 void keyboard_redirect_end(void) {
     kin_t* k = kin_cur();
     if (!k) return;
