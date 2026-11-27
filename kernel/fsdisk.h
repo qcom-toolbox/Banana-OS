@@ -27,6 +27,13 @@
 #define FSDISK_ERR_BAD_SOURCE -10 /* the CD / USB stick does not read back as built (fsdisk_medium_why) */
 #define FSDISK_ERR_NEEDS_LIVE -11 /* the installed system cannot update itself (old layout): use the live stick */
 #define FSDISK_ERR_SOURCE_READ -12 /* the stick / CD / file stopped reading (unplugged?) before anything was written */
+/* the all-in-one image's packages (/EXTRAS): fn(name "JAVA.BPK", data,
+ * size, its BANANA.SUM line) installs one - 0 done. The live system's: at
+ * the start (how many); the installed one's: after it updated itself */
+typedef int (*fsdisk_extra_fn)(const char* name, const uint8_t* data, uint32_t size, const char* sumline);
+void fsdisk_set_extras_fn(fsdisk_extra_fn fn);
+int  fsdisk_live_extras(void);
+#define FSDISK_ERR_WRONG_ARCH -13 /* the image has no kernel of the kind this computer runs (Banana_OS-32.iso on a 64-bit system, or the reverse) */
 
 /* Looks for exactly one non-ATAPI ATA disk attached (any bus/position).
  * Returns 1 and fills *out if exactly one was found, 0 if none, -1 if

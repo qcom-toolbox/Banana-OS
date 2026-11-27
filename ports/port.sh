@@ -142,6 +142,15 @@ port_package() {
         set -- "$@" "$name=$src"
     done
     shift
+    # the upstream source's licence files go with it (/apps/<name>/COPYING...,
+    # linked from /usr/share/licenses/<name>/ by kernel/pkg.c) - unless the
+    # port's script gave one of that name already
+    for f in COPYING COPYING.DOC COPYING.LIB COPYING.LESSER COPYING.LGPL COPYING.GPL COPYING.RUNTIME \
+             LICENSE LICENSE.txt LICENSE.md LICENCE NOTICE NOTICE.txt COPYRIGHT; do
+        [ -n "${SRC:-}" ] && [ -f "$SRC/$f" ] || continue
+        case " $* " in *" $f="*) continue ;; esac
+        set -- "$@" "$f=$SRC/$f"
+    done
     python3 "$SDK/tools/bpkg" pack -o "$out" "$B/manifest" "$B/app-x86_64" "$@" >/dev/null
     python3 "$SDK/tools/bpkg" check "$out"
 }

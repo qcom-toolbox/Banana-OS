@@ -27,6 +27,12 @@ rm -rf "$S" && mkdir -p "$S/lib"
 cp -r "$JDK_OUT/jdk" "$S/"
 cp "$MESA_OUT/libOSMesa.so" "$S/lib/"
 cp -r "$LWJGL_OUT/lwjgl" "$S/"
+# the licences of what is in it besides OpenJDK (its own: jdk/legal/):
+# Mesa and libffi (MIT), LWJGL (BSD-3-Clause), the notices with the Java
+# trademark note - /usr/share/licenses/java/LICENSES links here (kernel/pkg.c)
+R=$HERE/../..
+mkdir -p "$S/LICENSES"
+cp "$R/THIRD-PARTY-NOTICES" "$R/LICENSES/LWJGL-3.3.3.txt" "$R/LICENSES/MIT.txt" "$R/LICENSES/GPL-2.0-only.txt" "$S/LICENSES/"
 # (the kernel's unzip: no ZIP64 - far below its 4 GB)
 rm -f "$OUT/java.zip"
 (cd "$S" && zip -qrX "$OUT/java.zip" .)

@@ -241,6 +241,50 @@ static void bin_default(const char* mf, uint32_t len, const pkg_info_t* info, in
     bin_add(info->name, link);
 }
 
+/* ── its licences: /usr/share/licenses/<name>/ ──────────────────────────
+ * The licence files a package carries (COPYING, LICENSE, NOTICE... at the top
+ * of /apps/<name>: ports/port.sh puts the upstream source's there), and the
+ * LICENSES folder of what it unpacked (java.bpk: /usr/java/LICENSES), linked
+ * where Linux keeps them; the links go with the package. */
+static int licence_name(const char* n) {
+    static const char* const pre[] = { "COPYING", "LICENSE", "LICENCE", "NOTICE", "COPYRIGHT", "THIRD_PARTY", "THIRD-PARTY", NULL };
+    for (int i = 0; pre[i]; i++) {
+        size_t l = strlen(pre[i]), k = 0;
+        for (; k < l && n[k]; k++) {
+            char c = n[k] >= 'a' && n[k] <= 'z' ? (char)(n[k] - 32) : n[k];
+            if (c != pre[i][k]) break;
+        }
+        if (k == l) return 1;
+    }
+    return 0;
+}
+static void licence_links(const char* name, const char* udest, int add) {
+    char dir[FS_PATH_LEN], ldir[FS_PATH_LEN], link[FS_PATH_LEN], target[FS_PATH_LEN];
+    ksnprintf(dir, sizeof(dir), "%s/%s", PKG_DIR, name);
+    ksnprintf(ldir, sizeof(ldir), "/usr/share/licenses/%s", name);
+    int* idx = (int*)kmalloc(sizeof(int) * 256);
+    if (!idx) return;
+    int n = fs_list_files(dir, idx, 256);
+    for (int i = 0; i < n && i < 256; i++) {
+        const fs_file_t* f = fs_file_info(idx[i]);
+        if (!f || !licence_name(f->name)) continue;
+        ksnprintf(target, sizeof(target), "%s/%s", dir, f->name);
+        ksnprintf(link, sizeof(link), "%s/%s", ldir, f->name);
+        fs_stat_t st;
+        if (fs_stat(link, 0, &st) == 0 && st.is_link) fs_delete(link, 0);
+        if (add) { fs_mkdir_p(ldir); fs_symlink(target, link); }
+    }
+    kfree(idx);
+    if (udest && udest[0]) {
+        ksnprintf(target, sizeof(target), "%s/LICENSES", udest);
+        ksnprintf(link, sizeof(link), "%s/LICENSES", ldir);
+        fs_stat_t st;
+        if (fs_stat(link, 0, &st) == 0 && st.is_link) fs_delete(link, 0);
+        if (add && fs_find_dir(target) >= 0) { fs_mkdir_p(ldir); fs_symlink(target, link); }
+    }
+    if (!add && fs_find_dir(ldir) >= 0 && fs_list_files(ldir, NULL, 0) == 0 && fs_list_dirs(ldir, NULL, 0) == 0) fs_delete(ldir, 1);
+}
+
 /* at boot: the links of the console apps installed before there were any */
 void pkg_bin_sync(void) {
     pkg_info_t* l = (pkg_info_t*)kmalloc(sizeof(pkg_info_t) * 128);
@@ -471,6 +515,12 @@ int pkg_install_mem(const uint8_t* data, uint32_t size, char* msg, int mcap) {
     if (mff && mff->content) each_bin(mff->content, mff->size, info.name, bin_add);
     if (mff && mff->content) bin_default(mff->content, mff->size, &info, 1);
     if (mff && mff->content) each_lib(mff->content, mff->size, info.name, lib_add);
+    {
+        char uf[ENT_NAME], ud[FS_PATH_LEN];
+        ud[0] = 0;
+        if (mff && mff->content) unpack_spec(mff->content, mff->size, uf, sizeof(uf), ud, sizeof(ud));
+        licence_links(info.name, ud, 1);
+    }
     if (!strcmp(info.type, "driver")) {             /* a driver: loaded right away (and at every boot) */
         char err[96];
         if (driver_load_package(info.name, err, sizeof(err)) == 0)
@@ -543,7 +593,10 @@ int pkg_remove(const char* name, char* msg, int mcap) {
     ksnprintf(path, sizeof(path), "%s/manifest", dir);
     int fi = fs_find_file(path);
     fs_file_t* f = fi >= 0 ? fs_get_file(fi) : NULL;
-    if (f && unpack_spec(f->content, f->size, ufile, sizeof(ufile), udest, sizeof(udest)) > 0 && fs_find_dir(udest) >= 0)
+    udest[0] = 0;
+    int unpacked = f && unpack_spec(f->content, f->size, ufile, sizeof(ufile), udest, sizeof(udest)) > 0;
+    licence_links(name, unpacked ? udest : NULL, 0);
+    if (unpacked && fs_find_dir(udest) >= 0)
         fs_delete(udest, 1);
     if (f && f->content) each_bin(f->content, f->size, name, bin_remove);       /* and its /bin links */
     if (f && f->content) bin_default(f->content, f->size, &info, 0);

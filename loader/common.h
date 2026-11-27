@@ -40,6 +40,25 @@ static __attribute__((unused)) const char* entry_label(int i) {
 }
 static int entry_is64(int i) { return i == 0 || i == 1 || i == 3; }
 
+/* An image may carry one kernel only (Banana_OS-32.iso: the 32-bit one; the
+ * release's Banana_OS.iso, -mesa, -full: the 64-bit one). The entry started
+ * for the one chosen: the same, or its twin with the other kernel when this
+ * one is not there or the processor cannot run it; -1 when the image has no
+ * kernel this processor can run (a 64-bit image, a 32-bit processor). */
+static __attribute__((unused)) int entry_for(int entry, int have32, int have64, int long_mode) {
+    int is64 = entry_is64(entry);
+    if (is64 && have64 && long_mode) return entry;
+    if (!is64 && have32) return entry;
+    if (is64 && have32) return entry == 3 ? 4 : 2;           /* (boot messages stay asked for) */
+    if (!is64 && have64 && long_mode) return entry == 4 ? 3 : 0;
+    return -1;
+}
+/* the entry highlighted at first */
+static __attribute__((unused)) int entry_default(int have32, int have64, int long_mode) {
+    return have64 && long_mode ? 0 : have32 ? 2 : 0;
+}
+#define NO_KERNEL_FOR_CPU "64-bit image, 32-bit processor: use Banana_OS-32.iso"
+
 /* the value of a "set banana_medium=..." line ("live-cd", "install") */
 static __attribute__((unused)) void medium_value(const char* line, u32 len, char* out, u32 cap) {
     u32 i = 0, n = 0;

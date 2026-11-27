@@ -287,6 +287,54 @@ int fsdisk_boot_file(const char* path, uint64_t* offset, uint32_t* size) {
     return boot_src() ? src_file(&g_boot_src, path, offset, size) : -1;
 }
 
+/* ── the all-in-one image's packages: /EXTRAS (Java), listed in BANANA.SUM ──
+ * Too big for the kernel, they are files of the image: the live system
+ * installs them at the start (fsdisk_live_extras), the installed one when it
+ * updated itself from such an image (fsdisk_update_on). fn gets each one's
+ * name ("JAVA.BPK"), its data and its BANANA.SUM line (what changes with it). */
+static fsdisk_extra_fn g_extra_fn;
+void fsdisk_set_extras_fn(fsdisk_extra_fn fn) { g_extra_fn = fn; }
+
+static int src_extras(const img_src_t* src, fsdisk_extra_fn fn) {
+    uint64_t off;
+    uint32_t sz;
+    if (!fn || src_file(src, "BANANA.SUM", &off, &sz) != 0 || !sz || sz > 4096) return 0;
+    char* list = (char*)kzalloc(2048u * 2u + 1u);
+    if (!list || src_read(src, (uint32_t)(off / 2048u), (sz + 2047u) / 2048u, list) != 0) { kfree(list); return 0; }
+    list[sz] = 0;
+    int n = 0;
+    for (char* line = list; *line; ) {
+        char* nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        char* path = strstr(line, " EXTRAS/");
+        uint64_t foff;
+        uint32_t fsz;
+        if (path && src_file(src, path + 1, &foff, &fsz) == 0 && fsz && fsz < (512u << 20)) {
+            uint32_t blocks = (fsz + 2047u) / 2048u;
+            uint8_t* data = (uint8_t*)kmalloc(blocks * 2048u);
+            int ok = data != NULL;
+            for (uint32_t done = 0; ok && done < blocks; ) {
+                uint32_t k = blocks - done < 512u ? blocks - done : 512u;
+                ok = src_read(src, (uint32_t)(foff / 2048u) + done, k, data + done * 2048u) == 0;
+                done += k;
+                task_yield();
+            }
+            if (ok && fn(path + 8, data, fsz, line) == 0) n++;
+            else if (!ok) klog("fsdisk: %s could not be read from the %s\n", path + 1, src_kind(src));
+            kfree(data);
+        }
+        if (!nl) break;
+        line = nl + 1;
+    }
+    kfree(list);
+    return n;
+}
+
+int fsdisk_live_extras(void) {
+    if (!sysinfo_live_boot() || !boot_src()) return 0;
+    return src_extras(&g_boot_src, g_extra_fn);
+}
+
 /* ── the CD or USB stick checked before it is used ─────────────────────
  * The image carries BANANA.SUM (tools/iso_sums.py): "crc32 size path" of
  * its kernels and its EFI image - every built-in program is inside the
@@ -2716,6 +2764,19 @@ static int sink_compare(uint32_t blk, uint32_t nblk, const uint8_t* data, void* 
     return 0;
 }
 
+/* the image has the kernel this system runs (a 32-bit-only or 64-bit-only
+ * image would otherwise leave a computer that starts the other one - or
+ * cannot) */
+static int src_has_my_kernel(const img_src_t* src) {
+    uint64_t off;
+    uint32_t sz;
+#ifdef __x86_64__
+    return src_file(src, "/boot/kernel64.bin", &off, &sz) == 0 && sz;
+#else
+    return src_file(src, "/boot/kernel.bin", &off, &sz) == 0 && sz;
+#endif
+}
+
 int fsdisk_compare_boot(void) {
     memset(&g_tm, 0, sizeof(g_tm));
     g_cmp_ok = 0;
@@ -2725,6 +2786,7 @@ int fsdisk_compare_boot(void) {
     uint32_t iso_bytes;
     if (!fsdisk_find_install(&dst)) return FSDISK_ERR_NO_INSTALL;
     if (!find_source(&src) || src_iso_size(&src, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
+    if (!src_has_my_kernel(&src)) return FSDISK_ERR_WRONG_ARCH;
     uint8_t partition[16];
     uint32_t base = boot_partition(&dst, partition);
     if (!base) return FSDISK_ERR_IO;
@@ -2899,9 +2961,11 @@ int fsdisk_update_on(const ata_disk_t* dp) {
     v5_mark_t vm;
     if (self && !e4_detect(&dst) && !v5_detect(&dst, &vm)) return FSDISK_ERR_NEEDS_LIVE;
     if (!find_source(&src) || src_iso_size(&src, &iso_bytes) != 0) return FSDISK_ERR_NO_SOURCE;
+    if (!src_has_my_kernel(&src)) return FSDISK_ERR_WRONG_ARCH;
     if (self && fsdisk_sync_durable() != FSDISK_OK) return FSDISK_ERR_IO;   /* (the files safe on the disk first) */
     if (stage_source(&src, iso_bytes, g_medium_why, sizeof(g_medium_why)) < 0) return FSDISK_ERR_SOURCE_READ;
     int rc = update_from(&src, &dst, iso_bytes, t_start);
+    if (rc == FSDISK_OK && self) src_extras(&src, g_extra_fn);   /* (the all-in-one's Java: the new one) */
     unstage(&src);
     return rc;
 }

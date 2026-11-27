@@ -44,3 +44,13 @@ Banana_OS-mesa.iso
 
 /banana-driver-sdk.tar.gz
 build/fonts/
+Banana_OS-32.iso
+Banana_OS-full.iso
+build/iso-*/
+build/iso-kernels.txt
+build/licences.asm
+build/licences.h
+build/licences.o
+build/licences.o64
+build/extras/
+build/extras-test/

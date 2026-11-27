@@ -33,6 +33,7 @@
 #include "srvcmds.h"
 #include "usercmds.h"
 #include "../kernel/procfs.h"
+#include "../kernel/licences.h"
 #include "syscmds.h"
 #include "moncmds.h"
 #include "fscmds.h"
@@ -2144,6 +2145,17 @@ static void cmd_update_mode(const char* args, int repair) {
                              VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         return;
     }
+    if (same == FSDISK_ERR_WRONG_ARCH) {
+#ifdef __x86_64__
+        terminal_write_color("update: this image has only the 32-bit system (Banana_OS-32.iso), and this computer\n"
+                             "        runs the 64-bit one - nothing was changed. Use Banana_OS.iso (or -mesa, -full).\n",
+#else
+        terminal_write_color("update: this image has only the 64-bit system, and this computer runs the 32-bit\n"
+                             "        one - nothing was changed. Use Banana_OS-32.iso.\n",
+#endif
+                             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        return;
+    }
     if (same == FSDISK_ERR_ISO_TOO_BIG) {
         terminal_write_color("update: this system image is too big for the installed disk's boot area.\n"
                              "        Back up your files and reinstall to create a larger boot area.\n",
@@ -2217,6 +2229,9 @@ static void cmd_update_mode(const char* args, int repair) {
                              "        the disk is as it was. Plug it in again (and leave it in) and retry:\n        ",
                              VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         terminal_writeln(fsdisk_medium_why());
+    } else if (rc == FSDISK_ERR_WRONG_ARCH) {
+        terminal_write_color("update: this image lacks the kernel this computer runs (32-bit / 64-bit) - nothing was written.\n",
+                             VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
     } else if (rc == FSDISK_ERR_NEEDS_LIVE) {
         terminal_write_color("update: this install uses the old disk layout - start the live USB stick and run\n"
                              "        'update' there once (it moves the files); after that it updates itself.\n",
@@ -3209,6 +3224,7 @@ void shell_run(void) {
     examples_seed();              /* the SDK's example and test apps in /usr/share/extras */
     users_boot();                 /* /etc/passwd, group, shadow, doas.conf: there and up to date (kernel/users.c) */
     procfs_boot();                /* /proc/cpuinfo, /sys/devices/system/cpu: the processor for Java (OSHI), neofetch (kernel/procfs.c) */
+    licences_boot();              /* /usr/share/licenses/banana-os: the licences and notices (kernel/licences.c) */
     {   /* the first person logged in until the login says otherwise: banana */
         const user_t* first = user_by_name(PASSWD_USER);
         const user_t* p[1];
@@ -3240,6 +3256,7 @@ void shell_run(void) {
     boottime_mark("built-in apps");
     builtin_apps_install();         /* Media Player, Music (kernel/builtin_apps.c) */
     builtin_release();              /* installed: the packages on the disk, their RAM to the heap */
+    builtin_extras_install();       /* the all-in-one image's Java (its /EXTRAS) */
     boottime_mark("driver modules");
     drivers_load_installed();       /* (installed with pkg: driver-sdk) */
 

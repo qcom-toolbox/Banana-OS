@@ -36,6 +36,14 @@ JOBS=${JOBS:-$(nproc)}
 mkdir -p "$DL" "$OUT"
 
 # ── the sources and a boot JDK (Temurin) ──────────────────────────────
+# (SOURCES_ONLY=1: the source archive only, checked - for the release's
+#  corresponding source, tools/collect_sources.py; the boot JDK is a build tool)
+if [ "${SOURCES_ONLY:-}" = 1 ]; then
+    T=$DL/jdk17u-$VER.tar.gz
+    [ -f "$T" ] || curl -fsSL --retry 4 -o "$T" https://github.com/openjdk/jdk17u/archive/refs/tags/jdk-$VER-ga.tar.gz
+    echo "$SRC_SHA  $T" | sha256sum -c -
+    exit 0
+fi
 if [ ! -d "$SRC" ]; then
     T=$DL/jdk17u-$VER.tar.gz
     [ -f "$T" ] || curl -fsSL -o "$T" https://github.com/openjdk/jdk17u/archive/refs/tags/jdk-$VER-ga.tar.gz

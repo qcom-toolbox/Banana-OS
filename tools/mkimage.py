@@ -18,6 +18,15 @@ and hard disks (the installer copies the image onto the disk as it is):
 import struct, sys
 
 
+def iso_has(img, path):
+    """1 if the ISO9660 image has the file"""
+    try:
+        iso_find(img, path)
+        return True
+    except SystemExit:
+        return False
+
+
 def iso_find(img, path):
     """(first 2048-byte block, size) of an ISO9660 file"""
     pvd = img[16 * 2048:17 * 2048]
@@ -131,7 +140,11 @@ def compact_kernels(img):
     """
     esp_lba, esp_size = iso_find(img, "efi.img")
     aliases, removed = {}, []
-    for name in ("kernel.bin", "kernel64.bin"):
+    # (an image may have one kernel: Banana_OS-32.iso, or the 64-bit ones)
+    names = [n for n in ("kernel.bin", "kernel64.bin") if iso_has(img, "boot/" + n)]
+    if not names:
+        raise ValueError("no kernel in the image")
+    for name in names:
         lba, size = iso_find(img, "boot/" + name)
         off, fat_size = fat_file(img, esp_lba * 2048, esp_size, "boot/" + name)
         if off % 2048 or size != fat_size or img[lba * 2048:lba * 2048 + size] != img[off:off + size]:
@@ -140,7 +153,7 @@ def compact_kernels(img):
         removed.append((lba, lba + (size + 2047) // 2048))
     removed.sort()
     first = removed[0][0]
-    if removed[0][1] > removed[1][0] or esp_lba + (esp_size + 2047) // 2048 > first:
+    if any(removed[i][1] > removed[i + 1][0] for i in range(len(removed) - 1)) or esp_lba + (esp_size + 2047) // 2048 > first:
         raise ValueError("unexpected kernel/ESP extent overlap")
 
     def moved(lba):

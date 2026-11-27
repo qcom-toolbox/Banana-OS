@@ -187,6 +187,56 @@ static void verify_fresh_on_disk(void) {
     klog("apps: the apps just installed were read back from the disk and checked (%u ms)\n", timer_ms() - t0);
 }
 
+/* ── the all-in-one image's packages (/EXTRAS on it: Java) ─────────────
+ * kernel/fsdisk.c reads them from the image; one is installed unless the
+ * same one already is: /etc/banana-extras keeps the BANANA.SUM line of each
+ * installed (its CRC and size - a new image's differ). */
+#define EXTRAS_DONE "/etc/banana-extras"
+static int extra_install(const char* file, const uint8_t* data, uint32_t size, const char* sumline) {
+    char pkg[32], dir[64];
+    int n = 0;
+    for (; file[n] && file[n] != '.' && n < (int)sizeof(pkg) - 1; n++) pkg[n] = (char)(file[n] >= 'A' && file[n] <= 'Z' ? file[n] + 32 : file[n]);
+    pkg[n] = 0;
+    ksnprintf(dir, sizeof(dir), "/apps/%s/manifest", pkg);
+    const fs_cred_t* oc = fs_cred_swap(NULL);           /* (the system's: /apps, /usr) */
+    int fi = fs_find_file(EXTRAS_DONE);
+    fs_file_t* f = fi >= 0 ? fs_get_file(fi) : NULL;
+    if (f && f->content && strstr(f->content, sumline) && fs_find_file(dir) >= 0) { fs_cred_swap(oc); return 0; }
+    char msg[160];
+    uint32_t t0 = timer_ms();
+    int rc = pkg_install_mem(data, size, msg, sizeof(msg));
+    klog("extras: %s - %s (%u ms)\n", file, rc == 0 ? msg : "not installed", timer_ms() - t0);
+    if (rc == 0) {
+        /* the list again (looked up anew: installing changed the files): this package's old line out, the new one in */
+        fi = fs_find_file(EXTRAS_DONE);
+        f = fi >= 0 ? fs_get_file(fi) : NULL;
+        char* out = (char*)kmalloc((f && f->content ? f->size : 0) + 256);
+        uint32_t o = 0;
+        if (out) {
+            if (f && f->content) {
+                for (const char* l = f->content; *l; ) {
+                    const char* e = strchr(l, '\n');
+                    uint32_t len = e ? (uint32_t)(e - l) + 1 : (uint32_t)strlen(l);
+                    if (!strstr(l, file) || (e && strstr(l, file) > e)) { memcpy(out + o, l, len); o += len; }
+                    l += len;
+                }
+            }
+            o += (uint32_t)ksnprintf(out + o, 256, "%s\n", sumline);
+            fs_write_path(EXTRAS_DONE, out, o);
+            kfree(out);
+        }
+    }
+    fs_cred_swap(oc);
+    return rc == 0 ? 0 : -1;
+}
+
+/* the live all-in-one image's: at the start (installed systems: after an update) */
+void builtin_extras_install(void) {
+    fsdisk_set_extras_fn(extra_install);
+    int n = fsdisk_live_extras();
+    if (n) klog("extras: %d package%s from the image\n", n, n == 1 ? "" : "s");
+}
+
 void builtin_apps_install(void) {
     if (g_released) return;
     {

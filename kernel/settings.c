@@ -1649,6 +1649,11 @@ static const char* up_result_text(int rc, uint32_t* color) {
     case FSDISK_ERR_ISO_TOO_BIG: return "Too big for the disk's boot area: reinstall.";
     case FSDISK_ERR_BAD_SOURCE:  return "It reads back damaged - nothing was written.";
     case FSDISK_ERR_NEEDS_LIVE:  return "Old disk layout: update once from the live stick.";
+#ifdef __x86_64__
+    case FSDISK_ERR_WRONG_ARCH:  return "That is the 32-bit image: use Banana_OS.iso.";
+#else
+    case FSDISK_ERR_WRONG_ARCH:  return "That is a 64-bit image: use Banana_OS-32.iso.";
+#endif
     case FSDISK_ERR_SOURCE_READ: return "The stick stopped reading - nothing was written.";
     case FSDISK_ERR_TOO_SMALL: case FSDISK_ERR_FULL: return "The disk is too small - nothing was changed.";
     default:                     return "A disk error - your files are untouched; retry.";

@@ -142,6 +142,16 @@ static u8* read_file(const char* path, UINTN* size, int must) {
     return buf;
 }
 
+/* 1 if path is on my partition */
+static int file_exists(const char* path) {
+    EFI_FILE* f;
+    CHAR16 p[64];
+    wide(path, p, 64);
+    if (g_root->Open(g_root, &f, p, 1, 0) != EFI_SUCCESS) return 0;
+    f->Close(f);
+    return 1;
+}
+
 static void open_partition(void) {
     EFI_LOADED_IMAGE* li;
     EFI_SIMPLE_FILE_SYSTEM* fs;
@@ -402,9 +412,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     g_extra[g_nextra++] = X_RESTART;
 
     int entry;
+    int have32 = file_exists("\\boot\\kernel.bin"), have64 = file_exists("\\boot\\kernel64.bin"), lm = has_long_mode();
     tsc[1] = loader_tsc();
     for (;;) {
-        entry = menu(has_long_mode() ? 0 : 2);
+        entry = menu(entry_default(have32, have64, lm));
         if (entry < KERNEL_ENTRIES) break;
         int x = g_extra[entry - KERNEL_ENTRIES];
         ST->ConOut->ClearScreen(ST->ConOut);
@@ -417,6 +428,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     if (g_gop && g_vsel >= 0 && g_modes[g_vsel].id != g_gop->Mode->Mode)
         ((gop_set_t)g_gop->SetMode)(g_gop, g_modes[g_vsel].id);    /* refused: the size stays */
     ST->ConOut->ClearScreen(ST->ConOut);
+    entry = entry_for(entry, have32, have64, lm);
+    if (entry < 0) halt(NO_KERNEL_FOR_CPU);
     int is64 = entry_is64(entry);
     print(is64 ? "Loading Banana OS (64-bit)...\r\n" : "Loading Banana OS (32-bit)...\r\n");
 

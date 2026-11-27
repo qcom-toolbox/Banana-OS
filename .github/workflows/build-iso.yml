@@ -137,16 +137,41 @@ jobs:
         working-directory: mesa-packages
         run: sha256sum -c MESA-SHA256SUMS
 
-      - name: Build Banana_OS.iso
+      - name: Build Banana_OS.iso (64-bit) and Banana_OS-32.iso
         run: |
           make clean
           mesa_args=()
+          images=(Banana_OS.iso)
           if [ "${{ matrix.variant }}" = mesa ]; then
             mesa_args+=(MESA_BPK="$PWD/mesa-packages/mesa-x86_64.bpk")
+          else
+            images+=(Banana_OS-32.iso)       # (the 32-bit kernel alone: no Mesa, no ports - one build of it)
           fi
           # (in parallel: a clean build is 2.5 min on the runner's 4 cores instead of ~9)
-          make -j"$(nproc)" LIBJS_WORKER_BPK="$PWD/libjs-packages/libjsworker-x86_64.bpk" "${mesa_args[@]}"
+          make -j"$(nproc)" ISO_KERNELS=64 LIBJS_WORKER_BPK="$PWD/libjs-packages/libjsworker-x86_64.bpk" "${mesa_args[@]}" "${images[@]}"
           rm -f ~/.banana-secureboot/banana-sb.key
+
+      # the corresponding source of the ports built into the images (the
+      # upstream archives as fetched, checked; the trees from git)
+      - name: Collect the ports' sources
+        if: matrix.variant == 'standard'
+        run: python3 tools/collect_sources.py sources-ports bash coreutils grep sed findutils diffutils gawk ncurses less zsh nano vim vi neofetch neovim git ffmpeg tcc
+      - name: Retain the ports' sources
+        if: matrix.variant == 'standard'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sources-ports-${{ github.sha }}
+          path: sources-ports
+          if-no-files-found: error
+          retention-days: 3
+      - name: Retain the 32-bit ISO
+        if: matrix.variant == 'standard'
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-iso-32-${{ github.sha }}
+          path: Banana_OS-32.iso
+          if-no-files-found: error
+          retention-days: 3
 
       - name: Export application SDK independently
         if: matrix.variant == 'standard'
@@ -336,26 +361,20 @@ jobs:
           path: java-bundle/java.bpk
           retention-days: 3
 
-  # next to the ISO, in the same pre-release (once both are built)
-  publish-java:
-    needs: [ publish-isos, java ]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download java.bpk
-        uses: actions/download-artifact@v4
+      # OpenJDK's, LWJGL's and libffi's source archives (checked against the
+      # scripts' SHA-256) for the release's corresponding source
+      - name: Collect Java's sources
+        run: |
+          SOURCES_ONLY=1 sh ports/openjdk/build.sh
+          SOURCES_ONLY=1 sh ports/lwjgl/build.sh
+          SOURCES_JOB=java python3 tools/collect_sources.py sources-java openjdk:archives lwjgl:archives
+      - name: Retain Java's sources
+        uses: actions/upload-artifact@v4
         with:
-          name: java-bundle
-
-      - name: Add it to the pre-release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_number }}
-          name: Banana OS build ${{ github.run_number }}
-          prerelease: true
-          files: java.bpk
-
+          name: sources-java-${{ github.sha }}
+          path: sources-java
+          if-no-files-found: error
+          retention-days: 3
 
   # Build the isolated renderer before embedding it in the 64-bit ISO.
   # Keep audited packages/notices as internal CI artifacts; the worker ships in the ISO.
@@ -397,6 +416,8 @@ jobs:
           # (the same library goes into java.bpk: Java's OpenGL on the GPU)
           cp ports/mesa/build-crocus-iris-r600/libOSMesa.so mesa-packages/
           (cd mesa-packages && sha256sum mesa-x86_64.bpk libOSMesa.so > MESA-SHA256SUMS)
+          # Mesa's source archive, for the release's corresponding source
+          SOURCES_JOB=mesa python3 tools/collect_sources.py sources-mesa mesa:archives
       - name: Test pristine Mesa patching
         run: python3 tools/tests/mesa_patch.py
       - name: Test Intel kernel interface
@@ -437,6 +458,12 @@ jobs:
         with:
           name: mesa-intel-runtime
           path: mesa-packages/*
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sources-mesa-${{ github.sha }}
+          path: sources-mesa
           if-no-files-found: error
           retention-days: 3
 
@@ -510,7 +537,10 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends qemu-system-x86 ovmf acpica-tools python3
       - uses: actions/download-artifact@v4
         with:
-          name: boot-iso-standard-${{ github.sha }}
+          name: boot-iso-${{ matrix.bits == 32 && '32' || 'standard' }}-${{ github.sha }}
+      - name: The 32-bit image (Banana_OS-32.iso) for the 32-bit run
+        if: matrix.bits == 32
+        run: mv Banana_OS-32.iso Banana_OS.iso
       - name: Battery, backlight, PD contracts and power-role changes via AML
         timeout-minutes: 12
         run: |
@@ -553,7 +583,10 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends qemu-system-x86 ovmf python3
       - uses: actions/download-artifact@v4
         with:
-          name: boot-iso-standard-${{ github.sha }}
+          name: boot-iso-${{ matrix.bits == 32 && '32' || 'standard' }}-${{ github.sha }}
+      - name: The 32-bit image (Banana_OS-32.iso) for the 32-bit run
+        if: matrix.bits == 32
+        run: mv Banana_OS-32.iso Banana_OS.iso
       - name: Full selftest, local sockets, POSIX and supported application suites
         run: |
           args=()
@@ -601,7 +634,10 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends qemu-system-x86 ovmf acpica-tools gcc-multilib binutils make python3
       - uses: actions/download-artifact@v4
         with:
-          name: boot-iso-standard-${{ github.sha }}
+          name: boot-iso-${{ matrix.bits == 32 && '32' || 'standard' }}-${{ github.sha }}
+      - name: The 32-bit image (Banana_OS-32.iso) for the 32-bit run
+        if: matrix.bits == 32
+        run: mv Banana_OS-32.iso Banana_OS.iso
       - name: Load frozen ABI module and SDK USB/laptop examples
         timeout-minutes: 12
         run: |
@@ -620,8 +656,10 @@ jobs:
           retention-days: 7
 
   publish-isos:
-    name: Publish validated standard and Mesa ISOs
-    needs: [release-tag, build, boot, network, network-host, power, power-host, command-host, driver-sdk-host, driver-sdk-vm, os-regression]
+    name: Publish the validated ISOs, java.bpk and the sources
+    # (java is required: a release always has its java.bpk; the all-in-one
+    #  image is not - publish-full adds it when it is ready)
+    needs: [release-tag, build, boot, java, mesa, network, network-host, power, power-host, command-host, driver-sdk-host, driver-sdk-vm, os-regression]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -633,16 +671,47 @@ jobs:
           set -euo pipefail
           actual=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/build-$GITHUB_RUN_NUMBER" --jq '.object.sha')
           test "$actual" = "$GITHUB_SHA" || { echo "Refusing mismatched release tag"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          path: repo
       - uses: actions/download-artifact@v4
         with:
           pattern: boot-iso-*-${{ github.sha }}
           merge-multiple: true
       - uses: actions/download-artifact@v4
         with:
+          name: java-bundle
+      - uses: actions/download-artifact@v4
+        with:
           name: application-sdk-${{ github.sha }}
       - uses: actions/download-artifact@v4
         with:
           name: driver-sdk-${{ github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sources-*-${{ github.sha }}
+          path: sources
+      # the corresponding source: every upstream archive the builds used, and
+      # the repository at this tag (scripts, patches, Banana OS) - one file
+      - name: Assemble Banana_OS-sources.tar
+        run: |
+          set -euo pipefail
+          mkdir -p src-out/upstream
+          for d in sources/*/; do cp -r "$d"/. src-out/upstream/; done
+          git -C repo archive --format=tar.gz --prefix="banana-os-$GITHUB_SHA/" -o "$PWD/src-out/banana-os-$GITHUB_SHA.tar.gz" HEAD
+          {
+            echo "Banana OS build $GITHUB_RUN_NUMBER ($GITHUB_SHA) - corresponding source"
+            echo "upstream/<port>/: as ports/<port>/build.sh fetched it; banana-os-*.tar.gz: the repository at this tag."
+            echo "Licences: banana-os-*/LICENSES/, banana-os-*/THIRD-PARTY-NOTICES."
+            echo
+            echo "sha256  size  file"
+            cat src-out/upstream/SOURCES-*.txt | sed 's|  \([^ ]*\)$|  upstream/\1|'
+            (cd src-out && sha256sum "banana-os-$GITHUB_SHA.tar.gz" | awk -v s="$(stat -c %s "banana-os-$GITHUB_SHA.tar.gz")" '{printf "%s  %10d  %s\n", $1, s, $2}')
+          } > src-out/SOURCES.txt
+          rm -f src-out/upstream/SOURCES-*.txt
+          tar -C src-out -cf Banana_OS-sources.tar .
+          ls -la Banana_OS-sources.tar
+          head -20 src-out/SOURCES.txt
       - name: Publish pre-release
         uses: softprops/action-gh-release@v2
         with:
@@ -654,17 +723,184 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             Banana_OS.iso
+            Banana_OS-32.iso
             Banana_OS-mesa.iso
+            java.bpk
+            Banana_OS-sources.tar
             banana-sdk.tar.gz
             banana-driver-sdk.tar.gz
           body: |
-            - **Banana_OS.iso**: standard BIOS/UEFI image.
-            - LibJS is integrated in both 64-bit ISO variants; no separate LibJS BPK installation is required.
-            - **Banana_OS-mesa.iso**: the same OS with the 64-bit Mesa runtime, Intel Crocus/Iris (Core 1st–10th generation), VirGL and software fallback. The combined Mesa/LibJS profile is tested with 1 GiB RAM.
+            - **Banana_OS.iso**: the standard image, 64-bit (BIOS and UEFI; CD, USB stick or disk).
+            - **Banana_OS-32.iso**: the 32-bit system alone, for processors without 64-bit support (no Unix ports, Terminal, Java or Mesa: those are 64-bit).
+            - **Banana_OS-mesa.iso**: the 64-bit image with the Mesa runtime: Intel Crocus/Iris (Core 1st–10th generation), AMD r600, VirGL and software fallback. Tested with 1 GiB RAM.
+            - **Banana_OS-full.iso** (added when its build finishes - it does not hold the release up): everything in - the Mesa runtime, every Unix port (Neovim and Git too) and Java, installed from the image at the first start. 2 GiB RAM recommended.
+            - **java.bpk**: Java (OpenJDK 17, LWJGL 3, OpenGL) for the 64-bit images: `pkg install java.bpk`.
+            - **Banana_OS-sources.tar**: the corresponding source of everything above (every upstream source archive as built, checked by SHA-256 in its SOURCES.txt, and the repository at this tag).
+            - **banana-sdk.tar.gz**: application SDK. **banana-driver-sdk.tar.gz**: independent hardware Driver SDK.
 
-            - **banana-sdk.tar.gz**: application SDK.
-            - **banana-driver-sdk.tar.gz**: independent hardware Driver SDK (PCI, Ethernet/Wi-Fi, USB and laptop services).
+            LibJS is integrated in the 64-bit images. Each image's /LICENSES (and /usr/share/licenses on the system) has the licences and THIRD-PARTY-NOTICES. `update` refuses an image without the kernel the computer runs (Banana_OS-32.iso on a 64-bit system, or the reverse).
 
             Intel acceleration is experimental: crocus has run on a real Sandy Bridge (HD Graphics 2000); other generations are tested on models only. Radeon HD 5450 - 7450 (TeraScale 2) OpenGL through Mesa r600 is experimental too, tested on a model only (needs `gpu experimental on`). A supported GPU is used by default; `gpu3d test` checks it, `glinfo` shows the renderer, and `gpu3d off` restores software rendering.
 
             [Graphics setup and limits](https://github.com/qcom-toolbox/Banana-OS/blob/${{ github.sha }}/GPU.md#mesa-iso-in-prereleases)
+
+  # The all-in-one image: the Mesa runtime, every port (the optional ones
+  # installed too) and Java (java.bpk on the image, installed from it at the
+  # start). Not needed for the release: publish-full adds it to the
+  # published release once it built and started; when it fails, the release
+  # is out all the same.
+  build-full:
+    name: Build and start the all-in-one ISO
+    needs: [libjs, mesa, java]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo python3 tools/ci_apt_mirrors.py
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm gcc-multilib binutils xorriso mtools python3 sbsigntool efitools ncurses-bin zsh cmake git
+
+      # Secure Boot: the loaders are signed with the Banana OS key (a repository
+      # secret); without it (forks) they are built unsigned
+      - name: Secure Boot key
+        env:
+          SB_KEY_PEM: ${{ secrets.BANANA_SB_KEY }}
+        run: |
+          if [ -n "$SB_KEY_PEM" ]; then
+            mkdir -p ~/.banana-secureboot && chmod 700 ~/.banana-secureboot
+            printf '%s\n' "$SB_KEY_PEM" > ~/.banana-secureboot/banana-sb.key
+            chmod 600 ~/.banana-secureboot/banana-sb.key
+          fi
+
+      # FFmpeg for the Media Player and Music apps (ports/ffmpeg/build.sh):
+      # built once, then kept until the build script or the SDK's libc changes
+      - name: FFmpeg build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ports/ffmpeg/src
+            ports/ffmpeg/build
+          key: ffmpeg-7.1-${{ hashFiles('ports/ffmpeg/build.sh', 'sdk/lib/*.c', '!sdk/lib/banana.c', 'sdk/include/**', '!sdk/include/banana*.h') }}
+
+      # the Unix programs in /bin (ports/<name>/build.sh with ports/port.sh,
+      # 64-bit): bash, coreutils, grep, sed, findutils, diffutils, gawk,
+      # ncurses (+ terminfo), less, zsh; the optional editors (nano, vim, vi,
+      # neovim) and git - the downloads kept, the builds too
+      # while their scripts and the SDK stay (port.sh reconfigures otherwise)
+      - name: Unix ports build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ports/bash/src
+            ports/bash/build
+            ports/coreutils/src
+            ports/coreutils/build
+            ports/grep/src
+            ports/grep/build
+            ports/sed/src
+            ports/sed/build
+            ports/findutils/src
+            ports/findutils/build
+            ports/diffutils/src
+            ports/diffutils/build
+            ports/gawk/src
+            ports/gawk/build
+            ports/ncurses/src
+            ports/ncurses/build
+            ports/less/src
+            ports/less/build
+            ports/zsh/src
+            ports/zsh/build
+            ports/nano/src
+            ports/nano/build
+            ports/vim/src
+            ports/vim/build
+            ports/vi/src
+            ports/vi/build
+            ports/neovim/src
+            ports/neovim/build
+            ports/git/src
+            ports/git/build
+            ports/neofetch/src
+            ports/neofetch/build
+          key: unix-ports-v2-${{ hashFiles('ports/port.sh', 'ports/bash/*', 'ports/coreutils/*', 'ports/grep/*', 'ports/sed/*', 'ports/findutils/*', 'ports/diffutils/*', 'ports/gawk/*', 'ports/ncurses/*', 'ports/less/*', 'ports/zsh/*', 'ports/nano/*', 'ports/vim/*', 'ports/vi/*', 'ports/neovim/*', 'ports/git/*', 'ports/neofetch/*', 'sdk/tools/banana-*', 'sdk/lib/*.c', 'sdk/include/**') }}
+          restore-keys: unix-ports-v2-
+
+      - name: Download the integrated LibJS renderer
+        uses: actions/download-artifact@v4
+        with:
+          name: experimental-libjs-packages
+          path: libjs-packages
+      - name: Download Intel Mesa runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: mesa-intel-runtime
+          path: mesa-packages
+      - name: Download java.bpk
+        uses: actions/download-artifact@v4
+        with:
+          name: java-bundle
+          path: java-bundle
+      - name: Verify the packages
+        run: |
+          (cd libjs-packages && sha256sum -c LIBJS-SHA256SUMS)
+          (cd mesa-packages && sha256sum -c MESA-SHA256SUMS)
+          python3 sdk/tools/bpkg check java-bundle/java.bpk
+      - name: Build Banana_OS-full.iso
+        run: |
+          make clean
+          make -j"$(nproc)" FULL=1 ISO_KERNELS=64 LIBJS_WORKER_BPK="$PWD/libjs-packages/libjsworker-x86_64.bpk" \
+               MESA_BPK="$PWD/mesa-packages/mesa-x86_64.bpk" JAVA_BPK="$PWD/java-bundle/java.bpk" Banana_OS.iso
+          rm -f ~/.banana-secureboot/banana-sb.key
+          mv Banana_OS.iso Banana_OS-full.iso
+          ls -la Banana_OS-full.iso
+      - name: Start it - Java, Mesa, the ports, the licences
+        timeout-minutes: 40
+        run: |
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+          python3 tools/serialtest.py --log build/logs/full/serial.log --boot-timeout 900 --timeout 600 \
+              --cmd 'cat /etc/banana-extras ## EXTRAS/JAVA.BPK' \
+              --cmd 'java -version ## OpenJDK' \
+              --cmd 'glinfo ## glinfo: every check passed' \
+              --cmd 'nvim --version ## NVIM' \
+              --cmd 'git --version ## git version' \
+              --cmd 'ls /usr/share/licenses/java/LICENSES ## LWJGL' \
+              --cmd 'ls /usr/share/licenses/git ## COPYING' \
+              --cmd 'selftest ## 0 failed' \
+              -- -accel tcg -cdrom Banana_OS-full.iso -boot d -m 2G -smp 4 -nic none
+      - name: Preserve the start's log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-boot-${{ github.sha }}-${{ github.run_attempt }}
+          path: build/logs/full/*.log
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: full-iso-${{ github.sha }}
+          path: Banana_OS-full.iso
+          if-no-files-found: error
+          retention-days: 3
+
+  publish-full:
+    name: Add the all-in-one ISO to the release
+    needs: [build-full, publish-isos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: full-iso-${{ github.sha }}
+      - name: Add it to the pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Banana OS build ${{ github.run_number }}
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: Banana_OS-full.iso

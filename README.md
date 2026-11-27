@@ -75,7 +75,26 @@ chmod +x build.sh
 sudo apt-get install nasm gcc-multilib binutils xorriso mtools python3
 make
 # Output: Banana_OS.iso (kernel.bin = 32-bit, kernel64.bin = 64-bit inside)
+make ISO_KERNELS=64 Banana_OS.iso     # the release's image: the 64-bit kernel only
+make Banana_OS-32.iso                 # the 32-bit kernel only
+make FULL=1 ISO_KERNELS=64 MESA_BPK=.../mesa-x86_64.bpk JAVA_BPK=.../java.bpk Banana_OS.iso
+                                      # the all-in-one: Mesa, every port, Java
 ```
+
+### The release's images
+
+Each prerelease (GitHub Releases, `build-N`) has:
+
+| File | What |
+|---|---|
+| `Banana_OS.iso` | the standard image, 64-bit |
+| `Banana_OS-32.iso` | the 32-bit system alone, for processors without 64-bit support (no Unix ports, Terminal, Java or Mesa) |
+| `Banana_OS-mesa.iso` | the 64-bit image with the Mesa OpenGL runtime (GPU.md) |
+| `Banana_OS-full.iso` | all-in-one: Mesa, every Unix port (Neovim and Git too) and Java, installed from the image at the first start; 2 GiB RAM recommended. Added when its build finishes - it never holds a release up |
+| `java.bpk` | Java (OpenJDK 17, LWJGL, OpenGL) for the 64-bit images: `pkg install java.bpk` - a release always has it |
+| `Banana_OS-sources.tar` | the corresponding source of everything in them (upstream archives with their SHA-256, the repository at the tag) |
+
+Every image carries the licences in `/LICENSES` (and the system in `/usr/share/licenses`; each package's at `/usr/share/licenses/<name>`); THIRD-PARTY-NOTICES says which applies to what. `update` refuses an image without the kernel the computer runs.
 
 No GRUB: the boot loaders are built from `loader/` with the same tools as the kernel (`nasm`, `gcc`, `ld`; `objcopy` turns the UEFI one into a PE program), `mtools` makes the EFI partition, `xorriso` the ISO.
 
@@ -90,7 +109,7 @@ qemu-system-x86_64 -cdrom Banana_OS.iso -m 256 -nic user,model=e1000 -serial std
 qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd -cdrom Banana_OS.iso -m 256 -nic user,model=e1000 -serial stdio
 ```
 
-The boot menu has both entries - **Banana OS 0.6 (64-bit)** and **(32-bit)**; the default is the 64-bit one when the CPU has long mode (CPUID), the 32-bit one otherwise.
+The boot menu has both entries - **Banana OS 0.6 (64-bit)** and **(32-bit)**; the default is the 64-bit one when the CPU has long mode (CPUID), the 32-bit one otherwise. An image with one kernel (the release's) starts that one whichever entry is chosen; the 64-bit images on a 32-bit processor say to use `Banana_OS-32.iso`.
 
 ### Run in VirtualBox
 

@@ -499,7 +499,10 @@ void loader_main(u32 drive, u32 cd) {
     }
     if(!boot_ui_valid(&g_menu_fb)) { rm_regs_t r={0};r.eax=3;bios_int(0x10,&r);g_menu_fb.pixels=0;hide_cursor(); }
     tsc[1] = loader_tsc();
-    int entry = menu(has_long_mode() ? 0 : 2);
+    u32 klba, ksz;
+    int have32 = iso_find("boot/kernel.bin", &klba, &ksz) == 0, have64 = iso_find("boot/kernel64.bin", &klba, &ksz) == 0;
+    int lm = has_long_mode();
+    int entry = menu(entry_default(have32, have64, lm));
     tsc[2] = loader_tsc();
     if(g_menu_fb.pixels) { rm_regs_t r={0};r.eax=3;bios_int(0x10,&r);g_menu_fb.pixels=0;hide_cursor(); }
     cls();
@@ -515,6 +518,8 @@ void loader_main(u32 drive, u32 cd) {
         for (;;) __asm__ volatile("hlt");
     }
     g_msg_row = 2;
+    entry = entry_for(entry, have32, have64, lm);
+    if (entry < 0) fail("Banana Boot: " NO_KERNEL_FOR_CPU);
     message(entry_is64(entry) ? "Loading Banana OS (64-bit)..." : "Loading Banana OS (32-bit)...");
 
     u32 lba, size;

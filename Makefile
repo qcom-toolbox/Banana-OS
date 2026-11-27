@@ -36,11 +36,18 @@ C_SRCS   = $(wildcard kernel/*.c) $(wildcard shell/*.c) $(wildcard net/*.c) \
            $(wildcard crypto/*.c) $(wildcard usb/*.c) $(wildcard web/*.c) $(wildcard media/*.c) \
            third_party/stb/stb_image_impl.c $(wildcard third_party/igc/*.c) $(wildcard third_party/rge/*.c) $(wildcard third_party/uacpi/source/*.c) \
            third_party/radeon/atom.c third_party/radeon/evergreen_gfx.c third_party/radeon/r600_gfx.c third_party/radeon/ni_gfx.c third_party/radeon/evergreen_golden.c third_party/radeon/radeon_cs_check.c third_party/radeon/evergreen_wm.c
-ASM_SRCS   = boot/boot.asm kernel/isr.asm kernel/task_switch.asm kernel/appcall.asm kernel/exbin.asm kernel/frameworkbin.asm kernel/fontzbin.asm kernel/appbin.asm kernel/s3_resume.asm
-ASM_SRCS64 = boot/boot64.asm kernel/isr64.asm kernel/task_switch64.asm kernel/appcall64.asm kernel/exbin.asm kernel/frameworkbin.asm kernel/fontzbin.asm kernel/landscapebin.asm kernel/appbin.asm kernel/smp_tramp.asm kernel/s3_resume.asm
+ASM_SRCS   = boot/boot.asm kernel/isr.asm kernel/task_switch.asm kernel/appcall.asm kernel/exbin.asm kernel/frameworkbin.asm kernel/fontzbin.asm kernel/appbin.asm kernel/s3_resume.asm build/licences.asm
+ASM_SRCS64 = boot/boot64.asm kernel/isr64.asm kernel/task_switch64.asm kernel/appcall64.asm kernel/exbin.asm kernel/frameworkbin.asm kernel/fontzbin.asm kernel/landscapebin.asm kernel/appbin.asm kernel/smp_tramp.asm kernel/s3_resume.asm build/licences.asm
 kernel/landscapebin.o kernel/landscapebin.o64: $(wildcard assets/wallpapers/landscapes/*.jpg)
 
 kernel/frameworkbin.o kernel/frameworkbin.o64: $(wildcard web/fixtures/* web/fixtures/astro/* web/fixtures/astro/_astro/*) $(wildcard web/test/cases/mutation_observer*.html)
+
+# the licences built into the kernel (kernel/licences.c: /usr/share/licenses/banana-os)
+LICENCE_FILES = LICENSE COPYRIGHT THIRD-PARTY-NOTICES $(sort $(wildcard LICENSES/*.txt))
+build/licences.asm build/licences.h &: $(LICENCE_FILES) tools/mklicences.py
+	mkdir -p build
+	python3 tools/mklicences.py build/licences.asm build/licences.h $(LICENCE_FILES)
+kernel/licences.o kernel/licences.o64: build/licences.h
 
 # the boot object must come first: it carries the Multiboot2 header
 OBJS     = $(ASM_SRCS:.asm=.o) $(C_SRCS:.c=.o)
@@ -182,34 +189,38 @@ loader/keys/PK.auth: $(SB_CERT)
 	    sign-efi-sig-list    -k "$(SB_KEY)" -c $(SB_CERT) PK  loader/keys/banana.esl $@; \
 	 else rm -f $@; touch loader/keys/.nokey; fi
 
-# the EFI system partition: a FAT image with both UEFI loaders, the kernels,
-# the medium line, Banana OS's certificate (to enroll it by hand in the
-# firmware's settings) and its signed keys (to enroll from the menu)
-isoroot/efi.img: tools/format_efi.py loader/BOOTX64.EFI loader/BOOTIA32.EFI kernel.bin kernel64.bin loader/keys/PK.auth loader/keys/BananaOS.cer
-	mkdir -p isoroot
-	rm -f $@
-	printf 'set banana_medium=live-cd\nset banana_video=auto        \n' > isoroot/medium.cfg
-	kb=$$(( ($$(stat -c %s kernel.bin) + $$(stat -c %s kernel64.bin) + 2 * $$(stat -c %s loader/BOOTX64.EFI)) / 1024 + 2048 )); \
-	    dd if=/dev/zero of=$@ bs=1024 count=$$kb status=none
-	python3 tools/format_efi.py $@
-	mmd -i $@ ::/EFI ::/EFI/BOOT ::/EFI/BananaOS ::/boot
-	mcopy -i $@ loader/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
-	mcopy -i $@ loader/BOOTIA32.EFI ::/EFI/BOOT/BOOTIA32.EFI
-	mcopy -i $@ isoroot/medium.cfg loader/keys/BananaOS.cer ::/EFI/BananaOS/
-	if [ -f loader/keys/PK.auth ]; then mcopy -i $@ loader/keys/PK.auth loader/keys/KEK.auth loader/keys/db.auth ::/EFI/BananaOS/; fi
-	mcopy -i $@ kernel.bin kernel64.bin ::/boot/
+# the images (tools/mkiso.sh): the boot loaders, the kernels named, their EFI
+# system partition, the licences, and the all-in-one's extra packages.
+# Banana_OS.iso has the kernels of ISO_KERNELS (both by default - make, make
+# run; the release's is "64"), Banana_OS-32.iso the 32-bit one alone.
+ISO_KERNELS ?= 32 64
+# the all-in-one's packages on the image (FULL=1, below: JAVA_BPK)
+FULL ?=
+EXTRAS :=
+ifeq ($(FULL),1)
+ifeq ($(strip $(JAVA_BPK)),)
+$(error FULL=1 needs JAVA_BPK=.../java.bpk)
+endif
+EXTRAS := build/extras/java.bpk
+build/extras/java.bpk: $(JAVA_BPK)
+	rm -rf $(@D) && mkdir -p $(@D)
+	python3 sdk/tools/bpkg check "$<"
+	cp "$<" $@
+endif
+ISO_DEPS = loader/mbr.bin loader/bios.bin loader/BOOTX64.EFI loader/BOOTIA32.EFI loader/keys/PK.auth loader/keys/BananaOS.cer \
+           tools/mkiso.sh tools/format_efi.py tools/mkimage.py tools/iso_sums.py build/build_info.h \
+           LICENSE COPYRIGHT THIRD-PARTY-NOTICES $(wildcard LICENSES/*)
+.PHONY: iso-kernels-input
+iso-kernels-input:
+build/iso-kernels.txt: iso-kernels-input
+	mkdir -p build
+	echo '$(ISO_KERNELS) $(FULL)' > $@.tmp
+	cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
+Banana_OS.iso: kernel.bin kernel64.bin $(ISO_DEPS) build/iso-kernels.txt $(EXTRAS)
+	BANANA_BUILD='$(BANANA_BUILD)' BANANA_COMMIT='$(BANANA_COMMIT)' sh tools/mkiso.sh $@ '$(ISO_KERNELS)' $(if $(EXTRAS),build/extras)
 
-# the image: an ISO9660 CD (El Torito: the BIOS loader, and the EFI
-# partition for UEFI) that tools/mkimage.py makes a disk too (MBR)
-Banana_OS.iso: kernel.bin kernel64.bin loader/mbr.bin loader/bios.bin isoroot/efi.img tools/mkimage.py tools/iso_sums.py build/build_info.h
-	mkdir -p isoroot/boot
-	cp kernel.bin kernel64.bin loader/bios.bin isoroot/boot/
-	printf '%s %s\n' '$(BANANA_BUILD)' '$(BANANA_COMMIT)' > isoroot/BUILD.TXT
-	python3 tools/iso_sums.py isoroot boot/kernel.bin boot/kernel64.bin efi.img      # (not bios.bin: xorriso writes its boot info table into it)
-	xorriso -as mkisofs -quiet -o $@ -R -J -V BANANA_OS \
-	    -b boot/bios.bin -no-emul-boot -boot-load-size 4 -boot-info-table \
-	    -eltorito-alt-boot -e efi.img -no-emul-boot isoroot
-	python3 tools/mkimage.py $@ loader/mbr.bin
+Banana_OS-32.iso: kernel.bin kernel64.bin $(ISO_DEPS)
+	BANANA_BUILD='$(BANANA_BUILD)' BANANA_COMMIT='$(BANANA_COMMIT)' sh tools/mkiso.sh $@ 32
 
 run: Banana_OS.iso
 	$(QEMU) $(QEMU_BASE) $(QEMU_NET)
@@ -243,8 +254,8 @@ clean:
 	for a in $(APPS) $(APPS64) terminal webworker webmedia webgl; do $(MAKE) -s -C apps/$$a clean; done
 	for d in $(DRIVER_EXAMPLES); do $(MAKE) -s -C driver-sdk/examples/$$d clean; done
 	rm -f banana-sdk.tar.gz
-	rm -f $(OBJS) $(OBJS64) $(DEPS) kernel.bin kernel64.bin Banana_OS.iso build/builtin-meta-*.bin build/libjsworker-x86_64.bpk.z
-	rm -rf isoroot
+	rm -f $(OBJS) $(OBJS64) $(DEPS) kernel.bin kernel64.bin Banana_OS.iso Banana_OS-32.iso build/builtin-meta-*.bin build/libjsworker-x86_64.bpk.z
+	rm -rf isoroot build/iso-* build/extras
 	rm -f loader/*.o loader/*.so loader/*.bin loader/*.EFI loader/*.unsigned loader/kernel_hashes.h \
 	      loader/keys/*.esl loader/keys/*.auth loader/keys/.nokey
 
@@ -291,6 +302,17 @@ PORTS64    = bash coreutils grep sed findutils diffutils gawk ncurses less zsh n
 # optional ones: built in the same way, but installed only when asked for
 # (`apt install neovim`, the App Store: the builtin: source)
 OPTPORTS64 = neovim git
+# The all-in-one image (FULL=1): every port installed (the optional ones
+# too), the Mesa runtime (MESA_BPK) and Java (JAVA_BPK: java.bpk, the java
+# job's) - Java as a file of the image, /EXTRAS/JAVA.BPK, installed from
+# there at the start (kernel/builtin_apps.c): it is too big for the kernel.
+ifeq ($(FULL),1)
+PORTS64 += $(OPTPORTS64)
+OPTPORTS64 :=
+ifeq ($(strip $(MESA_BPK)),)
+$(error FULL=1 needs MESA_BPK=.../mesa-x86_64.bpk)
+endif
+endif
 # Optional Intel Mesa ISO: the same OS plus the user-space GL runtime.
 # Empty for the standard ISO; pass the audited runtime BPK for the Mesa ISO.
 MESA_BPK ?=

@@ -62,8 +62,14 @@ get() {   # get URL FILE SHA256
     [ -f "$2" ] || curl -fsSL -o "$2" "$1"
     echo "$3  $2" | sha256sum -c -
 }
-if [ ! -d "$SRC" ]; then
+# (SOURCES_ONLY=1: the two source archives only, checked - the release's
+#  corresponding source, tools/collect_sources.py)
+if [ "${SOURCES_ONLY:-}" = 1 ]; then
     get https://github.com/LWJGL/lwjgl3/archive/refs/tags/$VER.tar.gz "$DL/lwjgl3-$VER.tar.gz" $SRC_SHA
+    get https://github.com/libffi/libffi/releases/download/v$FFI/libffi-$FFI.tar.gz "$DL/libffi-$FFI.tar.gz" $FFI_SHA
+    exit 0
+fi
+if [ ! -d "$SRC" ]; then
     tar -C "$DL" -xzf "$DL/lwjgl3-$VER.tar.gz"
 fi
 if [ ! -d "$FS" ]; then

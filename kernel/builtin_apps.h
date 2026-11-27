@@ -10,6 +10,8 @@
  * until a new version comes, and one an install profile left out stays out
  * until it is installed again by hand. */
 void builtin_apps_install(void);
+/* the all-in-one image's packages (/EXTRAS: Java): installed when not yet (kernel/fsdisk.c reads them) */
+void builtin_extras_install(void);
 
 /* ── the App Store's "builtin:" source (kernel/repo.c) ─────────────────
  * The built-in apps and the SDK's examples are packages of a source that

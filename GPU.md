@@ -324,8 +324,10 @@ some speed at high resolutions.
 
 ## Mesa ISO in prereleases
 
-Each prerelease ships two bootable BIOS/UEFI images: `Banana_OS.iso` (standard)
-and `Banana_OS-mesa.iso` (the same OS plus the 64-bit Mesa runtime).
+Each prerelease ships bootable BIOS/UEFI images: `Banana_OS.iso` (standard,
+64-bit), `Banana_OS-32.iso` (32-bit, no Mesa), `Banana_OS-mesa.iso` (the same OS
+plus the 64-bit Mesa runtime) and, when its build is done, `Banana_OS-full.iso`
+(Mesa, every port and Java).
 The Mesa image installs `/apps/mesa/libOSMesa.so` and the `glinfo` CLI command.
 It adds no desktop or Start-menu launcher. OpenGL/EGL apps prefer this runtime
 over Java's bundled copy (the same build). The package owns a /lib/libOSMesa.so
