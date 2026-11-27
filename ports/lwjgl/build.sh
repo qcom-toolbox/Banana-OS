@@ -70,6 +70,7 @@ if [ "${SOURCES_ONLY:-}" = 1 ]; then
     exit 0
 fi
 if [ ! -d "$SRC" ]; then
+    get https://github.com/LWJGL/lwjgl3/archive/refs/tags/$VER.tar.gz "$DL/lwjgl3-$VER.tar.gz" $SRC_SHA
     tar -C "$DL" -xzf "$DL/lwjgl3-$VER.tar.gz"
 fi
 if [ ! -d "$FS" ]; then
