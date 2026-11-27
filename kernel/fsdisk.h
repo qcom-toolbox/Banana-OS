@@ -92,6 +92,10 @@ int  fsdisk_last_error(void);
  * rewriting its system from the CD - the files and settings stay. */
 int  fsdisk_find_install(ata_disk_t* out);
 int  fsdisk_compare_boot(void);
+/* 1: the last fsdisk_compare_boot found the image bigger than the disk's
+ * boot area - the update grows it, moving the files after it (the live
+ * stick only: from the installed system it is FSDISK_ERR_NEEDS_LIVE) */
+int  fsdisk_update_grows(void);
 int  fsdisk_update(void);
 /* the same on the disk chosen (several disks holding Banana OS) */
 int  fsdisk_update_on(const ata_disk_t* target);

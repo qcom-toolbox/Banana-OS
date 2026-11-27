@@ -65,6 +65,21 @@ int  ext4_mkfs(const ext4_dev_t* dev, const char* label, const uint32_t (*keep)[
 /* file ino (empty) gets the nblocks blocks from pblk - a kept run - as its
  * data, size bytes of it: 0, or -1 */
 int  ext4_adopt(uint32_t ino, uint64_t size, uint32_t pblk, uint32_t nblocks);
+/* a file's data as runs: logical block, physical block, length, unw (not
+ * written: reads as zeros) */
+typedef struct { uint32_t lblk, pblk, len, unw; } ext4_run_t;
+/* file ino (empty) gets these runs - kept ones, in order of lblk - and size: 0, or -1 */
+int  ext4_adopt_runs(uint32_t ino, uint64_t size, const ext4_run_t* r, uint32_t n);
+/* file ino's runs: *out kmalloc'd (kfree it), *n of them; 0, or -1 */
+int  ext4_runs(uint32_t ino, ext4_run_t** out, uint32_t* n);
+/* every run of blocks marked used, in order (fn's non-zero return stops it): 0, or that / -1 */
+int  ext4_used_runs(int (*fn)(void* arg, uint32_t blk, uint32_t n), void* arg);
+/* every inode's data and tree blocks (but the journal's) moved into blocks
+ * [lo, hi) - copied, the inode pointed there, the old ones freed, in
+ * transactions; *moved: the blocks copied. 0, -2 (no room there), -1 */
+int  ext4_move_into(uint32_t lo, uint32_t hi, uint32_t* moved);
+/* the blocks ext4_mkfs gives a filesystem of `sectors` */
+uint32_t ext4_mkfs_blocks(uint32_t sectors);
 /* making a filesystem in place of an older one: until ext4_activate, its
  * superblock goes to the disk without the ext4 magic (a cut meanwhile:
  * the disk is still what it was); and blocks given back (the old one's) */

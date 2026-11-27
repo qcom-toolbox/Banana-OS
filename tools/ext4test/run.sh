@@ -9,7 +9,7 @@ set -e
 cd "$(dirname "$0")"
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT HUP INT TERM
-cp ../../kernel/ext4.c ../../kernel/ext4.h stub/*.h "$T"/
+cp ../../kernel/ext4.c ../../kernel/ext4.h ../../kernel/ext4move.c ../../kernel/ext4move.h stub/*.h "$T"/
 gcc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie -no-pie -Wall -Wno-unused -I "$T" -o "$T/host" host.c "$T/ext4.c"
 gcc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie -no-pie -Wall -Wno-unused -I "$T" -o "$T/crash" crash.c "$T/ext4.c"
 E2FSCK=$(command -v e2fsck || echo /sbin/e2fsck)
@@ -60,6 +60,20 @@ for seed in 1 2; do
     "$T/aging" "$T/age.img" 160 200 "$seed"
     "$E2FSCK" -fn "$T/age.img"
 done
+
+echo "== the filesystem's start moved 128 MiB further in (ext4move: a boot area that grows)"
+gcc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie -no-pie -Wall -Wno-unused -I "$T" -o "$T/move" move.c "$T/ext4.c" "$T/ext4move.c"
+"$T/move" "$T/mv.img" 600 32768
+"$E2FSCK" -fn "$T/mv.img.old"
+"$E2FSCK" -fn "$T/mv.img.new"
+echo "== power cuts during the move: the old filesystem whole (its journal replayed), the move done again"
+for n in 0 1 2 3 4 5 6 7 8 9 10 12 20 50 200 700 1500 2300 2800; do
+    "$T/move" "$T/cut.img" 600 32768 cut "$n" >"$T/cut.log" 2>&1 || { cat "$T/cut.log"; exit 1; }
+    "$E2FSCK" -E journal_only -y "$T/cut.img.cut" >/dev/null 2>&1 || true
+    "$E2FSCK" -fn "$T/cut.img.cut" >"$T/cut.fsck" 2>&1 || { echo "cut $n:"; cat "$T/cut.fsck"; exit 1; }
+    "$E2FSCK" -fn "$T/cut.img.new" >"$T/cut.fsck" 2>&1 || { echo "cut $n (moved again):"; cat "$T/cut.fsck"; exit 1; }
+done
+echo "   19 cuts: all clean"
 
 rm -rf "$T"
 echo "ext4test: all passed"
