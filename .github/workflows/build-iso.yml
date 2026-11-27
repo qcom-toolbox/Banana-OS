@@ -862,6 +862,7 @@ jobs:
         timeout-minutes: 40
         run: |
           sudo apt-get install -y --no-install-recommends qemu-system-x86
+          mkdir -p build/logs/full
           python3 tools/serialtest.py --log build/logs/full/serial.log --boot-timeout 900 --timeout 600 \
               --cmd 'cat /etc/banana-extras ## EXTRAS/JAVA.BPK' \
               --cmd 'java -version ## OpenJDK' \
