@@ -307,7 +307,8 @@ OPTPORTS64 = neovim git
 # job's) - Java as a file of the image, /EXTRAS/JAVA.BPK, installed from
 # there at the start (kernel/builtin_apps.c): it is too big for the kernel.
 ifeq ($(FULL),1)
-PORTS64 += $(OPTPORTS64)
+# (:= - expanded now: OPTPORTS64 is emptied just below)
+PORTS64 := $(PORTS64) $(OPTPORTS64)
 OPTPORTS64 :=
 ifeq ($(strip $(MESA_BPK)),)
 $(error FULL=1 needs MESA_BPK=.../mesa-x86_64.bpk)
